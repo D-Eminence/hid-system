@@ -1,0 +1,159 @@
+name,other_names,specimen,category,code_system,code,loinc_long_name,notes
+Full blood count,FBC; CBC; Complete blood count; FBC with differential,Blood (EDTA),haematology,LOINC,57021-8,CBC W Auto Differential panel - Blood,Includes white cell differential.
+White cell count,WBC; TWBC; Total white cell count; Total white blood count,Blood (EDTA),haematology,LOINC,6690-2,Leukocytes [#/volume] in Blood by Automated count,
+Reticulocyte count,Retics; Retic count,Blood (EDTA),haematology,LOINC,4679-7,Reticulocytes/Erythrocytes in Blood,
+Haemoglobin genotype,Hb genotype; Genotype; Hb electrophoresis,Blood (EDTA),haematology,LOINC,49316-3,Hemoglobin pattern [Interpretation] in Blood by Electrophoresis,HID-LAB code exists: HB-GENOTYPE
+INR,International normalised ratio; PT/INR,Plasma (citrate),haematology,LOINC,6301-6,INR in Platelet poor plasma by Coagulation assay,Used to monitor warfarin.
+D-dimer,D dimer; Fibrin D-dimer,Plasma (citrate),haematology,LOINC,48065-7,Fibrin D-dimer FEU [Mass/volume] in Platelet poor plasma,Check the lab reports in FEU units; other units use a different code.
+Bone marrow aspirate,BMA; Bone marrow aspiration and trephine; Bone marrow biopsy,Bone marrow,haematology,,,,
+Potassium,K; Serum potassium,Serum,chemistry,LOINC,2823-3,Potassium [Moles/volume] in Serum or Plasma,Avoid a haemolysed sample.
+eGFR,Estimated glomerular filtration rate; GFR,Serum,chemistry,LOINC,98979-8,"Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (CKD-EPI 2021)/1.73 sq M",Calculated from creatinine; no extra sample.
+2 hour postprandial blood sugar,2HPP; 2 hr PP; Postprandial glucose,Plasma (fluoride),chemistry,LOINC,1521-4,Glucose [Mass/volume] in Serum or Plasma --2 hours post meal,
+HbA1c,Glycated haemoglobin; Glycosylated haemoglobin; A1c,Blood (EDTA),chemistry,LOINC,4548-4,Hemoglobin A1c/Hemoglobin.total in Blood,
+Conjugated bilirubin,Direct bilirubin; CB; DB,Serum,chemistry,LOINC,1968-7,Bilirubin.direct [Mass/volume] in Serum or Plasma,
+Alkaline phosphatase,ALP; Alk phos,Serum,chemistry,LOINC,6768-6,Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma,
+Albumin,Alb; Serum albumin,Serum,chemistry,LOINC,1751-7,Albumin [Mass/volume] in Serum or Plasma,
+Calcium,Ca; Serum calcium,Serum,chemistry,LOINC,17861-6,Calcium [Mass/volume] in Serum or Plasma,
+Amylase,Serum amylase,Serum,chemistry,LOINC,1798-8,Amylase [Enzymatic activity/volume] in Serum or Plasma,
+CK-MB,Creatine kinase MB; CKMB,Serum,chemistry,LOINC,13969-1,Creatine kinase.MB [Mass/volume] in Serum or Plasma,
+LDH,Lactate dehydrogenase; LD,Serum,chemistry,LOINC,2532-0,Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma,
+Ferritin,Serum ferritin,Serum,chemistry,LOINC,2276-4,Ferritin [Mass/volume] in Serum or Plasma,
+PSA,Prostate specific antigen; Total PSA,Serum,chemistry,LOINC,2857-1,Prostate specific Ag [Mass/volume] in Serum or Plasma,
+Vitamin D,25-hydroxy vitamin D; 25-OH vitamin D; Vit D,Serum,chemistry,LOINC,62292-8,25-Hydroxyvitamin D3+25-Hydroxyvitamin D2 [Mass/volume] in Serum or Plasma,
+CEA,Carcinoembryonic antigen,Serum,chemistry,LOINC,2039-6,Carcinoembryonic Ag [Mass/volume] in Serum or Plasma,
+TSH,Thyroid stimulating hormone; Thyrotropin,Serum,endocrinology,LOINC,3016-3,Thyrotropin [Units/volume] in Serum or Plasma,
+Thyroid function test,"TFT; Thyroid profile; TSH, FT4 and FT3",Serum,endocrinology,,,,
+LH,Luteinising hormone; Lutropin,Serum,endocrinology,LOINC,10501-5,Lutropin [Units/volume] in Serum or Plasma,
+Testosterone,Total testosterone; Serum testosterone,Serum,endocrinology,LOINC,2986-8,Testosterone [Mass/volume] in Serum or Plasma,
+Serum pregnancy test,Serum PT; Blood pregnancy test; Qualitative hCG,Serum,endocrinology,LOINC,2118-8,Choriogonadotropin [Presence] in Serum or Plasma,
+Anti-Mullerian hormone,AMH,Serum,endocrinology,LOINC,38476-8,Mullerian inhibiting substance [Mass/volume] in Serum or Plasma,Code is for mass units (ng/mL); use 48377-6 if the lab reports in pmol/L.
+"Stool microscopy, culture and sensitivity",Stool MCS; Stool M/C/S; Stool culture,Stool,microbiology,LOINC,625-4,Bacteria identified in Stool by Culture,
+"CSF microscopy, culture and sensitivity",CSF MCS; CSF M/C/S; CSF culture,CSF,microbiology,LOINC,606-4,Bacteria identified in Cerebrospinal Fluid by Culture,Send to the lab at once.
+Ear swab culture and sensitivity,Ear swab MCS; Ear swab M/C/S; Ear discharge culture,Swab (ear),microbiology,,,,
+Gram stain,Gram stain microscopy,Any (state source),microbiology,LOINC,664-3,Microscopic observation [Identifier] in Specimen by Gram stain,
+Fungal culture,Fungal MCS; Culture for fungi,Any (state source),microbiology,LOINC,580-1,Fungus identified in Specimen by Culture,
+Urine TB LAM,TB LAM; LF-LAM; Lipoarabinomannan test,Urine,microbiology,LOINC,95127-7,Mycobacterium tuberculosis lipoarabinomannan Ag [Presence] in Urine by Rapid immunoassay,For people living with HIV.
+Malaria rapid diagnostic test,mRDT; Malaria RDT; Malaria rapid test,Blood (capillary or EDTA),parasitology,LOINC,70569-9,Plasmodium sp Ag [Identifier] in Blood by Rapid immunoassay,HID-LAB code exists: MP-RDT
+Skin snip,Skin snip for microfilaria; Skin snip for Onchocerca,Skin snip,parasitology,,,,
+HIV confirmatory test,HIV confirmation; HIV tie-breaker; Second HIV rapid test,Blood (capillary or EDTA) or serum,serology,,,,Follows the national HIV testing algorithm.
+Hepatitis B profile,HBV profile; Hep B panel; Hepatitis B 5 panel,Serum,serology,,,,"Usually HBsAg, anti-HBs, HBeAg, anti-HBe and anti-HBc."
+TPHA,Treponema pallidum haemagglutination assay; Syphilis confirmatory test,Serum,serology,LOINC,8041-6,Treponema pallidum Ab [Presence] in Serum by Hemagglutination,
+Typhoid rapid test,Typhidot; Salmonella Typhi IgM/IgG rapid test; Typhoid RDT,Serum,serology,,,,
+ASO titre,ASO; Antistreptolysin O; ASOT,Serum,serology,LOINC,5370-2,Streptolysin O Ab [Units/volume] in Serum or Plasma,
+Dengue test,Dengue NS1; Dengue IgM and IgG; Dengue RDT,Serum,serology,,,,
+COVID-19 rapid antigen test,SARS-CoV-2 antigen; COVID RDT; COVID Ag test,Swab (nasal or nasopharyngeal),serology,LOINC,97097-0,SARS-CoV-2 (COVID-19) Ag [Presence] in Upper respiratory specimen by Rapid immunoassay,
+Antinuclear antibody,ANA; ANA screen,Serum,immunology,LOINC,8061-4,Nuclear Ab [Presence] in Serum,
+HIV early infant diagnosis,EID; HIV DNA PCR; Infant HIV PCR; DBS PCR,Dried blood spot,molecular,,,,For babies born to mothers with HIV.
+COVID-19 PCR,SARS-CoV-2 PCR; COVID PCR; RT-PCR for COVID,Swab (nasopharyngeal),molecular,LOINC,94500-6,SARS-CoV-2 (COVID-19) RNA [Presence] in Respiratory system specimen by NAA with probe detection,
+Urinalysis,Urine dipstick; Urine routine; U/A; Urine test strip,Urine,urine and stool,LOINC,24357-6,Urinalysis macro (dipstick) panel - Urine,HID-LAB code exists: URINALYSIS
+Urine albumin creatinine ratio,Microalbumin; UACR; ACR; Microalbuminuria,Urine,urine and stool,LOINC,9318-7,Albumin/Creatinine [Mass Ratio] in Urine,
+Blood group,ABO and Rh group; Blood grouping; Rhesus factor; Group,Blood (EDTA),blood bank,LOINC,882-1,ABO and Rh group [Type] in Blood,
+Indirect Coombs test,IAT; Indirect antiglobulin test; Antibody screen; Indirect Coombs,Serum or plasma,blood bank,LOINC,890-4,Blood group antibody screen [Presence] in Serum or Plasma,Used in pregnancy for Rhesus negative mothers.
+CSF protein,CSF total protein,CSF,chemistry,LOINC,2880-3,Protein [Mass/volume] in Cerebrospinal Fluid,
+Pap smear,Pap test; Cervical smear; Cervical cytology,Cervical smear,histology and cytology,LOINC,10524-7,Microscopic observation [Identifier] in Cervix by Cyto stain,
+Pleural fluid analysis,Pleural fluid MCS and chemistry; Pleural tap analysis,Pleural fluid,other,,,,"Usually protein, glucose, LDH, cell count, Gram stain and AFB."
+Packed cell volume,PCV; Haematocrit; Hct,Blood (EDTA),haematology,LOINC,4545-0,Hematocrit [Volume Fraction] of Blood by Centrifugation,"Code is for spun (microhaematocrit) PCV. If the value comes from an automated analyser, use 20570-8 (Hematocrit [Volume Fraction] of Blood by calculation) instead."
+Platelet count,PLT; Platelets,Blood (EDTA),haematology,LOINC,777-3,Platelets [#/volume] in Blood by Automated count,
+Peripheral blood film,Blood film; PBF; Blood film for morphology; Blood film comment,Blood (EDTA),haematology,LOINC,18314-5,Morphology [Interpretation] in Blood Narrative,Reviewed and reported by a haematologist or scientist.
+G6PD screening,G6PD; G6PD assay; Glucose-6-phosphate dehydrogenase,Blood (EDTA),haematology,LOINC,2356-4,Glucose-6-Phosphate dehydrogenase [Presence] in Red Blood Cells,Qualitative screen. A quantitative assay uses 2357-2 instead.
+APTT,aPTT; PTTK; Activated partial thromboplastin time; Partial thromboplastin time,Plasma (citrate),haematology,LOINC,14979-9,aPTT in Platelet poor plasma by Coagulation assay,
+Bleeding time,BT,Patient (bedside test),haematology,LOINC,11067-6,Bleeding time,"Done on the patient, no sample sent."
+Electrolytes,"Serum electrolytes; E; Na, K, Cl, HCO3",Serum,chemistry,LOINC,24326-1,Electrolytes 1998 panel - Serum or Plasma,
+Urea,Serum urea; Blood urea; BUN,Serum,chemistry,LOINC,22664-7,Urea [Moles/volume] in Serum or Plasma,"Most Nigerian labs report urea in mmol/L, which this code matches; BUN codes do not."
+Fasting blood sugar,FBS; FBG; Fasting plasma glucose; FPG,Plasma (fluoride),chemistry,LOINC,1558-6,Fasting glucose [Mass/volume] in Serum or Plasma,Patient fasts 8 to 10 hours.
+Oral glucose tolerance test,OGTT; GTT; 75 g OGTT,Plasma (fluoride),chemistry,LOINC,1518-0,Glucose [Mass/volume] in Serum or Plasma --2 hours post 75 g glucose PO,Code covers the 2 hour value only.
+Liver function test,LFT; Liver function tests; Hepatic panel,Serum,chemistry,LOINC,24325-3,Hepatic function 2000 panel - Serum or Plasma,HID-LAB code exists: LFT
+ALT,Alanine aminotransferase; SGPT,Serum,chemistry,LOINC,1742-6,Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma,
+GGT,Gamma GT; Gamma glutamyl transferase,Serum,chemistry,LOINC,2324-2,Gamma glutamyl transferase [Enzymatic activity/volume] in Serum or Plasma,
+Lipid profile,"Fasting lipid profile; FLP; Lipids; Cholesterol, triglycerides, HDL and LDL",Serum,chemistry,LOINC,24331-1,Lipid 1996 panel - Serum or Plasma,HID-LAB code exists: LIPID-PROFILE
+Phosphate,Inorganic phosphate; PO4; Serum phosphate,Serum,chemistry,LOINC,2777-1,Phosphate [Mass/volume] in Serum or Plasma,
+Lipase,Serum lipase,Serum,chemistry,LOINC,3040-3,Lipase [Enzymatic activity/volume] in Serum or Plasma,
+Troponin I,cTnI; Cardiac troponin I; Trop I,Serum,chemistry,LOINC,10839-9,Troponin I.cardiac [Mass/volume] in Serum or Plasma,High sensitivity assays use a different code.
+C-reactive protein,CRP,Serum,chemistry,LOINC,1988-5,C reactive protein [Mass/volume] in Serum or Plasma,
+Vitamin B12,B12; Cobalamin; Serum B12,Serum,chemistry,LOINC,2132-9,Cobalamin (Vitamin B12) [Mass/volume] in Serum or Plasma,
+Arterial blood gas,ABG; Blood gases,"Blood (arterial, heparin)",chemistry,LOINC,24336-0,Gas panel - Arterial blood,"Analyse within 15 minutes, sample on ice if delayed."
+Alpha-fetoprotein,AFP; Serum AFP,Serum,chemistry,LOINC,1834-1,Alpha-1-Fetoprotein [Mass/volume] in Serum or Plasma,
+Procalcitonin,PCT,Serum,chemistry,LOINC,33959-8,Procalcitonin [Mass/volume] in Serum or Plasma,
+Free T4,FT4; Free thyroxine,Serum,endocrinology,LOINC,3024-7,Thyroxine (T4) free [Mass/volume] in Serum or Plasma,
+Prolactin,PRL; Serum prolactin,Serum,endocrinology,LOINC,2842-3,Prolactin [Mass/volume] in Serum or Plasma,
+Oestradiol,E2; Estradiol,Serum,endocrinology,LOINC,2243-4,Estradiol (E2) [Mass/volume] in Serum or Plasma,
+Cortisol,Serum cortisol; Morning cortisol,Serum,endocrinology,LOINC,2143-6,Cortisol [Mass/volume] in Serum or Plasma,Note the time of collection.
+Urine pregnancy test,UPT; PT; Urine hCG; Pregnancy test,Urine,endocrinology,LOINC,2106-3,Choriogonadotropin [Presence] in Urine,
+Blood culture and sensitivity,Blood culture; Blood C/S; Blood MCS,Blood (culture bottle),microbiology,LOINC,600-7,Bacteria identified in Blood by Culture,Take before starting antibiotics.
+Wound swab culture and sensitivity,Wound swab MCS; Wound swab M/C/S; Wound culture,Swab (wound),microbiology,LOINC,6462-6,Bacteria identified in Wound by Culture,
+High vaginal swab culture and sensitivity,HVS; HVS MCS; HVS M/C/S,Swab (high vaginal),microbiology,LOINC,11261-5,Bacteria identified in Vaginal fluid by Aerobe culture,
+Throat swab culture and sensitivity,Throat swab MCS; Throat swab M/C/S; Throat culture,Swab (throat),microbiology,LOINC,626-2,Bacteria identified in Throat by Culture,
+Sputum for AFB,Sputum AFB; ZN stain; Sputum for acid fast bacilli; Sputum smear for TB,Sputum,microbiology,LOINC,11477-7,Microscopic observation [Identifier] in Sputum by Acid fast stain,HID-LAB code exists: SPUTUM-AFB
+KOH mount,KOH; Skin scraping for fungus; Nail clipping for fungus,"Skin scraping, nail or hair",microbiology,LOINC,55305-7,Fungus [Presence] in Specimen by KOH preparation,
+CSF India ink,India ink stain; India ink for Cryptococcus,CSF,microbiology,,,,"LOINC left blank: no India ink preparation code found in the LOINC search; Cryptococcus codes found are antigen tests, not India ink."
+Stool microscopy,Stool for ova and cysts; Stool O/C; Stool routine; Stool ova and parasites,Stool,parasitology,LOINC,10704-5,Ova and parasites identified in Stool by Light microscopy,HID-LAB code exists: STOOL-MICRO
+Blood for microfilaria,Night blood for microfilaria; Blood film for microfilaria; Filaria smear,Blood (EDTA),parasitology,LOINC,40745-2,Filaria identified in Blood,Collect at night for some species.
+Hepatitis B surface antigen,HBsAg; Hep B screen; HBV screening,Serum,serology,LOINC,5196-1,Hepatitis B virus surface Ag [Presence] in Serum or Plasma by Immunoassay,HID-LAB code exists: HBSAG
+HBeAg,Hepatitis B e antigen,Serum,serology,LOINC,13954-3,Hepatitis B virus e Ag [Presence] in Serum or Plasma by Immunoassay,
+Syphilis rapid test,Syphilis RDT; Treponemal rapid test,Blood (capillary) or serum,serology,LOINC,106936-8,"Treponema pallidum IgG+IgM Ab [Presence] in Serum, Plasma or Blood by Rapid immunoassay",Common in antenatal care.
+H. pylori stool antigen,H pylori antigen; HpSA; Helicobacter pylori stool test,Stool,serology,LOINC,31843-6,Helicobacter pylori Ag [Presence] in Stool,
+Toxoplasma antibodies,Toxoplasma IgG and IgM; Toxo serology,Serum,serology,LOINC,57770-0,Toxoplasma gondii IgG and IgM panel - Serum,
+TORCH screen,"TORCH; Toxoplasma, rubella, CMV and herpes antibodies",Serum,serology,LOINC,24314-7,TORCH 1996 panel - Serum,
+CD4 count,CD4; CD4 cell count; T helper cell count,Blood (EDTA),immunology,LOINC,24467-3,CD3+CD4+ (T4 helper) cells [#/volume] in Blood,
+GeneXpert MTB/RIF,GeneXpert; Xpert; Xpert MTB/RIF Ultra; TB PCR,Sputum,molecular,LOINC,89371-9,MTB complex DNA and rpoB RIF resistance mutation panel [Presence],Detects TB and rifampicin resistance.
+Hepatitis B viral load,HBV DNA; HBV viral load; HBV DNA PCR,Plasma (EDTA) or serum,molecular,LOINC,29615-2,Hepatitis B virus DNA [#/volume] (viral load) in Serum or Plasma by NAA with probe detection,
+Lassa fever PCR,Lassa PCR; Lassa virus RT-PCR,Blood (EDTA),molecular,LOINC,97646-4,Lassa virus RNA [Presence] in Specimen by NAA with probe detection,Handle as high risk; send to an approved reference lab.
+Urine microscopy,Urine deposit; Urine sediment; Urine M/E,Urine,urine and stool,LOINC,24365-9,Urinalysis microscopic panel - Urine sediment,
+24 hour urine protein,24 hr urine protein; 24 hour protein,Urine (24 hour),urine and stool,LOINC,2889-4,Protein [Mass/time] in 24 hour Urine,
+Grouping and crossmatch,Crossmatch; GXM; G&XM; Compatibility test,Blood (EDTA) or clotted,blood bank,LOINC,34531-4,Blood type and Crossmatch panel - Blood,State the number of units needed.
+CSF analysis,CSF chemistry and cell count; CSF biochemistry; Lumbar puncture analysis,CSF,chemistry,LOINC,54230-8,Cell count and Diff panel with Gluc and Prot - Cerebrospinal Fluid,"Usually glucose, protein and cell count."
+CSF cell count,CSF white cell count; CSF WBC,CSF,haematology,LOINC,806-0,Leukocytes [#/volume] in Cerebrospinal Fluid by Manual count,
+Biopsy histology,Histopathology; Tissue histology; Biopsy,Tissue (formalin),histology and cytology,LOINC,66121-5,Tissue Pathology biopsy report,State the site and clinical details.
+Ascitic fluid analysis,Ascitic tap analysis; Peritoneal fluid analysis,Ascitic fluid,other,,,,"Usually albumin, protein, cell count and culture. LOINC left blank: no single peritoneal fluid panel code covers albumin, protein, cell count and culture; only cell count and differential panels were found."
+Haemoglobin,Hb; Haemoglobin level; Hb estimation,Blood (EDTA),haematology,LOINC,718-7,Hemoglobin [Mass/volume] in Blood,
+Erythrocyte sedimentation rate,ESR,Blood (EDTA or citrate),haematology,LOINC,30341-2,Erythrocyte [Sedimentation Rate] in Blood,
+Sickling test,Sickle cell screen; Sickling; Sickle solubility test,Blood (EDTA),haematology,LOINC,6864-3,Hemoglobin S [Presence] in Blood by Solubility test,Screening only; does not tell AS from SS.
+Prothrombin time,PT,Plasma (citrate),haematology,LOINC,5902-2,Prothrombin time (PT),Usually ordered with INR.
+Fibrinogen,Plasma fibrinogen; Clauss fibrinogen,Plasma (citrate),haematology,LOINC,3255-7,Fibrinogen [Mass/volume] in Platelet poor plasma by Coagulation assay,
+Clotting time,CT; Whole blood clotting time; 20 minute whole blood clotting test; 20WBCT,Blood (plain glass tube),haematology,LOINC,3183-1,Clotting time of Blood by Lee White method,Often used after snake bite. The 20WBCT is a clotted or not clotted reading at 20 minutes; the code is for whole blood clotting time in a glass tube.
+"Electrolytes, urea and creatinine",E/U/Cr; EUCR; U&E; Urea and electrolytes; Renal function test; RFT; Kidney function test,Serum,chemistry,HID-LAB,EUCR,,HID-LAB code exists: EUCR. No single LOINC panel matches this set exactly. LOINC left blank: no panel matches this exact set of tests.
+Creatinine,Cr; Serum creatinine,Serum,chemistry,LOINC,2160-0,Creatinine [Mass/volume] in Serum or Plasma,Labs reporting in micromol/L may need the moles code instead.
+Random blood sugar,RBS; Random plasma glucose; RPG,Plasma (fluoride),chemistry,LOINC,2345-7,Glucose [Mass/volume] in Serum or Plasma,
+Capillary blood glucose,CBG; Finger prick sugar; Glucometer check; Bedside glucose,Blood (capillary),chemistry,LOINC,2339-0,Glucose [Mass/volume] in Blood,
+Total bilirubin,TB; Serum bilirubin; SBR,Serum,chemistry,LOINC,1975-2,Bilirubin.total [Mass/volume] in Serum or Plasma,Also used for neonatal jaundice.
+AST,Aspartate aminotransferase; SGOT,Serum,chemistry,LOINC,1920-8,Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma,
+Total protein,TP; Serum protein,Serum,chemistry,LOINC,2885-2,Protein [Mass/volume] in Serum or Plasma,
+Uric acid,Serum uric acid; Urate; SUA,Serum,chemistry,LOINC,3084-1,Urate [Mass/volume] in Serum or Plasma,
+Magnesium,Mg; Serum magnesium,Serum,chemistry,LOINC,19123-9,Magnesium [Mass/volume] in Serum or Plasma,Used to monitor magnesium sulphate in eclampsia.
+Creatine kinase,CK; CPK; Total CK,Serum,chemistry,LOINC,2157-6,Creatine kinase [Enzymatic activity/volume] in Serum or Plasma,
+Troponin T,cTnT; Cardiac troponin T; Trop T,Serum,chemistry,LOINC,6598-7,Troponin T.cardiac [Mass/volume] in Serum or Plasma,High sensitivity assays use a different code.
+Iron studies,Iron profile; Serum iron and TIBC; Transferrin saturation,Serum,chemistry,LOINC,50190-8,Iron and Iron binding capacity panel - Serum or Plasma,Ferritin is ordered separately.
+Folate,Serum folate; Folic acid level,Serum,chemistry,LOINC,2284-8,Folate [Mass/volume] in Serum or Plasma,
+Lactate,Serum lactate; Blood lactate; Lactic acid,Plasma (fluoride),chemistry,LOINC,2524-7,Lactate [Moles/volume] in Serum or Plasma,
+CA-125,CA 125; Cancer antigen 125,Serum,chemistry,LOINC,10334-1,Cancer Ag 125 [Units/volume] in Serum or Plasma,
+NT-proBNP,N-terminal pro B-type natriuretic peptide; proBNP,Serum,chemistry,LOINC,33762-6,Natriuretic peptide.B prohormone N-Terminal [Mass/volume] in Serum or Plasma,
+Free T3,FT3; Free triiodothyronine,Serum,endocrinology,LOINC,3051-0,Triiodothyronine (T3) Free [Mass/volume] in Serum or Plasma,
+FSH,Follicle stimulating hormone; Follitropin,Serum,endocrinology,LOINC,15067-2,Follitropin [Units/volume] in Serum or Plasma,
+Progesterone,Day 21 progesterone; Mid-luteal progesterone,Serum,endocrinology,LOINC,2839-9,Progesterone [Mass/volume] in Serum or Plasma,
+Beta hCG (quantitative),Serum beta hCG; Quantitative hCG; bhCG,Serum,endocrinology,LOINC,21198-7,Choriogonadotropin.beta subunit [Units/volume] in Serum or Plasma,
+Parathyroid hormone,PTH; Intact PTH,Serum,endocrinology,LOINC,2731-8,Parathyrin.intact [Mass/volume] in Serum or Plasma,
+"Urine microscopy, culture and sensitivity",Urine MCS; Urine M/C/S; Urine culture; Urine C/S,Urine (midstream),microbiology,LOINC,630-4,Bacteria identified in Urine by Culture,
+"Sputum microscopy, culture and sensitivity",Sputum MCS; Sputum M/C/S; Sputum culture,Sputum,microbiology,LOINC,624-7,Bacteria identified in Sputum by Respiratory culture,
+Endocervical swab culture and sensitivity,ECS; ECS MCS; Endocervical swab M/C/S,Swab (endocervical),microbiology,LOINC,43410-0,Bacteria identified in Cervix by Culture,
+Pus aspirate culture and sensitivity,Pus MCS; Aspirate M/C/S; Abscess culture,Pus or aspirate,microbiology,LOINC,75357-4,Bacteria identified in Abscess by Anaerobe+Aerobe culture,
+TB culture,Mycobacterial culture; AFB culture; LJ culture; MGIT culture,Sputum,microbiology,LOINC,539-7,Mycobacterium sp identified in Sputum by Organism specific culture,Done at TB reference labs.
+Wet mount,Wet prep; Saline wet mount; Wet mount for Trichomonas,Swab (high vaginal),microbiology,LOINC,14367-7,Trichomonas vaginalis [Presence] in Vaginal fluid by Wet preparation,Code covers the Trichomonas finding; yeast and clue cells are reported separately.
+Malaria parasite film,MP; Blood film for malaria parasites; BFMP; Malaria smear; Thick and thin film,Blood (EDTA),parasitology,LOINC,51587-4,Plasmodium sp [Presence] in Blood by Light microscopy,"HID-LAB code exists: MP-SMEAR. Thick film to find parasites, thin film to name the species. Species can be reported with 32206-5 (Plasmodium sp identified in Blood by Light microscopy)."
+Urine for schistosoma,Terminal urine for S. haematobium; Urine for ova; Urine for schistosoma ova,"Urine (terminal, midday)",parasitology,,,,"Collect the last part of the urine, best between 10am and 2pm. LOINC left blank: only computer assisted method codes found for S. haematobium in urine, no plain microscopy code."
+HIV 1/2 screening,HIV screen; Retroviral screening; RVS; HIV rapid test; HIV antibody test,Blood (capillary or EDTA) or serum,serology,LOINC,80387-4,"HIV 1+2 Ab [Presence] in Serum, Plasma or Blood by Rapid immunoassay",HID-LAB code exists: HIV-SCREEN
+Hepatitis C antibody,Anti-HCV; HCV antibody; HCV screen; Hep C screen,Serum,serology,LOINC,16128-1,Hepatitis C virus Ab [Presence] in Serum,HID-LAB code exists: HCV-AB
+VDRL,Venereal Disease Research Laboratory test; Syphilis screen,Serum,serology,LOINC,5292-8,Reagin Ab [Presence] in Serum by VDRL,
+Widal test,Widal; Febrile antigens; Typhoid serology,Serum,serology,HID-LAB,WIDAL,,HID-LAB code exists: WIDAL. Blood culture is more reliable for typhoid. LOINC left blank: no Widal panel code found; only separate O and H antibody codes.
+H. pylori antibody,H pylori serology; Helicobacter pylori antibody,Serum,serology,LOINC,22310-7,Helicobacter pylori Ab [Presence] in Serum,
+Rubella IgG,Rubella antibody; Rubella immunity,Serum,serology,LOINC,8014-3,Rubella virus IgG Ab [Units/volume] in Serum,For a qualitative result use 25514-1 (Rubella virus IgG Ab [Presence] in Serum).
+Cryptococcal antigen,CrAg; Cryptococcal antigen test,Serum or CSF,serology,LOINC,31790-9,Cryptococcus sp Ag [Presence] in Serum,Screening for advanced HIV disease. For CSF use 31788-3 (Cryptococcus sp Ag [Presence] in Cerebrospinal Fluid).
+Rheumatoid factor,RF; RA factor; Latex test,Serum,immunology,LOINC,11572-5,Rheumatoid factor [Units/volume] in Serum or Plasma,
+HIV viral load,VL; HIV RNA; HIV 1 viral load,Plasma (EDTA),molecular,LOINC,20447-9,HIV 1 RNA [#/volume] (viral load) in Serum or Plasma by NAA with probe detection,Some sites use dried blood spots.
+Hepatitis C viral load,HCV RNA; HCV viral load; HCV PCR,Plasma (EDTA) or serum,molecular,LOINC,11011-4,Hepatitis C virus RNA [Units/volume] (viral load) in Serum or Plasma by NAA with probe detection,
+HPV DNA test,HPV test; HPV PCR; Human papillomavirus test,Swab (cervical),molecular,LOINC,44550-2,Human papilloma virus DNA [Presence] in Cervix by Probe,Used in cervical cancer screening. Assays reporting specific high risk types have their own codes.
+Urine protein creatinine ratio,UPCR; PCR; Spot urine protein,Urine,urine and stool,LOINC,2890-2,Protein/Creatinine [Mass Ratio] in Urine,
+Faecal occult blood,FOB; FOBT; Stool occult blood,Stool,urine and stool,LOINC,2335-8,Hemoglobin [Presence] in Stool from gastrointestinal,
+Direct Coombs test,DAT; Direct antiglobulin test; Direct Coombs,Blood (EDTA),blood bank,LOINC,1007-4,Direct antiglobulin test.polyspecific reagent [Presence] on Red Blood Cells,
+CSF glucose,CSF sugar,CSF,chemistry,LOINC,2342-4,Glucose [Mass/volume] in Cerebrospinal Fluid,Take a blood glucose at the same time.
+Semen analysis,Seminal fluid analysis; SFA; Sperm count,Semen,other,LOINC,13361-1,Semen analysis panel,Abstain 2 to 5 days before; deliver within 1 hour.
+Fine needle aspiration cytology,FNAC; FNA,Aspirate,histology and cytology,LOINC,33718-8,Cytology report of Tissue fine needle aspirate Cyto stain,"Site specific codes exist, for example breast and thyroid."
