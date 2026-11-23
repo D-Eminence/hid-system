@@ -32,7 +32,14 @@ SKIPPED_PLAN_AFTER = "PLAN_BEFORE_FOUND_ZERO_PENDING"
 CATALOG_SEEDS = {"medicine":"/app/docs/codes/hid-medicines.json","lab_test":"/app/docs/codes/hid-lab-tests.json"}
 CATALOG_LOADED = re.compile(r'\{"status":"loaded",.*\}')
 CATALOG_NOT_LOADED = re.compile(r"load-catalog: .*; nothing loaded(?:; run the release again at a quieter time)?")
+EVIDENCE_PENDING = "evidence pending"
 EVIDENCE_LINE_MISSING = "evidence line missing"
+EVIDENCE_UNREADABLE = "evidence unreadable"
+# The operator's next step after a failure that follows a load: the loaded version stays loaded and asking for it again
+# is refused. An unreconciled release (the lease lost, or a rollback that could not be confirmed) is reconciled first.
+NEXT_AFTER_LOAD = "dispatch the release again with catalog_load none"
+NEXT_AFTER_LOAD_UNRECONCILED = ("reconcile this release first (it ended unreconciled and keeps the deployment lease), "
+                                "then dispatch the release again with catalog_load none")
 PHASES = frozenset({"approval","lease","snapshot-before","receipt-started","migration","catalog","register-services",
     "rollout-services","register-gateway","rollout-gateway","snapshot-after","index-and-receipt","notify",
     "rollback-rollout","rollback-snapshot","rollback-index"})
@@ -117,10 +124,12 @@ def catalog_seeds(kinds):
     return seeds
 
 def catalog_outcome(line, kind):
-    """The loader's evidence line as the receipt records it, or None when it is not one for this kind."""
+    """The loader's evidence line as the receipt records it, or None when it is not one for this kind: every field the
+    receipt records must be there ("replaced" too, null when nothing was replaced)."""
     try: outcome = json.loads(line)
     except ValueError: return None
     if not (isinstance(outcome, dict) and outcome.get("status") == "loaded" and outcome.get("kind") == kind
+            and "replaced" in outcome
             and isinstance(outcome.get("version"), str) and type(outcome.get("items")) is int
             and all(isinstance(outcome.get(k), str) and re.fullmatch(r"[0-9a-f]{64}", outcome[k])
                     for k in ("fileSha256","approvalsSha256"))
@@ -455,8 +464,11 @@ class ECS:
         """ORD-7's governed loader, after the migrations succeeded: one task per seed file (seeds: catalog_seeds)
         on the migration task definition this release registered, its command overridden. A refusal (exit 2,
         nothing loaded) stops the release, and so does any other non-zero exit; either way the loader's last line is
-        printed. A task that exits 0 has loaded its seed: without its evidence line, the receipt still names the seed
-        (kind, version, sha256) as loaded, and the release stops with CATALOG_LOAD_EVIDENCE_MISSING."""
+        printed. A task that exits 0 has loaded its seed, so the checks name it as loaded at once (kind, version and
+        sha256 from the checkout, "evidence pending"), before its log is read. Then its evidence line replaces that
+        entry; without one, the entry says "evidence line missing" and the release stops with
+        CATALOG_LOAD_EVIDENCE_MISSING; if the log cannot be read (throttling, the lease check), it says "evidence
+        unreadable" and the release stops with that error."""
         self.catalog_checks = []
         for kind, seed in seeds.items():
             self.lease.assert_owned()
@@ -477,16 +489,23 @@ class ECS:
                 time.sleep(5)
             codes = [c.get("exitCode") for c in rows["tasks"][0]["containers"]]
             if all(code == 0 for code in codes):
-                line, _ = self.catalog_line(task_arn,CATALOG_LOADED)
+                # Exit 0 is a committed load: the version is live whatever the log says or whether it can be read,
+                # so the checks (and any receipt written after a failure) name it now, before the log is read.
+                check = {"kind":kind,"status":"loaded","version":seed["version"],"file_sha256":seed["file_sha256"],
+                         "evidence":EVIDENCE_PENDING}
+                self.catalog_checks.append(check)
+                try:
+                    line, _ = self.catalog_line(task_arn,CATALOG_LOADED)
+                except Exception:
+                    check["evidence"] = EVIDENCE_UNREADABLE
+                    self.print_loaded(release_id,check)
+                    raise
                 outcome = catalog_outcome(line,kind) if line is not None else None
                 if outcome is None:
-                    # Exit 0 is a committed load: the version is live whatever the log says.
-                    self.catalog_checks.append({"kind":kind,"status":"loaded","version":seed["version"],
-                        "file_sha256":seed["file_sha256"],"evidence":EVIDENCE_LINE_MISSING})
-                    print(json.dumps({"release_id":release_id,"catalog_load":"loaded","kind":kind,"version":seed["version"],
-                        "file_sha256":seed["file_sha256"],"evidence":EVIDENCE_LINE_MISSING}), flush=True)
+                    check["evidence"] = EVIDENCE_LINE_MISSING
+                    self.print_loaded(release_id,check)
                     raise ReleaseError("CATALOG_LOAD_EVIDENCE_MISSING")
-                self.catalog_checks.append(outcome)
+                self.catalog_checks[-1] = outcome
                 continue
             # Any other exit: the loader's last line (its refusal or failure line, else whatever it printed last).
             line, last = self.catalog_line(task_arn,CATALOG_NOT_LOADED)
@@ -494,6 +513,12 @@ class ECS:
             print(json.dumps({"release_id":release_id,"catalog_load":"refused" if refused else "failed","kind":kind,
                 "exit_codes":codes,"message":line if line is not None else last}), flush=True)
             raise ReleaseError("CATALOG_LOAD_REFUSED" if refused else "CATALOG_LOAD_FAILED")
+
+    @staticmethod
+    def print_loaded(release_id, check):
+        """The line naming a seed that loaded without its evidence line: kind, version, sha256 and why."""
+        print(json.dumps({"release_id":release_id,"catalog_load":"loaded","kind":check["kind"],"version":check["version"],
+            "file_sha256":check["file_sha256"],"evidence":check["evidence"]}), flush=True)
 
     def catalog_line(self, arn, pattern):
         """The loader's line matching pattern in the task's log (the migration log group), and the log's last line:
@@ -672,8 +697,9 @@ def deploy(mode="deploy", rollback_id=None):
             loaded = [{"kind":k["kind"],"version":k["version"]} for k in (ecs.catalog_checks or []) if k.get("status") == "loaded"]
             if loaded:
                 # The runbook (planned contract, ORD-7): a loaded version stays loaded and loading it again is refused.
+                # Unreconciled (the lease lost, or a rollback that could not be confirmed), the release is reconciled first.
                 print(json.dumps({"release_id":candidate["release_id"],"catalog_loaded_before_failure":loaded,
-                    "next":"dispatch the release again with catalog_load none"}), flush=True)
+                    "next":NEXT_AFTER_LOAD if reconciled else NEXT_AFTER_LOAD_UNRECONCILED}), flush=True)
         except Exception: pass
         try: notify(aws,candidate,"failed-rolled-back" if reconciled and started else "reconciliation-required")
         except Exception: pass
