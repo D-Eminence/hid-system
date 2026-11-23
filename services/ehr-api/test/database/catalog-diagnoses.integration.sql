@@ -13,9 +13,11 @@
 --      typed exactly first, though its child codes have shorter titles,
 --      with or without its dot (Rahman, #320 finding 3), and copied with
 --      punctuation around it: NB91., NB91,, (NB91), 9A03. (Ola, round 2),
---      while a word with the same punctuation is searched as before; titles
---      and our other names split as q is: COVID-19, T-cell/histiocyte,
---      glucose-6-phosphate and HIV/TB, as typed (Rahman, #318 finding 1);
+--      and any run of it at either end: (NB91)., NB91 ., .NB91, NB91,.,
+--      (9A03.0)., (1A36.1). (Ola, round 3), while a word with the same
+--      punctuation is searched as before; titles and our other names
+--      split as q is: COVID-19, T-cell/histiocyte, glucose-6-phosphate and
+--      HIV/TB, as typed (Rahman, #318 finding 1);
 --   3. refusals: q of 1 or 101 characters, limit 0 or 26 (22023
 --      CATALOG_SEARCH_INVALID); brackets and operators answer nothing; an
 --      extension code, a bad chapter and a second active release are
@@ -139,9 +141,9 @@ select pg_temp.expect('2l a code with its dot comes first; without its dot it is
   '1A36.1 1A36 1A36.11 1A36.10 more=false|1A36.1 more=false|9A03.0 more=false',
   pg_temp.found('1A36.1', 10) || '|' || pg_temp.found('1a361', 10) || '|' || pg_temp.found('9A030', 10));
 select pg_temp.expect('2m a word of five letters is not taken for a code', '1A07 more=false', pg_temp.found('typho', 10));
--- A parent code copied with punctuation around it (Ola, round 2): characters that are neither letters, digits nor
--- dots off both ends, then full stops off the end, before the code's shape is tested. Before, NB91 came last of its
--- family (its title is the longest) and 9A03 after its children.
+-- A parent code copied with punctuation around it (Ola, round 2): the punctuation comes off both ends before the
+-- code's shape is tested. Before, NB91 came last of its family (its title is the longest) and 9A03 after its
+-- children.
 select pg_temp.expect('2q a parent code copied with a full stop, a comma, brackets or spaces comes first',
   'NB91 NB91.8 NB91.1 NB91.0 more=false|NB91 NB91.8 NB91.1 NB91.0 more=false|NB91 NB91.8 NB91.1 NB91.0 more=false|'
   || '9A03 9A03.4 9A03.0 9A03.3 more=false|9A03 9A03.4 9A03.0 9A03.3 more=false',
@@ -151,6 +153,14 @@ select pg_temp.expect('2r a word with the same punctuation is searched as a word
   '1A07 more=false|1A07 more=false|1F4Z KA64.20 1F40 1F40.Z more=false|1F4Z 1F40 1F40.Z KA64.20 more=false',
   pg_temp.found('typho.', 10) || '|' || pg_temp.found('(typho)', 10) || '|' || pg_temp.found('malaria.', 10) || '|'
   || pg_temp.found('malaria', 10));
+-- Any run of characters that are neither letters nor digits comes off both ends (Ola, round 3): a full stop after a
+-- bracket or a space, a full stop before the code, a comma and a full stop. The code's own dot stays: 1A36.1 comes
+-- before its parent 1A36 and its children (before, it came last of them); 9A03.0 is the only entry its words find.
+select pg_temp.expect('2s a code with any run of punctuation at either end comes first; the code''s own dot stays',
+  'NB91 NB91.8 NB91.1 NB91.0 more=false|NB91 NB91.8 NB91.1 NB91.0 more=false|NB91 NB91.8 NB91.1 NB91.0 more=false|'
+  || 'NB91 NB91.8 NB91.1 NB91.0 more=false|9A03.0 more=false|1A36.1 1A36 1A36.11 1A36.10 more=false',
+  pg_temp.found('(NB91).', 10) || '|' || pg_temp.found('NB91 .', 10) || '|' || pg_temp.found('.NB91', 10) || '|'
+  || pg_temp.found('NB91,.', 10) || '|' || pg_temp.found('(9A03.0).', 10) || '|' || pg_temp.found('(1A36.1).', 10));
 select pg_temp.expect('2n COVID-19 as typed: the titles starting with it first; with a space it is found too',
   'RA01 RA01.0 RA02 more=false|RA01 RA02 RA01.0 more=false',
   pg_temp.found('COVID-19', 10) || '|' || pg_temp.found('covid 19', 10));

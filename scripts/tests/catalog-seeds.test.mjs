@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
@@ -137,6 +138,18 @@ test('ids: a gap needs a retirement reason, a retired id may not be a row, and a
   assert.throws(() => build(csv(medicine('MED-00001', 'a'), medicine('MED-00001', 'b'))), /ids used twice: MED-00001/)
   assert.throws(() => build(FIXTURE, { retired: { 'MED-00003': 'short' } }), /a reason of 8-500 characters/)
   assert.throws(() => build(FIXTURE, { version: 'not a version' }), /not a version label/)
+})
+
+test('a row the seed holds back is never also retired: fix the row, do not retire it (builder and seedProblems)', () => {
+  // MED-00004's strength is over 80 characters, so the builder holds it back; retiring it instead would drop it for good.
+  const line = 'MED-00004 is held back in this seed and also listed as retired; fix the row, do not retire it'
+  assert.throws(() => build(FIXTURE, { retired: { ...RETIRED, 'MED-00004': 'Synthetic: retired instead of fixed' } }),
+    (error) => error.message === line)
+  // A seed made by hand that holds back and retires the same id: seedProblems refuses it (the builder's and the loader's check).
+  const seed = JSON.parse(JSON.stringify(build().medicine))
+  assert.deepEqual(seedProblems(seed), [])
+  seed.retired.push({ listId: 'MED-00004', reason: 'Synthetic: retired instead of fixed' })
+  assert.deepEqual(seedProblems(seed), [line])
 })
 
 test('the same list makes the same bytes, so the signed sha256 is reproducible', () => {
@@ -303,6 +316,45 @@ test('the builder reports every brand added (brand -> generic) and every brand l
       '--wave-zero', join(folder, 'wave-zero.json'), '--version', '2026.1', '--out', folder, '--brands', join(folder, 'brands.mjs'),
       '--check'], { encoding: 'utf8', env: { PATH: process.env.PATH } })
     assert.equal(check.status, 0, check.stderr)
+  } finally { rmSync(folder, { recursive: true, force: true }) }
+})
+
+test('the builder\'s report opens with Ola\'s brand decision: the 21 confirmed brands, the pending ones kept out', async () => {
+  const { BRAND_DECISION, CHECKED_BRANDS } = await import('../../services/ehr-api/scripts/catalog-seed.mjs')
+  assert.deepEqual(CHECKED_BRANDS, ['valium', 'phenergan', 'flagyl', 'amoxil', 'augmentin', 'septrin', 'rocephin', 'zinnat',
+    'coartem', 'fansidar', 'daraprim', 'panadol', 'norvasc', 'adalat', 'lasix', 'plasil', 'glucophage', 'ventolin', 'postinor',
+    'buscopan', 'voltaren'])
+  assert.equal(BRAND_DECISION, 'Brands (Ola\'s clinical decision as clinical owner, #319): only rows of brand-names.ts reviewed '
+    + '"coordinator-curated" go into the medicine seed. The 21 coordinator-curated brands in the seed built from #312\'s list ('
+    + CHECKED_BRANDS.join(', ') + ') were checked by Ola on 23 Nov 2026 and are confirmed. A brand pending a pharmacist\'s '
+    + 'review stays out until a pharmacist confirms it.')
+  // Each brand Ola checked is a confirmed, active row of the real brand-names.ts.
+  const module = await import(pathToFileURL(resolve(repository, 'services/ocr-worker/src/reading/brand-names.ts')).href)
+  for (const brand of CHECKED_BRANDS) {
+    const row = module.BRAND_ROWS.find((entry) => entry.brand === brand)
+    assert.equal(row?.reviewed_by, 'coordinator-curated', brand)
+    assert.equal(module.isActiveBrandRow(row), true, brand)
+  }
+  const folder = builderFolder()
+  try {
+    const result = runBuilder(folder)
+    assert.equal(result.status, 0, result.stderr)
+    const report = JSON.parse(result.stdout)
+    assert.deepEqual(Object.keys(report), ['brandDecision', 'hid-medicines.json', 'hid-lab-tests.json'])
+    assert.equal(report.brandDecision, BRAND_DECISION)
+  } finally { rmSync(folder, { recursive: true, force: true }) }
+})
+
+test('the builder refuses a retired id that it holds back, with one plain line (exit 2), and builds nothing', () => {
+  const folder = builderFolder()
+  try {
+    writeFileSync(join(folder, 'retired.json'), JSON.stringify({ ...RETIRED, 'MED-00004': 'Synthetic: retired instead of fixed' }))
+    const result = runBuilder(folder)
+    assert.equal(result.stderr.trim(), 'MED-00004 is held back in this seed and also listed as retired; fix the row, do not retire '
+      + 'it; nothing built')
+    assert.equal(result.status, 2)
+    assert.equal(result.stdout, '')
+    assert.ok(!existsSync(join(folder, 'hid-medicines.json')), 'nothing built')
   } finally { rmSync(folder, { recursive: true, force: true }) }
 })
 
@@ -575,5 +627,115 @@ test('a failure that is not a refusal ends with one plain line too (exit 1), nev
     assert.match(failed.stderr, /^load-catalog: .*\(ECONNREFUSED\); nothing loaded$/)
     assert.equal(failed.stderr.split('\n').length, 1)
     assert.equal(failed.stdout, '')
+  } finally { rmSync(folder, { recursive: true, force: true }) }
+})
+
+test('the loader refuses a seed that holds back and retires the same id (exit 2), before it connects or writes', async () => {
+  const seed = JSON.parse(JSON.stringify(build(FIXTURE, { version: '2026.2' }).medicine))
+  seed.retired.push({ listId: 'MED-00004', reason: 'Synthetic: retired instead of fixed' })
+  const { folder, seedPath, approvalsPath } = signedFiles(seed)
+  try {
+    // DATABASE_URL points at port 9, where nothing listens: the refusal comes first.
+    const refused = runLoader(['--seed', seedPath, '--approvals', approvalsPath], { NODE_ENV: 'test' })
+    assert.equal(refused.stderr, `load-catalog: ${seedPath}: MED-00004 is held back in this seed and also listed as retired; `
+      + 'fix the row, do not retire it; nothing loaded')
+    assert.equal(refused.status, 2)
+  } finally { rmSync(folder, { recursive: true, force: true }) }
+  // loadSeed itself refuses it before its transaction: MED-00004, live in 2026.1, is not retired.
+  const client = new StandInClient({ active: { version: '2026.1', ids: ['MED-00001', 'MED-00002', 'MED-00004', 'MED-00005'] } })
+  await assert.rejects(loadSeed(client, { seed, fileSha256: 'a'.repeat(64), approval: { approvalReference: 'Synthetic sign-off '
+    + 'reference', approvedAt: '2026-12-02T09:00:00+01:00' }, approvalsSha256: 'b'.repeat(64) }), (error) => error instanceof LoadRefusal
+    && refusalLine(error) === 'load-catalog: MED-00004 is held back in this seed and also listed as retired; fix the row, do not '
+      + 'retire it; nothing loaded')
+  assert.deepEqual(client.statements, [], 'nothing sent, so nothing retired')
+})
+
+/**
+ * A stand-in PostgreSQL server for a connection dropped mid-load (the real terminated backend is in the PR's
+ * evidence). It lets the loader in (AuthenticationOk, ReadyForQuery), answers its first statement ("begin"), and on
+ * the next one ends the connection: as pg_terminate_backend does (an ErrorResponse FATAL 57P01, then the socket
+ * closes), or, with fatal false, as a failover does (the socket closes with no message). `statements` records what the
+ * loader sent.
+ */
+async function droppingServer({ fatal }) {
+  const message = (type, body) => {
+    const header = Buffer.alloc(5)
+    header.write(type)
+    header.writeInt32BE(body.length + 4, 1)
+    return Buffer.concat([header, body])
+  }
+  const statements = []
+  const server = createServer((socket) => {
+    let chunks = 0
+    socket.on('error', () => {})
+    socket.on('data', (chunk) => {
+      chunks += 1
+      if (chunks === 1) {
+        socket.write(Buffer.concat([message('R', Buffer.from([0, 0, 0, 0])), message('Z', Buffer.from('I'))]))
+        return
+      }
+      if (chunk[0] === 0x51) statements.push(chunk.subarray(5, chunk.length - 1).toString())
+      if (chunks === 2) {
+        socket.write(Buffer.concat([message('C', Buffer.from('BEGIN\0')), message('Z', Buffer.from('T'))]))
+        return
+      }
+      if (fatal) {
+        socket.end(message('E', Buffer.from('SFATAL\0VFATAL\0C57P01\0Mterminating connection due to administrator command\0\0')))
+      } else {
+        socket.destroy()
+      }
+    })
+  })
+  await new Promise((done) => server.listen(0, '127.0.0.1', done))
+  return { port: server.address().port, statements, close: () => new Promise((done) => server.close(done)) }
+}
+function runLoaderAsync(args, environment) {
+  return new Promise((done) => {
+    const child = spawn(process.execPath, [loaderScript, ...args], { env: { PATH: process.env.PATH, ...environment } })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (data) => { stdout += data })
+    child.stderr.on('data', (data) => { stderr += data })
+    child.on('close', (status) => done({ status, stdout: stdout.trim(), stderr: stderr.trim() }))
+  })
+}
+
+test('a connection dropped mid-load (a terminated backend, a failover) is one plain line (exit 1), never an unhandled error event', async () => {
+  const { folder, seedPath, approvalsPath } = signedFiles(build().medicine)
+  try {
+    for (const [fatal, line] of [
+      [true, 'load-catalog: terminating connection due to administrator command (57P01); nothing loaded'],
+      [false, 'load-catalog: Connection terminated unexpectedly; nothing loaded']]) {
+      const server = await droppingServer({ fatal })
+      try {
+        const result = await runLoaderAsync(['--seed', seedPath, '--approvals', approvalsPath], { NODE_ENV: 'test',
+          DATABASE_URL: `postgresql://nobody@127.0.0.1:${server.port}/none` })
+        assert.equal(result.stderr, line, `fatal ${fatal}`)
+        assert.equal(result.status, 1)
+        assert.equal(result.stdout, '')
+        // Dropped inside the load's transaction, at its second statement.
+        assert.deepEqual(server.statements, ['begin', "set local lock_timeout = '5s'"])
+      } finally { await server.close() }
+    }
+  } finally { rmSync(folder, { recursive: true, force: true }) }
+})
+
+test('an error before the loader connects (a malformed DATABASE_HOST, a bad TLS setting) is one plain line (exit 1)', () => {
+  const { folder, seedPath, approvalsPath } = signedFiles(build().medicine)
+  const args = ['--seed', seedPath, '--approvals', approvalsPath]
+  try {
+    const managed = { NODE_ENV: 'test', DATABASE_URL: '', DATABASE_USERNAME: 'loader', DATABASE_PASSWORD: 'synthetic-placeholder' }
+    const malformed = runLoader(args, { ...managed, DATABASE_HOST: 'db host' })
+    assert.equal(malformed.stderr, 'load-catalog: DATABASE_HOST does not make a database address: Invalid URL (ERR_INVALID_URL); '
+      + 'nothing loaded')
+    assert.equal(malformed.status, 1)
+    assert.equal(malformed.stdout, '')
+    const tls = runLoader(args, { NODE_ENV: 'test', DATABASE_SSL: 'yes' })
+    assert.equal(tls.stderr, 'load-catalog: DATABASE_SSL must be true or false; nothing loaded')
+    assert.equal(tls.status, 1)
+    // No address at all stays a refusal (exit 2).
+    const none = runLoader(args, { NODE_ENV: 'test', DATABASE_URL: '' })
+    assert.equal(none.stderr, 'load-catalog: set DATABASE_URL or DATABASE_HOST, DATABASE_USERNAME and DATABASE_PASSWORD; nothing loaded')
+    assert.equal(none.status, 2)
   } finally { rmSync(folder, { recursive: true, force: true }) }
 })

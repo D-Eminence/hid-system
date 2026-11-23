@@ -249,11 +249,11 @@ begin
   end if;
   -- "Starts with q" for the order: q with LIKE's %, _ and \ escaped.
   starts := replace(replace(replace(lower(trimmed), '\', '\\'), '%', '\%'), '_', '\_') || '%';
-  -- q as a code, upper-cased, as copied: characters that are neither letters, digits nor dots taken off both ends,
-  -- then full stops off the end ("NB91.", "NB91,", "(NB91)" are NB91). Then as it is when it has the code's shape
-  -- with its dot, or with the dot put back after the fourth character ("9a030" is 9A03.0). That entry comes first,
-  -- and is found even without the dot.
-  code_text := rtrim(regexp_replace(upper(trimmed), '^[^[:alnum:].]+|[^[:alnum:].]+$', '', 'g'), '.');
+  -- q as a code, upper-cased, as copied: any run of characters that are neither letters nor digits taken off both
+  -- ends ("NB91.", "(NB91).", "NB91 .", ".NB91" are NB91; "(9A03.0)." is 9A03.0, the code's own dot stays). Then as
+  -- it is when it has the code's shape with its dot, or with the dot put back after the fourth character ("9a030"
+  -- is 9A03.0). That entry comes first, and is found even without the dot.
+  code_text := regexp_replace(upper(trimmed), '^[^[:alnum:]]+|[^[:alnum:]]+$', '', 'g');
   typed_code := case when code_text ~ '^[0-9A-Z]{4}(\.[0-9A-Z]{1,2}){0,2}$' then code_text
                      when code_text ~ '^[0-9A-Z]{5,6}$' then left(code_text, 4) || '.' || substr(code_text, 5) end;
   return query
