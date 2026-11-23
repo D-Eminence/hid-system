@@ -1901,3 +1901,32 @@ grant execute on function identity.patient_nin_link_precheck(uuid, char, text, c
 revoke all on function identity.patient_nin_link_precheck(uuid, char, text, char),
   identity.link_patient_nin(uuid, uuid, char, bytea, text, char, text, boolean, text, char) from public;
 revoke all on identity.patient_nin_links from public;
+
+-- Unknown patient records (0145, ID-7), exactly as 0145 grants them: the
+-- six commands and reads and the record kind to the Identity runtime, the waiting list's record
+-- kinds to the EHR runtime; the record table, its cancel-check marker table
+-- and the helpers are the owner's. The cancel check's marker test is run by
+-- every role that reads the clinical tables (their policies call it).
+grant execute on function
+  identity.create_unknown_patient(uuid, text, text, integer, text, bytea, text, text, text),
+  identity.list_unknown_patients(text, integer, timestamp with time zone, uuid),
+  identity.read_unknown_patient(uuid),
+  identity.identify_unknown_patient(uuid, bigint, text, text, date, text, text, bytea, bytea, text, text, text),
+  identity.decide_unknown_patient(uuid, text, bigint, text, text, text),
+  identity.review_unknown_patient(uuid), identity.patient_record_kind(uuid) to hid_identity_runtime;
+grant execute on function ehr.visit_queue_record_kinds(uuid[]) to hid_ehr_runtime;
+grant execute on function ehr.unknown_patient_cancel_scan_open() to public;
+revoke all on identity.unknown_patients, ehr.unknown_patient_cancel_scans from public;
+revoke all on function
+  identity.create_unknown_patient(uuid, text, text, integer, text, bytea, text, text, text),
+  identity.list_unknown_patients(text, integer, timestamp with time zone, uuid),
+  identity.read_unknown_patient(uuid),
+  identity.identify_unknown_patient(uuid, bigint, text, text, date, text, text, bytea, bytea, text, text, text),
+  identity.decide_unknown_patient(uuid, text, bigint, text, text, text),
+  identity.review_unknown_patient(uuid), identity.patient_record_kind(uuid),
+  ehr.visit_queue_record_kinds(uuid[]),
+  identity.unknown_patient_actor(text),
+  identity.unknown_patient_audit(text, uuid, uuid, uuid, uuid, text, text, text, uuid, text, jsonb),
+  identity.unknown_patient_cards(uuid[]), identity.unknown_patient_missing_reason(uuid, uuid),
+  identity.refuse_nin_for_unknown_patient(), identity.refuse_login_for_unknown_patient(),
+  identity.refuse_registration_for_unknown_patient() from public;
