@@ -417,7 +417,8 @@ describe('the controller\'s answers: today\'s keys plus exactly ownProgress or d
     const page = await subject.list(request, patientId, encounterId, { limit: 50 } as never);
     expect(Object.keys(page)).toEqual(Object.keys(before));
     expect(Object.keys(page.items[0]!)).toEqual([...TODAYS_KEYS, 'orderRoute', 'allergyAcknowledgements', 'ownProgress']);
-    expect(page.items[0]!.ownProgress).toEqual({ status: 'unknown', receivedAt: null, dispensedAt: null, reversedAt: null });
+    expect(page.items[0]!.ownProgress).toEqual({ status: 'unknown', receivedAt: null, acceptedAt: null, dispensedAt: null,
+      reversedAt: null });
   });
 
   it('one prescription', async () => {

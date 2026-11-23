@@ -88,11 +88,12 @@ describe('EHR-C3 GET ehr/patients/:patientId/vitals/latest', () => {
       { measure: 'temperatureC', value: '37.2', recordedAt, vitalId: vitalB, encounterId, corrected: false },
       { measure: 'notAMeasure', value: 1, recordedAt, vitalId: vitalB, encounterId, corrected: false },
     ]);
-    await expect(service.latest(context, patientId)).resolves.toEqual({ facilityId, measures: {
+    // VIT-1: each measure carries its warning (null within the usual range) and the table version.
+    await expect(service.latest(context, patientId)).resolves.toEqual({ facilityId, usualRangesVersion: '2026-11-adult-1', measures: {
       bloodPressure: { value: { systolicMmhg: 128, diastolicMmhg: 84 }, recordedAt, vitalId: vitalA, encounterId,
-        corrected: true },
-      pulseBpm: { value: 76, recordedAt, vitalId: vitalB, encounterId, corrected: false },
-      temperatureC: { value: 37.2, recordedAt, vitalId: vitalB, encounterId, corrected: false },
+        corrected: true, warning: null },
+      pulseBpm: { value: 76, recordedAt, vitalId: vitalB, encounterId, corrected: false, warning: null },
+      temperatureC: { value: 37.2, recordedAt, vitalId: vitalB, encounterId, corrected: false, warning: null },
     } });
     expect(calls[0]?.values).toEqual([patientId, facilityId]);
     expect(audits).toEqual([{ access: 'read_records', action: 'ehr.vital.latest', details: { measureCount: 3 } }]);
@@ -104,15 +105,16 @@ describe('EHR-C3 GET ehr/patients/:patientId/vitals/latest', () => {
       { measure: 'pulseBpm', value: 80, recordedAt, vitalId: vitalA, encounterId, corrected: true },
       { measure: 'weightKg', value: 70, recordedAt, vitalId: vitalA, encounterId, corrected: false },
     ]);
-    await expect(service.latest(context, patientId)).resolves.toEqual({ facilityId, measures: {
-      pulseBpm: { value: 80, recordedAt, vitalId: vitalA, encounterId, corrected: true },
-      weightKg: { value: 70, recordedAt, vitalId: vitalA, encounterId, corrected: false },
+    await expect(service.latest(context, patientId)).resolves.toEqual({ facilityId, usualRangesVersion: '2026-11-adult-1', measures: {
+      pulseBpm: { value: 80, recordedAt, vitalId: vitalA, encounterId, corrected: true, warning: null },
+      weightKg: { value: 70, recordedAt, vitalId: vitalA, encounterId, corrected: false, warning: null },
     } });
   });
 
   it('answers no measures when there are none', async () => {
     const { service } = setup([]);
-    await expect(service.latest(context, patientId)).resolves.toEqual({ facilityId, measures: {} });
+    await expect(service.latest(context, patientId)).resolves.toEqual({ facilityId, measures: {},
+      usualRangesVersion: '2026-11-adult-1' });
   });
 
   it('audits a refusal (403) through the clinical repository and reads nothing', async () => {

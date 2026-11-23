@@ -217,8 +217,10 @@ begin
   perform set_config('app.correlation_id', 'search-suite-' || label, true);
   insert into pg_temp.search_answers (label, outcome, reach, match_ref, full_name, sex, date_of_birth, health_id_last4,
     nin_verified, match_ref_expires_at)
-  select label, answer.* from identity.staff_patient_search(mode, first_name, last_name, dob, hid, phones, reason,
-    repeat('c', 64)) answer;
+  -- By name, so a column added at the end of the answer (0145's record_kind) changes nothing here.
+  select label, answer.outcome, answer.reach, answer.match_ref, answer.full_name, answer.sex, answer.date_of_birth,
+    answer.health_id_last4, answer.nin_verified, answer.match_ref_expires_at
+    from identity.staff_patient_search(mode, first_name, last_name, dob, hid, phones, reason, repeat('c', 64)) answer;
   select format('%s/%s/%s%s', min(answer.outcome), coalesce(min(answer.reach), '-'), count(answer.match_ref),
       coalesce(':' || string_agg(answer.health_id_last4, ',' order by answer.seq), ''))
     into summary from pg_temp.search_answers answer where answer.label = search.label;

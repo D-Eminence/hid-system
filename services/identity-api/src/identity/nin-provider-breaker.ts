@@ -69,6 +69,15 @@ export class NinProviderBreaker {
       'The NIN service is not answering right now. Please try again in a minute.');
   }
 
+  /**
+   * Q108: the check that took the place was never sent (NIN checks switched
+   * off, or the check refused before sending). Frees the place without
+   * counting a failure or logging.
+   */
+  release(): void {
+    this.probeStartedAt = null;
+  }
+
   recordSuccess(): void {
     this.failures = [];
     this.openedAt = null;

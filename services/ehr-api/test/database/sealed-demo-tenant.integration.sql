@@ -335,6 +335,9 @@ begin
     (select count(*) from (values
       ('identity.create_access_request(text,text,text,integer)', '2745e91d666f16a6ad79019d31f0380a'),
       ('identity.activate_break_glass(text,text,integer)', '585d55fe4f7b5773cea96ae8729cc99c'),
+      -- or 0139's (D6: 0123's text plus the lines marked "0139 (D6)"; 0139's post-check
+      -- proves that removing them gives 0123's), with both sealed clauses.
+      ('identity.activate_break_glass(text,text,integer)', '4c14590d514697e1bdad5876dcd66296'),
       -- 0122's 24-hour read and write PIN body (e17925c5...), plus 0123's QA line.
       ('identity.access_patient_with_pin(text,text,integer)', '6f44fc5433a8e2ddf1febbb711c88037'),
       ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)', '0c2def2b530bcb3d68537ade52787b6b'),

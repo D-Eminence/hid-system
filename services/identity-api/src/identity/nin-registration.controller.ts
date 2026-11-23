@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Header, Headers, Optional, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, Header, Headers, HttpCode, Inject, Optional, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
 import { AuditAction, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
@@ -13,6 +13,9 @@ import { NinProviderBreaker } from './nin-provider-breaker';
 import { RegisterWithoutNinDto, NO_NIN_REASONS } from './dto/register-without-nin.dto';
 import { RegistrationWithoutNinService } from './registration-without-nin.service';
 import { DomainProblem } from '../common/problem';
+import { NIN_VERIFICATION_PROVIDER, type NinVerificationProvider } from './nin.types';
+import { LinkPatientNinDto } from './dto/link-patient-nin.dto';
+import { PatientNinLinkService } from './patient-nin-link.service';
 
 @Controller('identity')
 export class NinRegistrationController {
@@ -20,23 +23,44 @@ export class NinRegistrationController {
     private readonly registrations: NinRegistrationService,
     @Optional() private readonly ninBreaker: NinProviderBreaker = new NinProviderBreaker(),
     @Optional() private readonly withoutNin?: RegistrationWithoutNinService,
+    @Optional() @Inject(NIN_VERIFICATION_PROVIDER) private readonly provider?: NinVerificationProvider,
+    @Optional() private readonly ninLink?: PatientNinLinkService,
   ) {}
 
   @Get('registration-capabilities')
   @RequirePermissions('identity.registration.write')
   @AuditAction('identity.registration-capabilities.read')
-  capabilities() {
-    const mode = getEnvironment().NIN_PROVIDER_MODE;
-    const enabled = mode === 'test';
+  async capabilities(@Req() request: HidRequest) {
     return {
       // ID-0: `available` is false while the NIN service breaker is tripped
       // (or NIN checks are off), so the desk knows before it asks.
-      nin: { enabled, state: enabled ? 'test-only' : mode, available: enabled && this.ninBreaker.available() },
+      nin: await this.ninCapability(request),
       // ID-2 (0130, owner Q106): the desk may register a patient without a
       // NIN; a phone (and address) is required except for a child.
       withoutNin: { enabled: true, phoneRequiredUnlessChild: true, reasons: [...NO_NIN_REASONS] },
       newPatientRegistrationRequiresNin: false,
     };
+  }
+
+  private async ninCapability(request: HidRequest): Promise<{ enabled: boolean; state: string; available: boolean }> {
+    if (this.provider?.name === 'qoreid' && this.provider.isEnabled) {
+      // Q108: NIN checks through QoreID, on while QoreID's switch is on (read
+      // now, never cached). A switch that cannot be read is "try again".
+      // 0098 G6, 0123 G6q: off at a desk of the sealed demo or QA tenant, as
+      // resolve answers there; a seal that cannot be read is "try again".
+      let enabled: boolean;
+      try {
+        enabled = await this.provider.isEnabled()
+          && !(await this.registrations.sealedTenant(request.facilityId, request.actor?.accountId));
+      } catch {
+        return { enabled: true, state: 'live', available: false };
+      }
+      return enabled ? { enabled, state: 'live', available: this.ninBreaker.available() }
+        : { enabled, state: 'unavailable', available: false };
+    }
+    const mode = getEnvironment().NIN_PROVIDER_MODE;
+    const enabled = mode === 'test';
+    return { enabled, state: enabled ? 'test-only' : mode, available: enabled && this.ninBreaker.available() };
   }
 
   @Post('nin/resolve')
@@ -157,6 +181,30 @@ export class NinRegistrationController {
       return this.withoutNin.review(caseId, 'link_existing', input, idempotencyKey, context);
     }
     return this.registrations.linkExisting(caseId, input, idempotencyKey, context);
+  }
+
+  /**
+   * ID-6 (0138, Akos P0-1): verify a NIN later and link it, for this
+   * facility's own patient (0131's basis; a consent grant does not allow it).
+   * The patient by UUID; the NIN only in the body. 200 with nin_linked or
+   * already_linked; the refusals are the planned contract's (ID-6).
+   */
+  @Post('patients/:patientId/nin')
+  @HttpCode(200)
+  @RequirePermissions('identity.registration.write')
+  @AuditAction('identity.patient.nin-link.request')
+  linkNin(
+    @Param('patientId', new ParseUUIDPipe()) patientId: string,
+    @Body() input: LinkPatientNinDto,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Req() request: HidRequest,
+  ) {
+    requireIdempotencyKey(idempotencyKey);
+    const context = requireRequestContext(request, input.purpose);
+    if (!this.ninLink) {
+      throw new DomainProblem(503, 'NIN_LINK_UNAVAILABLE', 'Adding a NIN is not available right now.');
+    }
+    return this.ninLink.link(patientId, input, idempotencyKey, context);
   }
 
   private requireWithoutNin(): RegistrationWithoutNinService {

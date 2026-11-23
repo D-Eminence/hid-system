@@ -5,7 +5,10 @@ import { LOINC_SYSTEM_SQL_PATTERN, SENSITIVE_LOINC_CODES, SENSITIVE_LOINC_SQL_LI
 
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 // The staff chat's two queries as they were at 34d69557 (staff-evidence.service.ts:15-18, :26-29).
-const STAFF_EVIDENCE_SHA256 = 'fd73cd5d42d12fb4f1faa20cc4f22851aed5eda132c87d614cfb1a02c48b250f';
+// EHR-C8b (0142) changed the evidence query on purpose, in its vitals branch
+// only: readings entered in error are left out, and the two status columns
+// stay out of the fields (was fd73cd5d42d12fb4f1faa20cc4f22851aed5eda132c87d614cfb1a02c48b250f).
+const STAFF_EVIDENCE_SHA256 = 'b15ada065bb22c1564484a2ca6bc993da04bd24eec626c75d6ccf81be681bffc';
 const STAFF_DOCUMENTS_SHA256 = 'fc695715139604a243b48813cac51bc7f33d91b1b03d0a029c659ebd8c743dab';
 const branch = (query: string, kind: string) => query.split('union all').find(b => b.includes(`'${kind}',`) || b.includes(`'${kind}' kind`))!;
 
@@ -72,7 +75,8 @@ describe('The patient evidence query', () => {
 
   it('reads vitals as an explicit list of measures (A9)', () => {
     const v = branch(PATIENT_EVIDENCE_QUERY, 'vital');
-    expect(v).not.toContain('to_jsonb(v)');
+    // The whole row is read only for the status filter (EHR-C8b), never for fields.
+    expect(v.replace("where coalesce(to_jsonb(v)->>'status','recorded')='recorded'", '')).not.toContain('to_jsonb(v)');
     expect(v).toContain("jsonb_build_object('recorded_at',v.recorded_at,'height_cm',v.height_cm");
     expect(v).toContain("'source',v.source)||coalesce(c.replacement_values,'{}'::jsonb)");
   });
@@ -113,5 +117,15 @@ describe('the imported paper records encounter (0113)', () => {
   });
   it('the staff query is unchanged by it', () => {
     expect(STAFF_EVIDENCE_QUERY).not.toContain('imported_paper_records');
+  });
+});
+
+describe('EHR-C8b: readings entered in error leave the record evidence (0142)', () => {
+  it.each([['staff', STAFF_EVIDENCE_QUERY], ['patient', PATIENT_EVIDENCE_QUERY]])('%s: only recorded readings', (_label, query) => {
+    expect(branch(query, 'vital')).toContain("where coalesce(to_jsonb(v)->>'status','recorded')='recorded'");
+  });
+
+  it('staff fields never carry the status columns', () => {
+    expect(branch(STAFF_EVIDENCE_QUERY, 'vital')).toContain("'current_correction_no','status','status_changed_at'])");
   });
 });
