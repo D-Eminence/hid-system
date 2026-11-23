@@ -26,7 +26,11 @@
 --      their attributes and EXECUTE kept; pharmacy.work_items' only unique
 --      key on the prescription is work_items_prescription_kind_uq; the six
 --      D14 and D15 triggers are enabled always (the claim key's two among
---      them);
+--      them). 0148 (Q132 A, a change after dispensing reaches the pharmacy)
+--      changes none of these counts: it adds a trigger on ehr.prescriptions
+--      that fires after D8's (prescriptions_pharmacy_change_after_dispensing)
+--      and reads D14's claims, a table of its own and a reader; no policy,
+--      and no body that names ehr.prescriptions (S7 stays eight);
 --   2. the send: the prescriber's activated prescription becomes a work item
 --      accepted by the prescriber with the fixed reason, one event, one
 --      outbox event with pharmacy-api's own four payload keys (what the event
@@ -200,7 +204,14 @@
 --         claims' CHECK);
 --   9. the undo order of 0133's header: the sends table dropped while the
 --      withdrawal trigger stands breaks prescription changes (42P01); the
---      trigger and its function dropped first do not; in the header's full
+--      trigger and its function dropped first do not; 0148 is undone before
+--      any step of 0133's (and before 0147's), in 0148's header order (its
+--      trigger, its reader, its trigger function, its table): its reader
+--      calls D1's halves and its trigger function reads D14's claims; with
+--      0148 left in place, 0147's and 0133's header undo still lets a
+--      prescription change go through (the claims stay) and 0148's reader
+--      answers no row (or 42883 once D1's halves are gone), never a failure;
+--      in the header's full
 --      order 0123's send and 0086's resend flag come back first (md5
 --      0c2def2b and cd18f1a4, ACLs kept), no function left reads the sends
 --      table when it is dropped (0147 is undone first, in full, as its undo
@@ -2949,7 +2960,53 @@ select pg_temp.expect('with 0147''s two dropped too, it can be',
   || pg_temp.try('drop policy staff_own_work_insert on pharmacy.work_item_acceptances') || ' '
   || pg_temp.try('drop function identity.pharmacy_work_patient_allows(uuid, uuid, uuid, text)'), 'ok ok ok');
 rollback to savepoint undo_0147_kept;
--- The header's full order, once 0147 is undone in full (its reader, its
+-- 0148 kept: 0147's and 0133's header undo (below) with 0148 left in place.
+-- 0148's trigger reads only D14's claims, which 0133's undo keeps, so a
+-- prescription change still goes through; its reader then answers no row
+-- for an item with nothing recorded (rx6, never dispensed), or 42883 had
+-- D1's halves been dropped too: never a failure the services cannot read
+-- as "no notice".
+savepoint undo_0148_kept;
+drop function pharmacy.own_work_item_steps(uuid[]);
+drop trigger pharmacy_work_item_acceptance_validate on pharmacy.work_item_acceptances;
+drop function pharmacy.validate_work_item_acceptance();
+drop table pharmacy.work_item_acceptances;
+do $$
+begin
+  execute pg_temp.without_d14(pg_get_functiondef(
+    'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)'::regprocedure));
+  execute pg_temp.without_d14(pg_get_functiondef('ehr.order_route_resend_allowed(text,uuid)'::regprocedure));
+end $$;
+drop function pharmacy.own_withdrawn_work_items();
+drop trigger prescriptions_own_pharmacy_send_withdrawn on ehr.prescriptions;
+drop function ehr.own_pharmacy_send_withdrawn_on_change();
+drop function ehr.send_prescription_to_own_pharmacy(uuid, bigint);
+drop function ehr.withdraw_own_pharmacy_send(uuid);
+drop function pharmacy.own_work_item_states(uuid[]);
+drop table pharmacy.own_prescription_sends;
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(1);
+select set_config('app.change_reason', 'Undo order probe', true);
+select set_config('own_work.undo_0148_change',
+  pg_temp.try(format($s$update ehr.prescriptions set frequency = 'Every 6 hours' where id = %L$s$, pg_temp.rx(6))), true);
+reset role;
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_member(2);
+select set_config('own_work.undo_0148_reader', pg_temp.try(format($s$do $d$ begin
+    if exists (select 1 from pharmacy.work_item_changes_after_dispensing(%L::uuid[])) then
+      raise exception 'a row';
+    end if;
+  end $d$$s$, array[pg_temp.work_item_of(pg_temp.rx(6))]::text)), true);
+select pg_temp.expect('0148 kept: 0133''s header undo order still lets a prescription change go through (the claims stay)',
+  current_setting('own_work.undo_0148_change') || ' '
+  || case when current_setting('own_work.undo_0148_reader') = 'ok'
+            or left(current_setting('own_work.undo_0148_reader'), 5) = '42883' then '42883 or no row'
+          else current_setting('own_work.undo_0148_reader') end
+  || ' ' || (to_regclass('pharmacy.prescription_item_claims') is not null)::text, 'ok 42883 or no row true');
+reset role;
+rollback to savepoint undo_0148_kept;
+-- The header's full order, once 0148 and then 0147 are undone in full
+-- (0148's trigger, reader, trigger function and table; 0147's reader, its
 -- trigger and function, then its table). D14 first: 0123's order-route send
 -- and 0086's resend flag are restored (the live bodies without the D14
 -- hunks), so nothing new is released. Then the withdrawn items reader, the
@@ -2963,6 +3020,16 @@ rollback to savepoint undo_0147_kept;
 -- acceptance while an own claim is live still ends in R10's order_in_work
 -- (rx15: sent to F4 by 0123's send, then taken by F1's pharmacy, as replica).
 savepoint undo_header_order;
+-- 0148 (Q132 A) first, in its header's order: the trigger on
+-- ehr.prescriptions (plpgsql records no dependency on the table it writes,
+-- so the table dropped first would make every change of an active or held
+-- prescription fail with 42P01), its reader, its trigger function, its
+-- table. 0148 is undone before 0133: its reader calls D1's halves and its
+-- trigger function reads D14's claims, which 0133's undo keeps.
+drop trigger if exists prescriptions_pharmacy_change_after_dispensing on ehr.prescriptions;
+drop function if exists pharmacy.work_item_changes_after_dispensing(uuid[]);
+drop function if exists pharmacy.prescription_change_after_dispensing();
+drop table if exists pharmacy.prescription_changes_after_dispensing;
 drop function pharmacy.own_work_item_steps(uuid[]);
 drop trigger pharmacy_work_item_acceptance_validate on pharmacy.work_item_acceptances;
 drop function pharmacy.validate_work_item_acceptance();
