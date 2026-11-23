@@ -1934,6 +1934,14 @@ and `endedKind` (null while the route is live). After a report the work item
 leaves the list for members without the patient's consent; any write on it
 answers 409 `ORDER_ROUTE_CLOSED`, and a Lab release under consent is refused.
 
+`PharmacyWorkItem` in `@hid/api-client` makes `sourceEhrPrescriptionId` and
+`sourceEncounterId` optional: pharmacy-api sends them only on this facility's
+own items and leaves both out on an item from another facility's order route
+(PRIV P4.3). It gains the optional `orderRoute` card
+(`PharmacyWorkItemOrderRoute`), present only when pharmacy-api could read the
+route. Before this the client answered 502 for a list or read holding a
+route-backed item. pharmacy-api's answer is unchanged.
+
 Support (Identity, `@FacilityOptional`, platform transactions):
 
 ```text
@@ -7151,10 +7159,74 @@ VALIDATION_FAILED` (`services/ehr-api/src/common/validation.ts:3-9`,
   VALIDATION_FAILED`, and the column is `NOT NULL` (`0004:181`). Free text is
   allowed for the name only. Until this changes, the screen should ask for a
   code, or say the diagnosis cannot be saved without one.
-- Send the code system as `ICD-10`. The patient's own record chat leaves out
-  sensitive diagnoses by their ICD-10 code only when the code system contains
-  "ICD" (`services/ehr-api/src/ehr/patient-records/patient-evidence.policy.ts:135,156`);
-  it also checks the name.
+- Send the code system as `ICD-10` (or `ICD-11` with an ICD-11 code). The
+  patient's own record chat leaves out sensitive diagnoses by code only when
+  the code system contains "ICD"; it also checks the name, whatever the code
+  system (`services/ehr-api/src/ehr/patient-records/patient-evidence.policy.ts:135,151-268,276`).
+  Both code checks below run for every code system containing "ICD",
+  whichever revision it names (`ICD-10`, `ICD-11`, `ICD-10/11`, `ICD`,
+  `http://id.who.int/icd/release/11/mms`): the label is free text and the
+  staff forms suggest `ICD-10`, so an ICD-11 code sent as `ICD-10` is still
+  hidden, and an ICD-10 code sent as `ICD-11` too.
+  - **ICD-10**, unchanged: HIV (B20-B24, Z21, R75), viral hepatitis
+    (B15-B19), sexually transmitted infections (A50-A64), neoplasms (C,
+    D00-D09), mental and behavioural disorders (F) and pregnancy (O,
+    Z32-Z36), matched at the start of the code as stored, as before.
+  - **ICD-11, a draft waiting for the clinical lead**, who confirms the
+    ranges below before release (owner decision Q124 A sign-off; Ola's
+    decision 5 on #258). It reads each part of the code in ICD-11 form (a
+    letter second, as in `1C62.0`). No WHO ICD-10, ICD-10-CM or ICD-9 code
+    has that form (theirs have a digit second), so no ICD-10 result changes;
+    only an ICD-10-PCS procedure code of section 6A, which is not a
+    diagnosis, would read as chapter 06 and be hidden. The code is
+    upper-cased and split at `&`, `/`, `,`, `;` and spaces (`1C62.0&XN487`,
+    `5A11/1C62.1`, `QE84, 7A00`, `HA60 gender incongruence`); each part is
+    read from its start, with or without the dot (`1C620` is `1C62.0`), as
+    the ICD-10 check reads `F640`; extension codes (X...) are ignored. A code
+    in neither form is not sensitive by code.
+
+  | Group | ICD-10 | ICD-11 (draft) |
+  | --- | --- | --- |
+  | HIV disease | B20-B24, Z21 | 1C60-1C62.Z (Z21 is 1C62.0), KA62.6 (congenital) |
+  | Laboratory evidence of HIV | R75 | MA14.0 only |
+  | Viral hepatitis | B15-B19 | 1E50-1E5Z |
+  | Sexually transmitted infections | A50-A64 | 1A60-1A9Z |
+  | Malignant neoplasms, except lymphoid, haematopoietic or CNS | C00-C69, C73-C80, C97 | 2B50-2E2Z |
+  | Neoplasms of haematopoietic or lymphoid tissues | C81-C96 | 2A20-2B3Z, the whole block (it also holds what ICD-10 files under D45-D47) |
+  | Neoplasms of the central nervous system (uncertain: the code does not say malignant or benign) | C70-C72 | 2A00-2A0Z except 2A02.3 and 2A02.4 |
+  | In situ neoplasms | D00-D09 | 2E60-2E6Z |
+  | Mental, behavioural or neurodevelopmental disorders | F00-F99 | 6A00-6E8Z (chapter 06) |
+  | F conditions ICD-11 moved out of chapter 06 | F51, F52, F64, F95, F98.4, F80.3, F84.2, F43.0, F66 | HA00-HA0Z, HA20-HA2Z, HA60-HA6Z, 8A05, 8A07.0, 8A62.2, LD90.4, QE84, QA15.1, and 25 sleep-wake codes, each alone (7A00, 7A01, 7A0Z, 7A23, 7A25, 7A26, 7A2Y, 7A2Z, 7A85, 7A86, 7A88, 7A8Y, 7A8Z, 7B00.1, 7B00.2, 7B01, 7B01.2, 7B01.Y, 7B01.Z, 7B02, 7B02.2, 7B0Y, 7B0Z, 7B2Y, 7B2Z): the 24 that WHO maps back to F51, and 7A0Z (insomnia disorders, unspecified), where WHO's 10-to-11 map sends F51.0 |
+  | Pregnancy, childbirth or the puerperium | O00-O99 | JA00-JB6Z (chapter 18) |
+  | Pregnancy care contacts | Z32-Z36 | QA40, QA41, QA42, QA43, QA45 |
+
+  A range takes in every code under its categories (`1C62.30`, `1C62.Z`);
+  a single code takes in its subcodes (`KA62.6` and `KA62.6x`), except the
+  sleep-wake codes, which count alone. The ranges come from WHO's ICD-11
+  MMS 2026-01 release files (tabular list and the 10-to-11 and 11-to-10
+  maps).
+
+  For the clinical lead: the table also hides ICD-11 codes that WHO's
+  11-to-10 map sends only to ICD-10 codes shown today. Each needs a decision:
+  - Haematopoietic block: what ICD-10 files under D45-D47 (polycythaemia
+    vera, myelodysplastic syndromes, MGUS...).
+  - Central nervous system block: 2A00.21 (mixed neuronal-glial tumours,
+    D33.2) and 2A00.22 (choroid plexus tumours, D33.0 and D33.1), as well
+    as the codes that do not say malignant or benign. Only 2A02.3 and
+    2A02.4 are left out.
+  - HA01.1-HA01.1Z, male erectile dysfunction (N48.4). ICD-10 hid only
+    F52.2, so ICD-11 hides all erectile dysfunction, diabetic and
+    hypertensive included.
+  - 7A85 (benign sleep myoclonus of infancy) and 7A86 (propriospinal
+    myoclonus at sleep onset): neurological, mapped only to the catch-all
+    F51.9.
+  - 8A05.11 (G25.6) and QA15.1 (Z70.1).
+  - Insomnia: 7A00, 7A01 and 7A0Z follow F51.0 together; if insomnia should
+    not, all three go.
+
+  Not hidden by code: MB2Y, where WHO maps hypomania (F30.0), is a residual
+  ("other specified") category. The name check hides "hypomania" and
+  "hypomanic" instead.
 - The code and code system cannot be changed after saving
   (`UpdateDiagnosisDto`, `clinical.dto.ts:335-353`, has no code fields). A
   wrong code is corrected by marking the diagnosis entered in error and
@@ -7302,9 +7374,10 @@ still.
   ICD-11, SNOMED CT, LOINC and HID-LAB are all accepted the same way; none is
   looked up or checked against a code list.
 - Code systems are read in one place only: the patient's own record chat
-  recognises LOINC (`patient-evidence.policy.ts:78-98`) and ICD
-  (`patient-evidence.policy.ts:134-135,156`) to leave out sensitive tests and
-  diagnoses.
+  recognises LOINC (`patient-evidence.policy.ts:78-98`) and ICD-10 and ICD-11
+  (`patient-evidence.policy.ts:134-135,151-268,276`) to leave out sensitive
+  tests and diagnoses. The ICD-11 ranges are a draft waiting for the clinical
+  lead (R-1).
 - **No FHIR API.** No service on this branch has a FHIR route or returns
   FHIR resources.
 - **Planned:** the lab test catalogue with LOINC and HID-LAB codes (0144) and

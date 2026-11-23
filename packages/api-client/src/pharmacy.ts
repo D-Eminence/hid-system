@@ -33,7 +33,9 @@ export interface PharmacyMedicationReference {
  * The patient on a work item: name, sex, date of birth and the last 4
  * characters of the Health ID. On this facility's own work it is sent while
  * pharmacy-api's OWN_WORK_PATIENT_CARD_ENABLED is on and the member may read
- * the work (0124); absent otherwise.
+ * the work (0124). On an item from another facility's order route it comes
+ * with the route card, and only while the route still allows a read. Absent
+ * otherwise.
  */
 export interface PharmacyWorkItemPatient {
   fullName: string;
@@ -53,13 +55,49 @@ export interface PharmacyWorkItemMedication extends PharmacyMedicationReference 
   doseForm?: string;
 }
 
+/**
+ * The order route a work item came from, as pharmacy-api shows it on an item
+ * that another facility sent here: the route's id and reference, its state
+ * now, what this pharmacy may still do with it, its version (sent back as
+ * expectedVersion when reporting the wrong patient on it), how it ended (null
+ * while it is live), and who ordered it from which facility, so a screen can
+ * say "by <ordering facility>". The names are null when the route does not
+ * hold them.
+ */
+export interface PharmacyWorkItemOrderRoute {
+  id: string;
+  reference: string | null;
+  effectiveState: string;
+  /**
+   * What this pharmacy may do with the route now: 'work' (may act on it),
+   * 'read' (may read it only) or 'none' (may no longer read it). Kept as a
+   * string so a value added later still reaches the screen instead of failing
+   * the whole list.
+   */
+  access: string;
+  version: number;
+  endedKind: string | null;
+  orderingFacilityName: string | null;
+  ordererName: string | null;
+  /** Left out when the route holds no licence for the orderer. */
+  ordererLicence?: { body: string; number: string | null };
+}
+
 export interface PharmacyWorkItem {
   id: string;
   patientId: string;
   facilityId: string;
-  sourceEhrPrescriptionId: string;
+  /**
+   * The EHR prescription and encounter the item came from, present only on
+   * this facility's own items. pharmacy-api leaves both out on an item from
+   * another facility's order route, because they are the ordering facility's
+   * record ids and this pharmacy may not see them (PRIV P4.3); such an item
+   * carries `orderRoute` instead.
+   */
+  sourceEhrPrescriptionId?: string;
   sourceEhrPrescriptionVersion: number;
-  sourceEncounterId: string;
+  /** Present only on this facility's own items (see sourceEhrPrescriptionId). */
+  sourceEncounterId?: string;
   status: 'accepted';
   medication: PharmacyWorkItemMedication;
   doseQuantity: number | null;
@@ -72,6 +110,12 @@ export interface PharmacyWorkItem {
   dispensing: { id: string; status: 'dispensed'; reversed: boolean } | null;
   /** Present only when pharmacy-api sent it (see PharmacyWorkItemPatient). */
   patient?: PharmacyWorkItemPatient;
+  /**
+   * Present only on an item from another facility's order route whose route
+   * card pharmacy-api could read; absent on this facility's own items, and on
+   * a route-backed item whose card could not be read.
+   */
+  orderRoute?: PharmacyWorkItemOrderRoute;
   /**
    * The prescription details on own work (0125), each present only when
    * pharmacy-api sent it (see PharmacyWorkItemMedication): the priority
@@ -534,14 +578,37 @@ function parseWorkItemStep(value: Record<string, unknown>): Pick<PharmacyWorkIte
     acceptedWith: acceptedWith as PharmacistAcceptance['acceptedWith'] } };
 }
 
+/**
+ * The optional order route card: left out when absent (this facility's own
+ * item, or a route-backed item whose card pharmacy-api could not read); a
+ * malformed one is refused like any other field. Keys the card does not
+ * define are dropped, so nothing else from the route reaches a screen.
+ */
+function parseWorkItemOrderRoute(value: unknown): { orderRoute?: PharmacyWorkItemOrderRoute } {
+  if (value === undefined) return {};
+  const route = record(value, 'Pharmacy work item order route');
+  const licence = route.ordererLicence === undefined ? undefined
+    : record(route.ordererLicence, 'Pharmacy work item orderer licence');
+  return { orderRoute: { id: text(route, 'id'), reference: nullableText(route, 'reference'),
+    effectiveState: text(route, 'effectiveState'), access: text(route, 'access'), version: integer(route, 'version'),
+    endedKind: nullableText(route, 'endedKind'), orderingFacilityName: nullableText(route, 'orderingFacilityName'),
+    ordererName: nullableText(route, 'ordererName'),
+    ...(licence === undefined ? {} : { ordererLicence: { body: text(licence, 'body'),
+      number: nullableText(licence, 'number') } }) } };
+}
+
 function parseWorkItem(payload: unknown): PharmacyWorkItem {
   const value = record(payload, 'Pharmacy work item');
   const dispensing = value.dispensing === null ? null : record(value.dispensing, 'Pharmacy dispensing summary');
   return {
     id: text(value, 'id'), patientId: text(value, 'patientId'), facilityId: text(value, 'facilityId'),
-    sourceEhrPrescriptionId: text(value, 'sourceEhrPrescriptionId'),
+    // Both source ids are left out on an item from another facility's order
+    // route (PRIV P4.3); when sent, each must still be a non-empty string.
+    ...(value.sourceEhrPrescriptionId === undefined ? {}
+      : { sourceEhrPrescriptionId: text(value, 'sourceEhrPrescriptionId') }),
     sourceEhrPrescriptionVersion: integer(value, 'sourceEhrPrescriptionVersion'),
-    sourceEncounterId: text(value, 'sourceEncounterId'), status: 'accepted',
+    ...(value.sourceEncounterId === undefined ? {} : { sourceEncounterId: text(value, 'sourceEncounterId') }),
+    status: 'accepted',
     medication: parseWorkItemMedication(value.medication),
     doseQuantity: typeof value.doseQuantity === 'number' ? value.doseQuantity : null,
     doseUnit: nullableText(value, 'doseUnit'), routeCode: nullableText(value, 'routeCode'),
@@ -550,6 +617,7 @@ function parseWorkItem(payload: unknown): PharmacyWorkItem {
     dispensing: dispensing ? {
       id: text(dispensing, 'id'), status: 'dispensed', reversed: dispensing.reversed === true,
     } : null,
+    ...parseWorkItemOrderRoute(value.orderRoute),
     ...parseWorkItemPatient(value.patient),
     ...parseWorkItemDetails(value),
     ...(value.withdrawn === true ? { withdrawn: true as const,
