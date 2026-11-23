@@ -454,8 +454,9 @@ select pg_temp.expect('3j maximums missing a line are refused',
 select set_config('zero136.owner_maximums', '', false);
 
 -- 4. 0136 as written, on the table before it. Its maximums are 0 at real
--- facilities (Q113 A) and the fictional staff at real facilities are
--- affected, so it stops before changing anything. ON_ERROR_ROLLBACK undoes only that statement here, so the suite
+-- facilities (Q113 A) except lines 13, 14, 19, 20 and 21 (Q134 B: 1, 1, 9,
+-- 9 and 1), and the fictional staff at real facilities are affected above
+-- them, so it stops before changing anything. ON_ERROR_ROLLBACK undoes only that statement here, so the suite
 -- can go on and check the change itself; the migration runner runs the file
 -- as one transaction and applies nothing.
 \set ON_ERROR_STOP off
@@ -475,9 +476,12 @@ select pg_temp.expect('4a with the owner''s maximums at 0 (Q113 A), 0136 stops o
   || (select real_count from counts_seen where label = 'before' and line = 1) || ' ('
   || (select logins from counts_seen where label = 'before' and line = 1)
   || ' staff logins), more than the owner''s 0 (0); ')));
-select pg_temp.expect('4b the stop names lines 1-24 that touch anyone, never 25 or 26',
-  (select string_agg(line::text, ' ' order by line) from counts_seen
-    where label = 'before' and line <= 24 and (real_count > 0 or coalesce(logins, 0) > 0)),
+select pg_temp.expect('4b the stop names lines 1-24 above the owner''s maximums (Q113 A, Q134 B), never 25 or 26',
+  (select string_agg(seen.line::text, ' ' order by seen.line) from counts_seen seen
+     left join (values (13, 1, 1), (14, 1, 1), (19, 9, 9), (20, 9, 9), (21, 1, 1)) raised(line, real_max, logins_max)
+       on raised.line = seen.line
+    where seen.label = 'before' and seen.line <= 24
+      and (seen.real_count > coalesce(raised.real_max, 0) or coalesce(seen.logins, 0) > coalesce(raised.logins_max, 0))),
   (select string_agg(found[1], ' ' order by found[1]::integer)
      from regexp_matches(:'LAST_ERROR_MESSAGE', 'line (\d+) \(', 'g') found));
 select pg_temp.expect('4c 0136 counted what the counts file counted, number for number', '0',

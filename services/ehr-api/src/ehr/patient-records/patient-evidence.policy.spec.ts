@@ -1,5 +1,5 @@
-import { LAB_CORRECTING, PATIENT_FIELDS, LOINC_SYSTEM_SQL_PATTERN, SENSITIVE_LOINC_CODES, SENSITIVE_TEST_SQL_PATTERN, VITAL_FIELDS, ageYears, isSensitiveTest, patientEvidence, redactIdentifiers,
-  type PatientProfileInput } from './patient-evidence.policy';
+import { LAB_CORRECTING, PATIENT_FIELDS, LOINC_SYSTEM_SQL_PATTERN, SENSITIVE_ICD11_GROUPS, SENSITIVE_LOINC_CODES, SENSITIVE_TEST_SQL_PATTERN, VITAL_FIELDS, ageYears,
+  icdRevision, isSensitiveDiagnosisCode, isSensitiveTest, patientEvidence, redactIdentifiers, type PatientProfileInput } from './patient-evidence.policy';
 import { evidence, type Evidence, type SourceKind } from './patient-evidence.types';
 
 // Fictional patient and records only.
@@ -453,5 +453,188 @@ describe('Second review: the date of birth, without catching clinical numbers (A
       expect([text, r(text)]).toEqual([text, text.replace(/(born on |born |DOB: |Date of birth is |dob ).*/, '$1[date of birth removed]')]);
     expect(r('seen 1990-03-12T08:30:00Z, and 12/03/1990 noted')).toBe('seen [date of birth removed], and [date of birth removed] noted');
     expect(r('BP 120/80 on 12/03/2024')).toBe('BP 120/80 on 12/03/2024');
+  });
+});
+
+/*
+ * ICD-11 sensitive diagnosis codes (S4). The ranges are a draft for the clinical lead (owner decision Q124 A
+ * sign-off; Ola's decision 5 on #258). Fictional patients; the codes are WHO's ICD-11 MMS 2026-01 codes, or
+ * codes in ICD-11 form placed just outside a range.
+ */
+describe('Sensitive diagnoses by ICD-11 code (S4, draft ranges for the clinical lead)', () => {
+  const diagnosis = (codeSystem: string, code: string, condition = 'Synthetic code-only condition') => record('diagnosis', {
+    _encounterId: encounterId, codeSystem, code, condition, clinicalStatus: 'active', verificationStatus: 'confirmed', onsetAt: null,
+    abatementAt: null }, { title: condition });
+  const icd11 = (code: unknown) => isSensitiveDiagnosisCode(code, 'ICD-11');
+
+  // Per group: codes inside (the first and last code of each range, a subcode) and codes just outside each edge.
+  const EDGES: ReadonlyArray<readonly [group: string, inside: readonly string[], outside: readonly string[]]> = [
+    ['HIV disease', ['1C60', '1C60.0', '1C61.3Z', '1C62.0', '1C62.30', '1C62.Z', 'KA62.6', 'KA62.60'],
+      ['1C5Z', '1C63', '1C6Y', 'KA62', 'KA62.5', 'KA62.7', 'KA60']],
+    ['Laboratory evidence of HIV', ['MA14.0', 'MA14.00'], ['MA14', 'MA14.1', 'MA14.10', 'MA13.Z', 'MA15']],
+    ['Viral hepatitis', ['1E50', '1E50.1', '1E51.00', '1E51.1', '1E5Z'], ['1E4Z', '1E60', '1E71']],
+    ['Predominantly sexually transmitted infections', ['1A60', '1A62.2Y', '1A92', '1A9Z'], ['1A5Z', '1B00', '1A40', '1B10']],
+    ['Malignant neoplasms, except of lymphoid, haematopoietic or central nervous system tissues',
+      ['2B50', '2C12.02', '2C77', '2C82', '2D4Z', '2E2Z'], ['2B4Z', '2E30', '2E86.0']],
+    ['Neoplasms of haematopoietic or lymphoid tissues', ['2A20', '2A20.0', '2A83.0', '2B3Z'], ['2A1Z', '2B40']],
+    ['Neoplasms of the central nervous system', ['2A00', '2A00.5', '2A00.21', '2A02', '2A02.2', '2A0Z'],
+      ['1H0Z', '2A10', '2A02.3', '2A02.30', '2A02.4']],
+    ['In situ neoplasms', ['2E60', '2E65', '2E6Y', '2E6Z'], ['2E5Z', '2E70', '2E86.0']],
+    ['Mental, behavioural or neurodevelopmental disorders (chapter 06)', ['6A00', '6A20', '6B00', '6C40', '6D80', '6E8Z'],
+      ['5Z9Z', '5C80', '6E90', '7A20']],
+    ['Mental or behavioural conditions outside chapter 06', ['HA00', 'HA0Z', 'HA20', 'HA2Z', 'HA60', 'HA61', 'HA6Z', '8A05', '8A05.00',
+      '8A05.Z', '8A07.0', '8A07.0Z', '8A62.2', 'LD90.4', 'QE84', 'QA15.1', '7A00', '7A01', '7A0Z', '7B00.1', '7B01', '7B01.2', '7B2Z'],
+    ['GZ9Z', 'HA10', 'HA1Z', 'HA30', 'HA5Z', 'HA70', '8A04', '8A06', '8A07', '8A07.1', '8A62.1', 'LD90.3', 'QE83', 'QE85', 'QA15',
+      'QA15.0', '7A20', '7A40', '7A83', '7B00', '7B00.0', '7B01.0', '7A00.0']],
+    ['Pregnancy, childbirth or the puerperium (chapter 18)', ['JA00', 'JA00.0', 'JA24', 'JB00', 'JB63.7', 'JB6Z'], ['HZ9Z', 'JB70', 'KA60']],
+    ['Pregnancy care contacts', ['QA40', 'QA41', 'QA42.0', 'QA43', 'QA43.30', 'QA43.Z', 'QA45', 'QA45.Z'],
+      ['QA3Z', 'QA44', 'QA46', 'QA47', 'QA48', 'QA4Z']],
+  ];
+
+  it('is a readable table of WHO codes and ranges, one row per group, each with edge tests', () => {
+    const STEM = /^[1-9A-HJ-NP-Z][A-HJ-NP-Z][0-9][0-9A-HJ-NP-Z](?:\.[0-9A-HJ-NP-Z]{1,2})?$/;
+    const CATEGORY = /^[1-9A-HJ-NP-Z][A-HJ-NP-Z][0-9][0-9A-HJ-NP-Z]$/;
+    const groups = SENSITIVE_ICD11_GROUPS.map(g => g.group);
+    expect(new Set(groups).size).toBe(groups.length);
+    expect(EDGES.map(([group]) => group).sort()).toEqual([...groups].sort());
+    for (const g of SENSITIVE_ICD11_GROUPS) {
+      expect(g.icd10).not.toBe('');
+      for (const entry of [...g.codes, ...(g.except ?? [])]) {
+        const [from = '', to, ...rest] = entry.split('-');
+        if (to === undefined) { expect([entry, STEM.test(entry)]).toEqual([entry, true]); continue; }
+        // A range runs from a category to a category or its last code (".Z"), so comparing categories is exact.
+        const last = CATEGORY.test(to) || (CATEGORY.test(to.slice(0, 4)) && to.slice(4) === '.Z');
+        expect([entry, rest.length, CATEGORY.test(from), last, from <= to.slice(0, 4)]).toEqual([entry, 0, true, true, true]);
+      }
+      for (const code of g.exactly ?? []) expect([code, STEM.test(code)]).toEqual([code, true]);
+      expect([...g.codes, ...(g.exactly ?? [])].filter(code => code.startsWith('X'))).toEqual([]);
+    }
+  });
+
+  it.each(EDGES)('%s: hides the first and last code of each range and keeps the codes just outside', (_group, inside, outside) => {
+    for (const code of inside) expect([code, icd11(code)]).toEqual([code, true]);
+    for (const code of outside) expect([code, icd11(code)]).toEqual([code, false]);
+  });
+
+  it('keeps ordinary ICD-11 diagnoses', () => {
+    for (const code of ['1A00', '1A07', '1B10', '1E71', '1F40', '1G40', '2E86.0', '3A00', '3A51.1', '5A11', '8A00.0', '8A63.0', '8A80',
+      'BA00', 'CA23', 'CA40', 'DA42', 'GB51', 'GB61', 'KA60', 'MD92', 'ME84.2']) expect([code, icd11(code)]).toEqual([code, false]);
+  });
+
+  it('checks every stem of a cluster and ignores extension codes', () => {
+    for (const code of ['1C62.0&XN487', '1A62.2Y&XA6KU8', '1A60.3/8C03.1', '5A11/1C62.1', 'BA00/2C77', '2C12.02&XH4XG8', '6A70&XS25'])
+      expect([code, icd11(code)]).toEqual([code, true]);
+    // An extension code never stands alone, even one in the four-character stem form (XK8G).
+    for (const code of ['XN487', 'XK8G', 'GB51&XK8G&XN6P4', 'BA41.0&XA7RE3&XA7NQ7', 'BA00/5A11'])
+      expect([code, icd11(code)]).toEqual([code, false]);
+  });
+
+  it('trims and case-folds, and finds nothing by code in a code of neither form', () => {
+    for (const code of [' 1c62.0 ', '1c62.0 & xn487', 'ba00 / 6a70', '\t2e65\n', 'qa41']) expect([code, icd11(code)]).toEqual([code, true]);
+    for (const code of ['1C6', 'HIV disease', '1000704511', 'http://id.who.int/icd/release/11/mms/1000704511', '', 42, null, undefined])
+      expect([code, icd11(code)]).toEqual([code, false]);
+  });
+
+  it('reads a code without its dot, with a note after it, or in a list, as the ICD-10 prefix rule does', () => {
+    for (const code of ['1C620', '2A204', '1C62.', '1C62.000', '1C62-0', 'HA60 gender incongruence', 'QE84, 7A00', '1C62.0;6A70',
+      '1C62,0', 'BA00 6A70', '7B012']) expect([code, icd11(code)]).toEqual([code, true]);
+    // Without its dot, a code that counts alone still counts alone: 7A000 is 7A00.0, not 7A00.
+    for (const code of ['7A000', 'BA00, 5A11', 'BA00 essential hypertension']) expect([code, icd11(code)]).toEqual([code, false]);
+  });
+
+  it('finds nothing by code when a character is outside the ICD-11 alphabet, even where its category would sort inside a range', () => {
+    // A fourth character I or O would sort inside 6A00-6E8Z, JA00-JB6Z and 2B50-2E2Z.
+    for (const code of ['6B0I', 'JA0O', '2C1O', '6B0I.0', '1I62.0', '1O62.0', '0C62.0', 'IC62.0'])
+      expect([code, icd11(code)]).toEqual([code, false]);
+  });
+
+  it('tells ICD-10 from ICD-11 by the code system name or URI, and ICD alone from neither', () => {
+    const SYSTEMS = {
+      icd10: ['ICD-10', 'icd10', 'ICD 10', 'ICD_10', ' ICD-10 ', 'ICD-10-CM', 'ICD10CM', 'http://hl7.org/fhir/sid/icd-10',
+        'http://hl7.org/fhir/sid/icd-10-cm', 'http://id.who.int/icd/release/10/2019'],
+      icd11: ['ICD-11', 'icd11', 'ICD 11', 'ICD-11 MMS', 'ICD11MMS', 'ICD-11-MMS 2026-01', 'http://id.who.int/icd/release/11/mms',
+        'http://id.who.int/icd/release/11/2026-01/mms', 'http://id.who.int/icd/entity'],
+      icd: ['ICD', 'icd', 'WHO ICD', 'ICD-9-CM', 'ICD-O-3', 'ICD-10/ICD-11', 'ICD-10/11', 'ICD 10/11', 'ICD 10 / 11', 'ICD-110'],
+      none: ['http://snomed.info/sct', 'SNOMED CT', 'LOCAL', 'http://loinc.org', '', undefined, null, 11],
+    } as const;
+    for (const [revision, systems] of Object.entries(SYSTEMS)) {
+      for (const system of systems) expect([system, icdRevision(system)]).toEqual([system, revision === 'none' ? null : revision]);
+    }
+    // ICD-10 and ICD-11 codes alike: under every ICD system, whichever revision it names (a free-text label can be wrong,
+    // and the two code forms never overlap), never under another.
+    for (const code of ['1C62.0', 'B20']) {
+      for (const system of [...SYSTEMS.icd10, ...SYSTEMS.icd11, ...SYSTEMS.icd])
+        expect([code, system, isSensitiveDiagnosisCode(code, system)]).toEqual([code, system, true]);
+      for (const system of SYSTEMS.none) expect([code, system, isSensitiveDiagnosisCode(code, system)]).toEqual([code, system, false]);
+    }
+    // Every ICD system goes by the code's form: ICD-10 codes against the ICD-10 list, ICD-11 codes against the ICD-11 table.
+    for (const system of ['ICD', 'ICD-10', 'ICD-11', 'ICD-10/11']) {
+      expect([system, ['F32.9', '6A70', 'O14.9', 'JA24', 'I10', 'BA00'].map(code => isSensitiveDiagnosisCode(code, system))])
+        .toEqual([system, [true, true, true, true, false, false]]);
+    }
+  });
+
+  it('leaves the records out of the patient chat by code alone, and keeps ordinary ones', () => {
+    expect(clean([...['1C62.0', '1E51.0', '1A92', '2C77', '2E65', '6A20', 'JA24', 'QA41', 'MA14.0', 'HA60', '1C62.0&XN487']
+      .map(code => diagnosis('ICD-11', code)), diagnosis('http://id.who.int/icd/release/11/mms', '6B00'), diagnosis('ICD', '1E51.1'),
+    diagnosis('ICD-10', '6A20')])).toEqual([]);
+    const kept = clean([diagnosis('ICD-11', 'BA00', 'Essential hypertension'),
+      diagnosis('http://id.who.int/icd/release/11/mms', '1F40', 'Malaria due to Plasmodium falciparum'),
+      diagnosis('ICD', '5A11', 'Type 2 diabetes mellitus'), diagnosis('ICD-10', 'BA00', 'Essential hypertension'),
+      diagnosis('http://snomed.info/sct', '1C62.0')]);
+    expect(kept.map(r => r.fields.code)).toEqual(['BA00', '1F40', '5A11', 'BA00', '1C62.0']);
+    // The name is still checked whatever the code.
+    expect(clean([diagnosis('ICD-11', 'BA00', 'HIV disease'), diagnosis('ICD-11', '1F40', 'Schizophrenia')])).toEqual([]);
+  });
+
+  it('leaves out ICD-11 codes sent under an ICD-10 label, a label naming both revisions, or written without the dot or with a note', () => {
+    // None of these names matches the name check, so the code is the only protection.
+    for (const [codeSystem, code, condition] of [['ICD-10', 'HA60', 'Gender incongruence of adolescence or adulthood'],
+      ['ICD-10', '6C50', 'Gambling disorder'], ['ICD-10', '6A00', 'Disorders of intellectual development'],
+      ['ICD-10', '6B24', 'Hoarding disorder'], ['ICD-10', '6C20', 'Bodily distress disorder'], ['ICD-10', '1C62.1', 'Stage 2'],
+      ['ICD-10', 'QE84', 'Acute stress reaction'], ['ICD-10/11', 'HA60', 'Gender incongruence of adolescence or adulthood'],
+      ['ICD 10/11', '2A20.4', 'Polycythaemia vera'], ['ICD-11', '2A204', 'Polycythaemia vera'],
+      ['ICD-11', 'HA60 gender incongruence', 'Gender incongruence'], ['ICD-11', 'QE84, 7A00', 'Acute stress reaction']] as const) {
+      expect([codeSystem, code, clean([diagnosis(codeSystem, code, condition)])]).toEqual([codeSystem, code, []]);
+      expect([condition, clean([diagnosis('LOCAL', code, condition)]).length]).toEqual([condition, 1]);
+    }
+  });
+
+  it('leaves out insomnia, unspecified (7A0Z, where WHO maps F51.0) and hypomania (MB2Y, where WHO maps F30.0)', () => {
+    expect(clean([diagnosis('ICD-11', '7A0Z', 'Insomnia disorders, unspecified'), diagnosis('ICD-11', '7A00', 'Chronic insomnia'),
+      diagnosis('ICD-11', 'MB2Y', 'Hypomania'), diagnosis('ICD-11', 'MB2Y', 'Hypomanic episode'),
+      diagnosis('LOCAL', 'X1', 'Hypomania')])).toEqual([]);
+    // MB2Y is a residual category, so the code alone does not hide it; the name does.
+    expect(icd11('MB2Y')).toBe(false);
+  });
+});
+
+describe('Sensitive diagnoses by ICD-10 code: unchanged by the ICD-11 split (S4)', () => {
+  // Today's rule, copied verbatim from before the split, so every ICD-10 result is pinned.
+  const BEFORE_ICD10 = /^(?:B2[0-4]|Z21|R75|B1[5-9]|A5\d|A6[0-4]|C\d\d|D0\d|F\d\d|O\d\d|Z3[2-6])/i;
+  const asText = (value: unknown) => typeof value === 'string' ? value : '';
+  const before = (code: unknown, codeSystem: unknown) => /icd/i.test(asText(codeSystem)) && BEFORE_ICD10.test(asText(code));
+
+  it('gives the same answer as before for every ICD-10 code under every code system', () => {
+    const systems = ['ICD-10', 'icd10', 'ICD 10', 'ICD-10-CM', 'http://hl7.org/fhir/sid/icd-10', 'http://hl7.org/fhir/sid/icd-10-cm', 'ICD',
+      'icd', 'ICD-9-CM', 'ICD-O-3', 'ICD-11', 'http://id.who.int/icd/release/11/mms', 'http://snomed.info/sct', 'LOCAL', '', undefined, null];
+    const codes = ['B20', 'B21.0', 'B24', 'B24.9', 'B25', 'B19.9', 'B15', 'B14', 'Z21', 'Z20', 'Z22', 'R75', 'R74', 'R76', 'A50', 'A59.0',
+      'A64', 'A49', 'A65', 'C00', 'C50.9', 'C97', 'C4A.0', 'O9A.1', 'Z3A.01', 'D00', 'D09.9', 'D10', 'D50.9', 'F00', 'F32.9', 'F99', 'O00', 'O14.9', 'O99.9',
+      'Z32', 'Z33', 'Z36.9', 'Z31', 'Z37', 'Z88.0', 'I10', 'E11', 'B54', 'B50.9', 'b20', 'f32.9', 'B20-B24', 'C50.9X',
+      'F32 depressive episode', ' B20', 'B20 ', '\tF32', '', 'X', '042', 'V22.0', 'E950', '8500/3', 'HIV', 42, null, undefined];
+    const differ: unknown[] = [];
+    for (const system of systems) {
+      for (const code of codes) if (isSensitiveDiagnosisCode(code, system) !== before(code, system)) differ.push([system, code]);
+    }
+    expect(differ).toEqual([]);
+  });
+
+  it('hides the same ICD-10 codes as before, and keeps the same ones', () => {
+    for (const code of ['B20', 'B24.9', 'b20', 'Z21', 'R75', 'B15', 'B19.9', 'A50', 'A64', 'C00', 'C50.9', 'C97', 'D00', 'D09.9', 'F00',
+      'F32.9', 'F99', 'O00', 'O99.9', 'Z32', 'Z36.9']) expect([code, isSensitiveDiagnosisCode(code, 'ICD-10')]).toEqual([code, true]);
+    for (const code of ['B14', 'B25', 'Z20', 'Z22', 'R74', 'R76', 'A49', 'A65', 'D10', 'D50.9', 'E11', 'I10', 'Z31', 'Z37', 'Z88.0', 'B54',
+      '']) expect([code, isSensitiveDiagnosisCode(code, 'ICD-10')]).toEqual([code, false]);
+    // An ICD-11 code under an ICD-10 label is a mislabel; the ICD-11 table still hides it.
+    for (const code of ['1C62.0', '6A20', 'JA00', 'QA41']) expect([code, isSensitiveDiagnosisCode(code, 'ICD-10')]).toEqual([code, true]);
   });
 });

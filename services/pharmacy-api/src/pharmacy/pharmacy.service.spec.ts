@@ -171,10 +171,17 @@ describe('PharmacyService.listWorkItems order: open work first', () => {
     id: `123e4567-e89b-42d3-a456-${String(n).padStart(12, '0')}`, accepted_at: new Date(Date.UTC(2026, 0, 1, 0, n)),
     order_route_id: null, dispensing_id: state === 'open' ? null : ids.dispensing, dispensing_status: state === 'open' ? null : 'dispensed',
     reversal_id: state === 'reversed' ? '123e4567-e89b-42d3-a456-426614174099' : null });
+  // Only the clock is fixed (Lagos 20 Nov 2026, 00:30): the list's window starts on 22 Aug 2026 (Q123 A).
+  beforeEach(() => jest.useFakeTimers({ now: new Date('2026-11-19T23:30:00Z'), doNotFake: ['hrtime', 'nextTick',
+    'performance', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'setTimeout',
+    'clearTimeout'] }));
+  afterEach(() => jest.useRealTimers());
   const build = (rows: ReturnType<typeof row>[]) => {
     const statements: string[] = [];
-    const query = jest.fn(async (sql: string) => {
+    const workListValues: unknown[] = [];
+    const query = jest.fn(async (sql: string, values?: unknown[]) => {
       statements.push(sql);
+      if (sql === WORK_LIST_QUERY) workListValues.push(values);
       return { rows: sql === WORK_LIST_QUERY ? rows : [] };
     });
     const database = { withTransaction: async <T>(_c: unknown, fn: (c: unknown) => Promise<T>) => fn({ query }),
@@ -186,7 +193,7 @@ describe('PharmacyService.listWorkItems order: open work first', () => {
     }) };
     const service = new PharmacyService(database as never, identity as never, audit as never,
       new PharmacyOrderRouteAccess(identity as never), new PharmacyOrderRouteCards(database as never));
-    return { service, statements, audits };
+    return { service, statements, audits, workListValues };
   };
 
   it('asks for open work (no dispensing) oldest first, then done work (dispensed or reversed) newest first, 200 rows in all', () => {
@@ -202,6 +209,24 @@ describe('PharmacyService.listWorkItems order: open work first', () => {
     expect(WORK_LIST_QUERY.startsWith('select w.*,d.id::text as dispensing_id,d.status as dispensing_status,')).toBe(true);
   });
 
+  it('reaches open work of any age and done work received from the Lagos midnight of $1 (Q123 A), before the order and limit', () => {
+    const query = WORK_LIST_QUERY.replace(/\s+/g, ' ');
+    expect(query).toContain("cross join lateral (select d.id is null as open_work) o where (o.open_work or "
+      + "w.accepted_at >= ($1::date::timestamp at time zone 'Africa/Lagos')) order by o.open_work desc");
+    expect(query.match(/\$\d/g)).toEqual(['$1']);
+    expect(query.match(/\bwhere\b/g)).toHaveLength(1);
+  });
+
+  it('works the window\'s first day out on each request, so a running service moves on at the Lagos midnight', async () => {
+    jest.setSystemTime(new Date('2026-11-19T22:30:00Z'));
+    const { service, workListValues } = build([]);
+    const before = await service.listWorkItems(context);
+    jest.setSystemTime(new Date('2026-11-19T23:30:00Z'));
+    const after = await service.listWorkItems(context);
+    expect([before.since, after.since]).toEqual(['2026-08-21', '2026-08-22']);
+    expect(workListValues).toEqual([['2026-08-21'], ['2026-08-22']]);
+  });
+
   it('answers what the query returns, in its order and shape: 250 items with 30 open answers all 30 first', async () => {
     // What Postgres answers for 250 work items of which 30 are open (indexes 0-9, 100-109, 240-249): the 30 open
     // oldest first, then the 170 newest done (every third one dispensed and reversed).
@@ -210,9 +235,12 @@ describe('PharmacyService.listWorkItems order: open work first', () => {
     const openRows = openIndexes.map((i) => row(i, 'open'));
     const doneRows = Array.from({ length: 250 }, (_, i) => i).filter((i) => !openIndexes.includes(i)).reverse().slice(0, 170)
       .map((i) => row(i, i % 3 === 0 ? 'reversed' : 'dispensed'));
-    const { service, statements, audits } = build([...openRows, ...doneRows]);
+    const { service, statements, audits, workListValues } = build([...openRows, ...doneRows]);
     const answer = await service.listWorkItems(context);
     expect(answer.items).toHaveLength(200);
+    // The window's first day, sent as the query's only parameter and answered so the screen can say so (Q123 A).
+    expect(workListValues).toEqual([['2026-08-22']]);
+    expect(answer.since).toBe('2026-08-22');
     expect(answer.items.slice(0, 30).map((item) => item.id)).toEqual(openRows.map((r) => r.id));
     expect(answer.items.slice(30).map((item) => item.id)).toEqual(doneRows.map((r) => r.id));
     expect(answer.items.map((item) => item.id)).toContain(row(249, 'open').id);
@@ -232,7 +260,7 @@ describe('PharmacyService.listWorkItems order: open work first', () => {
  * 0133 D14 (owner's Q121 A): an own item sent to another facility's pharmacy before it was dispensed leaves the
  * hospital pharmacy's list, and an own item withdrawn on a change (it can never be dispensed) counts as done work.
  * Both are named by pharmacy.own_withdrawn_work_items(), called once per list; the item is left out before the
- * 200-row limit, so it never takes an open slot. Projection, order and limit stay WORK_LIST_QUERY's.
+ * 200-row limit, so it never takes an open slot. Projection, window, order and limit stay WORK_LIST_QUERY's.
  */
 describe('WORK_LIST_QUERY_0133 (0133 D14)', () => {
   const flat = (sql: string) => sql.replace(/\s+/g, ' ').trim();
@@ -255,8 +283,16 @@ describe('WORK_LIST_QUERY_0133 (0133 D14)', () => {
   it('leaves out an item sent elsewhere before the limit, and counts a withdrawn item as done work', () => {
     const query = flat(WORK_LIST_QUERY_0133);
     expect(query).toContain('cross join lateral (select d.id is null and x.work_item_id is null as open_work) o');
-    expect(query).toContain("where x.withdrawn_reason is distinct from 'sent_elsewhere' order by");
+    expect(query).toContain("where x.withdrawn_reason is distinct from 'sent_elsewhere' and (o.open_work or ");
     expect(query.indexOf("is distinct from 'sent_elsewhere'")).toBeLessThan(query.indexOf('limit 200'));
+  });
+
+  it('keeps WORK_LIST_QUERY\'s window (Q123 A): a withdrawn item counts as done, so it is listed only from $1', () => {
+    const window = (sql: string) => flat(sql).match(/\(o\.open_work or w\.accepted_at >= [^)]*\)\)/g);
+    expect(window(WORK_LIST_QUERY_0133)).toEqual(window(WORK_LIST_QUERY));
+    expect(window(WORK_LIST_QUERY)).toEqual(["(o.open_work or w.accepted_at >= ($1::date::timestamp at time zone 'Africa/Lagos'))"]);
+    expect(flat(WORK_LIST_QUERY_0133)).toContain(`and ${window(WORK_LIST_QUERY)![0]} order by`);
+    expect(flat(WORK_LIST_QUERY_0133).match(/\$\d/g)).toEqual(['$1']);
   });
 
   it('keeps WORK_LIST_QUERY\'s order and limit, byte for byte', () => {
