@@ -518,14 +518,20 @@ try {
     const liveRehearsal = await readFile(join(live, 'scripts/tuf-staging-migration-rehearsal.mjs'), 'utf8');
     const liveVerifiers = [...new Set(liveRehearsal.match(/services\/[a-z-]+\/scripts\/verify-[a-z-]+-runtime\.mjs/g))];
     assert(liveVerifiers.length > 0, 'The live tree runs no runtime verifier');
-    // A live verifier's guard that checks the database's shape, not the live code: a Release A file changes that
-    // shape on purpose (0128 adds two columns to identity.list_my_access_requests, which the live consent service
-    // reads by name with select *). Such a verifier runs from a copy beside it with that one line set to the shape
-    // this branch leaves; the line, before and after, is in the evidence, and the code it boots is the live code.
+    // A live verifier's guard that checks the database's shape, not the live code: a later file changes that
+    // shape on purpose. 0128 adds two columns to identity.list_my_access_requests, which the live consent service
+    // reads by name with select *. 0146 (ID-7) audits a desk registration's replay as its own row (replayed: true),
+    // so the live desk verifier's count of registration audit rows sees one more; the replay's answer is the same.
+    // Such a verifier runs from a copy beside it with that one line set to the shape this branch leaves (the
+    // replay rows are counted and set aside, at most one); the line, before and after, is in the evidence, and the
+    // code it boots is the live code.
     const liveGuards = {
       'services/ehr-api/scripts/verify-records-processing-runtime.mjs': [
         "assert.deepEqual([code?.active, listColumns], [true, 12], 'a database with 0104');",
         "assert.deepEqual([code?.active, listColumns], [true, 14], 'a database with 0104 and 0128');"],
+      'services/identity-api/scripts/verify-desk-registration-own-facility-runtime.mjs': [
+        'assert.equal(registrationAudits, 3);',
+        "const replays = (await pool.query(`select count(*)::integer as n from audit.events where action in ('identity.registration.without-nin', 'identity.registration.without-nin.review') and facility_id = $1 and outcome = 'success' and details ? 'replayed'`, [ids.facA])).rows[0].n; assert(replays <= 1, 'At most the one replay is audited as a replay'); assert.equal(registrationAudits - replays, 3);"],
     };
     const guardsChanged = [];
     const liveScript = async (verifier) => {
