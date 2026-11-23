@@ -572,7 +572,7 @@ try {
   // ── ORD-7 (0149), first slice: the national lists' status and search ──
   // No X-Purpose-Of-Use (the lists hold no patient), so these calls send none.
   const catalogGet = (who, path) => http(ehr, 'GET', `/ehr/catalog${path}`, { cookie: who.cookie, facility: who.facilityId });
-  const notLoaded = { available: false, version: null, approvedAt: null };
+  const notLoaded = { available: false, version: null, approvedAt: null, fileSha256: null };
   const statusBefore = await catalogGet(doctor, '/status');
   assert.deepEqual(expectStatus(statusBefore, 200, 'catalogue status before a list is loaded'), {
     medicines: notLoaded, labTests: notLoaded, diagnoses: { available: false, release: null },
@@ -604,11 +604,11 @@ try {
   await owner.query(`insert into ehr.catalog_lab_tests (version_id, list_id, code_system, code, display, other_names,
       specimen, category, source) values ($1, 'LAB-0001', 'LOINC', '57021-8', 'Full blood count', 'FBC; CBC',
       'Blood (EDTA)', 'haematology', 'hid-common-tests')`, [labVersion]);
-  const loaded = { available: true, version: '2026.1', approvedAt: '2026-12-01' };
+  const loaded = seed => ({ available: true, version: '2026.1', approvedAt: '2026-12-01', fileSha256: seed.repeat(64) });
   assert.deepEqual(expectStatus(await catalogGet(ownPharmacist, '/status'), 200, 'catalogue status after a list'),
-    { medicines: loaded, labTests: loaded, diagnoses: { available: false, release: null }, labTestNameOnly: false,
+    { medicines: loaded('a'), labTests: loaded('b'), diagnoses: { available: false, release: null }, labTestNameOnly: false,
       diagnosisNameOnly: false, classDuplicateCheck: false, attribution: [loincNotice] },
-  'a loaded list is available with its version, its sign-off day (Lagos) and its sources\' notices');
+  'a loaded list is available with its version, its sign-off day (Lagos), its seed file and its sources\' notices');
   const firstAmox = expectStatus(await catalogGet(doctor, '/medicines?q=Amox&limit=1'), 200, 'doctor searches medicines');
   assert.deepEqual(firstAmox, { listVersion: '2026.1', more: true, items: [{ codeSystem: 'HID-MED', code: 'MED-00001',
     display: 'Amoxicillin 500 mg capsule', genericName: 'amoxicillin', strength: '500 mg', doseForm: 'capsule',

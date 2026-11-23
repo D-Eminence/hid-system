@@ -23,10 +23,16 @@
 --    'medicine' or 'lab_test'): its version label, the sha256 of the seed
 --    file it came from, the approval reference (the lead's sign-off) and
 --    when it was approved and loaded, and whether it is the active version.
---    At most one active version per kind (a unique partial index). Rows are
---    never deleted, so old prescriptions keep their meaning. Its
+--    At most one active version per kind (a unique partial index). Its
 --    attribution: the notices the signed file's sources require (LOINC's,
---    the WHO Model List's), at most 5, shown on the screens' About page.
+--    the WHO Model List's), at most 5, shown on the screens' About page. A
+--    version row is never deleted and never changes but for the loader's
+--    switch (active, and loaded_at): a trigger refuses anything else (55000),
+--    and TRUNCATE. The loader (a later slice) switches in one transaction
+--    under SHARE ROW EXCLUSIVE on this table: the old version off, then the
+--    new one on (two statements: one turning both would meet the
+--    one-active index row by row), so two loaders cannot both win and a
+--    search sees the old list or the new one, never neither.
 -- 2. ehr.catalog_medicines: one row per list row per version: the fixed id
 --    (MED-nnnnn, the code under codeSystem HID-MED), the generic name (the
 --    INN), other names (one text, names separated by "; "), strength, dose
@@ -34,24 +40,31 @@
 --    ATC code, a common adult dose hint, the source and its section and
 --    sub-list, and withdrawn. A generated tsvector over the generic name and
 --    the other names (configuration 'simple': no stemming, no stop words)
---    with a GIN index.
+--    with a GIN index. A row never changes once loaded (UPDATE, DELETE and
+--    TRUNCATE refused by platform.reject_mutation()): a correction or a
+--    withdrawal is a new version, so old prescriptions keep their meaning.
 -- 3. ehr.catalog_lab_tests: the same for lab tests: the fixed id
 --    (LAB-nnnn), the code system and code the test is ordered with (LOINC or
 --    HID-LAB; a test with no code is never loaded), the name, other names,
 --    specimen, category (the contract's nine), source, withdrawn, and the
---    tsvector with its GIN index.
+--    tsvector with its GIN index; append-only as 2.
 -- 4. ehr.search_catalog_medicines(q, limit, dose form, route) and
 --    ehr.search_catalog_lab_tests(q, limit) (SECURITY DEFINER, STABLE): the
 --    active version's rows that are not withdrawn, where every word of q
 --    starts a word of the generic name or of one other name (prefix match,
---    letters and digits only, case ignored). Names that start with q come
---    first, then A to Z by name. At most limit rows (1-25), and whether more
+--    letters and digits only, case ignored; the first 6 words of q, each cut
+--    to 40 characters; q never reaches to_tsquery as typed). Names that
+--    start with q (LIKE's %, _ and \ escaped) come first, then by name in
+--    the "C" collation, then strength and the list id, so the order is the
+--    same on every load. At most limit rows (1-25), and whether more
 --    matched. matched_name is the other name that matched when the generic
---    name did not. q of 2-100 characters after trimming, else 22023
---    CATALOG_SEARCH_INVALID; q is never stored or logged here.
+--    name did not. q of 2-100 characters after trimming, limit 1-25, a dose
+--    form of section 46 and a route of letters, spaces and hyphens, else
+--    22023 CATALOG_SEARCH_INVALID; q is never stored or logged here.
 -- 5. ehr.catalog_status(): per kind, whether an active version exists, its
---    label, when it was approved, how many rows it offers and its
---    attribution.
+--    label, when it was approved, how many rows it offers, its attribution
+--    and the sha256 of the signed file it was loaded from (so the screens
+--    and support can tell which list a clinician searched).
 -- 6. Grants: EXECUTE on 4 and 5 to hid_ehr_runtime and
 --    hid_schema_test_runtime only, where those roles exist (and in
 --    runtime-grants.sql); no privilege on the tables for any runtime.
@@ -62,9 +75,18 @@
 -- The lists hold no patient data: no row-level security on them, no patient
 -- audit.
 --
--- Locks: only the new tables and functions. Creating them in schema ehr
--- takes no lock on any existing table (the new tables reference only each
--- other), so the file never waits on a running service and stops nothing.
+-- Locks: only the new tables and functions. No foreign key reaches an
+-- existing table (the new tables reference only each other), the triggers
+-- call 0001's platform.reject_mutation() and this file's guard, and no
+-- existing object is altered or granted on, so the file takes no lock on
+-- any existing relation: it never waits on a running service and stops
+-- nothing. Checked before commit on PostgreSQL 16 (0001-0137 + this file):
+-- pg_locks lists relation locks only on the three new tables, their indexes
+-- and TOAST tables, besides ACCESS SHARE on system catalogs and ROW
+-- EXCLUSIVE on pg_description (the comments); its 16 object locks are all
+-- ACCESS SHARE (the schema and the types and functions the new objects
+-- use), which no running service conflicts with. There is no busy refusal
+-- to name: the preconditions' refusals start with "0149: ".
 --
 -- Old services on this schema: nothing calls the new functions. New
 -- services on a schema without this file (42883 from the functions):
@@ -74,7 +96,8 @@
 --
 -- Undo (by hand only): drop the two search functions and the status
 -- function, then the three tables (lab tests and medicines before
--- versions). Nothing else refers to them.
+-- versions; their triggers go with them), then the guard function and
+-- the query helper. Nothing else refers to them.
 --
 -- 0. Preconditions (catalog reads only; 55000 and nothing applied).
 -- 1-6. As above. 7. Post-checks.
@@ -84,6 +107,11 @@ do $$
 begin
   if to_regclass('identity.qoreid_nin_checks') is null or to_regclass('ehr.visit_queue') is null then
     raise exception using errcode = '55000', message = '0149: 0001-0137 must be applied first';
+  end if;
+  -- The append-only trigger function the new tables use, as 0001 made it.
+  if (select md5(proc.prosrc) from pg_proc proc where proc.oid = to_regprocedure('platform.reject_mutation()'))
+     is distinct from '398738f39f6eebed2c54da5009495def' then
+    raise exception using errcode = '55000', message = '0149: platform.reject_mutation() is not as 0001 made it';
   end if;
   if to_regclass('ehr.catalog_versions') is not null or to_regclass('ehr.catalog_medicines') is not null
      or to_regclass('ehr.catalog_lab_tests') is not null
@@ -109,6 +137,32 @@ create table ehr.catalog_versions (
 );
 create unique index catalog_versions_one_active_uq on ehr.catalog_versions (kind) where active;
 revoke all on ehr.catalog_versions from public;
+-- A version row never changes but for the loader's switch (active, and
+-- loaded_at when it is loaded again), and is never deleted.
+create function ehr.catalog_versions_guard()
+returns trigger
+language plpgsql
+set search_path = pg_catalog, pg_temp
+as $$
+begin
+  if tg_op = 'DELETE' then
+    raise exception using errcode = '55000', message = 'ehr.catalog_versions rows are never deleted';
+  end if;
+  if (new.id, new.kind, new.version, new.file_sha256, new.approval_reference, new.approved_at, new.attribution)
+     is distinct from
+     (old.id, old.kind, old.version, old.file_sha256, old.approval_reference, old.approved_at, old.attribution) then
+    raise exception using errcode = '55000', message = 'ehr.catalog_versions: only active and loaded_at may change';
+  end if;
+  return new;
+end;
+$$;
+revoke all on function ehr.catalog_versions_guard() from public;
+create trigger catalog_versions_guard
+  before update or delete on ehr.catalog_versions
+  for each row execute function ehr.catalog_versions_guard();
+create trigger catalog_versions_no_truncate
+  before truncate on ehr.catalog_versions
+  for each statement execute function platform.reject_mutation();
 
 -- 2. Medicines.
 create table ehr.catalog_medicines (
@@ -133,6 +187,13 @@ create table ehr.catalog_medicines (
 );
 create index catalog_medicines_search_idx on ehr.catalog_medicines using gin (search_terms);
 revoke all on ehr.catalog_medicines from public;
+-- A loaded row never changes: a correction or a withdrawal is a new version.
+create trigger catalog_medicines_append_only
+  before update or delete on ehr.catalog_medicines
+  for each row execute function platform.reject_mutation();
+create trigger catalog_medicines_no_truncate
+  before truncate on ehr.catalog_medicines
+  for each statement execute function platform.reject_mutation();
 
 -- 3. Lab tests.
 create table ehr.catalog_lab_tests (
@@ -154,11 +215,21 @@ create table ehr.catalog_lab_tests (
 );
 create index catalog_lab_tests_search_idx on ehr.catalog_lab_tests using gin (search_terms);
 revoke all on ehr.catalog_lab_tests from public;
+-- A loaded row never changes: a correction or a withdrawal is a new version.
+create trigger catalog_lab_tests_append_only
+  before update or delete on ehr.catalog_lab_tests
+  for each row execute function platform.reject_mutation();
+create trigger catalog_lab_tests_no_truncate
+  before truncate on ehr.catalog_lab_tests
+  for each statement execute function platform.reject_mutation();
 
 -- The words of a search: lower case, split at anything that is not a
 -- letter or a digit (so "co-amox" is two words, as the index splits
--- "co-amoxiclav", and "E/U/Cr" three), empty words dropped; and the prefix
--- query they make. An IMMUTABLE SQL helper, owner only (the search
+-- "co-amoxiclav", and "E/U/Cr" three), empty words dropped, the first 6
+-- words only, each cut to 40 characters; and the prefix query they make.
+-- q never reaches to_tsquery as typed: each word is letters and digits
+-- only and quoted, so "(", ":*" or "&|!" make no word and answer nothing,
+-- never an error. An IMMUTABLE SQL helper, owner only (the search
 -- functions call it as owner).
 create function ehr.catalog_search_query(requested_q text)
 returns tsquery
@@ -168,8 +239,11 @@ set search_path = pg_catalog, pg_temp
 as $$
   select case when count(*) = 0 then null
               else to_tsquery('simple'::regconfig, string_agg(quote_literal(word) || ':*', ' & ' order by position)) end
-    from regexp_split_to_table(lower(requested_q), '[^[:alnum:]]+') with ordinality as split(word, position)
-   where word <> ''
+    from (select left(split.word, 40) as word, split.position
+            from regexp_split_to_table(lower(requested_q), '[^[:alnum:]]+') with ordinality as split(word, position)
+           where split.word <> ''
+           order by split.position
+           limit 6) words
 $$;
 revoke all on function ehr.catalog_search_query(text) from public;
 
@@ -193,21 +267,22 @@ begin
      or requested_limit is null or requested_limit < 1 or requested_limit > 25
      or (requested_dose_form is not null and requested_dose_form not in ('tablet', 'capsule', 'liquid', 'injection',
            'cream', 'inhaler', 'drops', 'other'))
-     or (requested_route is not null and length(requested_route) not between 1 and 100) then
+     or (requested_route is not null and lower(requested_route) !~ '^[a-z][a-z -]{0,99}$') then
     raise exception using errcode = '22023', message = 'CATALOG_SEARCH_INVALID';
   end if;
   query := ehr.catalog_search_query(trimmed);
   if query is null then
     return;
   end if;
-  starts := lower(trimmed);
+  -- "Starts with q" for the order: q with LIKE's %, _ and \ escaped.
+  starts := replace(replace(replace(lower(trimmed), '\', '\\'), '%', '\%'), '_', '\_') || '%';
   return query
     with matched as (
       select medicine.*, version_row.version as version_label,
              case when to_tsvector('simple'::regconfig, medicine.generic_name) @@ query then null
                   else (select other.name from unnest(string_to_array(medicine.other_names, '; ')) as other(name)
                          where other.name <> '' and to_tsvector('simple'::regconfig, other.name) @@ query
-                         order by other.name limit 1) end as matched
+                         order by lower(other.name) collate "C", other.name collate "C" limit 1) end as matched
         from ehr.catalog_medicines medicine
         join ehr.catalog_versions version_row on version_row.id = medicine.version_id
        where version_row.active and version_row.kind = 'medicine'
@@ -220,8 +295,8 @@ begin
        where to_tsvector('simple'::regconfig, matched.generic_name) @@ query or matched.matched is not null),
     ranked as (
       select shown.*, count(*) over () as total,
-             row_number() over (order by (lower(coalesce(shown.matched, shown.generic_name)) like starts || '%') desc,
-               shown.generic_name, shown.strength nulls first, shown.list_id) as position
+             row_number() over (order by (lower(coalesce(shown.matched, shown.generic_name)) like starts escape '\') desc,
+               lower(shown.generic_name) collate "C", shown.strength collate "C" nulls first, shown.list_id) as position
         from shown)
     select ranked.list_id, ranked.generic_name, ranked.strength, ranked.dose_form, ranked.dose_form_text, ranked.routes,
            ranked.atc_code, ranked.common_adult_dose, ranked.matched, ranked.source, ranked.version_label,
@@ -254,14 +329,15 @@ begin
   if query is null then
     return;
   end if;
-  starts := lower(trimmed);
+  -- "Starts with q" for the order: q with LIKE's %, _ and \ escaped.
+  starts := replace(replace(replace(lower(trimmed), '\', '\\'), '%', '\%'), '_', '\_') || '%';
   return query
     with matched as (
       select test.*, version_row.version as version_label,
              case when to_tsvector('simple'::regconfig, test.display) @@ query then null
                   else (select other.name from unnest(string_to_array(test.other_names, '; ')) as other(name)
                          where other.name <> '' and to_tsvector('simple'::regconfig, other.name) @@ query
-                         order by other.name limit 1) end as matched
+                         order by lower(other.name) collate "C", other.name collate "C" limit 1) end as matched
         from ehr.catalog_lab_tests test
         join ehr.catalog_versions version_row on version_row.id = test.version_id
        where version_row.active and version_row.kind = 'lab_test'
@@ -272,8 +348,8 @@ begin
        where to_tsvector('simple'::regconfig, matched.display) @@ query or matched.matched is not null),
     ranked as (
       select shown.*, count(*) over () as total,
-             row_number() over (order by (lower(coalesce(shown.matched, shown.display)) like starts || '%') desc,
-               shown.display, shown.list_id) as position
+             row_number() over (order by (lower(coalesce(shown.matched, shown.display)) like starts escape '\') desc,
+               lower(shown.display) collate "C", shown.list_id) as position
         from shown)
     select ranked.list_id, ranked.code_system, ranked.code, ranked.display,
            array(select other.name from unnest(string_to_array(ranked.other_names, '; ')) as other(name)
@@ -289,7 +365,7 @@ $$;
 -- 5. Status.
 create function ehr.catalog_status()
 returns table (kind text, available boolean, list_version text, approved_at timestamptz, offered integer,
-  attribution text[])
+  attribution text[], file_sha256 text)
 language sql
 stable
 security definer
@@ -301,7 +377,7 @@ as $$
                                   where medicine.version_id = version_row.id and not medicine.withdrawn)
            else (select count(*)::integer from ehr.catalog_lab_tests test
                   where test.version_id = version_row.id and not test.withdrawn) end,
-         coalesce(version_row.attribution, '{}')
+         coalesce(version_row.attribution, '{}'), version_row.file_sha256::text
     from (values ('medicine'), ('lab_test')) as kinds(kind)
     left join ehr.catalog_versions version_row on version_row.kind = kinds.kind and version_row.active
    order by kinds.kind
@@ -349,10 +425,12 @@ begin
   if exists (select 1 from pg_proc proc, lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
               where proc.oid in ('ehr.search_catalog_medicines(text,integer,text,text)'::regprocedure,
                                  'ehr.search_catalog_lab_tests(text,integer)'::regprocedure,
-                                 'ehr.catalog_status()'::regprocedure, 'ehr.catalog_search_query(text)'::regprocedure)
+                                 'ehr.catalog_status()'::regprocedure, 'ehr.catalog_search_query(text)'::regprocedure,
+                                 'ehr.catalog_versions_guard()'::regprocedure)
                 and acl.grantee <> proc.proowner
                 and (acl.grantee = 0 or pg_get_userbyid(acl.grantee) not in ('hid_ehr_runtime', 'hid_schema_test_runtime')
-                     or proc.oid = 'ehr.catalog_search_query(text)'::regprocedure)) then
+                     or proc.oid in ('ehr.catalog_search_query(text)'::regprocedure,
+                                     'ehr.catalog_versions_guard()'::regprocedure))) then
     raise exception using errcode = '55000', message = '0149: a catalogue function is granted to a role other than the EHR and schema test runtimes';
   end if;
   if (select count(*) from pg_proc proc
@@ -362,6 +440,18 @@ begin
          and proc.prosecdef and proc.provolatile = 's' and proc.proowner = owner_oid
          and proc.proconfig = array['search_path=pg_catalog, pg_temp']) <> 3 then
     raise exception using errcode = '55000', message = '0149: a catalogue function is not as made';
+  end if;
+  if (select count(*) from pg_trigger trigger_row
+       where not trigger_row.tgisinternal and trigger_row.tgenabled = 'O'
+         and (trigger_row.tgrelid, trigger_row.tgname, trigger_row.tgfoid) in (
+           ('ehr.catalog_versions'::regclass, 'catalog_versions_guard', 'ehr.catalog_versions_guard()'::regprocedure),
+           ('ehr.catalog_versions'::regclass, 'catalog_versions_no_truncate', 'platform.reject_mutation()'::regprocedure),
+           ('ehr.catalog_medicines'::regclass, 'catalog_medicines_append_only', 'platform.reject_mutation()'::regprocedure),
+           ('ehr.catalog_medicines'::regclass, 'catalog_medicines_no_truncate', 'platform.reject_mutation()'::regprocedure),
+           ('ehr.catalog_lab_tests'::regclass, 'catalog_lab_tests_append_only', 'platform.reject_mutation()'::regprocedure),
+           ('ehr.catalog_lab_tests'::regclass, 'catalog_lab_tests_no_truncate', 'platform.reject_mutation()'::regprocedure)))
+     <> 6 then
+    raise exception using errcode = '55000', message = '0149: a catalogue table is missing its append-only trigger';
   end if;
   if exists (select 1 from ehr.catalog_versions) then
     raise exception using errcode = '55000', message = '0149: the lists must be empty after this file';

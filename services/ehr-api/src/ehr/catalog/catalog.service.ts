@@ -24,6 +24,8 @@ export interface CatalogListStatus {
   version: string | null;
   /** The clinical lead's sign-off day (Lagos), YYYY-MM-DD. */
   approvedAt: string | null;
+  /** The sha256 of the signed seed file the active version was loaded from, so support can tell which list was searched. */
+  fileSha256: string | null;
 }
 
 export interface CatalogStatus {
@@ -83,6 +85,7 @@ interface StatusRow extends QueryResultRow {
   approved_day: string | null;
   offered: number;
   attribution: string[] | null;
+  file_sha256: string | null;
 }
 
 interface MedicineRow extends QueryResultRow {
@@ -113,7 +116,7 @@ interface LabTestRow extends QueryResultRow {
 }
 
 export const STATUS_SQL = `select kind, available, list_version,
-  to_char(approved_at at time zone 'Africa/Lagos', 'YYYY-MM-DD') as approved_day, offered, attribution
+  to_char(approved_at at time zone 'Africa/Lagos', 'YYYY-MM-DD') as approved_day, offered, attribution, file_sha256
   from ehr.catalog_status()`;
 export const MEDICINES_SQL = `select list_id, generic_name, strength, dose_form, dose_form_text, routes,
   common_adult_dose, matched_name, source, list_version, more
@@ -196,7 +199,8 @@ export class CatalogService {
     const list = (kind: StatusRow['kind']): CatalogListStatus => {
       const row = rows.find((candidate) => candidate.kind === kind);
       const available = row?.available === true && Number(row.offered) > 0;
-      return { available, version: available ? row.list_version : null, approvedAt: available ? row.approved_day : null };
+      return { available, version: available ? row.list_version : null, approvedAt: available ? row.approved_day : null,
+        fileSha256: available ? row.file_sha256 : null };
     };
     const medicines = list('medicine');
     const labTests = list('lab_test');

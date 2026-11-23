@@ -1895,13 +1895,14 @@ revoke all on function identity.sealed_qa_hospital_work_staff_install() from pub
 -- The national medicine and lab-test lists (0149, ORD-7 of the Akos EHR
 -- plan, first slice; design note on hid-system#258, 23 November 2026),
 -- exactly as 0149 grants them: the two searches and the status to the EHR
--- runtime and the schema test runtime; no privilege on the tables or on the
--- query helper for any runtime.
+-- runtime and the schema test runtime; no privilege on the tables, the
+-- query helper or the versions' guard for any runtime.
 grant execute on function ehr.search_catalog_medicines(text, integer, text, text),
   ehr.search_catalog_lab_tests(text, integer),
   ehr.catalog_status() to hid_ehr_runtime, hid_schema_test_runtime;
 revoke all on function ehr.search_catalog_medicines(text, integer, text, text),
   ehr.search_catalog_lab_tests(text, integer),
   ehr.catalog_status(),
-  ehr.catalog_search_query(text) from public;
+  ehr.catalog_search_query(text),
+  ehr.catalog_versions_guard() from public;
 revoke all on ehr.catalog_versions, ehr.catalog_medicines, ehr.catalog_lab_tests from public;

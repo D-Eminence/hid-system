@@ -166,14 +166,15 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
 
   describe('status', () => {
     const statusRow = (kind: string, overrides: Record<string, unknown> = {}) => ({
-      kind, available: false, list_version: null, approved_day: null, offered: 0, attribution: [], ...overrides,
+      kind, available: false, list_version: null, approved_day: null, offered: 0, attribution: [], file_sha256: null,
+      ...overrides,
     });
 
     it('before a signed list is loaded: nothing is available, the later fields are off', async () => {
       const { database, calls } = fakeDatabase([statusRow('lab_test'), statusRow('medicine')]);
       await expect(new CatalogService(database).status()).resolves.toEqual({
-        medicines: { available: false, version: null, approvedAt: null },
-        labTests: { available: false, version: null, approvedAt: null },
+        medicines: { available: false, version: null, approvedAt: null, fileSha256: null },
+        labTests: { available: false, version: null, approvedAt: null, fileSha256: null },
         diagnoses: { available: false, release: null },
         labTestNameOnly: false, diagnosisNameOnly: false, classDuplicateCheck: false,
         attribution: [],
@@ -182,18 +183,18 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       expect(STATUS_SQL).toContain("at time zone 'Africa/Lagos'");
     });
 
-    it('a loaded list is available with its version, sign-off day and its sources\' notices, once each', async () => {
+    it('a loaded list is available with its version, sign-off day, seed file and its sources\' notices, once each', async () => {
       const loinc = 'This material contains content from LOINC (http://loinc.org).';
       const who = 'WHO Model List of Essential Medicines, 24th list (2025).';
       const { database } = fakeDatabase([
         statusRow('lab_test', { available: true, list_version: '2026.1', approved_day: '2026-12-01', offered: 158,
-          attribution: [loinc] }),
+          attribution: [loinc], file_sha256: 'b'.repeat(64) }),
         statusRow('medicine', { available: true, list_version: '2026.2', approved_day: '2026-12-02', offered: 1620,
-          attribution: [who, loinc] }),
+          attribution: [who, loinc], file_sha256: 'a'.repeat(64) }),
       ]);
       await expect(new CatalogService(database).status()).resolves.toMatchObject({
-        medicines: { available: true, version: '2026.2', approvedAt: '2026-12-02' },
-        labTests: { available: true, version: '2026.1', approvedAt: '2026-12-01' },
+        medicines: { available: true, version: '2026.2', approvedAt: '2026-12-02', fileSha256: 'a'.repeat(64) },
+        labTests: { available: true, version: '2026.1', approvedAt: '2026-12-01', fileSha256: 'b'.repeat(64) },
         attribution: [loinc, who],
       });
     });
@@ -205,7 +206,7 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
         statusRow('medicine'),
       ]);
       await expect(new CatalogService(database).status()).resolves.toMatchObject({
-        labTests: { available: false, version: null, approvedAt: null }, attribution: [],
+        labTests: { available: false, version: null, approvedAt: null, fileSha256: null }, attribution: [],
       });
     });
 

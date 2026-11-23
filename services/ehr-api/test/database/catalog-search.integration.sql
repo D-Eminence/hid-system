@@ -11,8 +11,14 @@
 --      withdrawn rows and inactive versions never offered; one active
 --      version per kind; the status counts what is offered;
 --   3. refusals: q of 1 or 101 characters, limit 0 or 26, an unknown dose
---      form (22023 CATALOG_SEARCH_INVALID); q of punctuation only answers
---      nothing; ids, codes and ATC codes outside their forms are refused;
+--      form, a route that is not a plain word (22023
+--      CATALOG_SEARCH_INVALID); q of punctuation only, brackets, :* or
+--      operators answers nothing, never an error; only the first 6 words
+--      of at most 40 characters count; LIKE's characters are plain; ids,
+--      codes and ATC codes outside their forms are refused; a loaded row
+--      and a version never change but for the loader's switch (55000), and
+--      the switch (old off, then new on) works; the status names each
+--      seed file;
 --   4. the EHR runtime may run the searches and read no table.
 -- Synthetic values only: uuid prefix c149. Medicine and test names are list
 -- facts, not patient data.
@@ -56,8 +62,9 @@ grant execute on function pg_temp.tests(text, integer) to public;
 select pg_temp.expect('1a the lists are empty', '0 0 0',
   (select count(*) from ehr.catalog_versions) || ' ' || (select count(*) from ehr.catalog_medicines) || ' '
   || (select count(*) from ehr.catalog_lab_tests));
-select pg_temp.expect('1b the status: neither list available', 'lab_test f 0, medicine f 0',
-  (select string_agg(format('%s %s %s', kind, available, offered), ', ' order by kind) from ehr.catalog_status()));
+select pg_temp.expect('1b the status: neither list available, no seed file', 'lab_test f 0 -, medicine f 0 -',
+  (select string_agg(format('%s %s %s %s', kind, available, offered, coalesce(file_sha256, '-')), ', ' order by kind)
+     from ehr.catalog_status()));
 select pg_temp.expect('1c a search before any list answers nothing', ' more=false', pg_temp.medicines('amox', 10));
 select pg_temp.expect('1d no runtime holds a privilege on the tables', '0',
   (select count(*)::text from pg_class relation, lateral aclexplode(coalesce(relation.relacl,
@@ -96,11 +103,13 @@ insert into ehr.catalog_medicines (version_id, list_id, generic_name, other_name
    '{intravenous,intramuscular}', 'J01DD04', 'nigeria-eml-8'),
   ('c1490000-0000-4000-8000-000000000001', 'MED-00006', 'chloramphenicol', '', '250 mg', 'capsule', 'Capsule',
    '{oral}', null, 'nigeria-eml-8'),
-  ('c1490000-0000-4000-8000-000000000001', 'MED-00007', 'prussian blue', '', '500 mg', 'capsule', 'Capsule', '{oral}',
-   null, 'who-eml-24'),
   ('c1490000-0000-4000-8000-000000000003', 'MED-00099', 'amoxicillin', '', '250 mg', 'capsule', 'Capsule', '{oral}',
    null, 'nigeria-eml-7');
-update ehr.catalog_medicines set withdrawn = true where list_id = 'MED-00007';
+-- Withdrawn in this version (a loaded row never changes: a withdrawal is a new version's row).
+insert into ehr.catalog_medicines (version_id, list_id, generic_name, other_names, strength, dose_form, dose_form_text,
+  routes, atc_code, source, withdrawn) values
+  ('c1490000-0000-4000-8000-000000000001', 'MED-00007', 'prussian blue', '', '500 mg', 'capsule', 'Capsule', '{oral}',
+   null, 'who-eml-24', true);
 insert into ehr.catalog_lab_tests (version_id, list_id, code_system, code, display, other_names, specimen, category,
   source) values
   ('c1490000-0000-4000-8000-000000000002', 'LAB-0001', 'LOINC', '57021-8', 'Full blood count',
@@ -167,6 +176,54 @@ select pg_temp.expect('3f a list id, a lab code system and an ATC code outside t
         source) values ('c1490000-0000-4000-8000-000000000002', 'LAB-0009', 'SNOMED', '1', 'x', 'other', 'x')$q$), 5)
   || ' ' || left(pg_temp.refusal($q$insert into ehr.catalog_medicines (version_id, list_id, generic_name, dose_form,
         atc_code, source) values ('c1490000-0000-4000-8000-000000000001', 'MED-00010', 'x', 'tablet', 'J01', 'x')$q$), 5));
+
+select pg_temp.expect('3g q never reaches to_tsquery as typed: brackets, :* and operators answer nothing',
+  'none none none none',
+  (select string_agg(pg_temp.refusal(format('select pg_temp.medicines(%L, 10)', typed)), ' ' order by typed)
+     from unnest(array['((', ':*', '&|!', 'a:* & (']) as typed));
+select pg_temp.expect('3h ... and answer no row', ' more=false| more=false| more=false',
+  pg_temp.medicines('((', 10) || '|' || pg_temp.medicines(':*', 10) || '|' || pg_temp.tests('&|!', 10));
+select pg_temp.expect('3i two words that are one name''s parts do not match (no misspellings)', ' more=false',
+  pg_temp.medicines('para cetamol', 10));
+select pg_temp.expect('3j a 100-character word is cut to 40 and matches nothing, without an error', ' more=false',
+  pg_temp.medicines(repeat('amoxicillin', 9) || 'a', 10));
+select pg_temp.expect('3k only the first 6 words count', 'MED-00002 MED-00001 MED-00003 more=false',
+  pg_temp.medicines('amox amox amox amox amox amox zzzz', 10));
+select pg_temp.expect('3l LIKE''s %, _ and \ in q are plain characters', 'MED-00002 MED-00001 MED-00003 more=false|'
+  || 'MED-00002 MED-00001 MED-00003 more=false|MED-00004 more=false',
+  pg_temp.medicines('amox%', 10) || '|' || pg_temp.medicines('_amox', 10) || '|' || pg_temp.medicines('\para', 10));
+select pg_temp.expect('3m a route that is not a plain word', '22023 CATALOG_SEARCH_INVALID',
+  pg_temp.refusal($q$select * from ehr.search_catalog_medicines('amox', 10, null, 'oral%')$q$));
+select pg_temp.expect('3n a loaded row never changes: UPDATE, DELETE and TRUNCATE refused',
+  '55000 55000 55000 55000 55000 55000',
+  left(pg_temp.refusal($q$update ehr.catalog_medicines set withdrawn = true where list_id = 'MED-00001'$q$), 5) || ' '
+  || left(pg_temp.refusal($q$delete from ehr.catalog_medicines where list_id = 'MED-00001'$q$), 5) || ' '
+  || left(pg_temp.refusal('truncate ehr.catalog_medicines'), 5) || ' '
+  || left(pg_temp.refusal($q$update ehr.catalog_lab_tests set display = 'x' where list_id = 'LAB-0001'$q$), 5) || ' '
+  || left(pg_temp.refusal($q$delete from ehr.catalog_lab_tests where list_id = 'LAB-0001'$q$), 5) || ' '
+  || left(pg_temp.refusal('truncate ehr.catalog_lab_tests'), 5));
+-- TRUNCATE of the versions is refused by the lists' foreign keys first (0A000), the trigger behind them.
+select pg_temp.expect('3o a version is never deleted and only its switch changes',
+  '55000 ehr.catalog_versions rows are never deleted|55000 ehr.catalog_versions: only active and loaded_at may change|'
+  || '55000 ehr.catalog_versions: only active and loaded_at may change|0A000',
+  pg_temp.refusal($q$delete from ehr.catalog_versions where id = 'c1490000-0000-4000-8000-000000000003'$q$) || '|'
+  || pg_temp.refusal($q$update ehr.catalog_versions set version = '2025.10' where id = 'c1490000-0000-4000-8000-000000000003'$q$)
+  || '|' || pg_temp.refusal($q$update ehr.catalog_versions set file_sha256 = repeat('d', 64)
+                                where id = 'c1490000-0000-4000-8000-000000000003'$q$)
+  || '|' || left(pg_temp.refusal('truncate ehr.catalog_versions'), 5));
+-- The loader's switch is two statements in one transaction: the old version off, then the new one on (one
+-- statement turning both would meet the one-active index row by row); other sessions see either list.
+select pg_temp.expect('3p the loader''s switch: the old version off, then the new one on',
+  'none none MED-00099 more=false',
+  pg_temp.refusal($q$update ehr.catalog_versions set active = false where kind = 'medicine' and active$q$)
+  || ' ' || pg_temp.refusal($q$update ehr.catalog_versions set active = true, loaded_at = clock_timestamp()
+                                where id = 'c1490000-0000-4000-8000-000000000003'$q$)
+  || ' ' || pg_temp.medicines('amoxicillin', 10));
+update ehr.catalog_versions set active = false where kind = 'medicine' and active;
+update ehr.catalog_versions set active = true where id = 'c1490000-0000-4000-8000-000000000001';
+select pg_temp.expect('3q the status names the seed file of each active version',
+  'lab_test ' || repeat('b', 64) || ', medicine ' || repeat('a', 64),
+  (select string_agg(format('%s %s', kind, file_sha256), ', ' order by kind) from ehr.catalog_status()));
 
 -- 4. As the EHR runtime: the searches answer; the tables do not.
 set local role hid_ehr_runtime;

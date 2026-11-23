@@ -1515,12 +1515,27 @@ signs a version (Q124 A) and the governed loader (a later slice) loads it.
     records the notices its sources require (at most 5). A list that is
     not available shows none.
   - A list is `available` only when its active version offers at least one
-    item. `approvedAt` is the Lagos day of the sign-off.
+    item. `approvedAt` is the Lagos day of the sign-off, and `fileSha256`
+    (an addition to the shape above) is the sha256 of the signed seed file
+    the version was loaded from, so support can tell which list a clinician
+    searched; both are `null` when the list is not available.
   - `listVersion` is `null` when nothing matched.
   - A search matches when each word of `q` starts a word of the generic
     name or of one other name. Words are split at anything that is not a
     letter or digit, so "co-amox" finds co-amoxiclav and "E/U/Cr" finds
-    electrolytes. Brand names come with the loader (they are other names).
+    electrolytes. Only the first 6 words count, each cut to 40 characters;
+    `q` never reaches the query parser as typed, so brackets or operators
+    answer nothing, never an error. Brand names come with the loader (they
+    are other names).
+  - The order: names that start with `q` first, then by name in the "C"
+    collation, then strength and the list id, so it is the same on every
+    load.
+- **Immutability:** a loaded row never changes; a correction or a
+  withdrawal is a new version. Triggers refuse UPDATE, DELETE and TRUNCATE
+  on the two lists, and on a version anything but the loader's switch
+  (`active`, `loaded_at`). The loader switches the old version off, then
+  the new one on, in one transaction under SHARE ROW EXCLUSIVE on the
+  versions.
 - **Refusals:** `q` missing or under 2 characters gives
   `CATALOG_SEARCH_TEXT_TOO_SHORT`. `q` over 100 characters, a bad `limit`,
   `doseForm` or `route`, or a parameter given twice or unknown gives
@@ -1540,8 +1555,10 @@ signs a version (Q124 A) and the governed loader (a later slice) loads it.
   audited (the method and route, never `q`).
 - **Not in this slice:** facility items and `ehr.catalog.facility-item.write`,
   lab requests by name only (`labTestNameOnly` stays `false`), the
-  loader and seed files, `ehr.duplicate_class_rules`, and the screens.
-- **Checks:** the database suite `catalog-search` (30 cases), the ehr-api
+  loader and seed files (with `ehr.catalog_retired_codes`, which the loader
+  checks so a retired id is never reused), `ehr.duplicate_class_rules`,
+  and the screens.
+- **Checks:** the database suite `catalog-search` (41 cases), the ehr-api
   spec (64 tests), and three steps in
   `verify-prescription-details-runtime.mjs`: before a list, with a list
   loaded by owner SQL (the doctor and the pharmacist search), and the
