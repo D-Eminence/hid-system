@@ -33,6 +33,8 @@ import { VisitQueueModule } from './worklist/visit-queue.module';
 // ORD-7 (0149): the medicine and lab-test lists.
 import { CatalogModule } from './catalog/catalog.module';
 
+import { ConsultationDraftsModule } from './consultation-drafts/consultation-drafts.module';
+import { MyOrdersModule } from './my-orders/my-orders.module';
 @Module({
   imports: [
     ClinicalInfrastructureModule,
@@ -46,6 +48,8 @@ import { CatalogModule } from './catalog/catalog.module';
     PrescriptionsModule,
     LabRequestsModule,
     OrderRoutesModule,
+    ConsultationDraftsModule,
+    MyOrdersModule,
     ConsultationsModule,
     // EHR-C7 (0135): the waiting list.
     VisitQueueModule,

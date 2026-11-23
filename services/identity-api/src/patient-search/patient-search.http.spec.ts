@@ -197,6 +197,18 @@ describe('patient search routes over HTTP', () => {
     .update(['hid-contact-lookup:v1', 'phone', phone].join('\u001f'), 'utf8').digest('hex');
   const auditEvents = () => JSON.stringify([audit.record.mock.calls, audit.recordWithClient.mock.calls]);
 
+  describe('ID-7 (0145): record kind', () => {
+    it('carries an unknown record\'s kind, and reads a database without 0145 as standard', async () => {
+      handlers['identity.staff_patient_search'] = () => ({ rows: [{ ...card(1, 'AA22', false), record_kind: 'unknown' }] });
+      const unknown = await search({ healthId: 'HID-AAAA22' });
+      expect(unknown.body.patients.map((patient: { recordKind: string }) => patient.recordKind)).toEqual(['unknown']);
+      expect(sqlCalls('identity.staff_patient_search')[0]?.sql).toContain("to_jsonb(answer) ->> 'record_kind'");
+      handlers['identity.staff_patient_search'] = () => ({ rows: [card(1, 'AA22', false)] });
+      const older = await search({ healthId: 'HID-AAAA22' });
+      expect(older.body.patients.map((patient: { recordKind: string }) => patient.recordKind)).toEqual(['standard']);
+    });
+  });
+
   describe('standard search', () => {
     it('counts the search for the member and the facility, then searches with normalized keys; cards carry matchRefs only', async () => {
       handlers['identity.staff_patient_search'] = () => ({ rows: [card(1, 'AA22', false), card(2, 'AB22', true)] });
@@ -205,9 +217,9 @@ describe('patient search routes over HTTP', () => {
       expect(answer.headers['cache-control']).toBe('no-store');
       expect(answer.body).toEqual({ mode: 'standard', outcome: 'found', reach: 'everywhere', message: null, patients: [
         { matchRef: ref(1), matchRefExpiresAt: '2026-11-18T10:10:00.000Z', fullName: 'Amaka Okafor', sex: 'female',
-          dateOfBirth: '1990-05-01', healthIdLast4: 'AA22', ninStatus: 'not_verified' },
+          dateOfBirth: '1990-05-01', healthIdLast4: 'AA22', ninStatus: 'not_verified', recordKind: 'standard' },
         { matchRef: ref(2), matchRefExpiresAt: '2026-11-18T10:10:00.000Z', fullName: 'Amaka Okafor', sex: 'female',
-          dateOfBirth: '1990-05-01', healthIdLast4: 'AB22', ninStatus: 'verified' }] });
+          dateOfBirth: '1990-05-01', healthIdLast4: 'AB22', ninStatus: 'verified', recordKind: 'standard' }] });
       expect(JSON.stringify(answer.body)).not.toMatch(/HID-|patientId|"hid"|unverified/i);
       expect(sqlCalls('from auth.otp_rate_limits').map((call) => call.values[1])).toEqual([
         bucket('patient-search-member', membershipId), bucket('patient-search-facility', facilityId)]);

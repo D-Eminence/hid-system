@@ -17,6 +17,15 @@ import type { DataAccessContext } from '../common/request-context';
  */
 export const OWN_FACILITY_WORK = '0133';
 
+/**
+ * 0142 D2 (EHR-C8b): a staff session that sets app.vitals_status to this
+ * value reads vitals readings marked entered in error (with their status,
+ * which this image filters as the contract says); every other session, an
+ * older image's above all, never sees them. Set beside OWN_FACILITY_WORK, in
+ * staff transactions only. On a schema without 0142 the setting is unused.
+ */
+export const VITALS_STATUS_AWARE = '0142';
+
 export interface TransactionOptions {
   readOnly?: boolean;
   isolationLevel?: 'READ COMMITTED' | 'REPEATABLE READ' | 'SERIALIZABLE';
@@ -120,7 +129,8 @@ export class DatabaseService implements OnApplicationShutdown {
            set_config('app.correlation_id', $3, true),
            set_config('app.membership_id', $4, true),
            set_config('app.purpose_of_use', $5, true),
-           set_config('app.own_facility_work', $6, true)`,
+           set_config('app.own_facility_work', $6, true),
+           set_config('app.vitals_status', $7, true)`,
         [
           context.actor.subject,
           context.facilityId,
@@ -128,6 +138,7 @@ export class DatabaseService implements OnApplicationShutdown {
           context.membershipId,
           context.purposeOfUse,
           OWN_FACILITY_WORK,
+          VITALS_STATUS_AWARE,
         ],
       );
       const result = await operation(client);

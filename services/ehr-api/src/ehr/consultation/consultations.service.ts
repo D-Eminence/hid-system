@@ -110,6 +110,10 @@ export class ConsultationsService {
           // Nothing is saved under this key yet: a visit that does not start
           // today is refused, as planCreate refuses it (the key row rolls back).
           if (notToday) throw notToday;
+          // VIT-1's order rule, also for a new consultation only: a retry of
+          // one an older image saved (diastolic equal to systolic was allowed
+          // then) replays below instead of being refused.
+          if (body.vitals) this.vitals.checkBloodPressureOrder(body.vitals);
           const value = await saved();
           return { value, id: value.encounter.id };
         },

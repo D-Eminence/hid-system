@@ -53,7 +53,7 @@ class BackendControllerTests(unittest.TestCase):
             b.rollback_receipt(store, release)
 
     def execute(self, failure=False, alert_failure=False, loss=False, components=('identity-api',), waves=None,
-                events=None, pending_before=0, output=None):
+                events=None, pending_before=0, output=None, catalog=None, catalog_failure=None, migration_failure=None):
         baseline=index(); state={n:brow.copy() for n,brow in baseline['backend'].items()}
         physical=lambda:{n:{k:r[k] for k in ('image_uri','task_definition','config_sha256')} for n,r in state.items()}
         objects={c.INDEX_KEY:copy.deepcopy(baseline)}; calls=[]; lease=FakeLease()
@@ -65,7 +65,7 @@ class BackendControllerTests(unittest.TestCase):
                 if '/intent-' in key: events.append(('intent',value['component']))
                 objects[key]=copy.deepcopy(value); return {'ETag':'next','VersionId':'v2'}
         class FakeECS:
-            def __init__(self,*args): self.migration_checks=None
+            def __init__(self,*args): self.migration_checks=None; self.catalog_checks=None
             def snapshot(self): return physical()
             def prepare(self,targets):
                 events.append(('prepare',list(targets)))
@@ -75,9 +75,18 @@ class BackendControllerTests(unittest.TestCase):
                 events.append(('register',name)); return baseline['backend'][name]['task_definition'][:-1]+'2'
             def migrate(self,uri,contract,settings,release_id):
                 events.append(('migrate',None))
+                if migration_failure: raise c.ReleaseError(migration_failure)
                 self.migration_checks=({'pending_before':0,'plan_after':'skipped','reason':b.SKIPPED_PLAN_AFTER,'tasks':1}
                     if not pending_before else {'pending_before':pending_before,'plan_after':'ran','tasks':4})
                 return baseline['migration_task_definition'][:-1]+'2'
+            def load_catalog(self,arn,network,release_id,kinds):
+                events.append(('catalog',list(kinds)))
+                assert arn==baseline['migration_task_definition'][:-1]+'2' and network==baseline['migration_network']
+                loaded=[{'kind':kind,'version':'2026.1','file_sha256':'e'*64,'approvals_sha256':'f'*64,'items':1,'replaced':None}
+                    for kind in kinds]
+                # A failure stops at the last seed: the ones before it were loaded, each in its own transaction.
+                self.catalog_checks=loaded[:-1] if catalog_failure else loaded
+                if catalog_failure: raise c.ReleaseError(catalog_failure)
             def update(self,name,arn):
                 calls.append((name,arn)); state[name]['task_definition']=arn
                 state[name]['image_uri']=image(name,'b' if arn.endswith(':2') else 'a')
@@ -95,12 +104,14 @@ class BackendControllerTests(unittest.TestCase):
             root=pathlib.Path(folder); c.atomic_json(root/'release/candidate.json',candidate)
             env={'EXPECTED_CANDIDATE_SHA256':c.file_sha(root/'release/candidate.json'),
                  'RELEASE_CONFIG_JSON':json.dumps({'account':c.ACCOUNT,'region':c.REGION,'migration_network':baseline['migration_network']})}
+            if catalog is not None: env['CATALOG_LOAD']=catalog
             with patch.dict(os.environ,env),patch.multiple(b,ROOT=root,AWS=FakeAWS,Store=FakeStore,
                     ECS=FakeECS,Lease=lambda *args:lease,context=lambda kind:ctx()),patch.object(b,'GitHub',autospec=True) as gh,patch.object(b,'notify') as notify,\
                     contextlib.redirect_stdout(output if output is not None else io.StringIO()):
                 gh.return_value.assert_approval.return_value={'reviewer_ids':[9]}
+                if catalog is None: os.environ.pop('CATALOG_LOAD',None)
                 if alert_failure: notify.side_effect=c.ReleaseError('SNS_DENIED')
-                if failure or alert_failure:
+                if failure or alert_failure or catalog_failure or migration_failure:
                     with self.assertRaises(c.ReleaseError): b.deploy()
                 else: b.deploy()
         return baseline,state,objects,calls,lease
@@ -516,3 +527,132 @@ class DeployPhaseTests(unittest.TestCase):
 
 
 if __name__=='__main__': unittest.main()
+
+
+class CatalogPhaseTests(unittest.TestCase):
+    """ORD-7's governed catalogue load (Rahman's review of #319, point 1): opt-in, after the migrations, on the
+    migration task definition, refusals stopping the release with the loader's own line."""
+    execute=BackendControllerTests.execute
+    RELEASE=('identity-api','database-migration')
+
+    def receipt(self, objects, name='complete.json'):
+        return next(v for k,v in objects.items() if k.endswith('/'+name))
+
+    def test_not_asked_the_release_is_unchanged_and_no_catalogue_task_runs(self):
+        runs=[]
+        for value in (None,'','none'):
+            events=[]; output=io.StringIO()
+            baseline,state,objects,calls,lease=self.execute(components=self.RELEASE,events=events,catalog=value,output=output)
+            receipt=self.receipt(objects)
+            self.assertNotIn('catalog_checks',receipt); self.assertNotIn('catalog',output.getvalue())
+            receipt.pop('candidate')
+            runs.append((events,receipt,state,calls))
+        self.assertEqual(runs[0][0],[('migrate',None),('prepare',['identity-api']),('register','identity-api'),
+            ('intent','identity-api'),('update_all',['identity-api'])])
+        self.assertEqual(runs[1],runs[0]); self.assertEqual(runs[2],runs[0])
+
+    def test_asked_it_runs_after_the_migrations_and_before_any_service(self):
+        events=[]; output=io.StringIO()
+        baseline,state,objects,calls,lease=self.execute(components=self.RELEASE,events=events,catalog='lab_test,medicine',
+            output=output,pending_before=2)
+        self.assertEqual(events[:3],[('migrate',None),('catalog',['medicine','lab_test']),('prepare',['identity-api'])])
+        self.assertEqual([k['kind'] for k in self.receipt(objects)['catalog_checks']],['medicine','lab_test'])
+        self.assertEqual(self.receipt(objects)['migration_checks']['plan_after'],'ran')
+        self.assertIn(' phase=catalog ',output.getvalue()); self.assertIn(' seeds=2',output.getvalue())
+        # A migration that fails runs no catalogue task.
+        events=[]
+        baseline,state,objects,calls,lease=self.execute(components=self.RELEASE,events=events,catalog='medicine',
+            migration_failure='MIGRATION_FAILED')
+        # (The failure path's restore has no service to restore: update_all of nothing.)
+        self.assertEqual(events,[('migrate',None),('update_all',[])])
+        self.assertEqual(self.receipt(objects,'failed.json')['error_code'],'MIGRATION_FAILED')
+
+    def test_a_loader_refusal_stops_the_release_before_any_service_changes(self):
+        events=[]
+        baseline,state,objects,calls,lease=self.execute(components=self.RELEASE,events=events,catalog='medicine',
+            catalog_failure='CATALOG_LOAD_REFUSED')
+        self.assertEqual(events,[('migrate',None),('catalog',['medicine']),('update_all',[])])
+        self.assertEqual(state,baseline['backend']); self.assertEqual(calls,[])
+        self.assertEqual(self.receipt(objects,'failed.json')['error_code'],'CATALOG_LOAD_REFUSED')
+        self.assertNotIn('catalog_checks',self.receipt(objects,'failed.json'))
+        self.assertEqual(objects[c.INDEX_KEY]['backend'],baseline['backend'])
+        # The lab tests refused after the medicines loaded: the failed receipt names the version that stays loaded.
+        baseline,state,objects,calls,lease=self.execute(components=self.RELEASE,catalog='medicine,lab_test',
+            catalog_failure='CATALOG_LOAD_REFUSED')
+        self.assertEqual([k['kind'] for k in self.receipt(objects,'failed.json')['catalog_checks']],['medicine'])
+
+    def test_the_request_is_checked_before_the_release_starts(self):
+        evidence={'identity-api':{},'database-migration':{}}
+        self.assertEqual(b.catalog_request(None,'deploy',evidence),[])
+        self.assertEqual(b.catalog_request('lab_test,medicine','deploy',evidence),['medicine','lab_test'])
+        for value in ('all','medicine,medicine','medicine;lab_test','Medicine','medicine, lab_test','diagnosis'):
+            with self.assertRaisesRegex(c.ReleaseError,'INVALID_CATALOG_LOAD_REQUEST'): b.catalog_request(value,'deploy',evidence)
+        for mode,found in (('rollback',evidence),('deploy',{'identity-api':{}})):
+            with self.assertRaisesRegex(c.ReleaseError,'CATALOG_LOAD_NEEDS_MIGRATION_IMAGE'): b.catalog_request('medicine',mode,found)
+        # Through deploy(): refused before the lease, so nothing is written and no task runs.
+        events=[]
+        baseline,state,objects,calls,lease=self.execute(events=events,catalog='medicine',migration_failure='UNUSED')
+        self.assertEqual(events,[]); self.assertEqual(list(objects),[c.INDEX_KEY]); self.assertIsNone(lease.released)
+
+    def loader_aws(self, exit_code, lines):
+        starts=[]
+        class AWS:
+            def call(self,service,operation,args,**kwargs):
+                if operation=='run-task':
+                    starts.append(args); return {'tasks':[{'taskArn':'arn:task/'+str(len(starts))}]}
+                if operation=='describe-tasks': return {'tasks':[{'lastStatus':'STOPPED','containers':[{'exitCode':exit_code}]}]}
+                if operation=='get-log-events':
+                    kind='medicine' if starts[-1]['overrides']['containerOverrides'][0]['command'][-1].endswith('hid-medicines.json') else 'lab_test'
+                    return {'events':[{'message':line.replace('KIND',kind)} for line in lines]}
+                raise AssertionError(operation)
+        return AWS(),starts
+
+    def test_each_seed_loads_on_the_migration_definition_with_the_loaders_command(self):
+        loaded=json.dumps({'status':'loaded','kind':'KIND','version':'2026.1','fileSha256':'e'*64,'approvalsSha256':'f'*64,
+            'items':145,'newRetiredIds':[],'replaced':None,'heldBack':13},separators=(',',':'))
+        aws,starts=self.loader_aws(0,['some other line',loaded])
+        ecs=b.ECS(aws,FakeLease())
+        with patch.object(b.time,'sleep'): ecs.load_catalog('arn:migration:2',index()['migration_network'],'release',['medicine','lab_test'])
+        self.assertEqual([r['overrides']['containerOverrides'] for r in starts],[
+            [{'name':'database-migration','command':['scripts/load-catalog.mjs','--seed','/app/docs/codes/hid-medicines.json']}],
+            [{'name':'database-migration','command':['scripts/load-catalog.mjs','--seed','/app/docs/codes/hid-lab-tests.json']}]])
+        self.assertEqual({r['taskDefinition'] for r in starts},{'arn:migration:2'})
+        self.assertEqual(len({r['clientToken'] for r in starts}),2)
+        self.assertTrue(all(r['enableExecuteCommand'] is False and r['networkConfiguration']=={'awsvpcConfiguration':index()['migration_network']}
+            for r in starts))
+        self.assertEqual(ecs.catalog_checks,[{'kind':kind,'version':'2026.1','file_sha256':'e'*64,'approvals_sha256':'f'*64,
+            'items':145,'replaced':None} for kind in ('medicine','lab_test')])
+
+    def test_a_refusal_ends_with_the_loaders_line_and_stops_at_that_seed(self):
+        line=('load-catalog: no sign-off names this file\'s sha256 '+'e'*64+'; nothing loaded')
+        aws,starts=self.loader_aws(2,[line])
+        ecs=b.ECS(aws,FakeLease()); output=io.StringIO()
+        with patch.object(b.time,'sleep'),contextlib.redirect_stdout(output):
+            with self.assertRaisesRegex(c.ReleaseError,'CATALOG_LOAD_REFUSED'):
+                ecs.load_catalog('arn:migration:2',index()['migration_network'],'release',['medicine','lab_test'])
+        self.assertEqual(len(starts),1)
+        self.assertEqual(json.loads(output.getvalue()),{'release_id':'release','catalog_load':'refused','kind':'medicine','message':line})
+        busy='load-catalog: ehr.catalog_versions or another catalogue load stayed busy for 5 seconds; nothing loaded; run the release again at a quieter time'
+        aws,starts=self.loader_aws(2,[busy]); ecs=b.ECS(aws,FakeLease()); output=io.StringIO()
+        with patch.object(b.time,'sleep'),contextlib.redirect_stdout(output):
+            with self.assertRaisesRegex(c.ReleaseError,'CATALOG_LOAD_REFUSED'):
+                ecs.load_catalog('arn:migration:2',index()['migration_network'],'release',['lab_test'])
+        self.assertEqual(json.loads(output.getvalue())['message'],busy)
+        # Any other failure stops the release too.
+        aws,starts=self.loader_aws(1,['load-catalog: connection refused; nothing loaded'])
+        with patch.object(b.time,'sleep'),self.assertRaisesRegex(c.ReleaseError,'CATALOG_LOAD_FAILED'):
+            b.ECS(aws,FakeLease()).load_catalog('arn:migration:2',index()['migration_network'],'release',['medicine'])
+
+    def test_the_migration_image_carries_what_the_catalogue_phase_loads(self):
+        dockerfile=(b.ROOT/'services/ehr-api/Dockerfile').read_text()
+        migration=dockerfile[dockerfile.index(' AS migration'):dockerfile.index(' AS runtime')]
+        runtime=dockerfile[dockerfile.index(' AS runtime'):]
+        self.assertRegex(migration,r'\nWORKDIR /app\n[\s\S]*\nCOPY --chown=65532:65532 docs/codes \./docs/codes\n')
+        self.assertNotIn('docs/codes',runtime)
+        self.assertEqual(b.CATALOG_SEEDS,{'medicine':'/app/docs/codes/hid-medicines.json','lab_test':'/app/docs/codes/hid-lab-tests.json'})
+        # load-catalog.mjs (at /app/services/ehr-api/scripts) reads its approvals and Wave 0 codes from /app/docs/codes.
+        loader=(b.ROOT/'services/ehr-api/scripts/load-catalog.mjs').read_text()
+        self.assertIn("path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../docs/codes')",loader)
+        self.assertEqual(os.path.normpath('/app/services/ehr-api/scripts/../../../docs/codes'),'/app/docs/codes')
+        self.assertTrue(all(pathlib.PurePosixPath(seed).parent==pathlib.PurePosixPath('/app/docs/codes') for seed in b.CATALOG_SEEDS.values()))
+        for name in ('catalog-approvals.json','hid-lab-codes.json'): self.assertTrue((b.ROOT/'docs/codes'/name).is_file())

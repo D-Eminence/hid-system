@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { QueryResultRow } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import { DatabaseService } from '../../database/database.service';
+import { CATALOG_SEARCH_MAX_LENGTH } from './catalog.dto';
 import type { CATALOG_LAB_CATEGORIES, CatalogDoseForm, SearchCatalogLabTestsQueryDto,
   SearchCatalogMedicinesQueryDto } from './catalog.dto';
 
@@ -184,6 +185,17 @@ export function searchTextTooShort(): DomainProblem {
   return new DomainProblem(400, 'CATALOG_SEARCH_TEXT_TOO_SHORT', 'Type at least 2 letters to search.');
 }
 
+/**
+ * q over 100 characters counted as the database counts them (code points), as
+ * the query's VALIDATION_FAILED: a text the validator's own count let through
+ * (it leaves out emoji presentation selectors) never reaches the database.
+ */
+export function searchTextTooLong(): DomainProblem {
+  return new DomainProblem(400, 'VALIDATION_FAILED', 'One or more request fields are invalid.', [
+    { field: 'q', messages: [`q must be shorter than or equal to ${CATALOG_SEARCH_MAX_LENGTH} characters`] },
+  ]);
+}
+
 export function searchTextNotAllowed(list: 'catalogue' | 'diagnoses' = 'catalogue'): DomainProblem {
   return new DomainProblem(400, 'CATALOG_SEARCH_TEXT_NOT_ALLOWED', list === 'diagnoses'
     ? 'Search by diagnosis name or code. Do not type a Health ID or NIN here.'
@@ -335,10 +347,15 @@ export class CatalogService {
   /**
    * The search text's checks, in the contract's order (too short, then a
    * person's identifier), and then this membership's search count. A
-   * refused text does not count.
+   * refused text does not count. Its length is counted in code points, as
+   * the database's char_length counts it: an emoji or "𝔸" is one character,
+   * not two UTF-16 units, so alone it is too short (400), never a database
+   * refusal answered as 503.
    */
   private admit(membershipKey: string, q: string | undefined, list: 'catalogue' | 'diagnoses' = 'catalogue'): string {
-    if (q === undefined || q.length < 2) throw searchTextTooShort();
+    const characters = q === undefined ? 0 : [...q].length;
+    if (q === undefined || characters < 2) throw searchTextTooShort();
+    if (characters > CATALOG_SEARCH_MAX_LENGTH) throw searchTextTooLong();
     if (looksLikePersonIdentifier(q)) throw searchTextNotAllowed(list);
     const now = Date.now();
     let entry = this.searches.get(membershipKey);

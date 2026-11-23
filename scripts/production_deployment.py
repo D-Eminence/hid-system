@@ -26,7 +26,12 @@ READ_POOL = 6
 PROTECT_POOL = 4
 ROLLOUT_POLL_SECONDS = 5
 SKIPPED_PLAN_AFTER = "PLAN_BEFORE_FOUND_ZERO_PENDING"
-PHASES = frozenset({"approval","lease","snapshot-before","receipt-started","migration","register-services",
+# ORD-7's governed catalogue load, opt-in (CATALOG_LOAD): the signed seed files where the migration image carries
+# them (services/ehr-api/Dockerfile copies docs/codes to /app/docs/codes), and the loader's two kinds of last line.
+CATALOG_SEEDS = {"medicine":"/app/docs/codes/hid-medicines.json","lab_test":"/app/docs/codes/hid-lab-tests.json"}
+CATALOG_LOADED = re.compile(r'\{"status":"loaded",.*\}')
+CATALOG_REFUSED = re.compile(r"load-catalog: .*; nothing loaded(?:; run the release again at a quieter time)?")
+PHASES = frozenset({"approval","lease","snapshot-before","receipt-started","migration","catalog","register-services",
     "rollout-services","register-gateway","rollout-gateway","snapshot-after","index-and-receipt","notify",
     "rollback-rollout","rollback-snapshot","rollback-index"})
 
@@ -79,6 +84,17 @@ class Phases:
                 plan_after_skipped=int(skipped))
         except Exception:
             pass
+
+def catalog_request(value, mode, desired):
+    """The seed kinds the release asked to load, in load order; [] when not asked (unset, empty or "none").
+
+    The catalogue phase never runs unless asked: only a deploy that carries the migration image may ask, and only
+    for "medicine", "lab_test" or both, comma separated. Anything else is refused before the release starts."""
+    if value in (None, "", "none"): return []
+    kinds = value.split(",")
+    require(len(set(kinds)) == len(kinds) and set(kinds) <= set(CATALOG_SEEDS), "INVALID_CATALOG_LOAD_REQUEST")
+    require(mode == "deploy" and "database-migration" in desired, "CATALOG_LOAD_NEEDS_MIGRATION_IMAGE")
+    return [kind for kind in CATALOG_SEEDS if kind in kinds]
 
 def candidate():
     ctx = context("backend")
@@ -164,6 +180,7 @@ class ECS:
     def __init__(self, aws, lease):
         self.aws, self.lease = aws, lease
         self.migration_checks = None
+        self.catalog_checks = None
 
     def service(self, component):
         body = self.aws.call("ecs","describe-services",{"cluster":CLUSTER,"services":["hid-production-"+component]})
@@ -402,6 +419,56 @@ class ECS:
             self.migration_checks = {"pending_before":0,"plan_after":"skipped","reason":SKIPPED_PLAN_AFTER,"tasks":len(tasks)}
         return definition["taskDefinitionArn"]
 
+    def load_catalog(self, arn, network, release_id, kinds):
+        """ORD-7's governed loader, after the migrations succeeded: one task per seed file on the migration task
+        definition this release registered, its command overridden. A refusal (exit 2, nothing loaded) stops the
+        release with the loader's own line; any other failure stops it too."""
+        self.catalog_checks = []
+        for kind in kinds:
+            self.lease.assert_owned()
+            task = self.aws.call("ecs","run-task",{"cluster":CLUSTER,"taskDefinition":arn,"launchType":"FARGATE",
+                "clientToken":sha((release_id+"catalog-"+kind).encode()),
+                "networkConfiguration":{"awsvpcConfiguration":network},"enableExecuteCommand":False,
+                "overrides":{"containerOverrides":[{"name":"database-migration",
+                    "command":["scripts/load-catalog.mjs","--seed",CATALOG_SEEDS[kind]]}]}},mutation=True)
+            require(not task.get("failures") and len(task.get("tasks",[])) == 1, "CATALOG_LOAD_START_FAILED")
+            task_arn = task["tasks"][0]["taskArn"]
+            end = time.monotonic()+600
+            while True:
+                require(time.monotonic() < end, "CATALOG_LOAD_TIMEOUT")
+                self.lease.assert_owned()
+                rows = self.aws.call("ecs","describe-tasks",{"cluster":CLUSTER,"tasks":[task_arn]})
+                require(not rows.get("failures") and len(rows.get("tasks",[])) == 1, "CATALOG_LOAD_TASK_MISSING")
+                if rows["tasks"][0]["lastStatus"] == "STOPPED": break
+                time.sleep(5)
+            codes = [c.get("exitCode") for c in rows["tasks"][0]["containers"]]
+            if all(code == 0 for code in codes):
+                outcome = json.loads(self.catalog_line(task_arn,CATALOG_LOADED))
+                require(outcome.get("kind") == kind, "CATALOG_LOAD_EVIDENCE_MISSING")
+                self.catalog_checks.append({"kind":kind,"version":outcome["version"],"file_sha256":outcome["fileSha256"],
+                    "approvals_sha256":outcome["approvalsSha256"],"items":outcome["items"],"replaced":outcome["replaced"]})
+                continue
+            if 2 in codes:
+                print(json.dumps({"release_id":release_id,"catalog_load":"refused","kind":kind,
+                    "message":self.catalog_line(task_arn,CATALOG_REFUSED)}), flush=True)
+                raise ReleaseError("CATALOG_LOAD_REFUSED")
+            raise ReleaseError("CATALOG_LOAD_FAILED")
+
+    def catalog_line(self, arn, pattern):
+        """The loader's line in the task's log (the migration log group): polls reads only, never re-runs a task."""
+        end = time.monotonic()+90
+        while time.monotonic() < end:
+            self.lease.assert_owned()
+            try:
+                events = self.aws.call("logs","get-log-events",{"logGroupName":"/hid/staging/database-migration",
+                    "logStreamName":"migration/database-migration/"+arn.split("/")[-1],"startFromHead":True}).get("events",[])
+                found = [e["message"] for e in events if pattern.fullmatch(e["message"])]
+                if found: return found[-1]
+            except ReleaseError as error:
+                if str(error) != "AWS_ResourceNotFoundException": raise
+            time.sleep(5)
+        raise ReleaseError("CATALOG_LOAD_EVIDENCE_MISSING")
+
     def migration_logs(self, arn):
         # Task exit can precede CloudWatch delivery. Poll reads only, never re-run a task.
         end = time.monotonic()+90
@@ -424,6 +491,7 @@ def deploy(mode="deploy", rollback_id=None):
     candidate = json.loads(path.read_text())
     require(file_sha(path) == os.environ.get("EXPECTED_CANDIDATE_SHA256"), "APPROVED_ARTIFACT_CHANGED")
     validate_candidate(candidate,ctx)
+    catalog = catalog_request(os.environ.get("CATALOG_LOAD"), mode, candidate["evidence"])
     github = GitHub(ctx["repository"])
     phases = Phases()
     # The approval step before cloud credentials already waited for GitHub's job records to settle.
@@ -469,6 +537,10 @@ def deploy(mode="deploy", rollback_id=None):
             settings["migration_task_definition"] = index["migration_task_definition"]
             migration_arn = ecs.migrate(desired["database-migration"],candidate["schema_change"],settings,candidate["release_id"])
             phases.migration(candidate["release_id"],ecs.migration_checks)
+            if catalog:
+                # Only when asked, and only once the migrations succeeded: the same task definition, the loader's command.
+                ecs.load_catalog(migration_arn,settings["migration_network"],candidate["release_id"],catalog)
+                phases.mark("catalog",seeds=len(catalog))
         # The services roll out side by side; the gateway, which routes to them, follows once they are healthy.
         rollout = [name for name in ORDER if name in desired]
         for label, wave in (("services",[n for n in rollout if n != "gateway"]), ("gateway",[n for n in rollout if n == "gateway"])):
@@ -507,7 +579,8 @@ def deploy(mode="deploy", rollback_id=None):
         index_meta = store.put(INDEX_KEY,new_index,etag=index_meta["ETag"])
         store.put(receipt_key+"complete.json",{"schema":"hid.release-receipt/v1","kind":"backend","status":"success",
             "candidate":candidate,"before":index["backend"],"after":new_backend,"migration_task_definition":migration_arn,
-            **({"migration_checks":ecs.migration_checks} if ecs.migration_checks else {})})
+            **({"migration_checks":ecs.migration_checks} if ecs.migration_checks else {}),
+            **({"catalog_checks":ecs.catalog_checks} if ecs.catalog_checks else {})})
         reconciled = True
         phases.mark("index-and-receipt")
         try: notify(aws,candidate,"success" if mode == "deploy" else "rollback-success")
@@ -541,7 +614,9 @@ def deploy(mode="deploy", rollback_id=None):
                 store.put(INDEX_KEY,restored,etag=live_meta["ETag"])
                 store.put(receipt_key+"failed.json",{"schema":"hid.release-receipt/v1","kind":"backend",
                     "status":"failed-rolled-back","error_code":str(error) if isinstance(error,ReleaseError) else "CONTROLLER_FAILED",
-                    "before":previous,"after":after})
+                    "before":previous,"after":after,
+                    # A catalogue version loaded before the failure stays loaded (each seed is its own transaction).
+                    **({"catalog_checks":ecs.catalog_checks} if ecs.catalog_checks else {})})
                 reconciled = True
                 phases.mark("rollback-index")
             except Exception:
