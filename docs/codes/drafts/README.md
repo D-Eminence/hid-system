@@ -8,7 +8,7 @@ The files hold facts only: medicine names, strengths, dose forms and routes, tes
 
 | File | Rows | What it holds |
 |---|---|---|
-| `hid-medicines-and-lab-tests.csv` | 1,782 | Every list in one file, with the same columns for every row: 1,371 medicines from the Nigeria Essential Medicines List, 8th edition (`MED-00001` to `MED-01371`); 253 medicines on the WHO Model List of Essential Medicines (24th list, 2025) that the Nigeria list does not have (`MED-01372` to `MED-01624`); and 158 lab tests (`LAB-0001` to `LAB-0158`). |
+| `hid-medicines-and-lab-tests.csv` | 1,778 | Every list in one file, with the same columns for every row: 1,371 medicines from the Nigeria Essential Medicines List, 8th edition (`MED-00001` to `MED-01371`); 249 medicines on the WHO Model List of Essential Medicines (24th list, 2025) that the Nigeria list does not have (`MED-01372` to `MED-01624`; four numbers in that range are retired, see below); and 158 lab tests (`LAB-0001` to `LAB-0158`). |
 
 This one file replaces the three separate files of the first draft (`medicines-nigeria-eml-8.csv`, `medicines-who-eml-gaps.csv`, `lab-tests.csv`), on the owner's instruction of 22 November 2026, so that the EHR, Pharmacy and Lab products read one list.
 
@@ -27,7 +27,7 @@ This one file replaces the three separate files of the first draft (`medicines-n
 | `use_status` | Where the row stands. Every row is a draft awaiting the clinician's sign-off (Q124 A). |
 | `notes` | Short factual notes, for example "for children" or "strength to confirm at review". |
 
-**The WHO rows, cleaned (owner, 22 November 2026: "use it as we need it"):** WHO's labels `core` and `complementary` read `main` and `specialist`; notes in WHO's wording were removed, so only facts remain ("for children" stays); `potassium ferric hexacyanoferrate(II) 2H2O` reads `prussian blue`, with the chemical name under `other_names`; and five rows with no strength say "strength to confirm at review". The WHO rows keep `source` = `who-eml-24` for traceability. The WHO list's licence (CC BY-NC-SA 3.0 IGO) is recorded under Sources; the owner chose to use these facts.
+**The WHO rows, cleaned (owner, 22 November 2026: "use it as we need it"):** WHO's labels `core` and `complementary` read `main` and `specialist`; notes in WHO's wording were removed, so only facts remain ("for children" stays); and three rows with no strength say "strength to confirm at review". Four WHO rows were removed on 23 November 2026 because the Nigeria list already has the medicine under another name: `MED-01375` prussian blue (Nigeria: potassium ferric hexacyanoferrate (II)), `MED-01618` compound sodium lactate (Nigeria: Ringer's lactate), `MED-01421` dolutegravir + lamivudine + tenofovir and `MED-01423` efavirenz + lamivudine + tenofovir (Nigeria lists both combinations, written in another order). Their ids are retired, never reused. The WHO rows keep `source` = `who-eml-24` for traceability. The WHO list's licence (CC BY-NC-SA 3.0 IGO) is recorded under Sources; the owner chose to use these facts.
 
 The sections below describe how the first draft's lists were built. Their columns map to the combined file as `generic_name` to `name` and `atc_code` to `code`, and `loinc_long_name` to `code_name`.
 
