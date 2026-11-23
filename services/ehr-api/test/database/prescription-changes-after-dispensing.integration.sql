@@ -50,7 +50,7 @@
 --      every transition, a row already at the next version, the order-route
 --      send of a draft, replica mode, an owner change of a 0125 column, a
 --      status this file does not know;
---   8. Release A's shapes: 0133's states and withdrawn readers, 0147's
+--   8. Release A's shapes: 0133's states and withdrawn readers, 0145's
 --      steps reader and pharmacy-api's 0133 list answer exactly as they do
 --      with 0148 undone; 0133 D8 marks a send once;
 --   9. both owner kinds: this suite runs on a database whose owner is a
@@ -142,7 +142,7 @@ begin
      and has_table_privilege(role_row.oid, 'pharmacy.prescription_changes_after_dispensing', privilege.name);
   perform pg_temp.expect('1b no hid_ role reaches the table through any membership', coalesce(mismatch, 'none'), 'none');
   -- 1c. Rows are never updated or deleted: 0023's immutability function, in
-  -- origin mode as the 0147 suite pins its own (PostgreSQL prints DELETE
+  -- origin mode as the 0145 suite pins its own (PostgreSQL prints DELETE
   -- before UPDATE).
   perform pg_temp.expect('1c the immutability trigger',
     (select string_agg(pg_get_triggerdef(trigger_row.oid) || ' ' || trigger_row.tgenabled::text, '; ')
@@ -214,7 +214,7 @@ begin
   -- 1g. No 0148 body names ehr.prescriptions or the sends table, so 0133's
   -- S7 list (the owner-run definers whose text names ehr.prescriptions,
   -- each of which sees D5's rows in a pharmacist's session) stays the eight
-  -- 0133's suite pins (0147's acceptance trigger function the eighth).
+  -- 0133's suite pins (0145's acceptance trigger function the eighth).
   perform pg_temp.expect('1g no 0148 body names ehr.prescriptions or the sends table; 0133''s S7 list unchanged',
     (select count(*) from pg_proc proc
       where proc.oid in ('pharmacy.work_item_changes_after_dispensing(uuid[])'::regprocedure,
@@ -339,7 +339,7 @@ select gen_random_uuid(), ('e1480006-0000-4000-8000-00000000000' || patient)::uu
   from (values (1, 1, 1, 'write_records'), (1, 2, 1, 'write_records'), (3, 1, 1, 'write_records'),
                (3, 2, 1, 'write_records'), (4, 1, 1, 'read_records'), (4, 2, 1, 'read_records'),
                (8, 1, 4, 'read_records')) consent(member, patient, site, scope);
--- The outside pharmacy (as 0133's and 0147's suites): its governed approval
+-- The outside pharmacy (as 0133's and 0145's suites): its governed approval
 -- and product, and orders between facilities switched on (control_settings
 -- readable by a non-superuser owner).
 insert into identity.organization_applications (id, product_code, organization_name, organization_type,
@@ -1015,7 +1015,7 @@ reset role;
 -- 9. Both owner kinds. This suite runs on a database whose owner is a
 -- superuser (the container acceptance cluster) and on one whose owner has
 -- neither superuser nor BYPASSRLS (the RDS-like rehearsal), and branches
--- only where PostgreSQL itself answers differently, as the 0147 suite does.
+-- only where PostgreSQL itself answers differently, as the 0145 suite does.
 -- 9a (above): DR's change of rx20 is recorded for F4's item although DR's
 -- session sees no F4 row, because the trigger reads only 0133's claims
 -- (row-level security on, not forced: never filtered for their owner).
@@ -1163,8 +1163,8 @@ select pg_temp.expect('N6 a status this file does not know (CHECK widened in a s
   || pg_temp.ph_reads(array[30]), 'ok active>suspended none');
 rollback to savepoint unknown_status;
 
--- 8. Release A's shapes. What 0133's two readers, 0147's steps reader (when
--- 0147 is applied) and pharmacy-api's 0133 list (WORK_LIST_QUERY_0133, its
+-- 8. Release A's shapes. What 0133's two readers, 0145's steps reader (when
+-- 0145 is applied) and pharmacy-api's 0133 list (WORK_LIST_QUERY_0133, its
 -- exact text at c839f61f, done work since 1 January 2026) answer for PH,
 -- now and again with 0148 undone in its header's order (in a savepoint):
 -- the same, for items dispensed and changed after (rx2, rx3, rx22 reversed),
@@ -1175,7 +1175,7 @@ declare
   items uuid[] := array(select pg_temp.work_item_of(pg_temp.rx(n)) from unnest(array[1, 2, 3, 19, 22, 23]) n);
   states text;
   withdrawn_items text;
-  steps text := 'no 0147';
+  steps text := 'no 0145';
   listed text;
 begin
   set local role hid_pharmacy_api_runtime;
@@ -1216,7 +1216,7 @@ select pg_temp.expect('8a own_work_item_states, own_withdrawn_work_items and own
   split_part(current_setting('changes.release_a'), ' | list=', 1),
   'states=rx1:own-work/t/changed rx19:own-work/f/- rx2:own-work/f/- rx22:own-work/f/- '
   || 'rx23:own-work/t/sent_elsewhere rx3:own-work/f/- | withdrawn=rx1:changed rx23:sent_elsewhere | steps='
-  || case when to_regprocedure('pharmacy.own_work_item_steps(uuid[])') is null then 'no 0147'
+  || case when to_regprocedure('pharmacy.own_work_item_steps(uuid[])') is null then 'no 0145'
           else 'rx1:own-work/t/t/- rx19:own-work/f/f/- rx2:own-work/f/t/- '
             || 'rx22:own-work/f/t/- rx23:own-work/t/t/- rx3:own-work/f/t/-' end);
 -- 8b: D8 (it fires before 0148's trigger, by name) marks the automatic send

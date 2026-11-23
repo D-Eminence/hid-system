@@ -27,7 +27,7 @@ import { PharmacyPrescriptionDetails, PRESCRIPTION_DETAILS_OFF } from './prescri
  * is faked here with the answers its reader gives; every statement runs
  * through the real DatabaseService (its SERIALIZABLE retry) and the real
  * AuditService, and the rest of the service (0133's list query, ORD-4's steps,
- * the route cards) is answered as on a database with 0133 and 0147. Fictional
+ * the route cards) is answered as on a database with 0133 and 0145. Fictional
  * ids and names only.
  */
 
@@ -516,7 +516,7 @@ describe('Q132 A: the list and the read stay as before when the notice is not th
     expect(page).toEqual(before);
     for (const n of [2, 3, 4, 7]) expect(await readOf(h, n)).toEqual(await readOf(off, n));
     expect(await replayOf(h, 3)).toEqual(await replayOf(off, 3));
-    // ORD-4's fields are there, as on a schema with 0147 and without 0148.
+    // ORD-4's fields are there, as on a schema with 0145 and without 0148.
     expect((page.items as unknown as Answer[]).map((item) => [item.id, item.pharmacyStep])).toEqual([
       [id(1), 'received'], [id(2), 'dispensed'], [id(3), 'dispensed'], [id(4), 'dispensed'], [id(5), 'accepted'],
       [id(6), 'received'], [id(7), 'dispensing_reversed'], [id(8), 'dispensed'], [id(9), 'accepted']]);

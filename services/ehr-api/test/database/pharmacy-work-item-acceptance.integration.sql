@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- 0147 (ORD-4 of the Akos EHR plan; owner decision Q125 B, 19 November
+-- 0145 (ORD-4 of the Akos EHR plan; owner decision Q125 B, 19 November
 -- 2026): a pharmacist accepts a prescription that was sent to this hospital's
 -- own pharmacy by itself (0133 D7) before dispensing it, and the work item's
 -- history and the steps reader say so.
@@ -126,7 +126,7 @@ begin
                  where constraint_row.conrelid = 'pharmacy.work_item_acceptances'::regclass and constraint_row.contype = 'f')
      or (select relation.relowner = owner_oid and relation.relrowsecurity and relation.relforcerowsecurity
            from pg_class relation where relation.oid = 'pharmacy.work_item_acceptances'::regclass) is not true then
-    raise exception 'pharmacist acceptance: the table is not 0147''s (columns, keys, CHECKs, no foreign key, owner, forced row-level security)';
+    raise exception 'pharmacist acceptance: the table is not 0145''s (columns, keys, CHECKs, no foreign key, owner, forced row-level security)';
   end if;
   -- The four policies: pharmacy.dispensings' four, for this table (the
   -- consent policies with this table's names, the own-work policies in
@@ -178,7 +178,7 @@ begin
        || 'pharmacy.work_item_acceptances FOR EACH ROW EXECUTE FUNCTION pharmacy.validate_work_item_acceptance() O; '
        || 'CREATE TRIGGER pharmacy_work_item_acceptances_immutable BEFORE DELETE OR UPDATE ON '
        || 'pharmacy.work_item_acceptances FOR EACH ROW EXECUTE FUNCTION pharmacy.reject_immutable_evidence() O' then
-    raise exception 'pharmacist acceptance: the triggers are not 0147''s';
+    raise exception 'pharmacist acceptance: the triggers are not 0145''s';
   end if;
   -- The functions: bodies (md5), owner (the insert validator's: the dispensing
   -- validator's owner), SECURITY DEFINER, volatility, not STRICT, search_path.
@@ -198,7 +198,7 @@ begin
       or proc.proowner <> owner_oid or not proc.prosecdef or proc.provolatile <> expected.volatility
       or proc.proisstrict or proc.proconfig::text <> expected.config;
   if mismatch is not null then
-    raise exception 'pharmacist acceptance: the functions are not 0147''s: %', mismatch;
+    raise exception 'pharmacist acceptance: the functions are not 0145''s: %', mismatch;
   end if;
   -- The replaced event validator: still the owner of pharmacy.context_allows'
   -- (pharmacy-session-guards pins it), its owner's alone, its trigger kept.
@@ -236,7 +236,7 @@ begin
      is distinct from 'TABLE(work_item_id uuid, basis text, withdrawn boolean, withdrawn_reason text, '
        || 'sent_automatically boolean, accepted_at timestamp with time zone, accepted_by_membership_id uuid, '
        || 'accepted_with text)' then
-    raise exception 'pharmacist acceptance: the reader''s columns are not 0147''s';
+    raise exception 'pharmacist acceptance: the reader''s columns are not 0145''s';
   end if;
   -- The event table's CHECKs, widened under 0023's names and validated.
   if (select string_agg(constraint_row.conname || ' ' || constraint_row.convalidated || ' '
@@ -247,7 +247,7 @@ begin
      is distinct from 'work_item_events_event_type_check true CHECK ((event_type = ANY (ARRAY['
        || '''prescription_accepted''::text, ''pharmacist_accepted''::text]))); work_item_events_event_version_check true '
        || 'CHECK ((event_version = ANY (ARRAY[1, 2])))' then
-    raise exception 'pharmacist acceptance: the event CHECKs are not widened as 0147 widens them';
+    raise exception 'pharmacist acceptance: the event CHECKs are not widened as 0145 widens them';
   end if;
 end $$;
 

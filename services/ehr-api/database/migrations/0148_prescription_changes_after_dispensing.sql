@@ -8,7 +8,7 @@
 -- staging 06f98040). The number is provisional and given in merge order; no
 -- migration number appears inside a function body, a policy or a trigger, so
 -- renumbering leaves every md5. This file requires 0001-0137 applied and
--- relies on nothing of 0147 (ORD-4), so the two apply in either order. The
+-- relies on nothing of 0145 (ORD-4), so the two apply in either order. The
 -- declaration is signed separately.
 --
 -- THE GAP. 0133 D8 tells a pharmacy when a prescription it has received
@@ -138,7 +138,7 @@
 -- refills_allowed column to C2's keys left out.
 --
 -- 0. Preconditions (catalog reads only; 55000, or 42501 for e and f; nothing
---    applied): a. 0001-0137 applied (0147's markers); b. this file not
+--    applied): a. 0001-0137 applied (0145's markers); b. this file not
 --    applied (no table, function of any signature or trigger of its names);
 --    c. every column the new bodies and checks read, by name and type;
 --    d. the bodies relied on, by md5; d2. 0133 D14's two claim triggers,
@@ -196,7 +196,7 @@
 -- the NOWAIT, so a long one stops the file after 5 seconds, nothing applied.
 -- In the dry run the lock lasts until the dry run ends; an earlier file's
 -- strong locks make this file take one attempt.
--- Measured on throwaway PostgreSQL 16 with 0001-0137 and 0147 applied and
+-- Measured on throwaway PostgreSQL 16 with 0001-0137 and 0145 applied and
 -- 20,000 prescriptions, work items and claims (fictional data), with a
 -- superuser applier and with a NOSUPERUSER NOBYPASSRLS applier:
 --   the file takes 44-78 ms; the hold, from the SHARE ROW EXCLUSIVE to
@@ -210,7 +210,7 @@
 --   lock_timeout and none of its 105-117 rounds fails (slowest round 34 ms,
 --   but for one of 164 ms, which three reruns of that case put at 3-4 ms);
 --   ACCESS EXCLUSIVE held by another session on every other application
---   table of 0001-0137 and 0147 (197 tables): the file applies in 47 ms and
+--   table of 0001-0137 and 0145 (197 tables): the file applies in 47 ms and
 --   no lock request of its own waits;
 --   a prescription UPDATE takes 0.28 ms more on average with C4 in place
 --   (C2 itself: 0.11 ms when a dispensed claim matches, 0.03 ms otherwise);
@@ -249,7 +249,7 @@
 -- The trigger comes first: plpgsql records no dependency on the table, so
 -- with the table dropped under a live trigger every change of an active or
 -- on-hold prescription would fail with 42P01 for every image. This undo is
--- independent of 0147's and comes before any step of 0133's (C3 calls 0133's
+-- independent of 0145's and comes before any step of 0133's (C3 calls 0133's
 -- own-work half; C2 reads 0133's claims). The ledger row stays; precondition
 -- b refuses a second apply; a later migration brings the objects back.
 
@@ -265,7 +265,7 @@ begin
   -- a. 0001-0137 applied: 0133's tables and readers, 0134's install, 0135's
   -- waiting list, 0137's NIN checks and its begin command, read from the
   -- catalog (0136 changes role rows only; the runner applies it before 0137).
-  -- The same markers as 0147's; nothing of 0147 is needed.
+  -- The same markers as 0145's; nothing of 0145 is needed.
   if (select count(*) from pg_class relation join pg_namespace namespace on namespace.oid = relation.relnamespace
        where relation.relkind = 'r'
          and (namespace.nspname, relation.relname) in (('pharmacy', 'own_prescription_sends'),

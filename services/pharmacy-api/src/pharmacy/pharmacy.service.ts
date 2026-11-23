@@ -191,7 +191,7 @@ export interface WorkItemAcceptanceAnswer {
  * The reason pharmacy.work_item_events carries on ORD-4's `pharmacist_accepted`
  * event (event_version 2). The acceptance takes no typed reason (FR-1, Q105),
  * so the text is fixed, the same for the accept route and for a dispensing
- * (`accepted_with` on the acceptance row tells the two apart), and 0147's
+ * (`accepted_with` on the acceptance row tells the two apart), and 0145's
  * pharmacy.validate_work_item_event() refuses any other (23514). Change both
  * together, or neither. Exported for the tests.
  */
@@ -336,8 +336,8 @@ function acceptanceSchemaMissing(error: unknown): boolean {
 }
 
 /**
- * 0147's unique (facility_id, accepted_by, idempotency_key) on
- * pharmacy.work_item_acceptances, by the name PostgreSQL gave it (0147's
+ * 0145's unique (facility_id, accepted_by, idempotency_key) on
+ * pharmacy.work_item_acceptances, by the name PostgreSQL gave it (0145's
  * post-check pins the index, and its suite the 23505 that names it).
  */
 const ACCEPTANCE_KEY_CONSTRAINT = 'work_item_acceptances_facility_id_accepted_by_idempotency_k_key';
@@ -648,7 +648,7 @@ export class PharmacyService {
    * - the write: own-work, the member's own consent, or the order route, as
    *   for a dispensing; an emergency session is refused (403), break-glass by
    *   Identity's decision or not: an acceptance is direct care only, and
-   *   0147's trigger refuses any other purpose;
+   *   0145's trigger refuses any other purpose;
    * - 412 when the version differs from the one the pharmacist saw;
    * - 409 IDEMPOTENCY_CONFLICT when this member's key recorded an acceptance
    *   for another request (also when row-level security now hides that
@@ -721,7 +721,7 @@ export class PharmacyService {
           // patient's consent grant ended, or the patient set a deny
           // directive): the retry still cannot read it. That row is another
           // request's: an acceptance of this item would already have been
-          // answered above from the steps reader, since 0147 gives an
+          // answered above from the steps reader, since 0145 gives an
           // acceptance its item's read rules (the dispensing's policies) and
           // this member reads the item. So it is the contract's 409
           // IDEMPOTENCY_CONFLICT, not the 500 a second 23505 would become.
