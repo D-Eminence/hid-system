@@ -503,30 +503,49 @@ try {
   evidence.checks.additional_schema_suites = additionalSuites;
   // The services' database suites (services/ehr-api/test/database): each is one transaction that ends in ROLLBACK,
   // judged by psql's exit status, so CI and npm run check:db run them all (coordinator, hid-system #258,
-  // 20 November 2026). They run on a copy of this freshly migrated database whose schema belongs to a role that
-  // neither is a superuser nor bypasses row-level security, as production's migration login (giveSchemaToNonSuperuser,
-  // the boundary hid_owner_check has, below): a superuser owner bypasses forced row-level security, so a suite could
-  // pass here and the same commands fail under the real owner, and forced row-level security would catch no mistake
-  // (review of hid-system #310). The copy is of the freshly migrated database the suites were written for, not of
-  // hid_owner_check's backup, which also holds the baseline records and every runtime workflow's rows.
+  // 20 November 2026). They run twice, under two schema owners that their commands meet differently (review of
+  // hid-system #310):
+  // - on this freshly migrated database, whose schema belongs to the superuser admin: an owner that bypasses
+  //   row-level security, as production's OCR owner is expected to (docs/INTERFACE_CONTRACT.md, expected owner
+  //   attributes, release checklist P8; ocr-source-deletion's worker data cases run only under such an owner);
+  // - on hid_service_suites, a copy of it given to hid_synthetic_schema_owner (giveSchemaToNonSuperuser, the
+  //   boundary hid_owner_check has, below), an owner that neither is a superuser nor bypasses row-level security, as
+  //   P8 expects of production's other owners (the outreach tables' among them). A superuser owner skips forced
+  //   row-level security, so a suite could pass on the first and the same commands fail under such an owner.
+  // The copy is of the freshly migrated database the suites were written for, not of hid_owner_check's backup, which
+  // also holds the baseline records and every runtime workflow's rows. schema.integration.sql (above, on the superuser
+  // owner's database, where its OCR owner emulation does nothing) runs on the copy too, so that emulation is exercised.
   const serviceSuitesDatabase = 'hid_service_suites';
   command('copy the migrated database for the service suites', join(pgBindir, 'createdb'),
     ['-T', database, serviceSuitesDatabase]);
   const serviceSuitesOwner = await giveSchemaToNonSuperuser(serviceSuitesDatabase);
   const serviceSuites = (await readdir(join(service, 'test/database')))
     .filter((name) => name.endsWith('.integration.sql')).sort();
-  // Every suite runs, and the step then fails once, naming each failed suite and its first error.
+  const migratedOwner = await withClient(database, async (client) => (await client.query(`select r.rolname as role,
+    r.rolsuper as superuser, r.rolbypassrls as bypass_rls from pg_class c join pg_roles r on r.oid = c.relowner
+    where c.oid = 'ocr.jobs'::regclass`)).rows[0]);
+  assert.deepEqual(migratedOwner, { role: admin, superuser: true, bypass_rls: true });
+  const serviceSuiteRuns = [
+    { database, owner: migratedOwner, suites: serviceSuites.map((name) => `test/database/${name}`) },
+    { database: serviceSuitesDatabase, owner: serviceSuitesOwner,
+      suites: ['database/tests/schema.integration.sql', ...serviceSuites.map((name) => `test/database/${name}`)] },
+  ];
+  // Every suite runs on both, and the step then fails once, naming each failed suite, its database and its first error.
   const suiteFailures = [];
-  for (const name of serviceSuites) {
-    try {
-      command(`service database suite ${name}`, join(pgBindir, 'psql'),
-        ['-X', '-q', '-d', serviceSuitesDatabase, '-v', 'ON_ERROR_STOP=1', '-f', join(service, 'test/database', name)]);
-    } catch (error) {
-      suiteFailures.push(`${name}: ${(/ERROR:\s+([^\n]*)/.exec(error.message)?.[1] ?? error.message).slice(0, 300)}`);
+  for (const run of serviceSuiteRuns) {
+    run.failed = [];
+    for (const suite of run.suites) {
+      try {
+        command(`database suite ${suite} on ${run.database}`, join(pgBindir, 'psql'),
+          ['-X', '-q', '-d', run.database, '-v', 'ON_ERROR_STOP=1', '-f', join(service, suite)]);
+      } catch (error) {
+        run.failed.push(suite);
+        suiteFailures.push(`${run.database}: ${suite}: `
+          + (/ERROR:\s+([^\n]*)/.exec(error.message)?.[1] ?? error.message).slice(0, 300));
+      }
     }
   }
-  evidence.checks.service_database_suites = { database: serviceSuitesDatabase, owner: serviceSuitesOwner,
-    suites: serviceSuites, failed: suiteFailures };
+  evidence.checks.service_database_suites = { suites: serviceSuites, runs: serviceSuiteRuns };
   assert.deepEqual(suiteFailures, [], `service database suites failed:\n${suiteFailures.join('\n')}`);
   const workflowEnvironment = {
     PGDATABASE: database, DATABASE_URL: url(database), CORS_ORIGINS: 'http://127.0.0.1', AUTH_MODE: 'local',

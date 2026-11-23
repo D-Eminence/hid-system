@@ -95,16 +95,35 @@ registry, reads your npm settings (`~/.npmrc`) and writes to your npm cache
 and npm log folder (usually `~/.npm`). `--prepare` cannot be combined with
 `--check-only`.
 
-The rehearsal migrates a fresh database and runs every database suite:
-`services/ehr-api/database/tests/*.integration.sql` on the migrated database
-itself, and `services/ehr-api/test/database/*.integration.sql` on a copy of it
-whose schemas, tables, functions and owner policies belong to a role that is
-neither a superuser nor allowed to bypass row-level security, as production's
-migration login. A superuser owner skips forced row-level security, so a
-suite could pass under it and still fail in production. Each suite is one
-transaction that ends in `ROLLBACK`, judged by psql's exit status; a failure
-names every failed suite and its first error. CI's "Synthetic migration
-rehearsal" job runs the same rehearsal, so the suites run in CI too.
+The rehearsal migrates a fresh database and runs every database suite. Each
+suite is one transaction that ends in `ROLLBACK`, judged by psql's exit
+status. Two kinds of schema owner meet the suites: the rehearsal's superuser,
+which owns everything it migrates, and a role that is neither a superuser nor
+allowed to bypass row-level security, given the schemas, tables, functions and
+owner policies of a copy. Production is expected to have both kinds
+(`docs/INTERFACE_CONTRACT.md`, expected owner attributes): the OCR tables'
+owner bypasses row-level security, the outreach tables' owner does not. A
+superuser owner skips forced row-level security, so a suite could pass under
+it and still fail under an owner that does not; and some cases run only under
+an owner that bypasses it. So:
+
+- `services/ehr-api/test/database/*.integration.sql` run on the migrated
+  database and again on such a copy of it.
+- `services/ehr-api/database/tests/schema.integration.sql` runs on the migrated
+  database, on that copy (with the suites above) and on `hid_restored`, the
+  database restored from the rehearsal's backup.
+- The other `services/ehr-api/database/tests/*.integration.sql` run on the
+  migrated database, on `hid_owner_check` (another restore of the backup, with
+  its baseline records, given to the non-superuser owner) and on
+  `hid_restored`. `runtime-roles.integration.sql` is the role bootstrap's own
+  check and runs inside it.
+
+The suites of the first bullet, and `schema.integration.sql` on the copy, all
+run, and a failure names each failed suite, its database and its first error;
+any other suite stops the rehearsal at its first failure.
+
+CI's "Synthetic migration rehearsal" job runs the same rehearsal, so the
+suites run in CI too.
 
 The rehearsal makes its own throwaway PostgreSQL in `/tmp`, reachable only
 through a private socket, fills it with fictional data and deletes it at the
