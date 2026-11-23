@@ -9243,3 +9243,84 @@ answers 503 `VITALS_STATUS_UNAVAILABLE`.
   error", with `includeEnteredInError=true`.
 - On `VITAL_ALREADY_ENTERED_IN_ERROR`, treat it as done. On
   `VERSION_CONFLICT`, reload and ask again.
+
+## VIT-1. Soft "abnormal" vitals warnings (Release B, no migration)
+
+Akos P1-11. The planned contract's "VIT-1" is the spec; this section is what
+is built. It needs EHR-C8b (readings entered in error get no warnings and are
+not in latest vitals). Warnings come from a fixed adult table in ehr-api
+(`vitals/usual-ranges.ts`), version `2026-11-adult-1`, worked out each time
+and never stored. They never block a save. `approvedBy` stays `null` until
+Health ID's named clinical lead signs the table off (owner decision Q124 A).
+
+### New hard rule
+
+On a vitals create, the one-call consultation's vitals, and a correction:
+the diastolic must be lower than the systolic, else 400
+`BLOOD_PRESSURE_ORDER_INVALID` "The lower blood pressure number (diastolic)
+must be less than the upper one (systolic). Check the reading." Rows already
+stored are not touched. The hard limits of today (`VALIDATION_FAILED`,
+`BLOOD_PRESSURE_INCOMPLETE`) are unchanged and checked first.
+
+The rule is checked only for a new write, after the `Idempotency-Key` is
+looked up: a retry of a create, a correction or a consultation that an older
+image saved (when a diastolic equal to the systolic was allowed) replays the
+saved answer instead of answering 400.
+
+### `GET /api/v1/ehr/vitals/usual-ranges`
+
+`ehr.vital.read`, `X-Facility-Id`; no patient, no consent check, no patient
+audit; `Cache-Control: private, max-age=3600`.
+
+```json
+{ "version": "2026-11-adult-1", "appliesTo": "adults (18 and over)", "approvedBy": null,
+  "ranges": [ { "measure": "pulseBpm", "level": "far_outside_usual", "atOrBelow": 40 }, … ] }
+```
+
+Each band names its bounds: `from` and `to`, `atOrBelow` and `atOrAbove`
+(inclusive), or `below` and `above` (exclusive). Where bands overlap, the most
+serious level applies (`check_entry`, then `far_outside_usual`, then
+`outside_usual`).
+
+| Measure | `outside_usual` | `far_outside_usual` | `check_entry` |
+|---|---|---|---|
+| Breathing rate | 9-11, 21-24 | 8 or below, 25 or above | 61 or above |
+| Oxygen % | 92 up to (not including) 96 | below 92 | below 50 |
+| Systolic | 91-100, 180-219 | 90 or below, 220 or above | above 300 |
+| Diastolic | 40 or below, 110 or above | | above 200 |
+| Pulse | 41-50, 111-130 | 40 or below, 131 or above | above 250 |
+| Temperature °C | 38.1-39.0 | 35.0 or below, 39.1 or above | below 30, above 44 |
+| Height, weight | none | none | none |
+
+For the clinical lead's sign-off (Ola's review of #297): NEWS2 also scores
+35.1-36.0 °C, which this draft table leaves without an `outside_usual` band
+(35.4 °C gives no warning, and the low-temperature message says "Usual for
+adults: 35.1 to 38"). Either add that band (and make 36.1 the usual low), or
+keep the table and record why (for example, axillary or infrared readings run
+low). The table is the agreed draft until then.
+
+### Warnings on answers
+
+The vitals create answer (`201`, and its replay) and the correction answer
+gain `warnings` and `usualRangesVersion`. A correction's warnings are for the
+values after it (its values over the reading's own). A replay of either, once
+the reading is marked entered in error, carries `warnings: []`:
+
+```json
+{ "warnings": [
+    { "measure": "pulseBpm", "value": 135, "level": "far_outside_usual",
+      "code": "VITAL_FAR_OUTSIDE_USUAL_RANGE",
+      "message": "Pulse is very high: 135 a minute. Usual for adults: 51 to 110." } ],
+  "usualRangesVersion": "2026-11-adult-1" }
+```
+
+`warnings` is `[]` when nothing is outside the usual range. Codes:
+`VITAL_OUTSIDE_USUAL_RANGE`, `VITAL_FAR_OUTSIDE_USUAL_RANGE`,
+`VITAL_CHECK_ENTRY` ("Check this entry: a temperature of 45 °C is very
+unlikely."). `GET /ehr/patients/:patientId/vitals/latest` gains
+`usualRangesVersion`, and each measure gains `warning` (the same object, or
+`null`; for `bloodPressure`, the more serious of the two halves; `null` for
+height and weight). The chart summary (EHR-C4) and the one-call consultation
+answer are unchanged. Warnings are worked out for every patient from the
+adult table; the screen shows them only for patients 18 and over. Nothing is
+stored and no audit field changes.
