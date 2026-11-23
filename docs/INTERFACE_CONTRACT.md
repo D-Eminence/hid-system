@@ -9448,9 +9448,11 @@ amendment on #258, for the owner to confirm at signing.
   (SX-4 never removes `admin`).
 - **Ending:** the rows end with the membership, as every role does, or with
   `doctor` as above. SX-4 cannot add or remove them by name.
-  - Two of 0086's commands also end them, because they count every role held:
-    the facility administrator's "Change role" and support's self-service
-    administrator role (S12). For a counted member "Change role" revokes
+  - Two of 0086's commands also end them: the facility administrator's
+    "Change role", which counts every role held, and support's self-service
+    administrator role (S12), which compares only the latest role granted
+    other than `org_admin` (a narrow role after 0147). For a counted member
+    "Change role" revokes
     every role held, and S12 every role but `org_admin`, the narrow roles with
     them, and each grants the requested role again. Access is never widened.
     But the same role and licence no longer answer "unchanged": S12 then makes

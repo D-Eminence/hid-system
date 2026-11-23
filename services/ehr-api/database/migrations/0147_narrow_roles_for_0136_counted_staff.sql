@@ -86,9 +86,11 @@
 -- SX-4 (0139's role lists stay the five hospital roles). They are only these
 -- extra assignment rows. They end with the membership, as every role does,
 -- or when doctor is removed through SX-4 (D5). Two of 0086's commands also
--- end them, because they count every role held: the facility administrator's
--- role change (identity.change_facility_staff_role) and support's self-service
--- administrator role (identity.admin_set_self_service_administrator_role, S12).
+-- end them: the facility administrator's role change
+-- (identity.change_facility_staff_role) counts every role held, and support's
+-- self-service administrator role
+-- (identity.admin_set_self_service_administrator_role, S12) compares only the
+-- latest role granted other than org_admin, a narrow role after this file.
 -- For a counted member the role change revokes every role held, and S12 every
 -- role but org_admin, the narrow roles with them, and each grants the
 -- requested role again, so access is never widened. But neither answers
@@ -145,17 +147,19 @@
 -- identity.staff_facility_memberships (below); ROW EXCLUSIVE on audit.events;
 -- ROW SHARE on auth.permissions, auth.accounts and identity.facilities (the
 -- foreign key checks of the new rows) and on identity.outreach_organisations
--- and identity.organization_applications (FOR SHARE in the two triggers of
--- auth.account_roles, 0115's outreach fence and 0086's review gate); and
+-- and identity.organization_applications (FOR SHARE in two of
+-- auth.account_roles' triggers, 0115's outreach fence and 0086's review gate;
+-- its sealed-tenant triggers fire only for platform rows); and
 -- ACCESS SHARE on the tables the count reads (identity.staff,
 -- identity.organizations and the sealed demo and QA member lists) and on
 -- migration.schema_migrations (0136's applied_at). That is every existing
 -- table this file locks (pg_locks before commit, at 9, 1 and 1 and at 0, 0
 -- and 0), at the strongest mode it takes. Besides tables it locks only
 -- indexes, at ACCESS SHARE or ROW SHARE (planning and the foreign key
--- checks), and, when it writes an audit row, ROW EXCLUSIVE on audit.events'
--- identity sequence. Replacing SX-4's change function (D5, CREATE OR
--- REPLACE) locks no table: ACCESS SHARE object locks on the identity schema,
+-- checks), apart from pg_proc's TOAST index below, and, when it writes an
+-- audit row, ROW EXCLUSIVE on audit.events' identity sequence. Replacing
+-- SX-4's change function (D5, CREATE OR REPLACE) locks none of the tables
+-- above: ACCESS SHARE object locks on the identity schema,
 -- plpgsql and the membership row type (identity.staff_facility_memberships,
 -- its first argument), so none of them can be dropped until commit, and ROW
 -- EXCLUSIVE on pg_proc's TOAST table and its index (where the new body is
@@ -166,9 +170,10 @@
 -- pg_namespace, pg_locks), and 3b and the post-checks read pg_description,
 -- at ACCESS SHARE, kept until commit (they conflict only with ACCESS
 -- EXCLUSIVE on a catalog); the check's (pg_class, pg_namespace, pg_database,
--- pg_locks) are held from before the first attempt, across its retries. Those are not
--- taken NOWAIT, as only DDL on that function, schema, type or language would
--- make them wait, and no service runs DDL. (Measured with pg_locks before
+-- pg_locks) are held from before the first attempt, across its retries.
+-- Those are not taken NOWAIT: only DDL on that function, schema, type or
+-- language, or maintenance that holds a catalog or one of its indexes
+-- (VACUUM FULL, REINDEX), would make them wait, and no service runs either. (Measured with pg_locks before
 -- commit, at 9, 1 and 1 and at 0, 0 and 0, on a database 0147 had not
 -- changed; the narrow-roles suite compares the tables, indexes, sequence,
 -- TOAST table and objects it locks at 9, 1 and 1.)
@@ -180,9 +185,9 @@
 -- in flight. The converse is the cost: 0147 gets the lock only at a moment
 -- when no transaction holds a membership row lock or has written a row that
 -- names a membership, and every audited staff request writes one (its audit
--- row); under steady staff traffic all 50 attempts can fail, nothing
--- applied, so run it at a quiet time (as Release B's 0145, which took ACCESS
--- EXCLUSIVE on seven clinical tables, was run).
+-- row; opening a patient locks the member's own membership row); under
+-- steady staff traffic all 50 attempts can fail, nothing applied, so run it
+-- at a quiet time.
 -- An SX-4 command locks the member's membership row (FOR NO KEY UPDATE)
 -- before it calls SX-4's change function. One already in flight holds the
 -- table at ROW SHARE, so 0147's attempt fails and counts again once that
@@ -206,7 +211,10 @@
 -- applied, instead of keeping those locks while this file waits. Other
 -- waits are not NOWAIT, and the runner's lock_timeout ends each after 5
 -- seconds (55P03 lock timeout: not a busy refusal, so not retried; nothing
--- applied). During such a wait 0147 keeps every step-0 lock, so staff writes
+-- applied). If the session 0147 waits for then waits for one of 0147's
+-- locks (a staff write naming a membership, for example), the deadlock
+-- detector ends one of the two sooner (deadlock_timeout, 1 s by default),
+-- with 40P01: 0147 (not retried, nothing applied) or that staff request. During such a wait 0147 keeps every step-0 lock, so staff writes
 -- that name a membership and role writes queue behind it until then. They
 -- are: an index or catalog that maintenance holds (a REINDEX, for example),
 -- at any step, until 0147 first opens it; a row of auth.permissions (the
@@ -214,8 +222,8 @@
 -- session holds FOR UPDATE; and, at 9, 1 and 1, a row of auth.accounts or
 -- identity.facilities that another session holds FOR UPDATE, or of
 -- identity.outreach_organisations or identity.organization_applications that
--- another session is updating or holds FOR UPDATE (the grants' foreign key
--- checks and the triggers' FOR SHARE).
+-- another session is updating or holds FOR NO KEY UPDATE or FOR UPDATE (the
+-- grants' foreign key checks and the triggers' FOR SHARE).
 --
 -- Undo (not in the ledger; a migration only if the owner signs it): mark both
 -- roles inactive (update auth.roles set active = false where code in
@@ -243,8 +251,10 @@
 --    and doctor x lab.work-item.read and pharmacy.work-item.read, nor doctor
 --    x ocr.job.start, as Release B leaves it; SX-4's change function as
 --    Release B leaves it (0139's body by its md5, SECURITY INVOKER with
---    0139's search_path, plpgsql and volatile, EXECUTE for neither PUBLIC nor
---    the Identity runtime), and this login holding its owner's privileges
+--    0139's search_path, plpgsql and volatile, parallel unsafe, not
+--    leakproof or strict, cost 100, an ordinary function returning no set,
+--    EXECUTE for neither PUBLIC nor the Identity runtime), and this login
+--    holding its owner's privileges
 --    (42501 otherwise); this login sees every row it counts (42501
 --    otherwise).
 -- 2. The count and the stop (55000, nothing applied).
@@ -581,12 +591,12 @@ begin
     end if;
     if holding then
       raise exception using errcode = '55P03',
-        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, identity.staff_facility_memberships (any staff request in flight that writes or locks a membership or a row naming one, such as a staff audit row), audit.events or a table 0147 reads (the permissions, accounts, staff, facilities, organizations, outreach groups, applications, sealed member lists and migration ledger) is busy, and this transaction already holds an earlier migration''s '
+        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, identity.staff_facility_memberships (any staff request in flight that writes or locks a membership, or inserts a row naming one, such as a staff audit row), audit.events or a table 0147 reads (the permissions, accounts, staff, facilities, organizations, outreach groups, applications, sealed member lists and migration ledger) is busy, and this transaction already holds an earlier migration''s '
           || 'locks, so it does not wait; nothing applied; run the release again at a quieter time';
     end if;
     if attempt >= 50 then
       raise exception using errcode = '55P03',
-        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, identity.staff_facility_memberships (any staff request in flight that writes or locks a membership or a row naming one, such as a staff audit row), audit.events or a table 0147 reads (the permissions, accounts, staff, facilities, organizations, outreach groups, applications, sealed member lists and migration ledger) stayed busy for 5 seconds; nothing applied; run the release again at a '
+        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, identity.staff_facility_memberships (any staff request in flight that writes or locks a membership, or inserts a row naming one, such as a staff audit row), audit.events or a table 0147 reads (the permissions, accounts, staff, facilities, organizations, outreach groups, applications, sealed member lists and migration ledger) stayed busy for 5 seconds; nothing applied; run the release again at a '
           || 'quieter time';
     end if;
     perform pg_sleep(0.1);
