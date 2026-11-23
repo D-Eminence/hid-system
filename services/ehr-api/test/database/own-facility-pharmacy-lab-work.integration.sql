@@ -12,13 +12,13 @@
 --      kind's row's half its own runtime's only; D14's reader the Pharmacy
 --      runtime's; the trigger functions nobody's); 0086's context_allows and
 --      work_item_allows bodies unchanged; the 46 own-work policies (a read
---      policy on each work item table, 42 on the chain, and 0147's two on the
+--      policy on each work item table, 42 on the chain, and 0145's two on the
 --      pharmacist acceptances, pharmacy.work_item_acceptances) and none on the
 --      imported evidence tables; the sends table, D14's claims and D15's list
 --      have no grant, row-level security on and not forced, no policy; the
 --      two ehr.prescriptions policies name only the dispensing validator's
 --      owner, no runtime role is its member, and the owner-run definer
---      functions that read ehr.prescriptions are the eight known ones (0147's
+--      functions that read ehr.prescriptions are the eight known ones (0145's
 --      acceptance trigger function, pharmacy.validate_work_item_acceptance,
 --      the eighth); D14's
 --      replaced order-route send and resend flag are 0123's and 0086's text
@@ -131,7 +131,7 @@
 --      pharmacist nothing more through the EHR runtime, in a session with the
 --      switch set (as the new ehr-api sets it, 0133 D13): the order-route
 --      send, the own-pharmacy send and the withdrawal refuse the pharmacist
---      first; 0147's acceptance trigger function runs only on an insert into
+--      first; 0145's acceptance trigger function runs only on an insert into
 --      pharmacy.work_item_acceptances, which the EHR runtime may not make
 --      (42501), and through the Pharmacy runtime it reads a prescription only
 --      as the source of an own item sent automatically that the acceptance
@@ -203,7 +203,7 @@
 --      trigger and its function dropped first do not; in the header's full
 --      order 0123's send and 0086's resend flag come back first (md5
 --      0c2def2b and cd18f1a4, ACLs kept), no function left reads the sends
---      table when it is dropped (0147 is undone first, in full, as its undo
+--      table when it is dropped (0145 is undone first, in full, as its undo
 --      says: while its two own-work policies on the pharmacist acceptances
 --      stand, D1's pharmacy half cannot be dropped, 2BP01, even with 0133's
 --      44 gone; and its steps reader and acceptance trigger function read
@@ -435,7 +435,7 @@ begin
     raise exception 'own facility work: 0086''s context_allows bodies changed';
   end if;
   -- The own-work policies: 46, a read policy on each work item table, 42 on
-  -- the work chain and 0147's read and insert policies on the pharmacist
+  -- the work chain and 0145's read and insert policies on the pharmacist
   -- acceptances (pharmacy.work_item_acceptances, anchored on its work item as
   -- the chain's are), never on the imported evidence, the Lab outbox or the
   -- route reports.
@@ -461,13 +461,13 @@ begin
                          'pharmacy.imported_medication_evidence'::regclass)
                    and coalesce(pg_get_expr(policy_row.polqual, policy_row.polrelid), '')
                        || coalesce(pg_get_expr(policy_row.polwithcheck, policy_row.polrelid), '') ~ 'own_work') then
-    raise exception 'own facility work: the own-work policies are not 0133''s 44 on the work items and their chain and 0147''s two on the pharmacist acceptances';
+    raise exception 'own facility work: the own-work policies are not 0133''s 44 on the work items and their chain and 0145''s two on the pharmacist acceptances';
   end if;
   -- S7: the owner-run SECURITY DEFINER functions that read ehr.prescriptions
   -- (each sees D5's rows in a pharmacist's session) are exactly these eight
-  -- (0147 added pharmacy.validate_work_item_acceptance, the acceptance's
+  -- (0145 added pharmacy.validate_work_item_acceptance, the acceptance's
   -- trigger function); case 8 shows each gives the pharmacist nothing more
-  -- (the two validators in cases 3 and 5, and 0147's in its own suite,
+  -- (the two validators in cases 3 and 5, and 0145's in its own suite,
   -- pharmacy-work-item-acceptance, too). A new one must be
   -- added here, and to case 8, by whoever writes it. The check matches a
   -- definer's own text only: an invoker helper that such a definer calls
@@ -2200,7 +2200,7 @@ select pg_temp.expect('PH: the withdrawal refuses', pg_temp.try(format(
 -- (The list is the patient's own: a staff session is refused.)
 select pg_temp.expect('PH: the patient''s own route list answers nothing for a staff session',
   pg_temp.rows_of('select * from ehr.patient_list_order_routes()'), '42501 PATIENT_SESSION_REQUIRED');
--- 0147's acceptance trigger function (the eighth) runs only on an insert
+-- 0145's acceptance trigger function (the eighth) runs only on an insert
 -- into pharmacy.work_item_acceptances, which the EHR runtime may not make.
 select pg_temp.expect('PH: the EHR runtime may not write a pharmacist acceptance',
   left(pg_temp.try(format($s$insert into pharmacy.work_item_acceptances (work_item_id, patient_id, facility_id,
@@ -2924,13 +2924,13 @@ select pg_temp.expect('the trigger and its function dropped first: the change go
   'ok');
 reset role;
 rollback to savepoint undo_trigger_first;
--- 0147 first, in full (its undo, minus restoring 0077's event validator,
+-- 0145 first, in full (its undo, minus restoring 0077's event validator,
 -- whose text this suite does not hold; the replaced validator reads the
 -- acceptances only for a pharmacist_accepted event, which nothing writes
 -- here): while its two own-work policies on pharmacy.work_item_acceptances
 -- stand, 0133's order stops at D1's halves (2BP01), even with 0133's own 44
 -- policies gone.
-savepoint undo_0147_kept;
+savepoint undo_0145_kept;
 do $$
 declare policy_row record;
 begin
@@ -2940,16 +2940,16 @@ begin
     execute format('drop policy %I on %s', policy_row.polname, policy_row.relation);
   end loop;
 end $$;
-select pg_temp.expect('0147 not undone: with 0133''s 44 own-work policies gone, D1''s pharmacy half cannot be dropped',
+select pg_temp.expect('0145 not undone: with 0133''s 44 own-work policies gone, D1''s pharmacy half cannot be dropped',
   pg_temp.try('drop function identity.pharmacy_work_patient_allows(uuid, uuid, uuid, text)'),
   '2BP01 cannot drop function identity.pharmacy_work_patient_allows(uuid,uuid,uuid,text) because other objects '
   || 'depend on it');
-select pg_temp.expect('with 0147''s two dropped too, it can be',
+select pg_temp.expect('with 0145''s two dropped too, it can be',
   pg_temp.try('drop policy staff_own_work_read on pharmacy.work_item_acceptances') || ' '
   || pg_temp.try('drop policy staff_own_work_insert on pharmacy.work_item_acceptances') || ' '
   || pg_temp.try('drop function identity.pharmacy_work_patient_allows(uuid, uuid, uuid, text)'), 'ok ok ok');
-rollback to savepoint undo_0147_kept;
--- The header's full order, once 0147 is undone in full (its reader, its
+rollback to savepoint undo_0145_kept;
+-- The header's full order, once 0145 is undone in full (its reader, its
 -- trigger and function, then its table). D14 first: 0123's order-route send
 -- and 0086's resend flag are restored (the live bodies without the D14
 -- hunks), so nothing new is released. Then the withdrawn items reader, the

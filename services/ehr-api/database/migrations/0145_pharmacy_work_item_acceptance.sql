@@ -1,4 +1,4 @@
--- 0147 Pharmacy accepts a prescription before dispensing (ORD-4 of the Akos
+-- 0145 Pharmacy accepts a prescription before dispensing (ORD-4 of the Akos
 -- EHR plan, Release B, lane D; Akos items N-1 and the pharmacy part of N-8).
 -- Owner decision Q125 B, 19 November 2026: the pharmacy "Accepted" step is
 -- wanted. The planned contract's section "ORD-4: Pharmacy accepts a
@@ -192,7 +192,7 @@
 --       identity.begin_qoreid_nin_check; 0136 changes rows of the role table
 --       only and leaves no catalog mark, and the runner applies it before
 --       0137);
---    b. 0147 not applied (no table, function or trigger of this file's names;
+--    b. 0145 not applied (no table, function or trigger of this file's names;
 --       1b finds the event CHECKs as 0023 made them);
 --    c. every column the new bodies, policies and checks read, by name and
 --       type;
@@ -219,7 +219,7 @@
 --    with nothing applied (see Locks).
 -- 1b. Under those locks, the preconditions that print a CHECK or a policy
 --    (each failure raises 55000 and nothing is applied):
---    b. (its last part) the event CHECKs not widened (else '0147: already
+--    b. (its last part) the event CHECKs not widened (else '0145: already
 --       applied');
 --    g. 0133 D5's two ehr.prescriptions policies, naming only the
 --       validator's owner;
@@ -312,7 +312,7 @@
 -- to 12 ms. The validation grows with the events (one per item a pharmacy
 -- holds, one more per pharmacist acceptance); the rest does not grow with
 -- the data.
--- When 0147 is the first statement of its transaction (the runner applies
+-- When 0145 is the first statement of its transaction (the runner applies
 -- each file in its own transaction), the loop tries again 100 ms later, so it
 -- never waits while holding the ACCESS EXCLUSIVE (only, for at most 10 ms, an
 -- index while holding the ACCESS SHARE locks) and no read or write queues
@@ -344,7 +344,7 @@
 -- acceptance (in a savepoint), the list and a read answer no pharmacyStep
 -- for an own item (a route-backed item's is its work item's own acceptance,
 -- which needs nothing of this file) and the progress never answers
--- 'accepted'. Applied migrations before 0147 are immutable.
+-- 'accepted'. Applied migrations before 0145 are immutable.
 --
 -- Undo (by hand only; no release runs it), in one transaction, in this
 -- order, so every image keeps working between the steps: first restore
@@ -361,9 +361,9 @@
 -- pharmacist_accepted event, never for 0077's). The widened CHECKs stay:
 -- pharmacist_accepted events are append-only evidence (0023's immutability
 -- trigger), so 0023's narrower CHECKs cannot come back once one exists, and
--- with 0077's validator restored no new one is written. 0147 is undone in
+-- with 0077's validator restored no new one is written. 0145 is undone in
 -- full, its table included, before any step of 0133's undo (0133's header,
--- applied and unchangeable, cannot say so): 0147's two own-work policies on
+-- applied and unchangeable, cannot say so): 0145's two own-work policies on
 -- pharmacy.work_item_acceptances call 0133's D1 halves
 -- (identity.facility_work_session_membership and
 -- identity.pharmacy_work_patient_allows), so 0133's order (its 44 own-work
@@ -371,9 +371,9 @@
 -- reader and its trigger function read 0133's sends table, which plpgsql
 -- records no dependency on, so with that table dropped first every call of
 -- the reader, and every acceptance of a work item the trigger finds, fail
--- with 42P01 (0133's suite, case 9, undoes 0147 first). After the undo this
+-- with 42P01 (0133's suite, case 9, undoes 0145 first). After the undo this
 -- file cannot be applied again: 1b finds the widened CHECKs and refuses
--- ('0147: already applied'). So 0147's row in migration.schema_migrations
+-- ('0145: already applied'). So 0145's row in migration.schema_migrations
 -- stays: the runner then counts the file as applied, and the file stays in
 -- every later release unchanged, as each applied file must; without the row
 -- the next release would stop at that refusal. To bring the step back, a
@@ -404,7 +404,7 @@ begin
                   ('identity', 'pharmacy_work_patient_allows', 'uuid, uuid, uuid, text'),
                   ('identity', 'sealed_qa_hospital_work_staff_install', ''),
                   ('identity', 'begin_qoreid_nin_check', 'character, character, boolean, text, uuid, integer'))) <> 5 then
-    raise exception using errcode = '55000', message = '0147: 0001-0137 must be applied first';
+    raise exception using errcode = '55000', message = '0145: 0001-0137 must be applied first';
   end if;
   -- b. Not applied yet: no table, function or trigger of this file's names
   -- (1b checks the event CHECKs, which only printing them shows).
@@ -417,7 +417,7 @@ begin
                  where not trigger_row.tgisinternal
                    and trigger_row.tgname in ('pharmacy_work_item_acceptance_validate',
                          'pharmacy_work_item_acceptances_immutable')) then
-    raise exception using errcode = '55000', message = '0147: already applied';
+    raise exception using errcode = '55000', message = '0145: already applied';
   end if;
   -- c. Every column the new bodies, policies and checks read, by name and
   -- type. The decision is an EXISTS over the absent columns (never null);
@@ -453,7 +453,7 @@ begin
     into found_absent, missing;
   if found_absent then
     raise exception using errcode = '55000',
-      message = format('0147: a column this migration relies on is missing or of another type: %s', missing);
+      message = format('0145: a column this migration relies on is missing or of another type: %s', missing);
   end if;
   -- d. The bodies replaced and relied on (md5 of pg_proc.prosrc). A function
   -- missing at its signature counts as a mismatch.
@@ -504,7 +504,7 @@ begin
     into found_absent, missing;
   if found_absent then
     raise exception using errcode = '55000',
-      message = format('0147: a function this migration replaces or relies on differs from 0001-0137: %s', missing);
+      message = format('0145: a function this migration replaces or relies on differs from 0001-0137: %s', missing);
   end if;
   -- The replaced validator's attributes, as test/database/pharmacy-session-guards
   -- pins them (CREATE OR REPLACE keeps them; section 6 checks them again).
@@ -514,7 +514,7 @@ begin
                     and not proc.proisstrict and proc.prorettype = 'trigger'::regtype
                     and proc.proconfig = array['search_path=pharmacy, platform, pg_temp']) then
     raise exception using errcode = '55000',
-      message = '0147: pharmacy.validate_work_item_event() does not have the attributes 0077 gave it';
+      message = '0145: pharmacy.validate_work_item_event() does not have the attributes 0077 gave it';
   end if;
   -- e. One owner: pharmacy.work_items' owns the tables this file locks,
   -- alters or reads in a new body, validate_dispensing (A3's function is made
@@ -553,7 +553,7 @@ begin
     into found_absent, missing;
   if found_absent or validator_owner is distinct from owner_oid then
     raise exception using errcode = '42501',
-      message = format('0147: these are not owned by %s, the owner of pharmacy.work_items: %s',
+      message = format('0145: these are not owned by %s, the owner of pharmacy.work_items: %s',
         coalesce(pg_get_userbyid(owner_oid), 'nobody'), coalesce(missing, 'pharmacy.validate_dispensing()'));
   end if;
   -- f. The applier is that owner, or a member that inherits it and may SET
@@ -562,7 +562,7 @@ begin
   if not (applier = owner_oid
           or (pg_has_role(applier, owner_oid, 'USAGE') and pg_has_role(applier, owner_oid, 'SET'))) then
     raise exception using errcode = '42501',
-      message = format('0147: %s must own, or inherit from and be able to SET ROLE to, %s, the owner of '
+      message = format('0145: %s must own, or inherit from and be able to SET ROLE to, %s, the owner of '
         || 'pharmacy.work_items, pharmacy.validate_dispensing() and the Pharmacy work tables', current_user,
         pg_get_userbyid(owner_oid));
   end if;
@@ -579,7 +579,7 @@ begin
     into found_absent, missing;
   if found_absent then
     raise exception using errcode = '42501',
-      message = format('0147: %s lacks %s', pg_get_userbyid(owner_oid), missing);
+      message = format('0145: %s lacks %s', pg_get_userbyid(owner_oid), missing);
   end if;
   -- g. 0133 D5's premise: no hid_ role is a member of the validator's owner,
   -- whom D5's two ehr.prescriptions policies name (1b checks the policies,
@@ -593,14 +593,14 @@ begin
     into found_absent, missing;
   if found_absent then
     raise exception using errcode = '55000',
-      message = format('0147: these roles are members of %s, which 0133 D5''s ehr.prescriptions policies name: %s',
+      message = format('0145: these roles are members of %s, which 0133 D5''s ehr.prescriptions policies name: %s',
         pg_get_userbyid(validator_owner), missing);
   end if;
   -- The replaced validator's owner and ACL, for section 6.
-  perform set_config('hid_0147.validator_acl',
+  perform set_config('hid_0145.validator_acl',
     (select pg_get_userbyid(proc.proowner) || '=' || coalesce(proc.proacl::text, 'default') from pg_proc proc
       where proc.oid = 'pharmacy.validate_work_item_event()'::regprocedure), true);
-  raise notice '0147: preconditions checked; applier %; owner %', current_user, pg_get_userbyid(owner_oid);
+  raise notice '0145: preconditions checked; applier %; owner %', current_user, pg_get_userbyid(owner_oid);
 end
 $$;
 
@@ -659,14 +659,14 @@ begin
     exception when lock_not_available then
       if holding then
         raise exception using errcode = '55P03',
-          message = '0147: pharmacy.work_item_events or a table 0147 reads (the Pharmacy work items, the dispensings, '
+          message = '0145: pharmacy.work_item_events or a table 0145 reads (the Pharmacy work items, the dispensings, '
             || '0133''s sends and claims, ehr.prescriptions, the memberships, auth.accounts, or their indexes) is '
             || 'busy, and this transaction already holds an earlier migration''s locks, so it does not wait; nothing '
             || 'applied; run the release again at a quieter time';
       end if;
       if attempt >= 50 then
         raise exception using errcode = '55P03',
-          message = '0147: pharmacy.work_item_events or a table 0147 reads (the Pharmacy work items, the dispensings, '
+          message = '0145: pharmacy.work_item_events or a table 0145 reads (the Pharmacy work items, the dispensings, '
             || '0133''s sends and claims, ehr.prescriptions, the memberships, auth.accounts, or their indexes) stayed '
             || 'busy for 5 seconds; nothing applied; run the release again at a quieter time';
       end if;
@@ -690,7 +690,7 @@ begin
   if exists (select 1 from pg_constraint constraint_row
               where constraint_row.conrelid = 'pharmacy.work_item_events'::regclass and constraint_row.contype = 'c'
                 and pg_get_constraintdef(constraint_row.oid) like '%pharmacist_accepted%') then
-    raise exception using errcode = '55000', message = '0147: already applied';
+    raise exception using errcode = '55000', message = '0145: already applied';
   end if;
   -- g. 0133 D5: its two ehr.prescriptions policies, naming only the
   -- validator's owner, through which A3 reads the source prescription of an
@@ -707,7 +707,7 @@ begin
                  = 'pharmacy.own_work_source_prescription(id, patient_id, facility_id)'
                and pg_get_expr(policy_row.polwithcheck, policy_row.polrelid) = 'false'))) <> 2 then
     raise exception using errcode = '55000',
-      message = '0147: ehr.prescriptions does not have 0133 D5''s two policies for the dispensing validator''s owner';
+      message = '0145: ehr.prescriptions does not have 0133 D5''s two policies for the dispensing validator''s owner';
   end if;
   -- h. pharmacy.work_item_events as 0023 made it: exactly one CHECK of each
   -- definition A4 widens, its unique key and its validator trigger.
@@ -731,7 +731,7 @@ begin
             and pg_get_triggerdef(trigger_row.oid) = 'CREATE TRIGGER pharmacy_work_item_event_validate BEFORE INSERT '
               || 'ON pharmacy.work_item_events FOR EACH ROW EXECUTE FUNCTION pharmacy.validate_work_item_event()') <> 1 then
     raise exception using errcode = '55000',
-      message = '0147: pharmacy.work_item_events does not have 0023''s two CHECKs, its key or its validator trigger';
+      message = '0145: pharmacy.work_item_events does not have 0023''s two CHECKs, its key or its validator trigger';
   end if;
 end
 $$;
@@ -1064,13 +1064,13 @@ end
 $$;
 
 comment on table pharmacy.work_item_acceptances is
-  '0147 A1 (ORD-4): a pharmacist''s acceptance of an own work item sent automatically (0133 D7), one per work item: who accepted it (account and membership), when, and with what (accept: the accept route; dispensing: its first dispensing). Append-only. Route-backed and handed-in items have none (their acceptance is the work item''s own).';
+  '0145 A1 (ORD-4): a pharmacist''s acceptance of an own work item sent automatically (0133 D7), one per work item: who accepted it (account and membership), when, and with what (accept: the accept route; dispensing: its first dispensing). Append-only. Route-backed and handed-in items have none (their acceptance is the work item''s own).';
 comment on function pharmacy.validate_work_item_acceptance() is
-  '0147 A3: the trigger function of pharmacy_work_item_acceptance_validate: the row must be the direct-care session''s (facility, account, membership), its work item this facility''s own and sent automatically (else 23514 PHARMACY_WORK_ITEM_NOT_SENT_AUTOMATICALLY, detail order_route or hand_off), and still dispensable: 0101''s source check with the prescription FOR SHARE, the claim live and undispensed and the send not withdrawn (else 23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE, detail not_claimed, sent_elsewhere or changed). Owned by pharmacy.validate_dispensing()''s owner (0133 D5); executed by no role.';
+  '0145 A3: the trigger function of pharmacy_work_item_acceptance_validate: the row must be the direct-care session''s (facility, account, membership), its work item this facility''s own and sent automatically (else 23514 PHARMACY_WORK_ITEM_NOT_SENT_AUTOMATICALLY, detail order_route or hand_off), and still dispensable: 0101''s source check with the prescription FOR SHARE, the claim live and undispensed and the send not withdrawn (else 23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE, detail not_claimed, sent_elsewhere or changed). Owned by pharmacy.validate_dispensing()''s owner (0133 D5); executed by no role.';
 comment on function pharmacy.own_work_item_steps(uuid[]) is
-  '0147 A5: for each own work item here the session may read: 0133 D10''s basis, withdrawn and withdrawn_reason (exactly pharmacy.own_work_item_states''), whether it was sent automatically, and its pharmacist''s acceptance (time, membership, accept or dispensing) or null. At most 200 ids.';
+  '0145 A5: for each own work item here the session may read: 0133 D10''s basis, withdrawn and withdrawn_reason (exactly pharmacy.own_work_item_states''), whether it was sent automatically, and its pharmacist''s acceptance (time, membership, accept or dispensing) or null. At most 200 ids.';
 comment on function pharmacy.validate_work_item_event() is
-  '0077 (replaced by 0147 A4): a prescription_accepted event of version 1 must match its work item''s acceptance (accepted_by, membership, reason) and the session (0077''s text); a pharmacist_accepted event of version 2 must match its item''s pharmacist acceptance (0147 A1) and the session, with the reason ''Accepted by the pharmacist''; any other pair is refused.';
+  '0077 (replaced by 0145 A4): a prescription_accepted event of version 1 must match its work item''s acceptance (accepted_by, membership, reason) and the session (0077''s text); a pharmacist_accepted event of version 2 must match its item''s pharmacist acceptance (0145 A1) and the session, with the reason ''Accepted by the pharmacist''; any other pair is refused.';
 
 -- 6. Post-checks.
 do $$
@@ -1116,19 +1116,19 @@ begin
                    coalesce(differing.found, 'missing')), '; ') from differing)
     into found_absent, mismatch;
   if found_absent then
-    raise exception using errcode = '55000', message = format('0147: functions are not as this file makes them: %s', mismatch);
+    raise exception using errcode = '55000', message = format('0145: functions are not as this file makes them: %s', mismatch);
   end if;
   -- The replaced validator keeps its owner and ACL, and its trigger.
   if (select pg_get_userbyid(proc.proowner) || '=' || coalesce(proc.proacl::text, 'default') from pg_proc proc
        where proc.oid = 'pharmacy.validate_work_item_event()'::regprocedure)
-     is distinct from nullif(current_setting('hid_0147.validator_acl', true), '')
+     is distinct from nullif(current_setting('hid_0145.validator_acl', true), '')
      or (select count(*) from pg_trigger trigger_row
           where trigger_row.tgfoid = 'pharmacy.validate_work_item_event()'::regprocedure) <> 1
      or (select count(*) from pg_trigger trigger_row
           where trigger_row.tgrelid = 'pharmacy.work_item_events'::regclass
             and trigger_row.tgname = 'pharmacy_work_item_event_validate' and trigger_row.tgenabled = 'O'
             and trigger_row.tgfoid = 'pharmacy.validate_work_item_event()'::regprocedure) <> 1 then
-    raise exception using errcode = '55000', message = '0147: the event validator''s owner, ACL or trigger changed';
+    raise exception using errcode = '55000', message = '0145: the event validator''s owner, ACL or trigger changed';
   end if;
   -- The new functions' exact EXECUTE grants: each expected grantee that
   -- exists holds EXECUTE (not grantable); nothing else is granted, PUBLIC
@@ -1162,7 +1162,7 @@ begin
   select exists (select 1 from wrong), (select string_agg(wrong.what, '; ') from wrong)
     into found_absent, mismatch;
   if found_absent then
-    raise exception using errcode = '55000', message = format('0147: the new functions'' grants are not section 5''s: %s',
+    raise exception using errcode = '55000', message = format('0145: the new functions'' grants are not section 5''s: %s',
       mismatch);
   end if;
   -- A1's table exactly: columns, types, NOT NULLs, defaults, CHECKs and keys
@@ -1181,7 +1181,7 @@ begin
        'facility_id:uuid:true:-', 'accepted_by:uuid:true:-', 'accepted_by_membership_id:uuid:true:-',
        'accepted_at:timestamp with time zone:true:clock_timestamp()', 'accepted_with:text:true:-',
        'idempotency_key:text:true:-', 'request_sha256:character(64):true:-', 'correlation_id:text:true:-'] then
-    raise exception using errcode = '55000', message = '0147: the columns of pharmacy.work_item_acceptances are not this file''s';
+    raise exception using errcode = '55000', message = '0145: the columns of pharmacy.work_item_acceptances are not this file''s';
   end if;
   if (select array_agg(constraint_row.contype::text || ' ' || pg_get_constraintdef(constraint_row.oid)
           order by constraint_row.contype, pg_get_constraintdef(constraint_row.oid) collate "C")
@@ -1206,13 +1206,13 @@ begin
           'CREATE UNIQUE INDEX work_item_acceptances_pkey ON pharmacy.work_item_acceptances USING btree (id)',
           'CREATE UNIQUE INDEX work_item_acceptances_work_item_id_key ON pharmacy.work_item_acceptances USING btree '
             || '(work_item_id)'] then
-    raise exception using errcode = '55000', message = '0147: the keys of pharmacy.work_item_acceptances are not this file''s';
+    raise exception using errcode = '55000', message = '0145: the keys of pharmacy.work_item_acceptances are not this file''s';
   end if;
   if (select relation.relrowsecurity and relation.relforcerowsecurity and relation.relkind = 'r'
              and relation.relowner = owner_oid
         from pg_class relation where relation.oid = 'pharmacy.work_item_acceptances'::regclass) is not true then
     raise exception using errcode = '55000',
-      message = '0147: pharmacy.work_item_acceptances must be the owner''s, with row-level security enabled and forced';
+      message = '0145: pharmacy.work_item_acceptances must be the owner''s, with row-level security enabled and forced';
   end if;
   with expected(grantee_name, privilege_type) as (values
          ('hid_pharmacy_runtime', 'SELECT'), ('hid_pharmacy_runtime', 'INSERT'),
@@ -1238,7 +1238,7 @@ begin
     into found_absent, mismatch;
   if found_absent then
     raise exception using errcode = '55000',
-      message = format('0147: the grants on pharmacy.work_item_acceptances are not section 5''s: %s', mismatch);
+      message = format('0145: the grants on pharmacy.work_item_acceptances are not section 5''s: %s', mismatch);
   end if;
   -- A2's four policies, exactly as PostgreSQL prints them (whitespace
   -- collapsed): permissive, for everyone; and the own-work read policy the
@@ -1268,7 +1268,7 @@ begin
          || 'work_item_acceptances.facility_id))))):-']
      or (select count(*) from pg_policy policy_row
           where policy_row.polrelid = 'pharmacy.work_item_acceptances'::regclass) <> 4 then
-    raise exception using errcode = '55000', message = format('0147: the policies are not section 3''s: %s',
+    raise exception using errcode = '55000', message = format('0145: the policies are not section 3''s: %s',
       (select string_agg(policy_row.polname || ' ' || coalesce(pg_get_expr(policy_row.polqual, policy_row.polrelid), '-')
          || ' ' || coalesce(pg_get_expr(policy_row.polwithcheck, policy_row.polrelid), '-'), '; ')
          from pg_policy policy_row where policy_row.polrelid = 'pharmacy.work_item_acceptances'::regclass));
@@ -1277,7 +1277,7 @@ begin
               where other_policy.polrelid = 'pharmacy.work_item_acceptances'::regclass and other_policy.polpermissive
                 and other_policy.polcmd in ('r', '*') and other_policy.polname <> 'staff_own_work_read'
                 and other_policy.polname::text collate "C" > 'staff_own_work_read') then
-    raise exception using errcode = '55000', message = '0147: a policy would be asked before the own-work read policy';
+    raise exception using errcode = '55000', message = '0145: a policy would be asked before the own-work read policy';
   end if;
   -- The table's two triggers, exactly (enabled in origin mode, as 0023's),
   -- the only ones; A3's function used by its trigger only.
@@ -1292,7 +1292,7 @@ begin
          || 'pharmacy.work_item_acceptances FOR EACH ROW EXECUTE FUNCTION pharmacy.reject_immutable_evidence() O']
      or (select count(*) from pg_trigger trigger_row
           where trigger_row.tgfoid = 'pharmacy.validate_work_item_acceptance()'::regprocedure) <> 1 then
-    raise exception using errcode = '55000', message = '0147: the acceptances'' triggers are not this file''s';
+    raise exception using errcode = '55000', message = '0145: the acceptances'' triggers are not this file''s';
   end if;
   -- A4: the event table's two CHECKs, exactly and validated, under 0023's
   -- names; its key on (work_item_id, event_version) kept.
@@ -1309,14 +1309,14 @@ begin
      or (select count(*) from pg_constraint constraint_row
           where constraint_row.conrelid = 'pharmacy.work_item_events'::regclass and constraint_row.contype = 'u'
             and pg_get_constraintdef(constraint_row.oid) = 'UNIQUE (work_item_id, event_version)') <> 1 then
-    raise exception using errcode = '55000', message = '0147: the work item events'' CHECKs are not A4''s';
+    raise exception using errcode = '55000', message = '0145: the work item events'' CHECKs are not A4''s';
   end if;
   -- 0133 D5's premise again: no hid_ role is a member of A3's owner.
   if exists (select 1 from pg_roles role_row
               where role_row.rolname like 'hid\_%' and role_row.oid <> validator_owner
                 and pg_has_role(role_row.oid, validator_owner, 'MEMBER')) then
     raise exception using errcode = '55000',
-      message = format('0147: a hid_ role is a member of %s, which 0133 D5''s ehr.prescriptions policies name',
+      message = format('0145: a hid_ role is a member of %s, which 0133 D5''s ehr.prescriptions policies name',
         pg_get_userbyid(validator_owner));
   end if;
   -- Probes, each undone. They open only what section 1 holds, so none waits
@@ -1329,12 +1329,12 @@ begin
     insert into pharmacy.work_item_acceptances (work_item_id, patient_id, facility_id, accepted_by,
       accepted_by_membership_id, accepted_with, idempotency_key, request_sha256, correlation_id)
     values (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'accept',
-      'post-check-0147-probe', repeat('0', 64), 'post-check-0147');
+      'post-check-0145-probe', repeat('0', 64), 'post-check-0145');
     error_state := 'no error';
   exception
     when lock_not_available then
       raise exception using errcode = '55P03',
-        message = '0147: a table a post-check probe reads is busy (' || sqlerrm || '); nothing applied; run the '
+        message = '0145: a table a post-check probe reads is busy (' || sqlerrm || '); nothing applied; run the '
           || 'release again at a quieter time';
     when others then
       get stacked diagnostics error_state = returned_sqlstate, error_message = message_text;
@@ -1342,7 +1342,7 @@ begin
   if error_state is distinct from '23514'
      or error_message is distinct from 'Pharmacist acceptance does not match its work item and actor context' then
     raise exception using errcode = '55000',
-      message = format('0147: an acceptance without a session must be refused with 23514; it answered %s %s',
+      message = format('0145: an acceptance without a session must be refused with 23514; it answered %s %s',
         error_state, coalesce(error_message, ''));
   end if;
   -- A pharmacist_accepted event without a session, and a
@@ -1353,12 +1353,12 @@ begin
     insert into pharmacy.work_item_events (work_item_id, patient_id, facility_id, event_version, event_type, actor_id,
       actor_membership_id, reason, correlation_id)
     values (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 2, 'pharmacist_accepted', gen_random_uuid(),
-      gen_random_uuid(), 'Accepted by the pharmacist', 'post-check-0147');
+      gen_random_uuid(), 'Accepted by the pharmacist', 'post-check-0145');
     error_state := 'no error';
   exception
     when lock_not_available then
       raise exception using errcode = '55P03',
-        message = '0147: a table a post-check probe reads is busy (' || sqlerrm || '); nothing applied; run the '
+        message = '0145: a table a post-check probe reads is busy (' || sqlerrm || '); nothing applied; run the '
           || 'release again at a quieter time';
     when others then
       get stacked diagnostics error_state = returned_sqlstate, error_message = message_text;
@@ -1366,7 +1366,7 @@ begin
   if error_state is distinct from '23514'
      or error_message is distinct from 'Pharmacy work-item event does not match its pharmacist acceptance' then
     raise exception using errcode = '55000',
-      message = format('0147: a pharmacist_accepted event without a session must be refused with 23514; it answered %s %s',
+      message = format('0145: a pharmacist_accepted event without a session must be refused with 23514; it answered %s %s',
         error_state, coalesce(error_message, ''));
   end if;
   error_state := null;
@@ -1375,12 +1375,12 @@ begin
     insert into pharmacy.work_item_events (work_item_id, patient_id, facility_id, event_version, event_type, actor_id,
       actor_membership_id, reason, correlation_id)
     values (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 2, 'prescription_accepted', gen_random_uuid(),
-      gen_random_uuid(), 'Accepted by the pharmacist', 'post-check-0147');
+      gen_random_uuid(), 'Accepted by the pharmacist', 'post-check-0145');
     error_state := 'no error';
   exception
     when lock_not_available then
       raise exception using errcode = '55P03',
-        message = '0147: a table a post-check probe reads is busy (' || sqlerrm || '); nothing applied; run the '
+        message = '0145: a table a post-check probe reads is busy (' || sqlerrm || '); nothing applied; run the '
           || 'release again at a quieter time';
     when others then
       get stacked diagnostics error_state = returned_sqlstate, error_message = message_text;
@@ -1388,7 +1388,7 @@ begin
   if error_state is distinct from '23514'
      or error_message is distinct from 'Pharmacy work-item event does not match its accepted prescription' then
     raise exception using errcode = '55000',
-      message = format('0147: a prescription_accepted event of version 2 must be refused with 0077''s 23514; it '
+      message = format('0145: a prescription_accepted event of version 2 must be refused with 0077''s 23514; it '
         || 'answered %s %s', error_state, coalesce(error_message, ''));
   end if;
   -- The reader: 22023 for 201 ids; no row without a session; and for a
@@ -1402,26 +1402,26 @@ begin
   exception
     when lock_not_available then
       raise exception using errcode = '55P03',
-        message = '0147: a table a post-check probe reads is busy (' || sqlerrm || '); nothing applied; run the '
+        message = '0145: a table a post-check probe reads is busy (' || sqlerrm || '); nothing applied; run the '
           || 'release again at a quieter time';
     when others then
       get stacked diagnostics error_state = returned_sqlstate, error_message = message_text;
   end;
   if error_state is distinct from '22023' or error_message is distinct from 'OWN_WORK_ITEM_STEPS_INVALID' then
     raise exception using errcode = '55000',
-      message = format('0147: the reader must refuse 201 ids with 22023 OWN_WORK_ITEM_STEPS_INVALID; it answered %s %s',
+      message = format('0145: the reader must refuse 201 ids with 22023 OWN_WORK_ITEM_STEPS_INVALID; it answered %s %s',
         error_state, coalesce(error_message, ''));
   end if;
   if exists (select 1 from pharmacy.own_work_item_steps(array[gen_random_uuid()])) then
-    raise exception using errcode = '55000', message = '0147: the reader answered a row without a session';
+    raise exception using errcode = '55000', message = '0145: the reader answered a row without a session';
   end if;
   perform set_config('app.facility_id', gen_random_uuid()::text, true);
   if exists (select 1 from pharmacy.own_work_item_steps(array[gen_random_uuid()])) then
-    raise exception using errcode = '55000', message = '0147: the reader answered a row for no item';
+    raise exception using errcode = '55000', message = '0145: the reader answered a row for no item';
   end if;
   perform set_config('app.facility_id', '', true);
   if exists (select 1 from pharmacy.work_item_acceptances) then
-    raise exception using errcode = '55000', message = '0147: pharmacy.work_item_acceptances is not empty';
+    raise exception using errcode = '55000', message = '0145: pharmacy.work_item_acceptances is not empty';
   end if;
 end
 $$;
