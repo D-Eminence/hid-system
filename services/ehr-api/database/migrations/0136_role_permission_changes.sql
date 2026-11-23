@@ -21,6 +21,16 @@
 --           nothing, if any of lines 1-24 at real facilities is above 0
 --           (coordinator's hand-over on hid-system#258, 18 November 2026).
 --           Nothing is filled in at signing; the maximums below are 0.
+--   Q134 B  real staff became active, and the release's dry run of 21
+--           November 2026 stopped here with these counts at real
+--           facilities: lines 13 and 14 (a doctor loses lab.work-item.read
+--           and pharmacy.work-item.read) 1 (1 staff login), lines 19 and 20
+--           (admins lose lab.work-item.read and pharmacy.work-item.read) 9
+--           (9 staff logins), line 21 (doctors who can start a reading today
+--           and cannot after 0136) 1 (1 staff login), every other line 0.
+--           The owner accepted those losses and raised exactly those five
+--           maximums to those counts; every other maximum stays 0, so any
+--           further real staff affected still stop 0136.
 -- The declaration in config/production-schema-compatibility.json is signed
 -- separately: its reviewed_by stays empty until the owner signs it there.
 --
@@ -284,8 +294,9 @@ begin
 end
 $preconditions$;
 
--- 1. THE OWNER'S MAXIMUMS (owner decision Q113 A): 0 at real facilities on
--- every line. The owner says no real (non-sealed) staff are active yet, so
+-- 1. THE OWNER'S MAXIMUMS (owner decisions Q113 A and Q134 B): 0 at real
+-- facilities on every line except lines 13, 14, 19, 20 and 21, which Q134 B
+-- raised to the counts printed on 21 November 2026 (see the header). The owner says no real (non-sealed) staff are active yet, so
 -- 0136 may touch none of them: it stops and changes nothing if any of lines
 -- 1-24 counts anyone (or, for lines 22-24, any facility) at a real facility.
 -- The sealed QA and demo tenants' fictional staff are counted apart and
@@ -311,15 +322,15 @@ select set_config('zero136.owner_maximums', (
       (10, 0, 0),
       (11, 0, 0),
       (12, 0, 0),
-      (13, 0, 0),
-      (14, 0, 0),
+      (13, 1, 1),
+      (14, 1, 1),
       (15, 0, 0),
       (16, 0, 0),
       (17, 0, 0),
       (18, 0, 0),
-      (19, 0, 0),
-      (20, 0, 0),
-      (21, 0, 0),
+      (19, 9, 9),
+      (20, 9, 9),
+      (21, 1, 1),
       (22, 0, null),
       (23, 0, null),
       (24, 0, null)

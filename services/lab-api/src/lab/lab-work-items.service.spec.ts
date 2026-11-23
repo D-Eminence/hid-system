@@ -234,6 +234,11 @@ describe('LabWorkItemsService.acceptEhrOrder database refusals', () => {
  * answering exactly what the query returns.
  */
 describe('LabWorkItemsService.list order: open work first', () => {
+  // Only the clock is fixed (Lagos 20 Nov 2026, 00:30): the list's window starts on 22 Aug 2026 (Q123 A).
+  beforeEach(() => jest.useFakeTimers({ now: new Date('2026-11-19T23:30:00Z'), doNotFake: ['hrtime', 'nextTick',
+    'performance', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'setTimeout',
+    'clearTimeout'] }));
+  afterEach(() => jest.useRealTimers());
   const RECEIVES = 'select lab.order_route_receives_here() as receives, lab.order_routes_here() as routes_here';
   const row = (n: number, open_work = true) => ({ id: `61000000-0000-4000-8000-${String(n).padStart(12, '0')}`, patient_id: patientId,
     facility_id: facilityId, ordering_facility_id: facilityId, source_ehr_order_id: orderId, source_ehr_order_version: '1',
@@ -274,6 +279,14 @@ describe('LabWorkItemsService.list order: open work first', () => {
     expect(WORK_LIST_QUERY).not.toMatch(/order by w\.accepted_at asc,w\.id asc/);
   });
 
+  it('reaches open work of any age and done work received from the Lagos midnight of $2 (Q123 A), before the order and limit', () => {
+    // The window applies to the 200 rows chosen, after open_work is worked out and before the order and the limit.
+    expect(flat.slice(0, cut)).toContain(" group by w.id) x where x.open_work or x.accepted_at >= "
+      + "($2::date::timestamp at time zone 'Africa/Lagos') order by ");
+    expect(flat.match(/\$2/g)).toHaveLength(1);
+    expect(flat.match(/\$\d/g)!.every((p) => p === '$1' || p === '$2')).toBe(true);
+  });
+
   it('counts work as done only when every requested test has a released, current, valid result', () => {
     // A work item is open unless every requested test it has is among the released ones; with no requested test
     // the one row of the left join has none, so it is open.
@@ -303,6 +316,16 @@ describe('LabWorkItemsService.list order: open work first', () => {
     for (const test of ['rel.facility_id=$1::uuid', 'e.facility_id=$1::uuid', 'w.facility_id=$1::uuid']) expect(flat).toContain(test);
   });
 
+  it('works the window\'s first day out on each request, so a running service moves on at the Lagos midnight', async () => {
+    jest.setSystemTime(new Date('2026-11-19T22:30:00Z'));
+    const { service, workListValues } = build([]);
+    const before = await service.list(reader);
+    jest.setSystemTime(new Date('2026-11-19T23:30:00Z'));
+    const after = await service.list(reader);
+    expect([before.since, after.since]).toEqual(['2026-08-21', '2026-08-22']);
+    expect(workListValues).toEqual([[facilityId, '2026-08-21'], [facilityId, '2026-08-22']]);
+  });
+
   it('answers what the query returns, in its order and shape: 250 items with 30 open answers all 30 first', async () => {
     // What Postgres answers for 250 work items of which 30 are open (indexes 0-9, 120-129, 240-249):
     // the 30 open oldest first, then the 170 newest done.
@@ -317,13 +340,15 @@ describe('LabWorkItemsService.list order: open work first', () => {
     expect(answer.items.slice(30).map((item) => item.id)).toEqual(doneRows.map((r) => r.id));
     // The newest open work (which the old query left out once 200 older rows existed) is answered.
     expect(answer.items.map((item) => item.id)).toContain(row(249).id);
-    // One work-list read, bound to the session's own facility; the answer's shape is as before.
+    // One work-list read, bound to the session's own facility and the window's first day (Q123 A); the items'
+    // shape is as before, and the answer says where the window starts.
     expect(statements.filter((sql) => sql.includes('from lab.work_items w'))).toEqual([WORK_LIST_QUERY]);
-    expect(workListValues).toEqual([[facilityId]]);
+    expect(workListValues).toEqual([[facilityId, '2026-08-22']]);
+    expect(answer.since).toBe('2026-08-22');
     expect(Object.keys(answer.items[0]!)).toEqual(['id', 'patientId', 'facilityId', 'sourceEhrOrderVersion', 'status',
       'priority', 'acceptedAt', 'version', 'sourceEhrOrderId', 'testName', 'accessionId', 'accessionNumber', 'specimenStatuses',
       'openWork', 'clinicalIndication']);
-    expect(Object.keys(answer)).toEqual(['items', 'crossFacilityOrders', 'crossFacilityWork']);
+    expect(Object.keys(answer)).toEqual(['items', 'since', 'crossFacilityOrders', 'crossFacilityWork']);
     // Same-facility rows name no patient on the list, as before: no audit row.
     expect(audit.recordWithClient).not.toHaveBeenCalled();
   });
