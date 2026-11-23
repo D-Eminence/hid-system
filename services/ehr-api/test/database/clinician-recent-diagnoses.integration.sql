@@ -4,7 +4,8 @@
 --      facility, newest first, with a count; the same pick again updates
 --      its display, time and count; no code records nothing; a member
 --      without ehr.diagnosis.write records and reads nothing; the record
---      never waits for another save's recording lock;
+--      takes the membership's recording lock and, as written, tries it
+--      before it writes and returns when it is taken;
 --   2. the same account at another facility (another membership) sees its
 --      own picks only; no session, a malformed one, or a membership
 --      presented at another facility reads and records nothing;
@@ -16,12 +17,19 @@
 -- reset role); only the direct counts of the table run as its owner. The
 -- concurrency of the record (it never waits; a save that finds the
 -- membership's recording lock taken skips its record) needs two sessions,
--- which no suite here holds (none uses dblink or a second connection), so
--- it is proven outside this suite. Here 1c checks the record takes the
--- lock, and 1f checks the function as stored: it tries the lock with
--- pg_try_advisory_xact_lock(7409, ...) before it writes, returns when the
--- lock is taken, and takes no waiting advisory lock. A blocking
--- pg_advisory_xact_lock in its place, or the early return dropped, fails 1f.
+-- which no suite here holds (none uses dblink or a second connection). The
+-- runtime verifier (services/ehr-api/scripts/verify-prescription-details-
+-- runtime.mjs) checks it: one session records a pick and stays open, the
+-- other records for the same membership with lock_timeout 1500 ms and must
+-- come back at once, recording nothing and raising nothing. Here 1c checks
+-- the record takes the lock, and 1f checks only the function's text as
+-- stored: the try-lock call pg_try_advisory_xact_lock(7409,
+-- hashtext(membership_value::text)) with its early return, before the
+-- insert and the delete, and no plain pg_advisory_lock or
+-- pg_advisory_xact_lock call. The early return dropped, or a blocking
+-- pg_advisory_xact_lock written plainly, fails 1f; a wait added another way
+-- (a row lock before the try, a quoted function name) passes 1f and fails
+-- the verifier.
 -- Synthetic values only: uuid prefix 151, example.invalid addresses.
 set plpgsql.variable_conflict = error;
 begin;
@@ -125,16 +133,17 @@ select pg_temp.as_member('staff:151-pharmacist', '15100000-0000-4000-8000-000000
 set local role hid_ehr_runtime;
 select pg_temp.expect('1e another account''s membership in the session reads nothing', '', pg_temp.recent());
 reset role;
-select pg_temp.expect('1f the record never waits: before it writes, it tries the membership''s recording lock '
-  || '(pg_try_advisory_xact_lock, class key 7409) and returns when the lock is taken; it takes no waiting '
-  || 'advisory lock', 'returns when taken: true|tried before the writes: true|waiting advisory lock: false',
-  (select 'returns when taken: '
+select pg_temp.expect('1f the function as written: the try-lock call pg_try_advisory_xact_lock(7409, '
+  || 'hashtext(membership_value::text)) with its early return, before the insert and the delete; no plain '
+  || 'pg_advisory_lock or pg_advisory_xact_lock call (the wait itself is checked by the runtime verifier)',
+  'try-lock call with early return: true|before the insert and the delete: true|plain waiting lock call: false',
+  (select 'try-lock call with early return: '
           || (proc.prosrc ~ 'if\s+not\s+pg_try_advisory_xact_lock\(7409,\s*hashtext\(membership_value::text\)\)\s+then\s+return;\s+end\s+if;')::text
-          || '|tried before the writes: '
+          || '|before the insert and the delete: '
           || (strpos(proc.prosrc, 'pg_try_advisory_xact_lock(7409,')
                 between 1 and least(strpos(proc.prosrc, 'insert into ehr.clinician_recent_diagnoses'),
                                     strpos(proc.prosrc, 'delete from ehr.clinician_recent_diagnoses')) - 1)::text
-          || '|waiting advisory lock: '
+          || '|plain waiting lock call: '
           || (proc.prosrc ~* 'pg_advisory(_xact)?_lock(_shared)?\s*\(')::text
      from pg_proc proc where proc.oid = 'ehr.record_recent_diagnosis(text,text,text)'::regprocedure));
 

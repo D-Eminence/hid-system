@@ -3,7 +3,7 @@ import type { QueryResultRow } from 'pg';
 import { AuditService } from '../../audit/audit.service';
 import { DomainProblem } from '../../common/problem';
 import { DatabaseService, type StaffTransactionContext } from '../../database/database.service';
-import { catalogUnavailable } from './catalog.service';
+import { diagnosisSearchUnavailable } from './catalog.service';
 
 export interface RecentDiagnosis {
   codeSystem: string;
@@ -40,8 +40,10 @@ export const RECENT_DIAGNOSES_SQL = `select code_system, code, display, last_use
  * membership, and only while it holds ehr.diagnosis.write there; the list
  * holds no patient. The read and its audit row (ehr.terminology.recent-read,
  * the count only) commit together. A schema without 0151, or any database
- * failure, is 503 CATALOG_UNAVAILABLE, on which the screen shows the empty
- * field as before.
+ * failure, is 503 CATALOG_UNAVAILABLE with the diagnosis search's words
+ * ("Diagnosis search is not available right now.", no advice: trying again
+ * does not help while 0151 is not there, and a name alone is not accepted
+ * yet), on which the screen shows the empty field as before.
  */
 @Injectable()
 export class RecentDiagnosesService {
@@ -82,7 +84,7 @@ export class RecentDiagnosesService {
       if (code !== '42883') {
         this.logger.warn(`Recent diagnoses could not be read (${typeof code === 'string' ? code : 'no database code'})`);
       }
-      throw catalogUnavailable();
+      throw diagnosisSearchUnavailable();
     }
   }
 }

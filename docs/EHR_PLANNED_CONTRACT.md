@@ -2072,7 +2072,14 @@ live table is altered.
     PostgreSQL keeps the one-key and two-key key spaces apart, so class key
     7409 cannot collide with any of them. So two saves of one clinician
     cannot deadlock on their picks or on the 200-cap trim; the later one
-    may skip its record.
+    may skip its record. The runtime verifier
+    (`verify-prescription-details-runtime.mjs`) checks this with two
+    sessions as the EHR runtime: while one save of the doctor's has
+    recorded a pick and is still open, another records for the same
+    membership with `lock_timeout` 1500 ms; it must come back in under
+    500 ms, record nothing and raise nothing, and once the first commits
+    its next record is kept. The database suite's case 1f only checks the
+    function as written (the try-lock call and the early return).
   - `ehr.recent_diagnoses(limit)` gives the session's membership's picks at
     its facility, newest first, and none without the permission. 22023
     `RECENT_DIAGNOSES_INVALID` outside 1-50.
@@ -2096,7 +2103,10 @@ live table is altered.
     `{ resultCount }` only) commit in one transaction. A read whose audit
     row cannot be written is refused.
   - A schema without 0151, or any database failure, answers 503
-    `CATALOG_UNAVAILABLE`. The screen then shows the empty field as before.
+    `CATALOG_UNAVAILABLE` "Diagnosis search is not available right now.",
+    the search's words, with no advice (trying again does not help while
+    0151 is not there, and a name alone is not accepted yet). The screen
+    then shows the empty field as before.
   - A refusal is audited by the interceptor, as for the search.
 - **Not in this slice:** diagnoses by name only and `codeStatus`.
 

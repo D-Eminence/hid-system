@@ -597,11 +597,17 @@ describe('ORD-9 (0151): recent diagnoses', () => {
     expect(JSON.stringify(audits)).not.toMatch(/1F40|B50|Malaria/);
   });
 
-  it.each(['42883', '42P01', '57014', '42501'])('%s is 503 CATALOG_UNAVAILABLE; a schema without 0151 is not logged', async (code) => {
+  it.each(['42883', '42P01', '57014', '42501'])('%s is 503 CATALOG_UNAVAILABLE in the diagnosis search\'s words; a schema '
+    + 'without 0151 is not logged', async (code) => {
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const { service, audits } = fakeStaff(databaseError(code));
     const problem = await problemOf(service.list(caller, 20));
-    expect([problem.getStatus(), problem.code]).toEqual([503, 'CATALOG_UNAVAILABLE']);
+    // The same words as the diagnosis search's 503 (#320), so no advice: trying again does not help while 0151 is
+    // not there, and a name alone is not accepted yet, so no "type the name instead" either.
+    expect([problem.getStatus(), problem.code, problem.message]).toEqual([503, 'CATALOG_UNAVAILABLE',
+      'Diagnosis search is not available right now.']);
+    expect(problem.message).toBe(diagnosisSearchUnavailable().message);
+    expect(problem.message).not.toMatch(/try|again|minute|type|instead/i);
     expect(audits).toEqual([]);
     expect(warn).toHaveBeenCalledTimes(code === '42883' ? 0 : 1);
     warn.mockRestore();
@@ -611,7 +617,8 @@ describe('ORD-9 (0151): recent diagnoses', () => {
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const { service } = fakeStaff([], databaseError('53300'));
     const problem = await problemOf(service.list(caller, 20));
-    expect([problem.getStatus(), problem.code]).toEqual([503, 'CATALOG_UNAVAILABLE']);
+    expect([problem.getStatus(), problem.code, problem.message]).toEqual([503, 'CATALOG_UNAVAILABLE',
+      'Diagnosis search is not available right now.']);
     warn.mockRestore();
   });
 });
