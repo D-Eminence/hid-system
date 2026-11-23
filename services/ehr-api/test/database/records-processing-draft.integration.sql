@@ -457,15 +457,25 @@ select pg_temp.expect('6m the same with ON CONFLICT does nothing', 'ok',
       '112d1000-0000-4000-8000-000000000001', '112d3000-0000-4000-8000-000000000001', 'other', 'completed', now(), now(),
       'Imported paper records (Migrate)', true)
     on conflict (patient_id, facility_id) where imported_paper_records do nothing returning 'inserted'$q$));
--- The shape check under direct care (under healthcare-operations the D4
--- guard, below, refuses this patient first: no dedicated grant for P2).
-select pg_temp.as_staff(1, 'direct-care');
-select pg_temp.expect('6n an imported encounter in progress', '23514',
-  split_part(pg_temp.try($q$insert into ehr.encounters (patient_id, facility_id, created_by, created_by_membership_id,
+-- The shape check under direct care, where the D4 guard (below) does not
+-- apply: written by clinician 8, P1's direct-care writer (3e, 3f), as the EHR
+-- API writes a visit. The version trigger (ehr.capture_record_version, run as
+-- the owner) inserts into ehr.record_versions, whose insert policy needs the
+-- writer's own write_records context for the patient; an owner that neither
+-- is a superuser nor bypasses row-level security meets that policy, so the
+-- writer must be one who may write P1's records (doctor 1 has no direct-care
+-- grant for any patient, and P2 has none at all). The shape check refuses the
+-- row before P1's unique imported encounter at A is reached (CHECK constraints
+-- are checked before the unique index), and the case names the constraint.
+select pg_temp.as_staff(8, 'direct-care');
+select pg_temp.expect('6n an imported encounter in progress',
+  '23514 new row for relation "encounters" violates check constraint "encounters_imported_paper_records_shape"',
+  pg_temp.try($q$insert into ehr.encounters (patient_id, facility_id, created_by, created_by_membership_id,
       encounter_type, status, started_at, chief_complaint, imported_paper_records)
-    values ('112d5000-0000-4000-8000-000000000002', '112d6000-0000-4000-8000-000000000002',
-      '112d1000-0000-4000-8000-000000000001', '112d3000-0000-4000-8000-000000000001', 'other', 'in_progress', now(),
-      'Imported paper records (Migrate)', true) returning 'ok'$q$), ' ', 1));
+    values ('112d5000-0000-4000-8000-000000000001', '112d6000-0000-4000-8000-000000000002',
+      '112d1000-0000-4000-8000-000000000008', '112d3000-0000-4000-8000-000000000008', 'other', 'in_progress', now(),
+      'Imported paper records (Migrate)', true) returning 'ok'$q$));
+select pg_temp.as_staff(1, 'direct-care');
 select set_config('app.change_reason', 'Synthetic flag change', true);
 select pg_temp.expect('6o the flag cannot be cleared', '55000 IMPORTED_PAPER_RECORDS_FIXED',
   pg_temp.try(format($q$update ehr.encounters set imported_paper_records = false where id = %L returning 'ok'$q$,

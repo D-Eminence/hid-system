@@ -1158,6 +1158,34 @@ begin
 end
 $$;
 
+-- The OCR job lifecycle below needs what production's OCR owner has: an
+-- owner of the OCR SECURITY DEFINER commands that bypasses row-level security
+-- (docs/INTERFACE_CONTRACT.md, expected owner attributes, release checklist
+-- P8). The job trigger ocr.record_job_event runs as that owner and inserts
+-- into ocr.job_events, which forces row-level security and has no INSERT
+-- policy at all (0013); and the worker commands, also run as that owner, see
+-- no job in a worker session, which names no facility. So under an owner that
+-- neither is a superuser nor bypasses row-level security, every job insert and
+-- status change is refused whatever the caller's session settings or role.
+-- For these cases only, each such OCR command is given to the session user (a
+-- superuser, as for every suite) and given back after them; under an owner
+-- that already bypasses row-level security nothing changes. The rest of this
+-- suite runs with the schema's own owner.
+reset role;
+create temporary table ocr_command_owners on commit drop as
+select p.oid::regprocedure::text as command, p.proowner::regrole::text as owner
+  from pg_proc p join pg_roles r on r.oid = p.proowner
+ where p.pronamespace = 'ocr'::regnamespace and p.prosecdef and not (r.rolsuper or r.rolbypassrls);
+do $$
+declare command_row record;
+begin
+  for command_row in select command from ocr_command_owners order by command loop
+    execute format('alter function %s owner to session_user', command_row.command);
+  end loop;
+end
+$$;
+set role hid_schema_test_runtime;
+
 insert into ocr.jobs (
   id, facility_id, document_id, patient_id, source_object_version_id,
   source_sha256_hex, idempotency_key, request_sha256, provider, max_attempts,
@@ -1424,6 +1452,18 @@ begin
   end if;
 end
 $$;
+
+-- The OCR commands go back to their owner.
+reset role;
+do $$
+declare command_row record;
+begin
+  for command_row in select command, owner from ocr_command_owners order by command loop
+    execute format('alter function %s owner to %I', command_row.command, command_row.owner);
+  end loop;
+end
+$$;
+set role hid_schema_test_runtime;
 
 select set_config('app.purpose_of_use', 'direct-care', true);
 select set_config('app.correlation_id', 'schema-test-lab-import-0001', true);

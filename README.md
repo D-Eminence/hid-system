@@ -95,9 +95,13 @@ registry, reads your npm settings (`~/.npmrc`) and writes to your npm cache
 and npm log folder (usually `~/.npm`). `--prepare` cannot be combined with
 `--check-only`.
 
-The rehearsal migrates a fresh database and runs every database suite on it:
-`services/ehr-api/database/tests/*.integration.sql` and
-`services/ehr-api/test/database/*.integration.sql`. Each suite is one
+The rehearsal migrates a fresh database and runs every database suite:
+`services/ehr-api/database/tests/*.integration.sql` on the migrated database
+itself, and `services/ehr-api/test/database/*.integration.sql` on a copy of it
+whose schemas, tables, functions and owner policies belong to a role that is
+neither a superuser nor allowed to bypass row-level security, as production's
+migration login. A superuser owner skips forced row-level security, so a
+suite could pass under it and still fail in production. Each suite is one
 transaction that ends in `ROLLBACK`, judged by psql's exit status; a failure
 names every failed suite and its first error. CI's "Synthetic migration
 rehearsal" job runs the same rehearsal, so the suites run in CI too.
