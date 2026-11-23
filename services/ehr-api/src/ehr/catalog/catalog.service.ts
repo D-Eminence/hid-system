@@ -31,8 +31,8 @@ export interface CatalogListStatus {
 export interface CatalogStatus {
   medicines: CatalogListStatus;
   labTests: CatalogListStatus;
-  /** ORD-9 fills this. */
-  diagnoses: { available: false; release: null };
+  /** ORD-9 (0150): the ICD-11 release the diagnosis search uses, when one is loaded. */
+  diagnoses: { available: boolean; release: string | null; fileSha256: string | null };
   /** The name-only lab request (a later ORD-7 slice). */
   labTestNameOnly: false;
   /** ORD-9. */
@@ -71,6 +71,32 @@ export interface CatalogLabTest {
   scope: 'national';
 }
 
+/** ORD-9: one ICD-11 entry, WHO's title verbatim (CC BY-ND 3.0 IGO). */
+export interface TerminologyDiagnosis {
+  codeSystem: 'ICD-11';
+  code: string;
+  display: string;
+  /** Our own other name that matched, or null. */
+  matchedName: string | null;
+}
+
+export interface TerminologyDiagnosisAnswer {
+  /** "ICD-11 MMS 2026-01"; null when nothing matched. */
+  release: string | null;
+  more: boolean;
+  results: TerminologyDiagnosis[];
+  /** q shaped like an ICD-10 code, upper-cased: accepted as typed (Q124 A); no ICD-10 title is shipped or looked up. */
+  typedIcd10: { codeSystem: 'ICD-10'; code: string } | null;
+}
+
+interface DiagnosisRow extends QueryResultRow {
+  code: string;
+  title: string;
+  matched_name: string | null;
+  list_version: string;
+  more: boolean;
+}
+
 export interface CatalogSearchAnswer<Item> {
   /** The active list's version; null when nothing matched. */
   listVersion: string | null;
@@ -79,7 +105,7 @@ export interface CatalogSearchAnswer<Item> {
 }
 
 interface StatusRow extends QueryResultRow {
-  kind: 'medicine' | 'lab_test';
+  kind: 'medicine' | 'lab_test' | 'diagnosis';
   available: boolean;
   list_version: string | null;
   approved_day: string | null;
@@ -121,6 +147,8 @@ export const STATUS_SQL = `select kind, available, list_version,
 export const MEDICINES_SQL = `select list_id, generic_name, strength, dose_form, dose_form_text, routes,
   common_adult_dose, matched_name, source, list_version, more
   from ehr.search_catalog_medicines($1, $2, $3, $4)`;
+export const DIAGNOSES_SQL = `select code, title, matched_name, list_version, more
+  from ehr.search_catalog_diagnoses($1, $2)`;
 export const LAB_TESTS_SQL = `select list_id, code_system, code, display, other_names, specimen, category, matched_name,
   list_version, more
   from ehr.search_catalog_lab_tests($1, $2)`;
@@ -156,9 +184,20 @@ export function searchTextTooShort(): DomainProblem {
   return new DomainProblem(400, 'CATALOG_SEARCH_TEXT_TOO_SHORT', 'Type at least 2 letters to search.');
 }
 
-export function searchTextNotAllowed(): DomainProblem {
-  return new DomainProblem(400, 'CATALOG_SEARCH_TEXT_NOT_ALLOWED',
-    'Search by medicine or test name. Do not type a Health ID or NIN here.');
+export function searchTextNotAllowed(list: 'catalogue' | 'diagnoses' = 'catalogue'): DomainProblem {
+  return new DomainProblem(400, 'CATALOG_SEARCH_TEXT_NOT_ALLOWED', list === 'diagnoses'
+    ? 'Search by diagnosis name or code. Do not type a Health ID or NIN here.'
+    : 'Search by medicine or test name. Do not type a Health ID or NIN here.');
+}
+
+/**
+ * An ICD-10 code as typed (planned contract, ORD-9): a letter, two digits or
+ * a digit and a letter, then optionally a dot and up to 4 more. No ICD-11
+ * code has this shape (an ICD-11 code's second character is a letter).
+ */
+const ICD10_CODE = /^[A-Za-z](?:[0-9]{2}|[0-9][A-Za-z])(?:\.[0-9A-Za-z]{1,4})?$/;
+export function typedIcd10(q: string): { codeSystem: 'ICD-10'; code: string } | null {
+  return ICD10_CODE.test(q) ? { codeSystem: 'ICD-10', code: q.toUpperCase() } : null;
 }
 
 export function catalogUnavailable(): DomainProblem {
@@ -204,13 +243,18 @@ export class CatalogService {
     };
     const medicines = list('medicine');
     const labTests = list('lab_test');
+    const diagnosisList = list('diagnosis');
+    const availableKinds = new Set(([['medicine', medicines], ['lab_test', labTests], ['diagnosis', diagnosisList]] as const)
+      .filter(([, listStatus]) => listStatus.available).map(([kind]) => kind));
     const attribution = [...new Set(rows
-      .filter((row) => (row.kind === 'medicine' ? medicines : labTests).available)
+      .filter((row) => availableKinds.has(row.kind))
       .flatMap((row) => row.attribution ?? []))];
     return {
       medicines,
       labTests,
-      diagnoses: { available: false, release: null },
+      diagnoses: { available: diagnosisList.available,
+        release: diagnosisList.available ? `ICD-11 MMS ${diagnosisList.version}` : null,
+        fileSha256: diagnosisList.fileSha256 },
       labTestNameOnly: false,
       diagnosisNameOnly: false,
       classDuplicateCheck: false,
@@ -265,13 +309,28 @@ export class CatalogService {
   }
 
   /**
+   * ORD-9 (0150): the active ICD-11 release's entries for q, in the
+   * contract's shape, and q as an ICD-10 code when it is shaped like one.
+   */
+  async searchDiagnoses(membershipKey: string, query: SearchCatalogLabTestsQueryDto): Promise<TerminologyDiagnosisAnswer> {
+    const q = this.admit(membershipKey, query.q, 'diagnoses');
+    const rows = await this.search<DiagnosisRow>(DIAGNOSES_SQL, [q, query.limit]);
+    return {
+      release: rows[0] ? `ICD-11 MMS ${rows[0].list_version}` : null,
+      more: rows.some((row) => row.more),
+      results: rows.map((row) => ({ codeSystem: 'ICD-11', code: row.code, display: row.title, matchedName: row.matched_name })),
+      typedIcd10: typedIcd10(q),
+    };
+  }
+
+  /**
    * The search text's checks, in the contract's order (too short, then a
    * person's identifier), and then this membership's search count. A
    * refused text does not count.
    */
-  private admit(membershipKey: string, q: string | undefined): string {
+  private admit(membershipKey: string, q: string | undefined, list: 'catalogue' | 'diagnoses' = 'catalogue'): string {
     if (q === undefined || q.length < 2) throw searchTextTooShort();
-    if (looksLikePersonIdentifier(q)) throw searchTextNotAllowed();
+    if (looksLikePersonIdentifier(q)) throw searchTextNotAllowed(list);
     const now = Date.now();
     let entry = this.searches.get(membershipKey);
     if (entry === undefined || entry.windowEnds <= now) {

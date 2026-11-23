@@ -1,0 +1,138 @@
+\set ON_ERROR_STOP on
+-- 0150 (ORD-9, first slice): the ICD-11 diagnosis list and its search.
+-- Rollback-only.
+--   1. after 0001-0150: the list is empty, the status answers for three
+--      lists, the versions take the kind 'diagnosis'; the table is the
+--      owner's only, the search the EHR and schema test runtimes' only;
+--   2. with a release loaded by hand (as the governed loader will): a word
+--      of the title, our other name (named when it starts q and the title
+--      does not), the code, two words; entries starting with q first, then
+--      shorter titles; limit and more; an inactive release never offered;
+--   3. refusals: q of 1 or 101 characters, limit 0 or 26 (22023
+--      CATALOG_SEARCH_INVALID); brackets and operators answer nothing; an
+--      extension code, a bad chapter and a second active release are
+--      refused; a loaded entry never changes;
+--   4. the EHR runtime may search and read no table.
+-- Synthetic version ids: prefix c150. The codes and titles are ICD-11's
+-- (WHO, CC BY-ND 3.0 IGO), verbatim; the other names are ours.
+set plpgsql.variable_conflict = error;
+begin;
+
+create temporary table diagnosis_cases (
+  seq serial, name text primary key, expected text not null, actual text
+) on commit drop;
+grant select, insert on diagnosis_cases to public;
+grant usage on sequence diagnosis_cases_seq_seq to public;
+create function pg_temp.expect(case_name text, expected text, actual text) returns void language sql as $$
+  insert into diagnosis_cases (name, expected, actual) values (case_name, expected, coalesce(actual, 'null'));
+$$;
+grant execute on function pg_temp.expect(text, text, text) to public;
+create function pg_temp.refusal(statement text) returns text language plpgsql as $$
+begin
+  execute statement;
+  return 'none';
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end;
+$$;
+grant execute on function pg_temp.refusal(text) to public;
+create function pg_temp.found(q text, lim integer) returns text language sql as $$
+  select coalesce(string_agg(hit.code || coalesce('(' || hit.matched_name || ')', ''), ' ' order by ordinality), '')
+         || ' more=' || coalesce(bool_or(hit.more)::text, 'false')
+    from ehr.search_catalog_diagnoses(q, lim) with ordinality as hit;
+$$;
+grant execute on function pg_temp.found(text, integer) to public;
+
+-- 1. After 0001-0150.
+select pg_temp.expect('1a the list is empty; the status answers for three lists', '0|diagnosis f, lab_test f, medicine f',
+  (select count(*) from ehr.catalog_diagnoses) || '|'
+  || (select string_agg(format('%s %s', kind, available), ', ' order by kind) from ehr.catalog_status()));
+select pg_temp.expect('1b a search before any release answers nothing', ' more=false', pg_temp.found('malaria', 10));
+select pg_temp.expect('1c the table is the owner''s only; the search the EHR runtime''s, not the pharmacy runtime''s',
+  '0 true false',
+  (select count(*)::text from pg_class relation, lateral aclexplode(coalesce(relation.relacl,
+     acldefault('r', relation.relowner))) acl
+    where relation.oid = 'ehr.catalog_diagnoses'::regclass and acl.grantee <> relation.relowner)
+  || ' ' || has_function_privilege('hid_ehr_runtime', 'ehr.search_catalog_diagnoses(text,integer)', 'EXECUTE')
+  || ' ' || has_function_privilege('hid_pharmacy_runtime', 'ehr.search_catalog_diagnoses(text,integer)', 'EXECUTE'));
+
+-- 2. A release loaded by hand, as the governed loader will.
+insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference, approved_at, active) values
+  ('c1500000-0000-4000-8000-000000000001', 'diagnosis', '2026-01', repeat('d', 64), 'synthetic sign-off reference',
+   now(), true),
+  ('c1500000-0000-4000-8000-000000000002', 'diagnosis', '2025-01', repeat('e', 64), 'synthetic older sign-off',
+   now() - interval '300 days', false);
+insert into ehr.catalog_diagnoses (version_id, code, title, other_names, chapter, residual) values
+  ('c1500000-0000-4000-8000-000000000001', '1F40', 'Malaria due to Plasmodium falciparum', 'falciparum malaria', '01', false),
+  ('c1500000-0000-4000-8000-000000000001', '1F40.Z', 'Malaria due to Plasmodium falciparum, unspecified', '', '01', true),
+  ('c1500000-0000-4000-8000-000000000001', '1F4Z', 'Malaria, unspecified', '', '01', true),
+  ('c1500000-0000-4000-8000-000000000001', 'KA64.20', 'Congenital falciparum malaria', '', '19', false),
+  ('c1500000-0000-4000-8000-000000000001', '1A07', 'Typhoid fever', 'enteric fever; typhoid', '01', false),
+  ('c1500000-0000-4000-8000-000000000001', '5A11', 'Type 2 diabetes mellitus', 'dm2; t2dm; type 2 dm', '05', false),
+  ('c1500000-0000-4000-8000-000000000001', 'BA00', 'Essential hypertension', '', '11', false),
+  ('c1500000-0000-4000-8000-000000000002', '1F41', 'Malaria due to Plasmodium vivax', '', '01', false);
+
+select pg_temp.expect('2a a word of the title: our other name starting q ranks 1F40 first and is named, then shorter titles',
+  '1F40(falciparum malaria) KA64.20 1F40.Z more=false', pg_temp.found('falciparum', 10));
+select pg_temp.expect('2b a title starting with q first, then shorter titles; an inactive release never offered',
+  '1F4Z 1F40 1F40.Z KA64.20 more=false', pg_temp.found('malaria', 10));
+select pg_temp.expect('2c our other name only', '5A11(t2dm) more=false', pg_temp.found('t2dm', 10));
+select pg_temp.expect('2d a title that starts with q is not named by another name', '1A07 more=false',
+  pg_temp.found('typhoid', 10));
+select pg_temp.expect('2e an other name that matched where the title did not', '1A07(enteric fever) more=false',
+  pg_temp.found('enteric', 10));
+select pg_temp.expect('2f the code, and a code''s parts', '1F40 1F40.Z more=false|1F40.Z more=false',
+  pg_temp.found('1F40', 10) || '|' || pg_temp.found('1f40.z', 10));
+select pg_temp.expect('2g two words', '5A11 more=false', pg_temp.found('diabetes type 2', 10));
+select pg_temp.expect('2h limit and more', '1F4Z more=true', pg_temp.found('malaria', 1));
+select pg_temp.expect('2i the answer carries the release', '2026-01 Malaria due to Plasmodium falciparum',
+  (select format('%s %s', list_version, title) from ehr.search_catalog_diagnoses('1F40', 1)));
+select pg_temp.expect('2j the status counts what is offered', 'diagnosis t 2026-01 7',
+  (select format('%s %s %s %s', kind, available, list_version, offered) from ehr.catalog_status() where kind = 'diagnosis'));
+
+-- 3. Refusals.
+select pg_temp.expect('3a q of 1 or 101 characters, limit 0 or 26', '22023 CATALOG_SEARCH_INVALID|22023 CATALOG_SEARCH_INVALID|'
+  || '22023 CATALOG_SEARCH_INVALID|22023 CATALOG_SEARCH_INVALID',
+  pg_temp.refusal($q$select * from ehr.search_catalog_diagnoses('m', 10)$q$) || '|'
+  || pg_temp.refusal(format('select * from ehr.search_catalog_diagnoses(%L, 10)', repeat('m', 101))) || '|'
+  || pg_temp.refusal($q$select * from ehr.search_catalog_diagnoses('malaria', 0)$q$) || '|'
+  || pg_temp.refusal($q$select * from ehr.search_catalog_diagnoses('malaria', 26)$q$));
+select pg_temp.expect('3b brackets and operators answer nothing, never an error', ' more=false| more=false',
+  pg_temp.found('((', 10) || '|' || pg_temp.found('&|!', 10));
+select pg_temp.expect('3c an extension code, a code of another shape and a bad chapter are refused', '23514 23514 23514',
+  left(pg_temp.refusal($q$insert into ehr.catalog_diagnoses (version_id, code, title, chapter)
+       values ('c1500000-0000-4000-8000-000000000001', 'XN6P4', 'x', 'X')$q$), 5) || ' '
+  || left(pg_temp.refusal($q$insert into ehr.catalog_diagnoses (version_id, code, title, chapter)
+       values ('c1500000-0000-4000-8000-000000000001', 'B50.9', 'x', '01')$q$), 5) || ' '
+  || left(pg_temp.refusal($q$insert into ehr.catalog_diagnoses (version_id, code, title, chapter)
+       values ('c1500000-0000-4000-8000-000000000001', '1A00', 'x', '1')$q$), 5));
+select pg_temp.expect('3d a second active release is refused', '23505',
+  left(pg_temp.refusal($q$update ehr.catalog_versions set active = true
+                          where id = 'c1500000-0000-4000-8000-000000000002'$q$), 5));
+select pg_temp.expect('3e a loaded entry never changes', '55000 55000 55000',
+  left(pg_temp.refusal($q$update ehr.catalog_diagnoses set title = 'x' where code = '1F40'$q$), 5) || ' '
+  || left(pg_temp.refusal($q$delete from ehr.catalog_diagnoses where code = '1F40'$q$), 5) || ' '
+  || left(pg_temp.refusal('truncate ehr.catalog_diagnoses'), 5));
+select pg_temp.expect('3f the versions still refuse a kind of no list', '23514',
+  left(pg_temp.refusal($q$insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference, approved_at)
+       values ('c1500000-0000-4000-8000-000000000009', 'procedure', '1', repeat('f', 64), 'synthetic sign-off', now())$q$), 5));
+
+-- 4. As the EHR runtime: the search answers; the table does not.
+set local role hid_ehr_runtime;
+select pg_temp.expect('4a the EHR runtime searches', '5A11(t2dm) more=false', pg_temp.found('t2dm', 10));
+select pg_temp.expect('4b the EHR runtime reads no table', '42501',
+  left(pg_temp.refusal('select count(*) from ehr.catalog_diagnoses'), 5));
+reset role;
+
+do $$
+declare
+  failures text;
+begin
+  select string_agg(format('%s: expected [%s] got [%s]', name, expected, actual), E'\n' order by seq) into failures
+    from diagnosis_cases where expected is distinct from actual;
+  if failures is not null then
+    raise exception E'0150 diagnosis search suite failed:\n%', failures;
+  end if;
+  raise notice '0150 diagnosis search suite: % cases passed', (select count(*) from diagnosis_cases);
+end $$;
+rollback;

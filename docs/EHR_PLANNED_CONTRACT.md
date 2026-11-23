@@ -1815,6 +1815,51 @@ facility, newest first. `limit` is 1-50, default 20.
 - The patient-evidence change (lane D edits `patient-records/` only for the
   ICD-11 split, agreed with lane C as FR-1 was).
 
+### First slice: the ICD-11 list and its search (0150, draft, not live)
+
+Built on 23 Nov 2026 (lane D), on ORD-7's tables and loader (#318, #319), as
+the design note on hid-system#258 (13:55 UTC) set out. The number 0150 is
+provisional. Nothing is loaded until the clinical lead signs the release
+file's seed in `docs/codes/catalog-approvals.json`.
+
+- **Database (0150):** `ehr.catalog_versions` takes the kind `diagnosis`
+  (ACCESS EXCLUSIVE on that small table, NOWAIT for at most 5 seconds, else
+  55P03 "0150: …"). `ehr.catalog_diagnoses` holds one row per coded entry
+  per release: code, WHO's title verbatim, our other names apart, chapter,
+  and whether the entry is residual. It is append-only. Instead of the
+  planned `ehr.terminology_icd11`, the list shares ORD-7's versions, loader
+  and sign-off.
+- **The seed** `docs/codes/drafts/icd11-mms-2026-01.json` is built by
+  `catalog:build-icd11-seed` from WHO's `SimpleTabulation-ICD-11-MMS-en.zip`
+  (2026-01, sha256 `f1356588…`). That is the file
+  `ocr-worker/src/reading/diagnosis-list.ts` checked its titles against,
+  and all 134 of that list's titles come out the same.
+  - It holds 17,255 entries. Extension codes and blocks are left out, and
+    so are chapter 26 (traditional medicine conditions, 1,120) and section
+    V (functioning, 130). Neither is a diagnosis a clinician picks here
+    (Ola, clinical owner). The seed lists both with why.
+  - Our other names are `DIAGNOSIS_SYNONYMS`' names for coded titles: 65
+    entries have one. Names pointing to a block (HTN, "MP+") are not
+    loaded, as this section says.
+- **Search:** `GET /api/v1/ehr/terminology/diagnoses?q=&limit=` as above,
+  with ORD-7's rules for `q` (6 words, never raw `to_tsquery`, no Health ID
+  or NIN shapes, never logged) and its 429 and cache.
+  - The code matches too, whole or in parts ("1F40", "1f40.z").
+  - Entries whose title or one of our other names starts with `q` come
+    first, then shorter titles. `matchedName` is our other name when it is
+    what matched, or when it starts with `q` and the title does not. So
+    `q=falciparum` gives 1F40 first, named "falciparum malaria", as the
+    example above.
+  - `typedIcd10` is filled for a `q` shaped like an ICD-10 code.
+  - A schema without 0150 answers 503 `CATALOG_UNAVAILABLE`. The catalogue
+    status fills `diagnoses: { available, release, fileSha256 }`.
+- **Measured** with the full release loaded on throwaway PostgreSQL 16: the
+  load takes about 0.4 s; searches take 4–42 ms, the broadest two-letter `q`
+  included.
+- **Not in this slice:** recent diagnoses, diagnoses by name only and
+  `codeStatus`, which alter `ehr.diagnoses` and need a lock plan.
+
+
 ### Target
 
 Release B (0145).

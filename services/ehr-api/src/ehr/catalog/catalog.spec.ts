@@ -7,12 +7,12 @@ import type { HidRequest } from '../../common/request-context';
 import { createValidationPipe } from '../../common/validation-pipe';
 import type { DatabaseService } from '../../database/database.service';
 import { EhrModule } from '../ehr.module';
-import { CATALOG_CACHE_CONTROL, CatalogController } from './catalog.controller';
-import { SearchCatalogLabTestsQueryDto, SearchCatalogMedicinesQueryDto } from './catalog.dto';
+import { CATALOG_CACHE_CONTROL, CatalogController, TerminologyController } from './catalog.controller';
+import { SearchCatalogLabTestsQueryDto, SearchCatalogMedicinesQueryDto, SearchDiagnosesQueryDto } from './catalog.dto';
 import { CatalogModule } from './catalog.module';
 import {
-  CATALOG_SEARCHES_PER_WINDOW, CATALOG_SEARCH_WINDOW_MS, CatalogService, LAB_TESTS_SQL, MEDICINES_SQL, STATUS_SQL,
-  looksLikePersonIdentifier, medicineDisplay,
+  CATALOG_SEARCHES_PER_WINDOW, CATALOG_SEARCH_WINDOW_MS, CatalogService, DIAGNOSES_SQL, LAB_TESTS_SQL, MEDICINES_SQL,
+  STATUS_SQL, looksLikePersonIdentifier, medicineDisplay, typedIcd10,
 } from './catalog.service';
 
 // Fictional identifiers only. Medicine and test names are list facts, not patient data.
@@ -67,7 +67,7 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
 
     it('is registered in the EHR module', () => {
       expect(Reflect.getMetadata('imports', EhrModule)).toContain(CatalogModule);
-      expect(Reflect.getMetadata('controllers', CatalogModule)).toEqual([CatalogController]);
+      expect(Reflect.getMetadata('controllers', CatalogModule)).toEqual([CatalogController, TerminologyController]);
       expect(Reflect.getMetadata(PATH_METADATA, CatalogController)).toBe('ehr/catalog');
     });
 
@@ -175,7 +175,7 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       await expect(new CatalogService(database).status()).resolves.toEqual({
         medicines: { available: false, version: null, approvedAt: null, fileSha256: null },
         labTests: { available: false, version: null, approvedAt: null, fileSha256: null },
-        diagnoses: { available: false, release: null },
+        diagnoses: { available: false, release: null, fileSha256: null },
         labTestNameOnly: false, diagnosisNameOnly: false, classDuplicateCheck: false,
         attribution: [],
       });
@@ -339,6 +339,87 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
         await problemOf(service.searchMedicines(membershipA, medicines({ q: 'a' })));
       }
       await expect(service.searchMedicines(membershipA, medicines())).resolves.toMatchObject({ items: [] });
+    });
+  });
+
+  describe('ORD-9 (0150): the ICD-11 diagnosis search', () => {
+    const diagnoses = (q?: string, limit = 10) => Object.assign(new SearchDiagnosesQueryDto(), { q, limit });
+
+    it('GET ehr/terminology/diagnoses: ehr.diagnosis.write, refusals audited only, in the catalogue module', () => {
+      const handler = (TerminologyController.prototype as unknown as Record<string, object>).diagnoses as object;
+      expect(Reflect.getMetadata(PATH_METADATA, TerminologyController)).toBe('ehr/terminology');
+      expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe('diagnoses');
+      expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(RequestMethod.GET);
+      expect(Reflect.getMetadata(REQUIRED_PERMISSIONS, handler)).toEqual(['ehr.diagnosis.write']);
+      expect(Reflect.getMetadata(AUDIT_FAILURES_ONLY, handler)).toBe(true);
+      expect(Reflect.getMetadata('controllers', CatalogModule)).toEqual([CatalogController, TerminologyController]);
+    });
+
+    it('answers the contract\'s shape: ICD-11, WHO\'s title as display, our other name that matched', async () => {
+      const { database, calls } = fakeDatabase([
+        { code: '1F40', title: 'Malaria due to Plasmodium falciparum', matched_name: 'falciparum malaria',
+          list_version: '2026-01', more: true },
+        { code: 'KA64.20', title: 'Congenital falciparum malaria', matched_name: null, list_version: '2026-01', more: true },
+      ]);
+      await expect(new CatalogService(database).searchDiagnoses(membershipA, diagnoses('falciparum', 2))).resolves.toEqual({
+        release: 'ICD-11 MMS 2026-01', more: true, typedIcd10: null,
+        results: [
+          { codeSystem: 'ICD-11', code: '1F40', display: 'Malaria due to Plasmodium falciparum',
+            matchedName: 'falciparum malaria' },
+          { codeSystem: 'ICD-11', code: 'KA64.20', display: 'Congenital falciparum malaria', matchedName: null },
+        ],
+      });
+      expect(calls).toEqual([{ sql: DIAGNOSES_SQL, values: ['falciparum', 2] }]);
+    });
+
+    it.each([
+      ['B50.9', { codeSystem: 'ICD-10', code: 'B50.9' }],
+      ['b50.9', { codeSystem: 'ICD-10', code: 'B50.9' }],
+      ['A09', { codeSystem: 'ICD-10', code: 'A09' }],
+      ['J45.909', { codeSystem: 'ICD-10', code: 'J45.909' }],
+      ['U07.1', { codeSystem: 'ICD-10', code: 'U07.1' }],
+      ['1F40', null],
+      ['BA00', null],
+      ['5A11.Z', null],
+      ['malaria', null],
+      ['B50.91234', null],
+    ])('q %j as an ICD-10 code: %j (accepted as typed; no ICD-10 title)', (q, expected) => {
+      expect(typedIcd10(q)).toEqual(expected);
+    });
+
+    it('an ICD-10 code typed finds nothing in ICD-11 and says so', async () => {
+      const { database } = fakeDatabase([]);
+      await expect(new CatalogService(database).searchDiagnoses(membershipA, diagnoses('B50.9'))).resolves.toEqual({
+        release: null, more: false, results: [], typedIcd10: { codeSystem: 'ICD-10', code: 'B50.9' } });
+    });
+
+    it('refuses as the catalogue does, with the diagnosis words for a Health ID or NIN', async () => {
+      const { database, calls } = fakeDatabase([]);
+      const service = new CatalogService(database);
+      expect((await problemOf(service.searchDiagnoses(membershipA, diagnoses('m')))).code).toBe('CATALOG_SEARCH_TEXT_TOO_SHORT');
+      const problem = await problemOf(service.searchDiagnoses(membershipA, diagnoses('HID-7KQ2M9')));
+      expect([problem.code, problem.message]).toEqual(['CATALOG_SEARCH_TEXT_NOT_ALLOWED',
+        'Search by diagnosis name or code. Do not type a Health ID or NIN here.']);
+      expect(calls).toEqual([]);
+      const failed = await problemOf(new CatalogService(fakeDatabase(databaseError('42883')).database)
+        .searchDiagnoses(membershipA, diagnoses('malaria')));
+      expect([failed.getStatus(), failed.code]).toEqual([503, 'CATALOG_UNAVAILABLE']);
+    });
+
+    it('the status names the loaded ICD-11 release and its notice', async () => {
+      const icd = 'ICD-11 notice';
+      const { database } = fakeDatabase([
+        { kind: 'diagnosis', available: true, list_version: '2026-01', approved_day: '2026-12-01', offered: 17255,
+          attribution: [icd], file_sha256: 'd'.repeat(64) },
+        { kind: 'lab_test', available: false, list_version: null, approved_day: null, offered: 0, attribution: [],
+          file_sha256: null },
+        { kind: 'medicine', available: false, list_version: null, approved_day: null, offered: 0, attribution: [],
+          file_sha256: null },
+      ]);
+      await expect(new CatalogService(database).status()).resolves.toMatchObject({
+        diagnoses: { available: true, release: 'ICD-11 MMS 2026-01', fileSha256: 'd'.repeat(64) },
+        medicines: { available: false }, attribution: [icd],
+      });
     });
   });
 

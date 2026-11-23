@@ -1,7 +1,7 @@
 import { Controller, Get, Query, Req } from '@nestjs/common';
-import { AuditFailuresOnly, RequireAnyPermission } from '../../common/decorators';
+import { AuditFailuresOnly, RequireAnyPermission, RequirePermissions } from '../../common/decorators';
 import type { HidRequest } from '../../common/request-context';
-import { SearchCatalogLabTestsQueryDto, SearchCatalogMedicinesQueryDto } from './catalog.dto';
+import { SearchCatalogLabTestsQueryDto, SearchCatalogMedicinesQueryDto, SearchDiagnosesQueryDto } from './catalog.dto';
 import { CatalogService } from './catalog.service';
 
 /**
@@ -47,6 +47,25 @@ export class CatalogController {
   @AuditFailuresOnly()
   labTests(@Req() request: HidRequest, @Query() query: SearchCatalogLabTestsQueryDto) {
     return keptAMinute(request, this.catalog.searchLabTests(searchKey(request), query));
+  }
+}
+
+/**
+ * ORD-9 (0150): the ICD-11 diagnosis search, for anyone who records
+ * diagnoses (ehr.diagnosis.write). The catalogue's rules: X-Facility-Id, no
+ * X-Purpose-Of-Use, q never a Health ID or NIN and never logged, 300
+ * searches per 5 minutes per membership (counted with the catalogue's),
+ * kept a minute only on an answer, only refusals audited.
+ */
+@Controller('ehr/terminology')
+export class TerminologyController {
+  constructor(private readonly catalog: CatalogService) {}
+
+  @Get('diagnoses')
+  @RequirePermissions('ehr.diagnosis.write')
+  @AuditFailuresOnly()
+  diagnoses(@Req() request: HidRequest, @Query() query: SearchDiagnosesQueryDto) {
+    return keptAMinute(request, this.catalog.searchDiagnoses(searchKey(request), query));
   }
 }
 

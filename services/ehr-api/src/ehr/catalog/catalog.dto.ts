@@ -60,3 +60,6 @@ export class SearchCatalogMedicinesQueryDto extends SearchCatalogLabTestsQueryDt
   @Matches(/^[A-Za-z][A-Za-z -]{0,99}$/, { message: 'route must be a plain word' })
   route?: string;
 }
+
+/** GET ehr/terminology/diagnoses?q=&limit= (ORD-9): q and limit as the lab-test search. */
+export class SearchDiagnosesQueryDto extends SearchCatalogLabTestsQueryDto {}

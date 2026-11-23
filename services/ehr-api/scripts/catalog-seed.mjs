@@ -14,7 +14,7 @@ import { createHash } from 'node:crypto';
 
 export const SEED_FORMAT = 'hid-catalog-seed/1';
 export const APPROVALS_FORMAT = 'hid-catalog-approvals/1';
-export const KINDS = ['medicine', 'lab_test'];
+export const KINDS = ['medicine', 'lab_test', 'diagnosis'];
 export const DOSE_FORMS = ['tablet', 'capsule', 'liquid', 'injection', 'cream', 'inhaler', 'drops', 'other'];
 export const LAB_CATEGORIES = ['haematology', 'chemistry', 'microbiology', 'serology', 'parasitology', 'urine-and-stool',
   'hormones', 'molecular', 'blood-bank', 'immunology', 'histopathology', 'other'];
@@ -32,6 +32,9 @@ export const ATC_CODE = /^[A-Z][0-9]{2}[A-Z]{2}[0-9]{2}$/;
 export const SOURCE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export const ROUTE = /^[a-z][a-z -]{0,99}$/;
 export const SHA256 = /^[0-9a-f]{64}$/;
+/** An ICD-11 MMS code (0150): a stem of four, then up to two parts after dots; never an extension code (X...). */
+export const ICD11_CODE = /^(?!X)[0-9A-Z]{4}(\.[0-9A-Z]{1,2}){0,2}$/;
+export const ICD11_CHAPTER = /^([0-9]{2}|[A-Z])$/;
 
 /** The notices the seeds carry, shown on the screens' About page (planned contract, "attribution"). */
 export const LOINC_NOTICE = 'This material contains content from LOINC (http://loinc.org). LOINC is copyright Regenstrief '
@@ -133,6 +136,22 @@ export function labTestProblems(item) {
   if (!LAB_CATEGORIES.includes(item.category)) problems.push('the category is not one of the twelve');
   if (!SOURCE.test(item.source ?? '')) problems.push('the source is not a plain id');
   if (typeof item.withdrawn !== 'boolean') problems.push('withdrawn must be true or false');
+  return problems;
+}
+
+/** Why an ICD-11 entry would not load as 0150 makes the table, or [] when it would. */
+export function diagnosisProblems(item) {
+  const problems = [];
+  if (typeof item.code !== 'string' || !ICD11_CODE.test(item.code)) problems.push('the code is not an ICD-11 MMS code');
+  if (typeof item.title !== 'string' || item.title.trim().length < 1 || item.title.length > 500) {
+    problems.push('the title must be 1-500 characters');
+  }
+  if (!Array.isArray(item.otherNames) || item.otherNames.some((name) => typeof name !== 'string' || name.trim() === ''
+      || name.includes(';')) || item.otherNames.join('; ').length > 2000) {
+    problems.push('other names must be non-empty words without ";", 2000 characters in all');
+  }
+  if (typeof item.chapter !== 'string' || !ICD11_CHAPTER.test(item.chapter)) problems.push('the chapter is not 01-99 or a letter');
+  if (typeof item.residual !== 'boolean') problems.push('residual must be true or false');
   return problems;
 }
 
@@ -261,9 +280,16 @@ export function buildSeeds(rows, { version, retired = {}, waveZero = [] }) {
   return { medicine: medicineSeed, lab_test: labSeed };
 }
 
-/** A seed file's bytes: stable JSON, two-space indent, one trailing newline, so its sha256 is reproducible. */
+/**
+ * A seed file's bytes: stable JSON, two-space indent, each item on one line
+ * (so a list of 18,000 entries stays small and diffs line by line), one
+ * trailing newline, so its sha256 is reproducible.
+ */
 export function seedText(seed) {
-  return `${JSON.stringify(seed, null, 2)}\n`;
+  const { items, ...rest } = seed;
+  const head = JSON.stringify({ ...rest, items: [] }, null, 2);
+  const lines = (items ?? []).map((item) => `    ${JSON.stringify(item)}`).join(',\n');
+  return `${head.slice(0, head.lastIndexOf('[]'))}[\n${lines}\n  ]\n}\n`;
 }
 
 /**
@@ -282,26 +308,31 @@ export function seedProblems(seed) {
       || seed.attribution.some((notice) => typeof notice !== 'string' || notice.trim() === '')) {
     problems.push('attribution must be at most 5 notices');
   }
-  if (!Array.isArray(seed.retired) || seed.retired.some((entry) => typeof entry?.listId !== 'string'
+  if (!Array.isArray(seed.retired) || (seed.kind === 'diagnosis' && seed.retired.length > 0)
+      || seed.retired.some((entry) => typeof entry?.listId !== 'string'
       || typeof entry?.reason !== 'string' || entry.reason.trim().length < 8 || entry.reason.length > 500
       || !(seed.kind === 'medicine' ? MEDICINE_ID : LAB_TEST_ID).test(entry.listId))) {
-    problems.push('each retired id needs an id of this kind and a reason of 8-500 characters');
+    problems.push(seed.kind === 'diagnosis' ? 'a diagnosis list retires no id (WHO\'s codes are WHO\'s)'
+      : 'each retired id needs an id of this kind and a reason of 8-500 characters');
   }
   if (!Array.isArray(seed.items) || seed.items.length === 0) {
     problems.push('the seed has no items');
     return problems;
   }
-  const problemsOf = seed.kind === 'medicine' ? medicineProblems : labTestProblems;
+  const problemsOf = { medicine: medicineProblems, lab_test: labTestProblems, diagnosis: diagnosisProblems }[seed.kind]
+    ?? (() => []);
+  const idOf = (item) => (seed.kind === 'diagnosis' ? item?.code : item?.listId);
   const ids = new Set();
   const codes = new Set();
   const retired = new Set((Array.isArray(seed.retired) ? seed.retired : []).map((entry) => entry?.listId));
   const heldBack = new Set((Array.isArray(seed.heldBack) ? seed.heldBack : []).map((entry) => entry?.listId));
   for (const item of seed.items) {
-    for (const problem of problemsOf(item ?? {})) problems.push(`${item?.listId ?? '(no id)'}: ${problem}`);
-    if (ids.has(item?.listId)) problems.push(`${item.listId}: the id is used twice`);
-    ids.add(item?.listId);
-    if (retired.has(item?.listId)) problems.push(`${item.listId}: a retired id is an item`);
-    if (heldBack.has(item?.listId)) problems.push(`${item.listId}: a held-back row is an item`);
+    const id = idOf(item);
+    for (const problem of problemsOf(item ?? {})) problems.push(`${id ?? '(no id)'}: ${problem}`);
+    if (ids.has(id)) problems.push(`${id}: the id is used twice`);
+    ids.add(id);
+    if (retired.has(id)) problems.push(`${id}: a retired id is an item`);
+    if (heldBack.has(id)) problems.push(`${id}: a held-back row is an item`);
     if (seed.kind === 'lab_test') {
       const key = `${item?.codeSystem}|${item?.code}`;
       if (codes.has(key)) problems.push(`${item.listId}: the code ${item.code} is used twice`);

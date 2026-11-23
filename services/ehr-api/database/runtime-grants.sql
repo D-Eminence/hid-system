@@ -1906,3 +1906,12 @@ revoke all on function ehr.search_catalog_medicines(text, integer, text, text),
   ehr.catalog_search_query(text),
   ehr.catalog_versions_guard() from public;
 revoke all on ehr.catalog_versions, ehr.catalog_medicines, ehr.catalog_lab_tests from public;
+
+-- The ICD-11 diagnosis search (0150, ORD-9 of the Akos EHR plan, first
+-- slice; design note on hid-system#258, 23 November 2026), exactly as 0150
+-- grants it: the search to the EHR runtime and the schema test runtime; no
+-- privilege on the diagnosis list for any runtime. The catalogue status
+-- keeps 0149's grants.
+grant execute on function ehr.search_catalog_diagnoses(text, integer) to hid_ehr_runtime, hid_schema_test_runtime;
+revoke all on function ehr.search_catalog_diagnoses(text, integer) from public;
+revoke all on ehr.catalog_diagnoses from public;

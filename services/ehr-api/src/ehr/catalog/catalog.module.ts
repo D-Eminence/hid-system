@@ -1,10 +1,10 @@
 import { Module } from '@nestjs/common';
-import { CatalogController } from './catalog.controller';
+import { CatalogController, TerminologyController } from './catalog.controller';
 import { CatalogService } from './catalog.service';
 
-/** ORD-7, first slice (0149): the medicine and lab-test lists. */
+/** ORD-7 (0149): the medicine and lab-test lists; ORD-9 (0150): the ICD-11 diagnosis search. */
 @Module({
-  controllers: [CatalogController],
+  controllers: [CatalogController, TerminologyController],
   providers: [CatalogService],
 })
 export class CatalogModule {}

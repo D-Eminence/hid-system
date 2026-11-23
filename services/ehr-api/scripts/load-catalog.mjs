@@ -12,7 +12,7 @@
 //   seed's kind and version (Q124 A: the clinical lead approves every change);
 // - a seed that breaks 0149's rules (catalog-seed.mjs's seedProblems);
 // - a version of that kind that is already loaded;
-// - a schema without 0149.
+// - a schema without 0149 (or, for the ICD-11 diagnosis list, 0150).
 // The database refuses on its own, and the whole load rolls back, a retired
 // id, an id whose medicine or test changed, or a lab code another id held
 // (0149's insert triggers).
@@ -80,6 +80,13 @@ const LAB_TESTS_INSERT = `insert into ehr.catalog_lab_tests (version_id, list_id
     from jsonb_to_recordset($2::jsonb) as item("listId" text, "codeSystem" text, code text, display text,
       "otherNames" jsonb, specimen text, category text, source text, withdrawn boolean)`;
 
+// 0150 (ORD-9): an ICD-11 release's coded entries.
+const DIAGNOSES_INSERT = `insert into ehr.catalog_diagnoses (version_id, code, title, other_names, chapter, residual)
+  select $1, item.code, item.title, array_to_string(array(select jsonb_array_elements_text(item."otherNames")), '; '),
+         item.chapter, item.residual
+    from jsonb_to_recordset($2::jsonb) as item(code text, title text, "otherNames" jsonb, chapter text, residual boolean)`;
+const INSERTS = { medicine: MEDICINES_INSERT, lab_test: LAB_TESTS_INSERT, diagnosis: DIAGNOSES_INSERT };
+
 const client = new pg.Client(databaseOptions(databaseUrl, 'hid-catalog-loader'));
 await client.connect();
 let outcome;
@@ -88,8 +95,11 @@ try {
   await client.query("set local lock_timeout = '5s'");
   await client.query("select pg_advisory_xact_lock(hashtextextended('hid-catalog-loader', 0))");
   const present = await client.query(`select to_regclass('ehr.catalog_versions') is not null
-      and to_regclass('ehr.catalog_retired_codes') is not null as ready`);
-  if (!present.rows[0].ready) throw new LoadRefusal('this schema has no catalogue tables (0149 is not applied)');
+      and to_regclass('ehr.catalog_retired_codes') is not null
+      and ($1 <> 'diagnosis' or to_regclass('ehr.catalog_diagnoses') is not null) as ready`, [seed.kind]);
+  if (!present.rows[0].ready) {
+    throw new LoadRefusal(`this schema has no catalogue tables for ${seed.kind} (${seed.kind === 'diagnosis' ? '0150' : '0149'} is not applied)`);
+  }
   await client.query('lock table ehr.catalog_versions in share row exclusive mode');
   const loaded = await client.query('select 1 from ehr.catalog_versions where kind = $1 and version = $2',
     [seed.kind, seed.version]);
@@ -101,8 +111,7 @@ try {
   await client.query(`insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference, approved_at,
       attribution) values ($1, $2, $3, $4, $5, $6, $7)`, [versionId, seed.kind, seed.version, fileSha256,
     approval.entry.approvalReference.trim(), approval.entry.approvedAt, seed.attribution]);
-  const inserted = await client.query(seed.kind === 'medicine' ? MEDICINES_INSERT : LAB_TESTS_INSERT,
-    [versionId, JSON.stringify(seed.items)]);
+  const inserted = await client.query(INSERTS[seed.kind], [versionId, JSON.stringify(seed.items)]);
   if (inserted.rowCount !== seed.items.length) {
     throw new Error(`loaded ${inserted.rowCount} rows of ${seed.items.length}`);
   }
