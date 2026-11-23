@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0141",
-    "count": 142,
+    "last": "0142",
+    "count": 143,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -665,6 +665,10 @@
       {
         "name": "0141_consultation_drafts.sql",
         "sha256": "2a6b55854cce84347db47760e7691afcb60572673dc5c01756bd99431e7b32ab"
+      },
+      {
+        "name": "0142_vitals_entered_in_error.sql",
+        "sha256": "8260899025a85ac999a90aca78ae79d1e0c663c0bc6479fe6e011f03d5cada77"
       }
     ]
   },

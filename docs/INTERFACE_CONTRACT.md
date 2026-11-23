@@ -6315,8 +6315,9 @@ Rules:
   `bloodPressure`, true when the correction set either half of the pair).
 - Blood pressure is one measure and is always the systolic and diastolic
   pair from the same reading; it is never mixed across readings.
-- Vitals of a visit entered in error are left out. (A single vital entered
-  in error waits for EHR-C8b, migration 0142.)
+- Vitals of a visit entered in error are left out, and so is a single
+  reading marked entered in error (EHR-C8b, migration 0142): the next newest
+  reading is used.
 - Values are JSON numbers (the per-visit vitals list still returns numeric
   columns as strings, unchanged).
 
@@ -10441,3 +10442,189 @@ expired draft (the author as actor).
   `ehr.consultation_draft_held(patient, account)`, which is
   `platform.legal_holds`' owner's (its policy alone reads the holds) and run
   only by 0141's own functions.
+
+## EHR-C8b. Vitals marked entered in error (Release B, migration 0142; not live until signed)
+
+Akos P1-14 and the QA question "mark the QA test vitals record entered in
+error". The planned contract's "EHR-C8b" is the spec; this section is what is
+built. One vitals reading can be withdrawn for good, without entering the
+whole visit in error (EHR-C8a). It cannot be undone: to fix a mistake, record
+the vitals again.
+
+### `PATCH /api/v1/ehr/patients/:patientId/encounters/:encounterId/vitals/:vitalId`
+
+`X-Facility-Id`, `X-Purpose-Of-Use: direct-care`, permission `ehr.vital.write`
+and the patient's `write_records` consent, as a correction. UUIDs only. No
+Idempotency-Key: the row version protects it. Body, exactly these fields:
+
+```json
+{ "expectedRowVersion": 2, "status": "entered_in_error", "changeReason": "Recorded on the wrong patient" }
+```
+
+- `expectedRowVersion`: whole number, 1 or more (the reading's `rowVersion`).
+- `status`: only `entered_in_error`.
+- `changeReason`: required, trimmed, 3 to 500 characters.
+
+The reading is locked (`FOR UPDATE`) before the checks. `200`: the reading as
+`GET .../vitals/:vitalId` answers it, with `status: "entered_in_error"`,
+`statusChangedAt` and the new `rowVersion`.
+
+Audit: `ehr.vital.update`, naming the patient and the reading, with
+`enteredInError: true`; never the typed reason or the values. The reason, who
+and when, and the prior row are kept in `ehr.record_versions` (0004's version
+trigger). A refusal is audited as today: a reading of another visit, patient
+or facility (or none) writes a `failure` row with `reason: not_found`, as a
+correction does, and answers 404 `VITAL_NOT_FOUND`.
+
+### `status` on every vitals answer
+
+Every answer that returns a reading (the list, the read, a create and its
+replay, the one-call consultation's vitals, this PATCH) carries `status`
+(`recorded` or `entered_in_error`) and `statusChangedAt` (null while
+recorded). A correction answers the correction, as today: it can only be made
+on a recorded reading.
+
+| Read | Readings entered in error |
+|---|---|
+| `GET .../encounters/:encounterId/vitals` | Left out by default. `?includeEnteredInError=true` lists them with their status (`true` or `false` only; a cursor is valid only for the choice it was issued with). |
+| `GET .../vitals/:vitalId` | Still answered, with `status`. |
+| `GET .../vitals/:vitalId/corrections` | Still answered, as today (no `status`: read it on `GET .../vitals/:vitalId`). |
+| `GET /ehr/patients/:patientId/vitals/latest` (EHR-C3) and the chart summary (EHR-C4) | Left out: the next newest reading is used. |
+| The patient's own record and patient chat; staff record evidence and staff chat | Left out (and their search chunks drop out at the next refresh). The patient's own read policy leaves them out in the database too. |
+| `POST .../vitals/:vitalId/corrections` | Refused: 409 `VITAL_ENTERED_IN_ERROR`. |
+
+On a database without 0142 every reading reads as `recorded`, and the PATCH
+answers 503 `VITALS_STATUS_UNAVAILABLE`.
+
+### Errors
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | One or more request fields are invalid. (another status, a reason under 3 or over 500 characters or of only spaces, an unknown field) |
+| 400 | `CHANGE_REASON_REQUIRED` | Please say why you are changing this. (no `changeReason`) |
+| 400 | `PURPOSE_OF_USE_REQUIRED` | as today |
+| 403 | `CONSENT_REQUIRED`, `PERMISSION_DENIED` | as today |
+| 404 | `VITAL_NOT_FOUND` | These vitals were not found. |
+| 409 | `VITAL_ALREADY_ENTERED_IN_ERROR` | These vitals are already marked as entered in error. |
+| 409 | `VITAL_ENTERED_IN_ERROR` | These vitals were marked as entered in error. Record new vitals instead. (on a correction) |
+| 412 | `VERSION_CONFLICT` | Someone else changed these vitals. Reload them and try again. (also on a correction) |
+| 503 | `VITALS_STATUS_UNAVAILABLE` | This cannot be done right now. Please try again. |
+
+### Database (0142)
+
+- `ehr.vitals.status` (`recorded`, the default and every existing row, or
+  `entered_in_error`) and `status_changed_at` (null exactly while recorded).
+- `ehr.guard_vital_status()`, before `vitals_versioned`: a new reading is
+  recorded (else 23514 `VITAL_STATUS_INVALID`); the one change is recorded to
+  entered in error, changing nothing else, with the time set by the guard;
+  after it the row never changes again (55000 `VITAL_ENTERED_IN_ERROR`), so it
+  cannot be undone or corrected. Rows still cannot be deleted.
+- `vitals_patient_self_read` (0067) gains `status = 'recorded'`.
+- `vitals_entered_in_error_hidden`, a restrictive read policy: a reading
+  entered in error is seen only by a session that sets `app.vitals_status`
+  to `0142`, which this release's ehr-api does in every staff transaction.
+  An older ehr-api image on this schema (during the rolling deploy, or after
+  a rollback) never sees one: it drops out of that image's latest vitals,
+  chart summary, lists, reads, staff chat and evidence, and that image's
+  correction of it answers not found instead of failing.
+- No index is added: every reader tests the status through `to_jsonb` (so it
+  also runs on a schema without 0142), which no partial index could serve.
+  Latest vitals use today's indexes.
+- No grant change. Old ehr-api images keep working: they never name the
+  columns and write only recorded readings.
+- Rollout: this release's ehr-api before 0142 (it runs on a schema without
+  it) or right after it. An older image's staff record evidence hashes each
+  vitals row as a whole, which gains the two columns, so an older image that
+  refreshes vitals evidence on the new schema embeds those chunks again (and
+  this image, which leaves both columns out, once more).
+
+### Screen notes
+
+- Offer "Entered in error" on each vitals row of a visit. Ask for the reason
+  (required), send `expectedRowVersion`, then read the list and "Latest
+  vitals" again.
+- History may show withdrawn readings struck through, labelled "Entered in
+  error", with `includeEnteredInError=true`.
+- On `VITAL_ALREADY_ENTERED_IN_ERROR`, treat it as done. On
+  `VERSION_CONFLICT`, reload and ask again.
+
+## VIT-1. Soft "abnormal" vitals warnings (Release B, no migration)
+
+Akos P1-11. The planned contract's "VIT-1" is the spec; this section is what
+is built. It needs EHR-C8b (readings entered in error get no warnings and are
+not in latest vitals). Warnings come from a fixed adult table in ehr-api
+(`vitals/usual-ranges.ts`), version `2026-11-adult-1`, worked out each time
+and never stored. They never block a save. `approvedBy` stays `null` until
+Health ID's named clinical lead signs the table off (owner decision Q124 A).
+
+### New hard rule
+
+On a vitals create, the one-call consultation's vitals, and a correction:
+the diastolic must be lower than the systolic, else 400
+`BLOOD_PRESSURE_ORDER_INVALID` "The lower blood pressure number (diastolic)
+must be less than the upper one (systolic). Check the reading." Rows already
+stored are not touched. The hard limits of today (`VALIDATION_FAILED`,
+`BLOOD_PRESSURE_INCOMPLETE`) are unchanged and checked first.
+
+The rule is checked only for a new write, after the `Idempotency-Key` is
+looked up: a retry of a create, a correction or a consultation that an older
+image saved (when a diastolic equal to the systolic was allowed) replays the
+saved answer instead of answering 400.
+
+### `GET /api/v1/ehr/vitals/usual-ranges`
+
+`ehr.vital.read`, `X-Facility-Id`; no patient, no consent check, no patient
+audit; `Cache-Control: private, max-age=3600`.
+
+```json
+{ "version": "2026-11-adult-1", "appliesTo": "adults (18 and over)", "approvedBy": null,
+  "ranges": [ { "measure": "pulseBpm", "level": "far_outside_usual", "atOrBelow": 40 }, … ] }
+```
+
+Each band names its bounds: `from` and `to`, `atOrBelow` and `atOrAbove`
+(inclusive), or `below` and `above` (exclusive). Where bands overlap, the most
+serious level applies (`check_entry`, then `far_outside_usual`, then
+`outside_usual`).
+
+| Measure | `outside_usual` | `far_outside_usual` | `check_entry` |
+|---|---|---|---|
+| Breathing rate | 9-11, 21-24 | 8 or below, 25 or above | 61 or above |
+| Oxygen % | 92 up to (not including) 96 | below 92 | below 50 |
+| Systolic | 91-100, 180-219 | 90 or below, 220 or above | above 300 |
+| Diastolic | 40 or below, 110 or above | | above 200 |
+| Pulse | 41-50, 111-130 | 40 or below, 131 or above | above 250 |
+| Temperature °C | 38.1-39.0 | 35.0 or below, 39.1 or above | below 30, above 44 |
+| Height, weight | none | none | none |
+
+For the clinical lead's sign-off (Ola's review of #297): NEWS2 also scores
+35.1-36.0 °C, which this draft table leaves without an `outside_usual` band
+(35.4 °C gives no warning, and the low-temperature message says "Usual for
+adults: 35.1 to 38"). Either add that band (and make 36.1 the usual low), or
+keep the table and record why (for example, axillary or infrared readings run
+low). The table is the agreed draft until then.
+
+### Warnings on answers
+
+The vitals create answer (`201`, and its replay) and the correction answer
+gain `warnings` and `usualRangesVersion`. A correction's warnings are for the
+values after it (its values over the reading's own). A replay of either, once
+the reading is marked entered in error, carries `warnings: []`:
+
+```json
+{ "warnings": [
+    { "measure": "pulseBpm", "value": 135, "level": "far_outside_usual",
+      "code": "VITAL_FAR_OUTSIDE_USUAL_RANGE",
+      "message": "Pulse is very high: 135 a minute. Usual for adults: 51 to 110." } ],
+  "usualRangesVersion": "2026-11-adult-1" }
+```
+
+`warnings` is `[]` when nothing is outside the usual range. Codes:
+`VITAL_OUTSIDE_USUAL_RANGE`, `VITAL_FAR_OUTSIDE_USUAL_RANGE`,
+`VITAL_CHECK_ENTRY` ("Check this entry: a temperature of 45 °C is very
+unlikely."). `GET /ehr/patients/:patientId/vitals/latest` gains
+`usualRangesVersion`, and each measure gains `warning` (the same object, or
+`null`; for `bloodPressure`, the more serious of the two halves; `null` for
+height and weight). The chart summary (EHR-C4) and the one-call consultation
+answer are unchanged. Warnings are worked out for every patient from the
+adult table; the screen shows them only for patients 18 and over. Nothing is
+stored and no audit field changes.

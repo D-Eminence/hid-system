@@ -154,6 +154,7 @@ const acceptedMigrations = new Map([
   ['0139_facility_staff_role_add_remove.sql', '7a90bc366628d3de24efda92487fdd56efc44f21a7d376ec61d7709c4d8baa96'],
   ['0140_session_open_patient.sql', '2b8951941ae66419b922dbbf9c6542d7b5a2207a36a8d49e6a83b47a7750a1d2'],
   ['0141_consultation_drafts.sql', '2a6b55854cce84347db47760e7691afcb60572673dc5c01756bd99431e7b32ab'],
+  ['0142_vitals_entered_in_error.sql', '8260899025a85ac999a90aca78ae79d1e0c663c0bc6479fe6e011f03d5cada77'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))
