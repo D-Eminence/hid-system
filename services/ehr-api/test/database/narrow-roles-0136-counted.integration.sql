@@ -375,7 +375,7 @@ values ('c1474000-0000-4000-8000-000000000109', pg_temp.nr_id('1', 10), 'recepti
         pg_temp.nr_id('3', 10), pg_temp.nr_facility(10), 'Synthetic 0147 suite role');
 set local session_replication_role = origin;
 :run0147
-select pg_temp.expect('3f 9, 1 and 0 (the doctor starts readings through the front desk role): stops, nothing applied',
+select pg_temp.expect('3f 9, 1 and 0, a near miss (the doctor starts readings through the front desk role): stops, nothing applied',
   '55000 9, 1 and 0 | 0 roles, 0 rows, 0 grants, 0 audit rows',
   pg_temp.answer(:'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made());
 rollback to savepoint variant;

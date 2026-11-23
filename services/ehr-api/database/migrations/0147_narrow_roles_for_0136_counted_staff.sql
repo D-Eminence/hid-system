@@ -81,8 +81,17 @@
 -- Neither role is a staff kind, a membership_role or app_role, or a role
 -- anyone can invite (identity.staff_invitable_roles) or add or remove through
 -- SX-4 (0139's role lists stay the five hospital roles). They are only these
--- extra assignment rows, and they end with the membership, as every role
--- does, or when doctor is removed (D5). No policy, grant or table changes, so
+-- extra assignment rows. They end with the membership, as every role does,
+-- or when doctor is removed through SX-4 (D5). Two of 0086's commands also
+-- end them, because they count every role held: the facility administrator's
+-- role change (identity.change_facility_staff_role) and support's self-service
+-- administrator role (identity.admin_set_self_service_administrator_role, S12).
+-- For a counted member either one revokes every role held, the narrow roles
+-- with it, and grants the requested role again, so access is never widened;
+-- but it no longer answers "unchanged" for the same role and licence, and S12's
+-- audit row names the latest narrow role as previousRole. Leaving them out
+-- there is a follow-up (coordinator, 23 November on #258). No policy, grant
+-- or table changes, so
 -- runtime-grants.sql is unchanged (D5 keeps the function's grants, and the
 -- file's revoke from PUBLIC still holds). Permissions are read on every
 -- request (auth.membership_has_permission and the Identity staff context), so
@@ -146,12 +155,18 @@
 -- EXCLUSIVE on pg_proc's TOAST table and its index (where the new body is
 -- stored); its pg_proc row is replaced and the catalog's own lock released
 -- at once. The preconditions read the catalog (pg_proc, pg_language,
--- pg_roles, pg_description) at ACCESS SHARE. Those are not taken NOWAIT, as
+-- pg_roles, pg_authid, pg_class, pg_database, pg_db_role_setting,
+-- pg_description, pg_namespace) at ACCESS SHARE. Those are not taken NOWAIT, as
 -- only DDL on that function, schema, type or language would make them wait,
 -- and no service runs DDL. (pg_locks before commit, at 9, 1 and 1 and at 0, 0
 -- and 0, on a database 0147 had not changed; the narrow-roles suite checks
--- them there.) An SX-4 command already inside the function when 0147 commits
--- finishes with the body it started with; every later call uses the new one.
+-- them there.) After the count, 0147 takes each counted membership row FOR
+-- SHARE, NOWAIT, in the same 100 ms / 5 s loop (one attempt when holding an
+-- earlier file's locks): an SX-4 change in flight on a counted member holds
+-- that row FOR NO KEY UPDATE, so it finishes before 0147 grants (or 0147
+-- refuses, nothing applied), and 0147 counts again. Any other SX-4 command
+-- already inside the function when 0147 commits finishes with the body it
+-- started with; every later call uses the new one.
 -- A busy table fails the attempt at once, and its subtransaction releases
 -- what it took. The attempt is made again every 100 ms for at most 5 seconds,
 -- so the file never waits while holding a lock and no request queues behind a
@@ -199,6 +214,7 @@
 do $q137b$
 declare
   attempt integer := 0;
+  count_attempt integer := 0;
   holding boolean := exists (
     select 1 from pg_locks held
       join pg_class relation on relation.oid = held.relation
@@ -370,7 +386,15 @@ begin
     raise notice '0147: 0136 is not recorded in migration.schema_migrations, so it is being applied in this same transaction; this transaction''s start stands for its applied_at.';
   end if;
 
-  -- 2. The count. 0136's change list (lines 1-20), as 0136 has it.
+  -- 2. The count, and the stop. Then each counted membership row FOR SHARE,
+  -- NOWAIT: that conflicts with the FOR NO KEY UPDATE an SX-4 change already in
+  -- flight holds on it, so 0147 never grants alongside a remove that would
+  -- finish with Release B's body. A busy row fails the attempt, and the count
+  -- is made again every 100 ms for at most 5 seconds (one attempt when this
+  -- transaction holds an earlier migration's locks), as the locks above.
+  loop
+  count_attempt := count_attempt + 1;
+  -- 0136's change list (lines 1-20), as 0136 has it.
   with change(position, role_code, permission_code, action) as (
     values
       (1, 'receptionist', 'ehr.document.write', 'gains'), (2, 'receptionist', 'ehr.document.read-own', 'gains'),
@@ -502,6 +526,26 @@ begin
         || 'and 0, 0 and 0 grants nothing.', administrators, doctors, reading_doctors);
   end if;
 
+  begin
+    perform 1 from identity.staff_facility_memberships membership
+     where membership.id = any(work_list_members || reading_members)
+       for share of membership nowait;
+    exit;
+  exception when lock_not_available then
+    if holding then
+      raise exception using errcode = '55P03',
+        message = '0147: a counted member''s membership is busy (a staff role change in flight), and this transaction already holds an earlier migration''s '
+          || 'locks, so it does not wait; nothing applied; run the release again at a quieter time';
+    end if;
+    if count_attempt >= 50 then
+      raise exception using errcode = '55P03',
+        message = '0147: a counted member''s membership (a staff role change in flight) stayed busy for 5 seconds; nothing applied; run the release again at a '
+          || 'quieter time';
+    end if;
+    perform pg_sleep(0.1);
+  end;
+  end loop;
+
   select string_agg(grant_row.role_code || ' ' || grant_row.permission_code, ',' order by grant_row.role_code,
                     grant_row.permission_code)
     into role_rows_before from auth.role_permissions grant_row;
@@ -594,7 +638,8 @@ begin
   -- written as 0139 wrote them.
   select row(proc.oid, proc.proowner, proc.proacl, obj_description(proc.oid, 'pg_proc'), proc.prolang,
              proc.prosecdef, proc.proconfig, proc.provolatile, proc.proparallel, proc.proleakproof, proc.procost,
-             proc.prorettype, proc.proallargtypes, proc.proargmodes, proc.proargnames)::text
+             proc.prorettype, proc.proallargtypes, proc.proargmodes, proc.proargnames, proc.proisstrict,
+             proc.proretset, proc.prokind, proc.prorows, proc.proargdefaults)::text
     into apply_before
     from pg_proc proc where proc.oid = to_regprocedure(apply_signature);
   execute $apply$
@@ -900,14 +945,25 @@ $apply$;
      is distinct from '25ecccbb09f5118cf0e7f7c1e98c5479'
      or (select row(proc.oid, proc.proowner, proc.proacl, obj_description(proc.oid, 'pg_proc'), proc.prolang,
                     proc.prosecdef, proc.proconfig, proc.provolatile, proc.proparallel, proc.proleakproof, proc.procost,
-                    proc.prorettype, proc.proallargtypes, proc.proargmodes, proc.proargnames)::text
+                    proc.prorettype, proc.proallargtypes, proc.proargmodes, proc.proargnames, proc.proisstrict,
+             proc.proretset, proc.prokind, proc.prorows, proc.proargdefaults)::text
            from pg_proc proc where proc.oid = to_regprocedure(apply_signature))
         is distinct from apply_before then
     raise exception using errcode = '55000',
       message = '0147: post-check failed (identity.staff_role_change_apply is not Release B''s body plus 0147''s lines)';
   end if;
 
-  if cardinality(work_list_members) + cardinality(reading_members) = 0 then
+  -- At 0, 0 and 0 (a fresh database; coordinator's answer of 23 November on
+  -- #258): zero new assignments of either role and zero audit rows.
+  if (administrators, doctors, reading_doctors) = (0, 0, 0)
+     and ((select count(*) from auth.account_roles assignment_row
+            where assignment_row.role_code in ('work_list_reader', 'reading_starter')) <> 0
+       or (select count(*) from audit.events event_row
+            where event_row.correlation_id = '0147-narrow-roles-q137b') <> 0) then
+    raise exception using errcode = '55000', message = '0147: post-check failed (0, 0 and 0 must grant nothing)';
+  end if;
+
+  if (administrators, doctors, reading_doctors) = (0, 0, 0) then
     raise notice '0147: nobody of 0136''s count is active today (0, 0 and 0): the two roles are created and given to nobody.';
   else
     raise notice '0147 gave work_list_reader to % memberships and reading_starter to % memberships, one audit row each.',
