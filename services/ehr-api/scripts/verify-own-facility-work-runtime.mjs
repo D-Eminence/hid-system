@@ -297,6 +297,15 @@ try {
     acceptance_check: 'pharmacy.validate_work_item_acceptance()', steps: 'pharmacy.own_work_item_steps(uuid[])' },
   `a database with ORD-4: ${JSON.stringify(ord4)}`);
   evidence.database.ord4 = Object.values(ord4);
+  // Q132 A: the changes table, its recorder and the reader the work list and a read ask (an image on a database
+  // without them answers no changedAfterDispensing).
+  const q132 = await one(`select to_regclass('pharmacy.prescription_changes_after_dispensing')::text as changes,
+      to_regprocedure('pharmacy.prescription_change_after_dispensing()')::text as recorder,
+      to_regprocedure('pharmacy.work_item_changes_after_dispensing(uuid[])')::text as reader`);
+  assert.deepEqual(q132, { changes: 'pharmacy.prescription_changes_after_dispensing',
+    recorder: 'pharmacy.prescription_change_after_dispensing()',
+    reader: 'pharmacy.work_item_changes_after_dispensing(uuid[])' }, `a database with Q132 A: ${JSON.stringify(q132)}`);
+  evidence.database.q132 = Object.values(q132);
   await new Promise(done => stub.listen(0, '127.0.0.1', done));
   const stubUrl = `http://127.0.0.1:${stub.address().port}`;
   const preload = join(temporary, 'loopback-only.cjs');
@@ -596,7 +605,8 @@ try {
   const sendAgain = expectStatus(await ehrCall(doctor, 'POST', `${enc}/prescriptions/${rx3.id}/own-pharmacy-send`,
     { expectedRowVersion: Number(edited.rowVersion) }), 200, 'Send to pharmacy after the edit');
   assert.deepEqual(sendAgain.pharmacyHandoff, EARLIER, 'Send to pharmacy answers the earlier-version row');
-  // A change after the dispensing: recorded on the send, reported nowhere (what was sent was dispensed).
+  // A change after the dispensing: shown on the pharmacy's item (Q132 A), not on the prescriber's side (no
+  // hand-off, Send to pharmacy answers "already has it", ownProgress stays dispensed: what was sent was dispensed).
   const editedAfterDispensing = expectStatus(await ehrCall(doctor, 'PATCH', `${enc}/prescriptions/${rx1.id}`,
     { expectedRowVersion: Number(rx1.rowVersion), frequency: 'three times daily',
       changeReason: 'Synthetic change after dispensing' }), 200, 'edit rx1 after its dispensing');
@@ -606,7 +616,35 @@ try {
     { expectedRowVersion: Number(editedAfterDispensing.rowVersion) }), 200, 'Send to pharmacy after the dispensing and edit');
   assert.deepEqual(sendAfterDispensing.pharmacyHandoff, ALREADY,
     `Send to pharmacy after the dispensing: ${JSON.stringify(sendAfterDispensing.pharmacyHandoff)}`);
+  // Q132 A: the pharmacist's list and read show the change on rx1's item: 'edited', once.
+  const changeShown = (item, label) => {
+    const notice = item?.changedAfterDispensing;
+    assert(notice && notice.change === label.change && notice.changeCount === label.changeCount
+      && typeof notice.changedAt === 'string' && !Number.isNaN(Date.parse(notice.changedAt))
+      && Object.keys(notice).sort().join() === 'change,changeCount,changedAt',
+    `item ${item?.id} should show ${JSON.stringify(label)}: ${JSON.stringify(notice)}`);
+    return notice;
+  };
+  const editedList = expectStatus(await pharmacyCall(ownPharmacist, 'GET', '/work-items'), 200,
+    'the list after the edit after dispensing');
+  const editedNotice = changeShown(editedList.items.find(item => item.id === item1.id), { change: 'edited', changeCount: 1 });
+  changeShown(expectStatus(await pharmacyCall(ownPharmacist, 'GET', `/work-items/${item1.id}`), 200,
+    'read rx1\'s item after its edit after dispensing'), { change: 'edited', changeCount: 1 });
+  assert(editedList.items.filter(item => item.id !== item1.id).every(item => item.changedAfterDispensing === undefined),
+    'no other item shows a change after dispensing (none of them was dispensed)');
+  // Then the doctor puts rx1 on hold: the pharmacy reads on_hold, two changes; the prescriber's side is unchanged
+  // (no hand-off for the hold; ownProgress below still reads dispensed).
+  const heldAfterDispensing = expectStatus(await ehrCall(doctor, 'PATCH', `${enc}/prescriptions/${rx1.id}`,
+    { expectedRowVersion: Number(editedAfterDispensing.rowVersion), status: 'on_hold',
+      changeReason: 'Synthetic hold after dispensing' }), 200, 'hold rx1 after its dispensing and edit');
+  assert.equal(heldAfterDispensing.pharmacyHandoff, undefined,
+    `a hold after the dispensing answers no hand-off: ${JSON.stringify(heldAfterDispensing.pharmacyHandoff)}`);
+  const heldNotice = changeShown(expectStatus(await pharmacyCall(ownPharmacist, 'GET', `/work-items/${item1.id}`), 200,
+    'read rx1\'s item after its hold after dispensing'), { change: 'on_hold', changeCount: 2 });
+  assert(Date.parse(heldNotice.changedAt) >= Date.parse(editedNotice.changedAt),
+    `the hold's time is the latest: ${editedNotice.changedAt} then ${heldNotice.changedAt}`);
   const afterEdits = expectStatus(await pharmacyCall(ownPharmacist, 'GET', '/work-items'), 200, 'the list after the edits');
+  changeShown(afterEdits.items.find(item => item.id === item1.id), { change: 'on_hold', changeCount: 2 });
   assert.deepEqual([item1, item2, item3, item4].map(item => {
     const row = afterEdits.items.find(entry => entry.id === item.id);
     return [row?.withdrawn, row?.withdrawnReason];
@@ -638,12 +676,13 @@ try {
     dispense: 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE' },
     edit: { handoff: 'earlier version (superseded)', sendToPharmacy: 'earlier version (superseded)' },
     editAfterDispensing: { handoff: 'none', sendToPharmacy: 'already has it', list: 'not withdrawn', ownProgress: 'dispensed',
-      send: 'change recorded' },
+      send: 'change recorded', pharmacyItem: 'edited (1), then on_hold (2) after a hold' },
     listOrder: 'the open item first, then the withdrawn and dispensed ones, newest first',
     ownProgress: { dispensed: 'dispensed', held: 'withdrawn', edited: 'withdrawn', open: 'received' },
     ownPharmacyStaffed: true };
   step('a hold withdraws the send (Dispense refused); an edit answers the earlier-version hand-off; ownProgress reads '
-    + 'withdrawn; withdrawn items list with the done work, after the open one; an edit after the dispensing reports nothing');
+    + 'withdrawn; withdrawn items list with the done work, after the open one; an edit and a hold after the dispensing are '
+    + 'shown on the pharmacy\'s item (Q132 A), not on the prescriber\'s side');
 
   // ── ORD-4: the pharmacist accepts before dispensing ──
   // The pharmacist, still without a grant, accepts rx4's item (sent by itself, still open) on the own-work basis:
@@ -803,6 +842,76 @@ try {
   step('ORD-4: the pharmacist without a grant accepts on the own-work basis (201, then 200 alreadyAccepted); the doctor\'s '
     + 'ownProgress reads accepted, then dispensed; a Release A ehr-api is answered received; a hold after the acceptance '
     + 'reads withdrawn');
+
+  // ── Q132 A: "after dispensing" is commit order (the own-item race) ──
+  // A dispensing in flight holds 0101's FOR SHARE on its prescription until it commits. The doctor's PATCH,
+  // through ehr-api, takes the prescription FOR UPDATE first, so it waits; once the dispensing commits it goes on,
+  // and C2 (VOLATILE, READ COMMITTED) sees the committed claim and records the change: one row, a version above
+  // the one dispensed, a time after dispensed_at. Session A is the Pharmacy runtime in the pharmacist's own-work
+  // session (as pharmacy-api sets it); no fixed sleep: the wait is read from pg_stat_activity.
+  const rxRace = await newPrescription('active', 'Synthetic amlodipine 5 mg tablet');
+  assert.deepEqual(rxRace.pharmacyHandoff, SENT, `the race prescription's hand-off: ${JSON.stringify(rxRace.pharmacyHandoff)}`);
+  const raceItem = await one(`select id::text as id, row_version as version, patient_id::text as patient_id, facility_id::text as facility_id,
+      medication_code_system, medication_code, medication_display
+    from pharmacy.work_items where source_ehr_prescription_id = $1`, [rxRace.id]);
+  assert(raceItem, 'the race prescription reached the pharmacy');
+  const pharmacistAccount = await one('select subject from auth.accounts where id = $1', [ownPharmacist.accountId]);
+  const sessionA = new Client({ connectionString: databaseUrl('hid_pharmacy_api_runtime') });
+  await sessionA.connect();
+  let raceEdit;
+  try {
+    await sessionA.query('begin');
+    await sessionA.query(`select set_config('app.actor_subject', $1, true), set_config('app.facility_id', $2, true),
+        set_config('app.correlation_id', 'own-facility-work-verifier-race', true), set_config('app.membership_id', $3, true),
+        set_config('app.purpose_of_use', 'direct-care', true), set_config('app.own_facility_work', '0133', true)`,
+    [pharmacistAccount.subject, hospital.facilityId, pharmacistMembership]);
+    await sessionA.query(`insert into pharmacy.dispensings (id, work_item_id, work_item_version, patient_id, facility_id,
+        medication_code_system, medication_code, medication_display, quantity_dispensed, quantity_unit, dispensed_by,
+        dispensed_by_membership_id, reason, idempotency_key, request_sha256, correlation_id)
+      values ($1, $2, $3, $4, $5, $6, $7, $8, 30, 'tablet', $9, $10, 'Synthetic dispensing in flight', $11, $12,
+        'own-facility-work-verifier-race')`,
+    [randomUUID(), raceItem.id, raceItem.version, raceItem.patient_id, raceItem.facility_id,
+      raceItem.medication_code_system, raceItem.medication_code, raceItem.medication_display,
+      ownPharmacist.accountId, pharmacistMembership, freshKey('race-dispense'), randomBytes(32).toString('hex')]);
+    // B: the doctor's PATCH, through ehr-api; it must wait on the dispensing's lock.
+    raceEdit = ehrCall(doctor, 'PATCH', `${enc}/prescriptions/${rxRace.id}`,
+      { expectedRowVersion: Number(rxRace.rowVersion), frequency: 'once daily',
+        changeReason: 'Synthetic change while a dispensing is in flight' });
+    let waiting = false;
+    for (let tries = 0; tries < 200 && !waiting; tries += 1) {
+      // ehr-api's backend: its login is the runtime role, or (a local cluster) the superuser with the runtime role
+      // set, so it is found by its application name too.
+      waiting = (await one(`select count(*)::int as n from pg_stat_activity
+          where (usename = 'hid_ehr_api_runtime' or application_name = 'hid-ehr-api')
+            and wait_event_type = 'Lock' and state = 'active'`)).n > 0;
+      if (!waiting) await new Promise(done => setTimeout(done, 25));
+    }
+    if (!waiting) {
+      const early = await Promise.race([raceEdit, new Promise(done => setTimeout(() => done('still running'), 2000))]);
+      assert.fail(`the PATCH never waited on the dispensing in flight: ${JSON.stringify(early?.status ?? early)} `
+        + `${JSON.stringify(early?.body ?? '')}`);
+    }
+    await sessionA.query('commit');
+  } catch (error) {
+    await sessionA.query('rollback').catch(() => {});
+    throw error;
+  } finally {
+    await sessionA.end();
+  }
+  const raceEdited = expectStatus(await raceEdit, 200, 'the PATCH after the dispensing in flight committed');
+  const raceRows = await all(`select change_row.prescription_version::text as version, change_row.status_before,
+      change_row.status_after, change_row.changed_at > claim.dispensed_at as after_dispensing
+    from pharmacy.prescription_changes_after_dispensing change_row
+    join pharmacy.prescription_item_claims claim on claim.work_item_id = change_row.work_item_id
+   where change_row.work_item_id = $1`, [raceItem.id]);
+  assert.deepEqual(raceRows, [{ version: String(raceEdited.rowVersion), status_before: 'active', status_after: 'active',
+    after_dispensing: true }], `the race's recorded change: ${JSON.stringify(raceRows)}`);
+  assert(Number(raceEdited.rowVersion) > Number(rxRace.rowVersion), 'the recorded version is above the one dispensed');
+  changeShown(expectStatus(await pharmacyCall(ownPharmacist, 'GET', `/work-items/${raceItem.id}`), 200,
+    'read the race item after the PATCH'), { change: 'edited', changeCount: 1 });
+  evidence.q132 = { editAfterDispensing: 'edited (1), then on_hold (2)', race: { patchWaitedOnDispensing: true,
+    rows: 1, versionAboveDispensed: true, changedAfterDispensedAt: true, shown: 'edited (1)' } };
+  step('Q132 A: a PATCH racing a dispensing in flight waits for it, then is recorded once, after the dispensing');
 
   // ── The row's half, asked directly by the lab runtime (0133 D1 with D15, owner's Q122 A) ──
   // In the lab scientist's own session, as lab-api's role. The patient has own pharmacy work here and no own lab
