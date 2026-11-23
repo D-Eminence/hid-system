@@ -96,7 +96,7 @@
   "migration": {
     "first": "0001",
     "last": "0145",
-    "count": 145,
+    "count": 146,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -673,6 +673,10 @@
       {
         "name": "0143_my_orders.sql",
         "sha256": "131f9f3ecc5d97ffecf6fceb030d93ea5cda25617358581e246456b93f0ca838"
+      },
+      {
+        "name": "0144_pharmacy_work_item_acceptance.sql",
+        "sha256": "17f8e54c409b6a2cd8e7e4709d1a7802337c3cc4bf392081bce7ab5928192773"
       },
       {
         "name": "0145_unknown_patient_record.sql",

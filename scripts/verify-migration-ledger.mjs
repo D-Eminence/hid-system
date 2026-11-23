@@ -156,6 +156,7 @@ const acceptedMigrations = new Map([
   ['0141_consultation_drafts.sql', '2a6b55854cce84347db47760e7691afcb60572673dc5c01756bd99431e7b32ab'],
   ['0142_vitals_entered_in_error.sql', '8260899025a85ac999a90aca78ae79d1e0c663c0bc6479fe6e011f03d5cada77'],
   ['0143_my_orders.sql', '131f9f3ecc5d97ffecf6fceb030d93ea5cda25617358581e246456b93f0ca838'],
+  ['0144_pharmacy_work_item_acceptance.sql', '17f8e54c409b6a2cd8e7e4709d1a7802337c3cc4bf392081bce7ab5928192773'],
   ['0145_unknown_patient_record.sql', 'e27367ace883df85dfc4630043ffeb3e43144615b3603f187532ce2b6420bcb2'],
 ])
 
