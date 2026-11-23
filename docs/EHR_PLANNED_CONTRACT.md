@@ -1607,13 +1607,26 @@ facility, newest first. `limit` is 1-50, default 20.
 - Every diagnosis answer (and EHR-C4's `problems` section,
   `chart-summary.service.ts:91`) may carry `"codeSystem": null, "code":
   null`.
-- The patient record chat's sensitive-diagnosis check
-  (`patient-evidence.policy.ts:156`) today applies its ICD-10 pattern to
-  any code system containing "ICD". 0145's code splits it:
-  - The ICD-10 pattern applies to ICD-10 only.
-  - A new ICD-11 list applies to ICD-11: HIV, viral hepatitis, sexually
-    transmitted infections, neoplasms, mental and behavioural disorders, and
-    pregnancy. The clinical lead confirms its code ranges before release.
+- The patient record chat's sensitive-diagnosis check is split already. It
+  needs no migration and does not depend on `DIAGNOSIS_NAME_ONLY_ENABLED`
+  (`patient-evidence.policy.ts:135,151-268,276`; the ranges are listed in
+  Wave 0 R-1 of `INTERFACE_CONTRACT.md`):
+  - The ICD-10 pattern runs exactly as before for every code system
+    containing "ICD", so nothing hidden before is shown.
+  - A table of ICD-11 ranges also runs for every code system containing
+    "ICD", whichever revision it names (`ICD-10`, `ICD-11`, `ICD-10/11`,
+    `ICD`, a WHO URI), on each part of the code in ICD-11 form: HIV, viral
+    hepatitis, sexually transmitted infections, neoplasms, mental and
+    behavioural disorders, and pregnancy. The label is free text, so an
+    ICD-11 code sent as `ICD-10` is still hidden; no ICD-10 diagnosis code
+    has the ICD-11 form (a letter second), so no ICD-10 result changes.
+    Every stem of a post-coordinated code or list is checked, not only the
+    first, a code without its dot or with a note after it is still read, and
+    extension codes (X...) are ignored. **Draft:** the clinical lead confirms its code
+    ranges before release (owner decision Q124 A sign-off; Ola's decision 5
+    on #258). The central nervous system group is marked uncertain, and the
+    haematopoietic and moved-out-of-chapter-06 groups need the lead's choice;
+    R-1 lists the codes it hides whose ICD-10 codes are shown today.
   - The name check stays for every code system, and it is what still hides
     a name-only diagnosis.
 - While the setting is off, the routes behave exactly as today.
