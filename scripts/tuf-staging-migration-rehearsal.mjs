@@ -348,9 +348,10 @@ try {
   // migration 0115 (open sign-up on outreach.) exactly two, outreach_organiser
   // and outreach_volunteer, and migration 0147 (Q137 B) exactly two, the narrow
   // reading_starter and work_list_reader; every role row that existed before
-  // the upgrade is unchanged. (0147 gives its two to nobody here: this upgrade
-  // starts from 0028's rows, so 0136's counts are 0, 0 and 0, and the
-  // auth.account_roles comparison below holds.)
+  // the upgrade is unchanged. (0147 gives its two to nobody here: 0136's
+  // counts are 0, 0 and 0 once the rehearsal has ended this baseline's one
+  // synthetic admin membership above, so the auth.account_roles comparison
+  // below holds.)
   const declaredRoles = ['org_admin_awaiting_review', 'outreach_organiser', 'outreach_volunteer',
     'reading_starter', 'work_list_reader'];
   await withClient('hid_upgrade', async client => {

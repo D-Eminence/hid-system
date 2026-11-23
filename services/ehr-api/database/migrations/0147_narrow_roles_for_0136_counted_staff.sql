@@ -93,9 +93,10 @@
 -- role but org_admin, the narrow roles with them, and each grants the
 -- requested role again, so access is never widened. But neither answers
 -- "unchanged" any more for the same role and licence: S12 then makes the
--- change, so it also signs the member out (as every S12 change does), and its
+-- change, so it also signs the member out (as every S12 grant does), and its
 -- audit row names the latest narrow role as previousRole. Leaving them out
--- there is a follow-up (coordinator, 23 November on #258). No policy, grant
+-- there is a follow-up, put to the owner with this file (hid-system#258), not
+-- part of it. No policy, grant
 -- or table changes, so
 -- runtime-grants.sql is unchanged (D5 keeps the function's grants, and the
 -- file's revoke from PUBLIC still holds). Permissions are read on every
@@ -140,11 +141,11 @@
 -- auth.role_permissions and auth.account_roles for the transaction (other
 -- writers wait, for example a role added or removed through SX-4, an
 -- invitation accepted or a membership ended; every reader goes on), so no
--- role or assignment changes between the count and the grants; ROW EXCLUSIVE
--- on audit.events; ROW SHARE on auth.permissions, auth.accounts,
--- identity.staff_facility_memberships and identity.facilities (the foreign
--- key checks of the new rows) and on identity.outreach_organisations and
--- identity.organization_applications (FOR SHARE in the two triggers of
+-- role or assignment changes between the count and the grants; EXCLUSIVE on
+-- identity.staff_facility_memberships (below); ROW EXCLUSIVE on audit.events;
+-- ROW SHARE on auth.permissions, auth.accounts and identity.facilities (the
+-- foreign key checks of the new rows) and on identity.outreach_organisations
+-- and identity.organization_applications (FOR SHARE in the two triggers of
 -- auth.account_roles, 0115's outreach fence and 0086's review gate); and
 -- ACCESS SHARE on the tables the count reads (identity.staff,
 -- identity.organizations and the sealed demo and QA member lists) and on
@@ -162,29 +163,45 @@
 -- at once. The preconditions, and the check whether this transaction already
 -- holds an earlier migration's locks, read the catalog (pg_proc, pg_language,
 -- pg_roles, pg_authid, pg_class, pg_database, pg_db_role_setting,
--- pg_description, pg_namespace, pg_locks) at ACCESS SHARE. Those are not taken NOWAIT, as
--- only DDL on that function, schema, type or language would make them wait,
--- and no service runs DDL. (pg_locks before commit, at 9, 1 and 1 and at 0, 0
--- and 0, on a database 0147 had not changed; the narrow-roles suite checks
--- them there.) After the count and the stop, in the same attempt, 0147 takes
--- each counted membership row FOR SHARE, NOWAIT: an SX-4 change in flight on
--- a counted member holds that row FOR NO KEY UPDATE until it commits, so 0147
--- never grants alongside a remove that would finish with Release B's body.
--- Any other SX-4 command already inside the function when 0147 commits
--- finishes with the body it started with; every later call uses the new one.
--- One attempt is the locks, the preconditions, the count, the stop and the
--- counted rows (steps 0-2). A busy table or a busy counted row fails the
--- attempt at once, and its subtransaction releases every lock the attempt
--- took, the table locks with it, so an SX-4 change holding a counted row (or
--- waiting to write auth.account_roles) goes on and finishes, and the next
--- attempt counts again. The attempt is made again every 100 ms for at most 5
--- seconds, so the file never waits while holding a lock and no request queues
--- behind a waiting lock; then 55P03 (nothing applied; the release can run
--- again). When this transaction already holds an earlier migration's locks
--- that stop other sessions' reads or writes (the runner's dry run applies
--- every pending file in one transaction), one attempt and no sleep: 55P03 at
--- once, nothing applied, instead of keeping those locks while this file
--- waits.
+-- pg_description, pg_namespace, pg_locks) at ACCESS SHARE, kept until commit
+-- (they conflict only with ACCESS EXCLUSIVE on a catalog). Those are not
+-- taken NOWAIT, as only DDL on that function, schema, type or language would
+-- make them wait, and no service runs DDL. (Measured with pg_locks before
+-- commit, at 9, 1 and 1 and at 0, 0 and 0, on a database 0147 had not
+-- changed; the narrow-roles suite compares the tables, indexes, sequence,
+-- TOAST table and objects it locks at 9, 1 and 1.)
+-- EXCLUSIVE on identity.staff_facility_memberships, for the transaction:
+-- every membership change and every lock on a membership row (including the
+-- foreign key checks of rows that name a membership) waits until 0147
+-- commits; plain reads go on. It keeps every counted membership as counted
+-- until commit, and it is what makes D5 hold for an SX-4 change in flight.
+-- An SX-4 command locks the member's membership row (FOR NO KEY UPDATE)
+-- before it calls SX-4's change function. One already in flight holds the
+-- table at ROW SHARE, so 0147's attempt fails and counts again once that
+-- change commits. One that starts while 0147 holds the table waits for the
+-- table, not for a row: a session takes in catalog changes when it is granted
+-- a table lock, so once 0147 commits it calls D5's body. (With only a row
+-- lock, a session that had already run SX-4's change once ran Release B's
+-- body after 0147 committed: an independent check reproduced that on 23
+-- November with a counted doctor's remove, and not with this table lock.)
+-- One attempt is the locks, the preconditions, the count and the stop
+-- (steps 0-2). A busy table fails the attempt at once, and its
+-- subtransaction releases every lock the attempt took, so a change in flight
+-- (an SX-4 change, which also writes auth.account_roles, for example) goes on
+-- and finishes, and the next attempt counts again. The attempt is made 50
+-- times, 100 ms apart (about 5 seconds), so the file never waits while
+-- holding a table or row lock and no request queues behind a waiting lock;
+-- then 55P03 (nothing applied; the release can run again). When this
+-- transaction already holds an earlier migration's locks that stop other
+-- sessions' reads or writes (the runner's dry run applies every pending file
+-- in one transaction), one attempt and no sleep: 55P03 at once, nothing
+-- applied, instead of keeping those locks while this file waits. Two waits
+-- are not NOWAIT, and the runner's lock_timeout ends either at once (nothing
+-- applied, not retried): an index or catalog that maintenance holds (a
+-- REINDEX, for example) while the count is planned, and, at 9, 1 and 1 only,
+-- a row of auth.accounts, identity.facilities, identity.outreach_organisations
+-- or identity.organization_applications that another session holds FOR
+-- UPDATE when the grants' foreign key checks and triggers lock it.
 --
 -- Undo (not in the ledger; a migration only if the owner signs it): mark both
 -- roles inactive (update auth.roles set active = false where code in
@@ -196,8 +213,8 @@
 --
 -- The whole file is one statement (do $q137b$), so whatever raises in it,
 -- however the file is run, applies nothing. Steps 0-2 are one attempt, made
--- again every 100 ms for at most 5 seconds while a table or a counted row is
--- busy (one attempt when this transaction holds an earlier file's locks;
+-- again every 100 ms, 50 times, while a table is busy (one attempt when this
+-- transaction holds an earlier file's locks;
 -- then 55P03, nothing applied); the NOTICEs of the count follow them, once:
 -- 0. The locks.
 -- 1. Preconditions (each failure raises 55000 and nothing is applied):
@@ -214,8 +231,7 @@
 --    the Identity runtime), and this login holding its owner's privileges
 --    (42501 otherwise); this login sees every row it counts (42501
 --    otherwise).
--- 2. The count and the stop (55000, nothing applied); then each counted
---    membership row FOR SHARE, NOWAIT.
+-- 2. The count and the stop (55000, nothing applied).
 -- 3. The two roles and their three rows, the grants and their audit rows
 --    (D1-D4).
 -- 3b. SX-4's change function replaced (D5), at any counts that apply.
@@ -229,7 +245,6 @@ do $q137b$
 declare
   attempt integer := 0;
   busy text;
-  rows_busy boolean := false;
   zero136_here boolean := false;
   holding boolean := exists (
     select 1 from pg_locks held
@@ -255,11 +270,11 @@ declare
     || 'text,text,text,text,text,uuid,uuid,text)';
   apply_before text;
 begin
-  -- Steps 0-2 are one attempt (see Locks): a busy table or a busy counted row
-  -- fails it at once, and its subtransaction releases every lock it took. It
-  -- is made again every 100 ms for at most 5 s; once when this transaction
-  -- already holds an earlier migration's locks. (The attempt's block is not
-  -- indented, so steps 0-2 read as separate steps.)
+  -- Steps 0-2 are one attempt (see Locks): a busy table fails it at once, and
+  -- its subtransaction releases every lock it took. It is made 50 times, 100
+  -- ms apart; once when this transaction already holds an earlier migration's
+  -- locks. (The attempt's block is not indented, so steps 0-2 read as separate
+  -- steps.)
   loop
   attempt := attempt + 1;
   begin
@@ -268,14 +283,18 @@ begin
   -- 0. The locks, NOWAIT.
   lock table auth.roles, auth.role_permissions, auth.account_roles
     in share row exclusive mode nowait;
+  lock table identity.staff_facility_memberships
+    in exclusive mode nowait;
   lock table audit.events
     in row exclusive mode nowait;
-  lock table auth.permissions, auth.accounts, identity.staff_facility_memberships, identity.facilities,
+  lock table auth.permissions, auth.accounts, identity.facilities,
              identity.outreach_organisations, identity.organization_applications
     in row share mode nowait;
   lock table identity.staff, identity.organizations, identity.sealed_demo_members, identity.sealed_qa_members,
              migration.schema_migrations
     in access share mode nowait;
+  -- From here on a lock wait is not one of these NOWAIT locks (see the handler).
+  busy := 'reads';
 
   -- 1. Preconditions.
   -- One marker of each of 0137-0146 (each file's own "already applied" test).
@@ -393,11 +412,9 @@ begin
     zero136_here := true;
   end if;
 
-  -- 2. The count, and the stop. Then each counted membership row FOR SHARE,
-  -- NOWAIT: that conflicts with the FOR NO KEY UPDATE an SX-4 change already in
-  -- flight holds on it, so 0147 never grants alongside a remove that would
-  -- finish with Release B's body. A busy row fails the attempt, as a busy
-  -- table does, and the next attempt counts again.
+  -- 2. The count, and the stop. identity.staff_facility_memberships is held
+  -- EXCLUSIVE since step 0, so no counted membership changes until commit, and
+  -- an SX-4 change that starts now waits for the table (see Locks).
   -- 0136's change list (lines 1-20), as 0136 has it.
   with change(position, role_code, permission_code, action) as (
     values
@@ -521,38 +538,33 @@ begin
 
   -- The stop (Q137 B, and the amendment's 0, 0 and 0): numbers only.
   if (administrators, doctors, reading_doctors) not in ((9, 1, 1), (0, 0, 0)) then
+    if zero136_here then
+      raise notice '0147: 0136 is not recorded in migration.schema_migrations, so it is being applied in this same transaction; this transaction''s start stands for its applied_at.';
+    end if;
     raise exception using errcode = '55000',
       message = format('0147 stopped, nothing was changed: the counts are %s, %s and %s (administrators and doctors '
         || 'for the work lists, doctors for the reading start); the owner approved exactly 9, 1 and 1 (Q137 B), '
         || 'and 0, 0 and 0 grants nothing.', administrators, doctors, reading_doctors);
   end if;
 
-  busy := 'rows';
-  perform 1 from identity.staff_facility_memberships membership
-   where membership.id = any(work_list_members || reading_members)
-     for share of membership nowait;
   exit;
 
   exception when lock_not_available then
-    rows_busy := rows_busy or busy = 'rows';
-    if holding and busy = 'rows' then
-      raise exception using errcode = '55P03',
-        message = '0147: a counted member''s membership is busy (a staff role change in flight), and this transaction already holds an earlier migration''s '
-          || 'locks, so it does not wait; nothing applied; run the release again at a quieter time';
+    -- Only a table of step 0, taken NOWAIT, is retried. A lock wait while the
+    -- preconditions and the count are planned or run (an index or catalog that
+    -- maintenance holds) ends with the runner's lock_timeout, which stops the
+    -- file at once, as the runner intends; it is not a busy table of 0147's.
+    if busy = 'reads' then
+      raise;
     end if;
     if holding then
       raise exception using errcode = '55P03',
-        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, audit.events or a table 0147 reads (the permissions, accounts, staff, memberships, facilities, organizations, outreach groups, applications, sealed member lists and migration ledger) is busy, and this transaction already holds an earlier migration''s '
+        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, identity.staff_facility_memberships (a change to a staff membership in flight), audit.events or a table 0147 reads (the permissions, accounts, staff, facilities, organizations, outreach groups, applications, sealed member lists and migration ledger) is busy, and this transaction already holds an earlier migration''s '
           || 'locks, so it does not wait; nothing applied; run the release again at a quieter time';
-    end if;
-    if attempt >= 50 and rows_busy then
-      raise exception using errcode = '55P03',
-        message = '0147: its tables or a counted member''s membership (a staff role change in flight) stayed busy for 5 seconds; nothing applied; run the release again at a '
-          || 'quieter time';
     end if;
     if attempt >= 50 then
       raise exception using errcode = '55P03',
-        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, audit.events or a table 0147 reads (the permissions, accounts, staff, memberships, facilities, organizations, outreach groups, applications, sealed member lists and migration ledger) stayed busy for 5 seconds; nothing applied; run the release again at a '
+        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, identity.staff_facility_memberships (a change to a staff membership in flight), audit.events or a table 0147 reads (the permissions, accounts, staff, facilities, organizations, outreach groups, applications, sealed member lists and migration ledger) stayed busy for 5 seconds; nothing applied; run the release again at a '
           || 'quieter time';
     end if;
     perform pg_sleep(0.1);

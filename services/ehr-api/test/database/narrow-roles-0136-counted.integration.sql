@@ -472,7 +472,7 @@ insert into declared_locks values
   ('auth.roles', 'ShareRowExclusiveLock'), ('auth.role_permissions', 'ShareRowExclusiveLock'),
   ('auth.account_roles', 'ShareRowExclusiveLock'), ('audit.events', 'RowExclusiveLock'),
   ('auth.permissions', 'RowShareLock'), ('auth.accounts', 'RowShareLock'),
-  ('identity.staff_facility_memberships', 'RowShareLock'), ('identity.facilities', 'RowShareLock'),
+  ('identity.staff_facility_memberships', 'ExclusiveLock'), ('identity.facilities', 'RowShareLock'),
   ('identity.outreach_organisations', 'RowShareLock'), ('identity.organization_applications', 'RowShareLock'),
   ('identity.staff', 'AccessShareLock'), ('identity.organizations', 'AccessShareLock'),
   ('identity.sealed_demo_members', 'AccessShareLock'), ('identity.sealed_qa_members', 'AccessShareLock'),

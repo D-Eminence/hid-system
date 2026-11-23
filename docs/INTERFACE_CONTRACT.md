@@ -9454,7 +9454,7 @@ amendment on #258, for the owner to confirm at signing.
     every role held, and S12 every role but `org_admin`, the narrow roles with
     them, and each grants the requested role again. Access is never widened.
     But the same role and licence no longer answer "unchanged": S12 then makes
-    the change, so it also signs the member out (as every S12 change does),
+    the change, so it also signs the member out (as every S12 grant does),
     and its audit row names the latest narrow role as `previousRole`. Leaving
     them out there is a follow-up.
 - **Undo:** mark both roles inactive (`auth.roles.active = false`); every
