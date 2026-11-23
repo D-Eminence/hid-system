@@ -16,6 +16,9 @@ import { ServiceWorkloadIdentityService } from './service-workload-identity.serv
  * Nothing here can fail the EHR answer: when a service cannot be reached,
  * refuses, times out or answers something unexpected, every item it was
  * asked about carries `{ status: 'unknown' }` with no times.
+ *
+ * ORD-4 adds the pharmacist's step between "Sent to pharmacy" and
+ * "Dispensed": the pharmacy status 'accepted' and the time `acceptedAt`.
  */
 
 /** At most this many ids in one call (the services' limit). */
@@ -23,11 +26,18 @@ export const OWN_PROGRESS_BATCH = 100;
 /** A slow pharmacy or laboratory must not hold the clinician's list for long. */
 export const OWN_PROGRESS_TIMEOUT_MS = 3_000;
 
-export type PharmacyOwnProgressStatus = 'not_received' | 'received' | 'dispensed' | 'dispensing_reversed' | 'withdrawn'
-  | 'sent_elsewhere' | 'unknown';
+export type PharmacyOwnProgressStatus = 'not_received' | 'received' | 'accepted' | 'dispensed' | 'dispensing_reversed'
+  | 'withdrawn' | 'sent_elsewhere' | 'unknown';
 export interface PharmacyOwnProgress {
   status: PharmacyOwnProgressStatus;
   receivedAt: string | null;
+  /**
+   * ORD-4: when a pharmacist at this hospital's pharmacy accepted it, as
+   * pharmacy-api answers it: with 'accepted', and also kept with a later
+   * status ('dispensed', 'withdrawn', ...), or null (not accepted, unknown, or
+   * a pharmacy-api from before ORD-4, which never sends it).
+   */
+  acceptedAt: string | null;
   dispensedAt: string | null;
   reversedAt: string | null;
 }
@@ -42,19 +52,21 @@ export interface LabOwnProgress {
 }
 
 export const PHARMACY_PROGRESS_UNKNOWN: PharmacyOwnProgress = Object.freeze({ status: 'unknown', receivedAt: null,
-  dispensedAt: null, reversedAt: null });
+  acceptedAt: null, dispensedAt: null, reversedAt: null });
 export const PHARMACY_PROGRESS_NOT_RECEIVED: PharmacyOwnProgress = Object.freeze({ status: 'not_received',
-  receivedAt: null, dispensedAt: null, reversedAt: null });
+  receivedAt: null, acceptedAt: null, dispensedAt: null, reversedAt: null });
 export const LAB_PROGRESS_UNKNOWN: LabOwnProgress = Object.freeze({ status: 'unknown', receivedAt: null,
   collectedAt: null, lastResultAt: null });
 export const LAB_PROGRESS_NOT_RECEIVED: LabOwnProgress = Object.freeze({ status: 'not_received', receivedAt: null,
   collectedAt: null, lastResultAt: null });
 
+// 'accepted' (ORD-4): a pharmacist at this hospital's pharmacy accepted it (acceptedAt), and it is not dispensed yet.
 // 'withdrawn' (0133): sent by itself, then held, cancelled, entered in error, edited or resumed before dispensing.
 // 'sent_elsewhere' (0133 D14, owner's Q121 A): this hospital's pharmacy had it, and it was sent to another facility's
 // pharmacy before it was dispensed; where it went is the prescription's orderRoute.
-const PHARMACY_STATUSES = new Set(['not_received', 'received', 'dispensed', 'dispensing_reversed', 'withdrawn',
-  'sent_elsewhere']);
+// Any other value still makes the whole batch unknown (parseItems).
+const PHARMACY_STATUSES = new Set(['not_received', 'received', 'accepted', 'dispensed', 'dispensing_reversed',
+  'withdrawn', 'sent_elsewhere']);
 
 /**
  * Sent on the pharmacy call only (ORD-3): this ehr-api reads 'withdrawn' and
@@ -64,6 +76,19 @@ const PHARMACY_STATUSES = new Set(['not_received', 'received', 'dispensed', 'dis
  * them. Always sent; not a setting.
  */
 export const OWN_PROGRESS_HEADER = Object.freeze({ 'x-hid-own-progress': '0133' });
+
+/**
+ * ORD-4, sent beside OWN_PROGRESS_HEADER on the pharmacy call only: this
+ * ehr-api also reads 'accepted' and `acceptedAt`. A separate header, so
+ * OWN_PROGRESS_HEADER keeps exactly the value a Release A pharmacy-api
+ * matches (that image ignores this one and answers as before, with no
+ * `acceptedAt`, which parses as null). pharmacy-api answers 'accepted' only
+ * to a call carrying both, each value matched exactly; to an ehr-api from
+ * before ORD-4 it answers 'received', so that page never turns unknown
+ * because of it. Either image may therefore be deployed, or rolled back,
+ * first. Always sent; not a setting.
+ */
+export const OWN_PROGRESS_ACCEPTED_HEADER = Object.freeze({ 'x-hid-own-progress-accepted': 'ord4' });
 const LAB_STATUSES = new Set(['not_received', 'received', 'sample_collected', 'some_results_ready', 'results_ready']);
 
 /** A draft was never sent, so it is not asked about; every other status may have been. */
@@ -106,12 +131,14 @@ export class WorkItemProgressService {
     for (const batch of batches(asked)) {
       const answer = await this.call('pharmacy', '/api/v1/pharmacy/work-items/progress', context,
         { patientId, sourceEhrPrescriptionIds: batch });
+      // ORD-4: a missing acceptedAt (a pharmacy-api from before ORD-4) parses as null, as a missing time always has.
       const parsed = parseItems(answer, batch, 'sourceEhrPrescriptionId', PHARMACY_STATUSES,
-        ['receivedAt', 'dispensedAt', 'reversedAt']);
+        ['receivedAt', 'acceptedAt', 'dispensedAt', 'reversedAt']);
       for (const id of batch) {
         const found = parsed?.get(id);
         result.set(id, found ? { status: found.status as PharmacyOwnProgressStatus, receivedAt: found.receivedAt ?? null,
-          dispensedAt: found.dispensedAt ?? null, reversedAt: found.reversedAt ?? null } : PHARMACY_PROGRESS_UNKNOWN);
+          acceptedAt: found.acceptedAt ?? null, dispensedAt: found.dispensedAt ?? null,
+          reversedAt: found.reversedAt ?? null } : PHARMACY_PROGRESS_UNKNOWN);
       }
     }
     return result;
@@ -163,7 +190,7 @@ export class WorkItemProgressService {
           ...(context.origin ? { origin: context.origin } : {}),
           'x-hid-internal-caller': 'ehr-api',
           ...caller,
-          ...(service === 'pharmacy' ? OWN_PROGRESS_HEADER : {}),
+          ...(service === 'pharmacy' ? { ...OWN_PROGRESS_HEADER, ...OWN_PROGRESS_ACCEPTED_HEADER } : {}),
         },
       });
       if (!response.ok) {

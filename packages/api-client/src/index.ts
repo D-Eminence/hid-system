@@ -108,6 +108,7 @@ export { PharmacyApiClient, PharmacyApiProblem } from './pharmacy';
 export type {
   CreatePharmacyDispensingInput,
   ListPharmacyImportedMedicationsOptions,
+  PharmacistAcceptance,
   PharmacyDispensing,
   PharmacyDispensingReversal,
   PharmacyImportedMedicationEvidence,
@@ -118,6 +119,7 @@ export type {
   PharmacyMedicationReference,
   PharmacyRequestContext,
   PharmacyResourceReference,
+  PharmacyStep,
   PharmacyWorkItem,
   PharmacyWorkItemMedication,
   PharmacyWorkItemOrderRoute,

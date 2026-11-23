@@ -619,6 +619,23 @@ describe('EHR-C5 one-call consultation (service)', () => {
     expect(db.tables()).toEqual(before);
   });
 
+  it('VIT-1: refuses a new consultation whose diastolic is not below the systolic, but replays one an older image saved',
+    async () => {
+      const db = fakeDatabase();
+      const equal = body({ vitals: { ...body().vitals!, systolicMmhg: 120, diastolicMmhg: 120 } });
+      await expect(db.consultations.create(contextFor('correlation-0001'), patientId, equal, KEY))
+        .rejects.toMatchObject({ status: 400, code: 'BLOOD_PRESSURE_ORDER_INVALID' });
+      expect(db.tables()).toEqual({ keys: [], encounters: [], notes: [], revisions: [], vitals: [], diagnoses: [] });
+      // An older image (before VIT-1) saved it; the answer was lost, and the retry reaches this image.
+      const rule = db.vitals.checkBloodPressureOrder;
+      db.vitals.checkBloodPressureOrder = () => undefined;
+      const saved = await db.consultations.create(contextFor('correlation-0002'), patientId, equal, KEY);
+      db.vitals.checkBloodPressureOrder = rule;
+      const before = structuredClone(db.tables());
+      await expect(db.consultations.create(contextFor('correlation-0003'), patientId, equal, KEY)).resolves.toEqual(saved);
+      expect(db.tables()).toEqual(before);
+    });
+
   it('saves a visit with only a draft note, leaving out vitals and diagnoses', async () => {
     const db = fakeDatabase();
     const saved = await db.consultations.create(contextFor('correlation-0001'), patientId,

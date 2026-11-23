@@ -126,6 +126,21 @@ assert.match(ehrDockerfile, new RegExp(`FROM ${distrolessNodeRuntime} AS migrati
 const ehrRuntime = ehrDockerfile.slice(ehrDockerfile.lastIndexOf(`FROM ${distrolessNodeRuntime} AS runtime`))
 assert.doesNotMatch(ehrRuntime, /services\/ehr-api\/(?:database|scripts)/,
   'the EHR API runtime image must not contain the migration executor or ledger')
+// ORD-7: the migration image carries what the governed catalogue load reads, the sign-off (catalog-approvals.json),
+// the Wave 0 codes and the signed seed files, at /app/docs/codes, where load-catalog.mjs and the deploy tool's
+// catalogue phase look; the runtime image carries none of it.
+const ehrMigration = ehrDockerfile.slice(ehrDockerfile.indexOf(`FROM ${distrolessNodeRuntime} AS migration`),
+  ehrDockerfile.lastIndexOf(`FROM ${distrolessNodeRuntime} AS runtime`))
+assert.match(ehrMigration, /\nWORKDIR \/app\n[\s\S]*\nCOPY --chown=65532:65532 docs\/codes \.\/docs\/codes\n/,
+  'the EHR migration image must carry docs/codes (the catalogue sign-off and the signed seed files) at /app/docs/codes')
+assert.doesNotMatch(ehrRuntime, /docs\/codes/, 'the EHR API runtime image must not carry the catalogue files')
+assert.ok((await readFile(join(repository, 'services/ehr-api/scripts/load-catalog.mjs'), 'utf8'))
+  .includes("path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../docs/codes')"),
+'load-catalog.mjs must read /app/docs/codes in the migration image')
+assert.match(await readFile(join(repository, 'scripts/production_deployment.py'), 'utf8'),
+  /^CATALOG_SEEDS = \{"medicine":"\/app\/docs\/codes\/hid-medicines\.json","lab_test":"\/app\/docs\/codes\/hid-lab-tests\.json"\}$/m,
+  'the deploy tool must load the signed seed files where the migration image carries them')
+for (const file of ['catalog-approvals.json', 'hid-lab-codes.json']) await stat(join(repository, 'docs/codes', file))
 
 const workerDockerfile = await readFile(join(repository, 'services/ocr-worker/Dockerfile'), 'utf8')
 assert.doesNotMatch(workerDockerfile, /HEALTHCHECK/, 'the portless OCR worker must use orchestrator/process lifecycle, not fake HTTP health')

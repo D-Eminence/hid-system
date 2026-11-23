@@ -518,21 +518,36 @@ try {
     const liveRehearsal = await readFile(join(live, 'scripts/tuf-staging-migration-rehearsal.mjs'), 'utf8');
     const liveVerifiers = [...new Set(liveRehearsal.match(/services\/[a-z-]+\/scripts\/verify-[a-z-]+-runtime\.mjs/g))];
     assert(liveVerifiers.length > 0, 'The live tree runs no runtime verifier');
-    // A live verifier's guard that checks the database's shape, not the live code: a Release A file changes that
-    // shape on purpose (0128 adds two columns to identity.list_my_access_requests, which the live consent service
-    // reads by name with select *). Such a verifier runs from a copy beside it with that one line set to the shape
-    // this branch leaves; the line, before and after, is in the evidence, and the code it boots is the live code.
+    // A live verifier's guard that checks the database's shape, not the live code: a later file changes that
+    // shape on purpose. 0128 adds two columns to identity.list_my_access_requests, which the live consent service
+    // reads by name with select *. 0145 (ID-7) audits a desk registration's replay as its own row (replayed: true),
+    // so the live desk verifier's count of registration audit rows sees one more; the replay's answer is the same.
+    // Such a verifier runs from a copy beside it with that one line set to the shape this branch leaves (the
+    // replay rows are counted and set aside, at most one); the line, before and after, is in the evidence, and the
+    // code it boots is the live code.
     const liveGuards = {
       'services/ehr-api/scripts/verify-records-processing-runtime.mjs': [
         "assert.deepEqual([code?.active, listColumns], [true, 12], 'a database with 0104');",
         "assert.deepEqual([code?.active, listColumns], [true, 14], 'a database with 0104 and 0128');"],
+      'services/identity-api/scripts/verify-desk-registration-own-facility-runtime.mjs': [
+        'assert.equal(registrationAudits, 3);',
+        "const replays = (await pool.query(`select count(*)::integer as n from audit.events where action in ('identity.registration.without-nin', 'identity.registration.without-nin.review') and facility_id = $1 and outcome = 'success' and details ? 'replayed'`, [ids.facA])).rows[0].n; assert(replays <= 1, 'At most the one replay is audited as a replay'); assert.equal(registrationAudits - replays, 3);"],
     };
     const guardsChanged = [];
     const liveScript = async (verifier) => {
       const guard = liveGuards[verifier];
       if (!guard) return join(live, verifier);
       const original = await readFile(join(live, verifier), 'utf8');
-      assert.equal(original.split(guard[0]).length, 2, `the live ${basename(verifier)} guard is not as expected`);
+      // A live tree with 0128 (Release A and later) reads the shape itself (`has0128 ? 14 : 12`): no old line, so
+      // its verifier runs as it is. The old line, where present, must be there exactly once.
+      const occurrences = original.split(guard[0]).length - 1;
+      if (occurrences === 0) {
+        if (!guardsChanged.some((entry) => entry.verifier === verifier)) {
+          guardsChanged.push({ verifier, live_sha256: sha256(original), unchanged: 'the live verifier has no pre-0128 line' });
+        }
+        return join(live, verifier);
+      }
+      assert.equal(occurrences, 1, `the live ${basename(verifier)} guard is not as expected`);
       const copy = join(live, verifier.replace(/[^/]+$/, (name) => `rehearsal-copy-${name}`));
       await writeFile(copy, original.replace(guard[0], guard[1]));
       if (!guardsChanged.some((entry) => entry.verifier === verifier)) {
@@ -548,10 +563,22 @@ try {
       'hid_live_base');
     migration('live runtime roles and grants by the live bootstrap',
       join(liveService, 'scripts/bootstrap-database-roles.mjs'), 'hid_live_base');
-    const points = ['0132', '0135'];
+    // The points after which the live images' verifiers run: HID_REHEARSAL_LIVE_POINTS (comma-separated 4-digit
+    // numbers, each one of this branch's files after the live schema), else Release A's 0132 and 0135 while those
+    // are still pending, else every pending file (a later release, for example Release B on Release A's images).
+    const pending = files.slice(liveFiles.length).map((name) => name.slice(0, 4));
+    const requestedPoints = (process.env.HID_REHEARSAL_LIVE_POINTS ?? '').split(',').map((point) => point.trim())
+      .filter(Boolean);
+    for (const point of requestedPoints) {
+      assert(/^\d{4}$/.test(point) && pending.includes(point),
+        `HID_REHEARSAL_LIVE_POINTS names ${point}, which is not one of this branch's files after the live schema`);
+    }
+    const points = requestedPoints.length > 0 ? requestedPoints
+      : ['0132', '0135'].every((point) => pending.includes(point)) ? ['0132', '0135'] : pending;
     const results = [];
-    for (const [index, last] of points.entries()) {
-      const db = `hid_live_${'abcdefgh'[index]}`;
+    for (const last of new Set(points)) {
+      // Letters only: url() accepts hid_[a-z_]+. The point's own digits as letters (0138 -> hid_live_abdi).
+      const db = `hid_live_${last.replace(/\d/g, (digit) => 'abcdefghij'[Number(digit)])}`;
       command(`copy the live database for ${last}`, join(pgBindir, 'createdb'), ['-T', 'hid_live_base', db]);
       const subset = join(temporary, `migrations-through-${last}`);
       await mkdir(subset);

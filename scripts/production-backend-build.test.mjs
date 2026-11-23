@@ -57,9 +57,16 @@ test('an unknown path under scripts/ or packages/ selects all 13 components',()=
     assert.deepEqual(selectComponents([p]),components,p);
 });
 test('a pure docs/ or scripts/tests/ change selects no component',()=>{
-  assert.deepEqual(selectComponents(['docs/INTERFACE_CONTRACT.md','docs/codes/hid-lab-codes.json']),[]);
+  assert.deepEqual(selectComponents(['docs/INTERFACE_CONTRACT.md','docs/EHR_PLANNED_CONTRACT.md']),[]);
   assert.deepEqual(selectComponents(['scripts/tests/hid-lab-codes.test.mjs','scripts/tests/fixtures/a.json']),[]);
-  assert.deepEqual(selectComponents(['docs/INTERFACE_CONTRACT.md','docs/codes/hid-lab-codes.json','scripts/tests/hid-lab-codes.test.mjs']),[]);
+  assert.deepEqual(selectComponents(['docs/INTERFACE_CONTRACT.md','scripts/tests/hid-lab-codes.test.mjs']),[]);
+});
+test('docs/codes selects the migration image, which carries it for the governed catalogue load (ORD-7)',()=>{
+  for(const p of ['docs/codes/catalog-approvals.json','docs/codes/hid-lab-codes.json','docs/codes/hid-medicines.json',
+    'docs/codes/hid-lab-tests.json'])
+    assert.deepEqual(selectComponents([p]),['database-migration'],p);
+  assert.deepEqual(selectComponents(['docs/INTERFACE_CONTRACT.md','docs/codes/hid-lab-codes.json','scripts/tests/hid-lab-codes.test.mjs']),
+    ['database-migration']);
 });
 test('scripts and packages that no image or production build uses select no component',()=>{
   for(const p of ['scripts/tuf-staging-migration-rehearsal.mjs','scripts/staging-backend-build.mjs','scripts/verify-container-platform.mjs',
@@ -672,4 +679,15 @@ test('the select job reads the push base from the Actions API, not from the prev
   assert.ok(/permissions:\n\s+contents: read\n\s+actions: read\n/.test(select));
   assert.ok(select.includes('BASE_SHA: ${{ github.event.pull_request.base.sha }}\n'));
   assert.ok(!select.includes('github.event.before'));
+});
+// ORD-7's catalogue phase (scripts/production_deployment.py) runs only when a dispatch chooses it: a push deploys with
+// CATALOG_LOAD 'none', and the dispatch input defaults to it.
+test('the deploy job asks for the catalogue load only when a dispatch chooses it',()=>{
+  const text=readFileSync(join(repoRoot,'.github/workflows/production-backend-images.yml'),'utf8');
+  const inputs=text.slice(text.indexOf('  workflow_dispatch:'),text.indexOf('\npermissions:'));
+  assert.ok(/catalog_load:\n[^\n]*\n\s+type: choice\n\s+default: none\n\s+options: \[none, medicine, lab_test, 'medicine,lab_test'\]/.test(inputs));
+  const deploy=text.slice(text.indexOf('\n  deploy:\n'));
+  assert.equal(deploy.match(/CATALOG_LOAD: .*/g)?.join(),
+    "CATALOG_LOAD: ${{ github.event_name == 'workflow_dispatch' && inputs.catalog_load || 'none' }}");
+  assert.ok(!text.slice(0,text.indexOf('\n  deploy:\n')).includes('CATALOG_LOAD'));
 });

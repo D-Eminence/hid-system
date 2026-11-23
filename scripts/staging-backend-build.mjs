@@ -23,7 +23,7 @@ export function selectComponents(paths, requested='changed') {
     if(p.startsWith('gateway/')) result.add('gateway');
     for(const c of components.filter(x=>!['gateway','database-migration'].includes(x)))
       if(p.startsWith(`services/${c}/`)) result.add(c);
-    if(p.startsWith('services/ehr-api/database/') || p.startsWith('services/ehr-api/scripts/')) result.add('database-migration');
+    if(p.startsWith('services/ehr-api/database/') || p.startsWith('services/ehr-api/scripts/') || p.startsWith('docs/codes/')) result.add('database-migration');
   }
   return components.filter(c=>result.has(c));
 }

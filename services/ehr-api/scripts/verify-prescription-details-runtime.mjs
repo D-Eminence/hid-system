@@ -585,13 +585,16 @@ try {
   step('ORD-7: before a signed list is loaded the status says not available and a search answers nothing, '
     + 'with no purpose of use, kept a minute by the browser');
 
-  // A list loaded as the governed loader of a later slice will (owner SQL: no route loads a list). Synthetic rows.
+  // A list loaded as the governed loader of a later slice will (owner SQL: no route loads a list): the versions
+  // (still loading), their rows, then the switch, which seals them. Synthetic rows.
   const loincNotice = 'Synthetic notice: this material contains content from LOINC (http://loinc.org).';
   const [medicineVersion, labVersion] = [randomUUID(), randomUUID()];
-  await owner.query(`insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference, approved_at,
-      active, attribution) values
-    ($1, 'medicine', '2026.1', repeat('a', 64), 'synthetic sign-off reference', '2026-12-01T09:00:00+01:00', true, '{}'),
-    ($2, 'lab_test', '2026.1', repeat('b', 64), 'synthetic sign-off reference', '2026-12-01T09:00:00+01:00', true, $3)`,
+  await owner.query(`insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference,
+      approvals_sha256, approved_at, attribution) values
+    ($1, 'medicine', '2026.1', repeat('a', 64), 'synthetic sign-off reference', repeat('1', 64),
+     '2026-12-01T09:00:00+01:00', '{}'),
+    ($2, 'lab_test', '2026.1', repeat('b', 64), 'synthetic sign-off reference', repeat('1', 64),
+     '2026-12-01T09:00:00+01:00', $3)`,
   [medicineVersion, labVersion, [loincNotice]]);
   await owner.query(`insert into ehr.catalog_medicines (version_id, list_id, generic_name, other_names, strength,
       dose_form, dose_form_text, routes, atc_code, common_adult_dose, source) values
@@ -604,6 +607,8 @@ try {
   await owner.query(`insert into ehr.catalog_lab_tests (version_id, list_id, code_system, code, display, other_names,
       specimen, category, source) values ($1, 'LAB-0001', 'LOINC', '57021-8', 'Full blood count', 'FBC; CBC',
       'Blood (EDTA)', 'haematology', 'hid-common-tests')`, [labVersion]);
+  await owner.query('update ehr.catalog_versions set active = true where id = any($1::uuid[])',
+    [[medicineVersion, labVersion]]);
   const loaded = seed => ({ available: true, version: '2026.1', approvedAt: '2026-12-01', fileSha256: seed.repeat(64) });
   assert.deepEqual(expectStatus(await catalogGet(ownPharmacist, '/status'), 200, 'catalogue status after a list'),
     { medicines: loaded('a'), labTests: loaded('b'), diagnoses: { available: false, release: null, fileSha256: null }, labTestNameOnly: false,
@@ -659,15 +664,18 @@ try {
     + 'never kept; only refusals are audited, never with the search text');
 
   // ── ORD-9 (0150), first slice: the ICD-11 diagnosis search ──
+  // Loaded as the governed loader loads it: the release (still loading, with the approvals file's sha256), its
+  // entries, then the switch, which seals it (0149, 0150).
   const icdNotice = 'Synthetic notice: ICD-11, World Health Organization, CC BY-ND 3.0 IGO.';
   const diagnosisVersion = randomUUID();
-  await owner.query(`insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference, approved_at,
-      active, attribution) values ($1, 'diagnosis', '2026-01', repeat('d', 64), 'synthetic sign-off reference',
-      '2026-12-01T09:00:00+01:00', true, $2)`, [diagnosisVersion, [icdNotice]]);
+  await owner.query(`insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference,
+      approvals_sha256, approved_at, attribution) values ($1, 'diagnosis', '2026-01', repeat('d', 64),
+      'synthetic sign-off reference', repeat('1', 64), '2026-12-01T09:00:00+01:00', $2)`, [diagnosisVersion, [icdNotice]]);
   await owner.query(`insert into ehr.catalog_diagnoses (version_id, code, title, other_names, chapter, residual) values
     ($1, '1F40', 'Malaria due to Plasmodium falciparum', 'falciparum malaria', '01', false),
     ($1, 'KA64.20', 'Congenital falciparum malaria', '', '19', false),
     ($1, '1A07', 'Typhoid fever', 'enteric fever; typhoid', '01', false)`, [diagnosisVersion]);
+  await owner.query('update ehr.catalog_versions set active = true where id = $1', [diagnosisVersion]);
   const terminologyGet = (who, path) => http(ehr, 'GET', `/ehr/terminology${path}`, { cookie: who.cookie,
     facility: who.facilityId });
   const falciparum = await terminologyGet(doctor, '/diagnoses?q=falciparum&limit=5');

@@ -67,3 +67,38 @@ describe('PostgresIdentityProvider records-processing cover (0104, owner decisio
     expect(query.mock.calls.some(([sql]) => sql.includes('records_processing_direct_care_cover'))).toBe(false);
   });
 });
+
+describe('PostgresIdentityProvider record kind (0145, ID-7)', () => {
+  const patientRow = { id: patientId, hid_code: 'HID-UNKAAA2', first_name: 'Unknown', last_name: 'U-0007',
+    full_name: 'Unknown patient U-0007', dob: '1990-07-01', gender: 'male', row_version: '2', nin_verified: false };
+
+  function lookups(present: boolean, kind = 'unknown') {
+    const query = jest.fn(async (sql: string, _values?: unknown[]) => {
+      if (sql.includes('to_regprocedure')) return { rows: [{ present }] };
+      if (sql.includes('identity.patient_record_kind($1')) return { rows: [{ record_kind: kind }] };
+      return { rows: [patientRow] };
+    });
+    const database = { withTransaction: jest.fn(async (_c: DataAccessContext, work: (client: PoolClient) => Promise<unknown>) =>
+      work({ query } as unknown as PoolClient)) } as unknown as DatabaseService;
+    return { identity: new PostgresIdentityProvider(database), query };
+  }
+
+  it('reads the kind through identity.patient_record_kind, and asks whether it exists only until it does', async () => {
+    const { identity, query } = lookups(true);
+    await expect(identity.lookupExactHid('HID-UNKAAA2', context)).resolves.toMatchObject({ recordKind: 'unknown' });
+    await expect(identity.lookupPatientId(patientId, context)).resolves.toMatchObject({ recordKind: 'unknown' });
+    expect(query.mock.calls.filter(([sql]) => sql.includes('to_regprocedure'))).toHaveLength(1);
+    expect(query.mock.calls.filter(([sql]) => sql.includes('patient_record_kind($1')).map(([, values]) => values))
+      .toEqual([[patientId], [patientId]]);
+    expect(query.mock.calls.some(([sql]) => sql.includes('record_kind') && sql.includes('identity.patients'))).toBe(false);
+  });
+
+  it('leaves the kind out before 0145, asking again next time', async () => {
+    const { identity, query } = lookups(false);
+    const found = await identity.lookupExactHid('HID-UNKAAA2', context);
+    expect(found).not.toHaveProperty('recordKind');
+    await identity.lookupPatientId(patientId, context);
+    expect(query.mock.calls.filter(([sql]) => sql.includes('to_regprocedure'))).toHaveLength(2);
+    expect(query.mock.calls.some(([sql]) => sql.includes('patient_record_kind($1'))).toBe(false);
+  });
+});

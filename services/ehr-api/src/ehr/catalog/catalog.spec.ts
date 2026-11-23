@@ -14,7 +14,7 @@ import {
 import { CatalogModule } from './catalog.module';
 import {
   CATALOG_SEARCHES_PER_WINDOW, CATALOG_SEARCH_WINDOW_MS, CatalogService, DIAGNOSES_SQL, LAB_TESTS_SQL, MEDICINES_SQL,
-  STATUS_SQL, looksLikePersonIdentifier, medicineDisplay, typedIcd10,
+  STATUS_SQL, diagnosisSearchUnavailable, looksLikePersonIdentifier, medicineDisplay, typedIcd10,
 } from './catalog.service';
 import { RECENT_DIAGNOSES_SQL, RecentDiagnosesService, type RecentDiagnosesCaller } from './recent-diagnoses.service';
 
@@ -314,6 +314,45 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       }
       expect(calls).toEqual([]);
     });
+
+    // q's length in code points, as the database's char_length counts it, not in UTF-16 units.
+    it.each([
+      ['one emoji', '\u{1F600}'],
+      ['one mathematical letter (U+1D538)', '\u{1D538}'],
+    ])('q of %s is one character: 400 CATALOG_SEARCH_TEXT_TOO_SHORT, and nothing is searched', async (_name, q) => {
+      expect(q).toHaveLength(2);
+      const { database, calls } = fakeDatabase([]);
+      const service = new CatalogService(database);
+      for (const search of [service.searchMedicines(membershipA, medicines({ q })),
+        service.searchLabTests(membershipA, labTests({ q }))]) {
+        const problem = await problemOf(search);
+        expect([problem.getStatus(), problem.code]).toEqual([400, 'CATALOG_SEARCH_TEXT_TOO_SHORT']);
+      }
+      expect(calls).toEqual([]);
+    });
+
+    it('q of two code points is searched, though one of them is two UTF-16 units', async () => {
+      const { database, calls } = fakeDatabase([]);
+      const service = new CatalogService(database);
+      await service.searchMedicines(membershipA, medicines({ q: 'a\u{1D538}' }));
+      await service.searchLabTests(membershipA, labTests({ q: '\u{1F600}\u{1F600}' }));
+      expect(calls.map((call) => call.values[0])).toEqual(['a\u{1D538}', '\u{1F600}\u{1F600}']);
+    });
+
+    it('q of 100 code points is searched; over 100 is VALIDATION_FAILED, even where the validator counted fewer', async () => {
+      const astral = '\u{1D538}'.repeat(100);
+      const presented = '\u2764\uFE0F'.repeat(51);
+      // The query validator counts 100 and 51 characters (it leaves out the presentation selectors); the database 100 and 102.
+      await expect(validate(SearchCatalogLabTestsQueryDto, { q: astral })).resolves.toMatchObject({ q: astral });
+      await expect(validate(SearchCatalogLabTestsQueryDto, { q: presented })).resolves.toMatchObject({ q: presented });
+      const { database, calls } = fakeDatabase([]);
+      const service = new CatalogService(database);
+      await service.searchLabTests(membershipA, labTests({ q: astral }));
+      const problem = await problemOf(service.searchMedicines(membershipA, medicines({ q: presented })));
+      expect([problem.getStatus(), problem.code, problem.errors]).toEqual([400, 'VALIDATION_FAILED',
+        [{ field: 'q', messages: ['q must be shorter than or equal to 100 characters'] }]]);
+      expect(calls.map((call) => call.values[0])).toEqual([astral]);
+    });
   });
 
   describe('300 searches per 5 minutes per membership', () => {
@@ -404,10 +443,37 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       expect([problem.code, problem.message]).toEqual(['CATALOG_SEARCH_TEXT_NOT_ALLOWED',
         'Search by diagnosis name or code. Do not type a Health ID or NIN here.']);
       expect(calls).toEqual([]);
-      const failed = await problemOf(new CatalogService(fakeDatabase(databaseError('42883')).database)
-        .searchDiagnoses(membershipA, diagnoses('malaria')));
-      expect([failed.getStatus(), failed.code]).toEqual([503, 'CATALOG_UNAVAILABLE']);
     });
+
+    // Rahman's review of #320, nit 6: admit() counts code points for the diagnosis search too, as char_length does.
+    it('counts q in code points: one astral character is too short, two are searched, over 100 is VALIDATION_FAILED',
+      async () => {
+        const { database, calls } = fakeDatabase([]);
+        const service = new CatalogService(database);
+        for (const q of ['\u{1F600}', '\u{1D538}']) {
+          const problem = await problemOf(service.searchDiagnoses(membershipA, diagnoses(q)));
+          expect([problem.getStatus(), problem.code]).toEqual([400, 'CATALOG_SEARCH_TEXT_TOO_SHORT']);
+        }
+        const tooLong = await problemOf(service.searchDiagnoses(membershipA, diagnoses('\u2764\uFE0F'.repeat(51))));
+        expect([tooLong.getStatus(), tooLong.code]).toEqual([400, 'VALIDATION_FAILED']);
+        await service.searchDiagnoses(membershipA, diagnoses('a\u{1D538}'));
+        expect(calls.map((call) => call.values[0])).toEqual(['a\u{1D538}']);
+      });
+
+    it.each(['42883', '42P01', '57014', '08006'])('%s is 503 CATALOG_UNAVAILABLE in words true today, and q is never logged',
+      async (code) => {
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        const failed = await problemOf(new CatalogService(fakeDatabase(databaseError(code)).database)
+          .searchDiagnoses(membershipA, diagnoses('malaria')));
+        // A name alone is not accepted yet (clinical.dto.ts still requires the code), so no "type it instead".
+        expect([failed.getStatus(), failed.code, failed.message]).toEqual([503, 'CATALOG_UNAVAILABLE',
+          'Diagnosis search is not available right now. Try again in a minute.']);
+        expect(failed.message).not.toMatch(/type|instead/i);
+        expect(diagnosisSearchUnavailable().message).toBe(failed.message);
+        expect(warn.mock.calls.map((call) => String(call[0])).join('\n')).not.toMatch(/malaria/);
+        expect(warn).toHaveBeenCalledTimes(code === '42883' || code === '42P01' ? 0 : 1);
+        warn.mockRestore();
+      });
 
     it('the status names the loaded ICD-11 release and its notice', async () => {
       const icd = 'ICD-11 notice';

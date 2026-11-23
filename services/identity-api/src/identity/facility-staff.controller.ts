@@ -5,6 +5,8 @@ import { requireIdempotencyKey } from '../common/idempotency';
 import { type HidRequest, requireRequestContext } from '../common/request-context';
 import { AdministratorLicenceDto, ChangeFacilityStaffRoleDto, CreateStaffInvitationDto, EndFacilityStaffDto,
   ExpectedVersionDto } from './dto/staff-invitation.dto';
+import { AddFacilityStaffRoleDto, RemoveFacilityStaffRoleDto } from './dto/staff-role.dto';
+import { FacilityStaffRolesService } from './facility-staff-roles.service';
 import { FacilityStaffService } from './facility-staff.service';
 import { StaffInvitationsService } from './staff-invitations.service';
 
@@ -21,10 +23,14 @@ import { StaffInvitationsService } from './staff-invitations.service';
  * Order: guard (session, facility, permission, CSRF) → DTO → the facility's
  * self sign-up state → the gate (invite, resend, role) → password re-entry
  * (invite, role, remove) → the command (recovery hold inside it).
+ *
+ * SX-4 (0139) adds one role or removes one beside today's role change, with
+ * the same guard, gate (add only) and password; see FacilityStaffRolesService.
  */
 @Controller('identity')
 export class FacilityStaffController {
-  constructor(private readonly staff: FacilityStaffService, private readonly invitations: StaffInvitationsService) {}
+  constructor(private readonly staff: FacilityStaffService, private readonly invitations: StaffInvitationsService,
+    private readonly roles: FacilityStaffRolesService) {}
 
   @Get('facility-staff')
   @RequirePermissions('workforce.manage')
@@ -95,5 +101,34 @@ export class FacilityStaffController {
   changeRole(@Param('membershipId', new ParseUUIDPipe({ version: '4' })) membershipId: string,
     @Body() input: ChangeFacilityStaffRoleDto, @Req() request: HidRequest) {
     return this.staff.changeRole(requireRequestContext(request, 'healthcare-operations'), request, membershipId, input);
+  }
+
+  /**
+   * SX-4: add one role. 201 { membershipId, version, roles, replayed: false };
+   * a replay of the same Idempotency-Key and request answers 200 with
+   * replayed: true.
+   */
+  @Post('facility-staff/:membershipId/roles/add')
+  @RequirePermissions('workforce.manage')
+  @AuditAction('identity.facility-staff.role-add')
+  async addRole(@Param('membershipId', new ParseUUIDPipe({ version: '4' })) membershipId: string,
+    @Body() input: AddFacilityStaffRoleDto, @Headers('idempotency-key') key: string | undefined,
+    @Req() request: HidRequest, @Res({ passthrough: true }) response: Response) {
+    const idempotencyKey = requireIdempotencyKey(key);
+    const answer = await this.roles.add(requireRequestContext(request, 'healthcare-operations'), request,
+      membershipId, input, idempotencyKey);
+    response.status(answer.status);
+    return answer.body;
+  }
+
+  /** SX-4: remove one role, never the last. 200 { membershipId, version, roles, replayed: false }. */
+  @Post('facility-staff/:membershipId/roles/remove')
+  @HttpCode(200)
+  @RequirePermissions('workforce.manage')
+  @AuditAction('identity.facility-staff.role-remove')
+  async removeRole(@Param('membershipId', new ParseUUIDPipe({ version: '4' })) membershipId: string,
+    @Body() input: RemoveFacilityStaffRoleDto, @Req() request: HidRequest) {
+    return (await this.roles.remove(requireRequestContext(request, 'healthcare-operations'), request, membershipId,
+      input)).body;
   }
 }

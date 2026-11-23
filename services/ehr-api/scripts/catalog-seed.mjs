@@ -37,6 +37,22 @@ export const ICD11_CODE = /^(?!X)[0-9A-Z]{4}(\.[0-9A-Z]{1,2}){0,2}$/;
 export const ICD11_CHAPTER = /^([0-9]{2}|[A-Z])$/;
 
 /** The notices the seeds carry, shown on the screens' About page (planned contract, "attribution"). */
+/**
+ * The licence answers a sign-off records (Q124 A; Rahman's review of #319,
+ * point 3), each a reference (8-500 characters) to where the owner's answer
+ * is kept, never a personal name:
+ * - nigeriaEml8: the owner's confirmation that the Nigeria Essential
+ *   Medicines List, 8th edition ("All rights reserved"), may be used for its
+ *   facts. Every medicine version needs it.
+ * - whoccAtc: the WHOCC terms answer for ATC codes in a commercial product.
+ *   A medicine version holding any ATC code needs it, and the seed builder
+ *   writes ATC codes (--with-atc) only when the version's sign-off has it.
+ */
+export const LICENCES = {
+  nigeriaEml8: 'the owner\'s confirmation that the Nigeria EML 8th edition may be used',
+  whoccAtc: 'the WHOCC terms answer for ATC codes',
+};
+
 export const LOINC_NOTICE = 'This material contains content from LOINC (http://loinc.org). LOINC is copyright Regenstrief '
   + 'Institute, Inc. and the Logical Observation Identifiers Names and Codes (LOINC) Committee and is available at no cost '
   + 'under the license at http://loinc.org/license. LOINC is a registered United States trademark of Regenstrief Institute, Inc.';
@@ -155,7 +171,7 @@ export function diagnosisProblems(item) {
   return problems;
 }
 
-function medicineFromRow(row) {
+function medicineFromRow(row, withAtc) {
   return {
     listId: row.id,
     genericName: row.name.trim(),
@@ -164,7 +180,8 @@ function medicineFromRow(row) {
     doseForm: row.dose_form.trim(),
     doseFormText: optional(row.dose_form_text ?? ''),
     routes: words(row.route ?? ''),
-    atcCode: row.code_system === 'ATC' ? optional(row.code ?? '') : null,
+    // Null unless the build is asked for ATC codes (--with-atc), which needs the WHOCC answer recorded first.
+    atcCode: withAtc && row.code_system === 'ATC' ? optional(row.code ?? '') : null,
     commonAdultDose: null,
     source: row.source.trim(),
     sourceSection: optional(row.source_section ?? ''),
@@ -199,6 +216,44 @@ function idGaps(items, prefix, width) {
   return gaps;
 }
 
+/** A name compared as Ola's brand rule compares it: lower case, white space collapsed, trimmed. */
+const sameName = (name) => name.toLowerCase().replace(/\s+/g, ' ').trim();
+
+/**
+ * The brand names (ocr-worker's brand-names.ts, its active rows) added to the
+ * other names of the medicine they stand for, so they are signed with the
+ * file (planned contract: "Brand names come with the loader"). Ola's
+ * clinical rule (review of #319, point 6): a brand is added only where its
+ * generic, compared case-insensitively with white space collapsed, is the
+ * generic name of exactly one medicine in the seed (a combination counts
+ * only when written as the seed writes it, "amoxicillin + clavulanic acid");
+ * it then goes on every item (strength and form) of that medicine. Nothing
+ * is guessed: every brand that does not map is reported with its generic.
+ */
+export function addBrandNames(medicines, brands) {
+  const byGeneric = new Map();
+  for (const item of medicines) {
+    const key = sameName(item.genericName);
+    byGeneric.set(key, new Set([...(byGeneric.get(key) ?? []), item.genericName]));
+  }
+  const added = new Map();
+  const notMapped = [];
+  for (const { brand, generic } of brands) {
+    const names = byGeneric.get(sameName(generic)) ?? new Set();
+    if (names.size === 1) added.set(sameName(generic), [...(added.get(sameName(generic)) ?? []), brand]);
+    else notMapped.push({ brand, generic, why: names.size === 0 ? 'no medicine in the seed has this generic name'
+      : `${names.size} medicines in the seed have this generic name` });
+  }
+  const items = medicines.map((item) => {
+    const extra = (added.get(sameName(item.genericName)) ?? [])
+      .filter((brand) => !item.otherNames.some((name) => sameName(name) === sameName(brand)));
+    const unique = [...new Set(extra)].sort();
+    return unique.length === 0 ? item : { ...item, otherNames: [...item.otherNames, ...unique] };
+  });
+  const branded = items.filter((item, index) => item !== medicines[index]).length;
+  return { items, brands: { added: [...added.values()].flat().length, items: branded, notMapped } };
+}
+
 /**
  * The two seeds from the combined list's rows.
  * - `version` is the version label both seeds carry (for example 2026.1).
@@ -207,10 +262,15 @@ function idGaps(items, prefix, width) {
  * - `waveZero` is docs/codes/hid-lab-codes.json's codes: each one must be in
  *   the lab-test seed with its code and name unchanged (planned contract,
  *   "The 13 Wave 0 HID-LAB codes move in unchanged"); the seed reports how
- *   each one stands, so the signer sees it.
+ *   each one stands (kept, renamed, recoded, held back or missing), so the
+ *   signer sees it.
+ * - `withAtc` writes the list's ATC codes; without it every atcCode is null
+ *   (the builder allows it only once the WHOCC answer is recorded).
+ * - `brands` is brand-names.ts's active rows ({ brand, generic }), added as
+ *   other names by addBrandNames's rule.
  * A row that would not load is held back, with why, never cut or guessed.
  */
-export function buildSeeds(rows, { version, retired = {}, waveZero = [] }) {
+export function buildSeeds(rows, { version, retired = {}, waveZero = [], withAtc = false, brands = [] }) {
   if (!VERSION.test(version ?? '')) throw new Error(`the version ${version} is not a version label`);
   const unknown = rows.filter((row) => row.list !== 'medicine' && row.list !== 'lab-test');
   if (unknown.length > 0) throw new Error(`rows of an unknown list: ${unknown.map((row) => row.id).join(', ')}`);
@@ -218,7 +278,7 @@ export function buildSeeds(rows, { version, retired = {}, waveZero = [] }) {
   const repeated = ids.filter((id, index) => ids.indexOf(id) !== index);
   if (repeated.length > 0) throw new Error(`ids used twice: ${[...new Set(repeated)].join(', ')}`);
 
-  const medicines = rows.filter((row) => row.list === 'medicine').map(medicineFromRow);
+  const medicines = rows.filter((row) => row.list === 'medicine').map((row) => medicineFromRow(row, withAtc));
   const labTests = rows.filter((row) => row.list === 'lab-test').map(labTestFromRow);
   const retiredIds = Object.keys(retired);
   const stillRows = retiredIds.filter((id) => ids.includes(id));
@@ -243,11 +303,16 @@ export function buildSeeds(rows, { version, retired = {}, waveZero = [] }) {
   };
   const medicineSplit = split(medicines, medicineProblems);
   const labSplit = split(labTests, labTestProblems);
+  // Brands go on the items that load (a held-back medicine is not in the seed to be found).
+  const branded = addBrandNames(medicineSplit.loaded, brands);
 
+  // A row of the same name that is held back is reported "held back", not as recoded: it is not in the list.
+  const heldBackIds = new Set(labSplit.heldBack.map((entry) => entry.listId));
   const waveZeroStatus = waveZero.map((entry) => {
     const same = labSplit.loaded.find((item) => item.codeSystem === 'HID-LAB' && item.code === entry.code);
     if (same) return { code: entry.code, status: same.display === entry.display ? 'kept' : 'renamed', listId: same.listId };
     const byName = labTests.find((item) => item.display.toLowerCase() === entry.display.toLowerCase());
+    if (byName && heldBackIds.has(byName.listId)) return { code: entry.code, status: 'held back', listId: byName.listId };
     return byName
       ? { code: entry.code, status: 'recoded', listId: byName.listId, now: { codeSystem: byName.codeSystem, code: byName.code } }
       : { code: entry.code, status: 'missing' };
@@ -264,7 +329,7 @@ export function buildSeeds(rows, { version, retired = {}, waveZero = [] }) {
     attribution: medicineSplit.loaded.some((item) => item.source.startsWith('who-eml')) ? [WHO_EML_NOTICE] : [],
     retired: retiredOf(MEDICINE_ID),
     heldBack: medicineSplit.heldBack,
-    items: medicineSplit.loaded,
+    items: branded.items,
   };
   const labSeed = {
     format: SEED_FORMAT,
@@ -277,7 +342,7 @@ export function buildSeeds(rows, { version, retired = {}, waveZero = [] }) {
     waveZero: waveZeroStatus,
     items: labSplit.loaded,
   };
-  return { medicine: medicineSeed, lab_test: labSeed };
+  return { medicine: medicineSeed, lab_test: labSeed, brands: branded.brands };
 }
 
 /**
@@ -296,9 +361,11 @@ export function seedText(seed) {
  * Why a parsed seed may not be loaded, or [] when it may: its format, kind,
  * version and notices, each item as 0149's rules, no id twice, no item that
  * is a retired id, no held-back row presented as an item, and (lab tests) no
- * code twice.
+ * code twice, and every HID-LAB code one of Wave 0's with its name
+ * unchanged. `waveZero` is docs/codes/hid-lab-codes.json's codes; a lab-test
+ * seed holding an HID-LAB code is refused without them.
  */
-export function seedProblems(seed) {
+export function seedProblems(seed, { waveZero = null } = {}) {
   const problems = [];
   if (seed === null || typeof seed !== 'object') return ['the seed is not a JSON object'];
   if (seed.format !== SEED_FORMAT) problems.push(`the format is not ${SEED_FORMAT}`);
@@ -337,17 +404,37 @@ export function seedProblems(seed) {
       const key = `${item?.codeSystem}|${item?.code}`;
       if (codes.has(key)) problems.push(`${item.listId}: the code ${item.code} is used twice`);
       codes.add(key);
+      if (item?.codeSystem === 'HID-LAB') problems.push(...waveZeroProblems(item, waveZero));
     }
   }
   return problems;
 }
 
 /**
- * The sign-off a seed file needs (docs/codes/catalog-approvals.json): an
- * entry of this kind and version whose sha256 is the file's. Returns it, or
- * the reason there is none.
+ * Wave 0's rule for an HID-LAB item (planned contract: "a code is never
+ * changed or reused"; Rahman's review of #319, point 5): its code is one of
+ * docs/codes/hid-lab-codes.json's, with that file's name exactly.
  */
-export function approvalFor(approvals, { kind, version, fileSha256 }) {
+function waveZeroProblems(item, waveZero) {
+  if (!Array.isArray(waveZero)) return [`${item.listId}: the Wave 0 codes (docs/codes/hid-lab-codes.json) are needed to check an HID-LAB code`];
+  const entry = waveZero.find((candidate) => candidate?.code === item.code);
+  if (!entry) return [`${item.listId}: the HID-LAB code ${item.code} is not one of Wave 0's (docs/codes/hid-lab-codes.json)`];
+  if (entry.display !== item.display) {
+    return [`${item.listId}: the HID-LAB code ${item.code} is Wave 0's "${entry.display}", not "${item.display}" (a Wave 0 code is never changed or reused)`];
+  }
+  return [];
+}
+
+const reference = (value) => typeof value === 'string' && value.trim().length >= 8 && value.length <= 500;
+
+/**
+ * The sign-off a seed file needs (docs/codes/catalog-approvals.json): an
+ * entry of this kind and version whose sha256 is the file's, and, for a
+ * medicine version, the licence answers it needs (LICENCES): always the
+ * Nigeria EML 8th edition confirmation, and the WHOCC answer when the file
+ * holds an ATC code (`holdsAtc`). Returns it, or the reason there is none.
+ */
+export function approvalFor(approvals, { kind, version, fileSha256, holdsAtc = false }) {
   if (approvals?.format !== APPROVALS_FORMAT || !Array.isArray(approvals.approvals)) {
     return { problem: `the approvals file is not ${APPROVALS_FORMAT}` };
   }
@@ -359,5 +446,25 @@ export function approvalFor(approvals, { kind, version, fileSha256 }) {
   if (typeof entry.approvalReference !== 'string' || entry.approvalReference.trim().length < 8
       || entry.approvalReference.length > 500) return { problem: 'the sign-off has no approval reference (8-500 characters)' };
   if (Number.isNaN(Date.parse(entry.approvedAt ?? ''))) return { problem: 'the sign-off has no approval time' };
+  if (kind === 'medicine' && !reference(entry.licences?.nigeriaEml8)) {
+    return { problem: `the sign-off for medicine ${version} does not record ${LICENCES.nigeriaEml8} (licences.nigeriaEml8)` };
+  }
+  if (kind === 'medicine' && holdsAtc && !reference(entry.licences?.whoccAtc)) {
+    return { problem: `this file holds ATC codes, and the sign-off for medicine ${version} does not record ${LICENCES.whoccAtc} (licences.whoccAtc)` };
+  }
   return { entry };
+}
+
+/**
+ * Whether the seed builder may write ATC codes (--with-atc) for a medicine
+ * version: only when a sign-off entry of that version records the WHOCC
+ * answer. Returns the reason it may not, or null.
+ */
+export function withAtcProblem(approvals, version) {
+  const entries = Array.isArray(approvals?.approvals) ? approvals.approvals : [];
+  if (entries.some((entry) => entry?.kind === 'medicine' && entry.version === version && reference(entry.licences?.whoccAtc))) {
+    return null;
+  }
+  return `--with-atc needs ${LICENCES.whoccAtc} recorded first (licences.whoccAtc on a medicine ${version} entry of `
+    + 'docs/codes/catalog-approvals.json); until then build without it, so every atcCode is null';
 }
