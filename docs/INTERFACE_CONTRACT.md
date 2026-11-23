@@ -10097,3 +10097,207 @@ EXECUTE to the Identity runtime only. The idempotency keys are kept in
 `admin.facility-staff.role-remove`. `identity.staff_licence_attestations`
 accepts support's methods (with no attesting membership, review or
 invitation) and a new attestation text, `platform-staff-role-v1`.
+
+## SX-8. Keep the open patient across a reload (Release B, migration 0140; not live until signed)
+
+Akos P1-2. The owner's default "Open patient remembered for 8 hours" applies.
+The planned contract's "SX-8" is the spec; this section is what is built. It
+follows section 56 (0129): the same per-sign-in row, read only through a live
+session of the sign-in.
+
+Health IDs stay out of page addresses and the app stores nothing on the
+device, so only the server can remember which patient a staff sign-in had
+open: for one sign-in, at one facility, for at most 8 hours (the staff
+sign-in's own longest life). The row grants nothing. Every chart read still
+carries `X-Facility-ID` and goes through `authorization/check`, which sends
+the patient's "Your records were opened" notice as today.
+
+### Setting
+
+`STAFF_OPEN_PATIENT_ENABLED` (Identity; `true` or `false`, default `false`;
+any other value refuses to boot). In AWS it is `HID_STAFF_OPEN_PATIENT_ENABLED`
+at synth time (identity-api only). While it is `false`:
+
+- `POST /auth/open-patient` and `POST /auth/open-patient/clear` answer a plain
+  404 before any guard (as an Identity without the routes);
+- `GET /auth/session` never carries `openPatient`;
+- a move to another facility clears nothing.
+
+With it `true`, Identity starts only on a definite answer that
+`auth.session_open_patient`, the runtime's SELECT, INSERT, UPDATE and DELETE on
+it, and its EXECUTE on `auth.session_open_patient_target_exists(uuid)` are all
+there, so a deploy made before 0140 rolls back. A start-up read that fails is
+tried 5 times, 2 seconds apart; with still no answer Identity refuses to start
+as well (unlike 0129's check, which leaves an unreachable database to
+`GET /health/ready`).
+
+### `POST /api/v1/auth/open-patient`
+
+A staff session of an Identity sign-in at its `X-Facility-ID` facility, with
+the Origin and CSRF checks of every cookie POST. No permission beyond the
+membership. Body, exactly these fields:
+
+```json
+{ "patientId": "uuid", "purpose": "direct-care" }
+```
+
+- `patientId`: the canonical UUID the chart's routes use.
+- `purpose`: `direct-care`, or `emergency` for a patient opened through
+  break-glass.
+
+`200`:
+
+```json
+{ "openPatient": { "state": "kept", "patientId": "uuid", "expiresAt": "2026-11-20T17:00:00.000Z" } }
+```
+
+- Before storing anything, Identity runs the decision of
+  `POST /identity/authorization/check` for `read_records`, at this facility,
+  with this purpose, for this member, in its no-notice form (`precheck`: no
+  second "Your records were opened" notice, no access-history entry; an
+  `identity.authorization.precheck` audit row).
+- A refused and an unknown patient get the same 403 status and body, and
+  nothing is stored for either. The timing can differ: Identity first asks 0140's
+  `auth.session_open_patient_target_exists`: a UUID that is no patient gets no
+  access check (so no `identity.authorization.precheck` row, whose patient key
+  admits only a real patient), so its answer can come back a little faster.
+  Its denied `auth.open-patient.set` row names the id in
+  `details.requestedPatientId`, not as the row's patient. The caller must
+  already hold the UUID, and every attempt leaves a denied audit row.
+- A new set replaces the old one (one row per sign-in).
+- `expiresAt` is the earlier of the set time plus 8 hours and the sign-in's
+  own end.
+
+### `POST /api/v1/auth/open-patient/clear`
+
+The same caller; the body is `{}` and is not read. `200 { "openPatient": null }`.
+Safe to repeat.
+
+### On `GET /api/v1/auth/session`
+
+`openPatient` is added beside `actor` and `facilitySelection`.
+`POST /auth/refresh` and the service-session routes never carry it.
+
+```json
+{ "openPatient": { "state": "restored", "patientId": "uuid", "purpose": "direct-care",
+    "expiresAt": "2026-11-20T17:00:00.000Z", "card": { "fullName": "Amaka Okafor", "sex": "female",
+    "dateOfBirth": "1990-05-01", "healthIdLast4": "AA22", "ninStatus": "verified" } } }
+```
+
+The card has a 0132 search card's fields, with no full Health ID and no
+`matchRef`. It is shown only after the access check allows the patient, and it
+is read as the member at the reported facility with the stored purpose, only
+while `identity.has_active_consent_grant` allows it for `read_records`: the
+access check's own test, so the card and the decision agree (0131's
+own-facility opening holds such a grant). Row-level security alone would not
+be enough: 0011's registration read shows every unsealed patient to a member
+with `identity.registration.write` or `.approve`, doctors, clinicians and
+nurses among them.
+
+| `state` | When |
+|---|---|
+| `restored` | A patient is stored for this sign-in at the facility being reported, it is under 8 hours old, and the access check (`precheck`, `read_records`, the stored purpose) still allows it. |
+| `ended` | The access check no longer allows it (the grant ended or was revoked, a deny directive applies), or the patient is no longer active. No card; the row read is cleared. |
+| `expired` | 8 hours have passed. No check, no card; the row read is cleared. |
+| `unavailable` | The row, the check, the card or the audit row could not be read or written. No card. The session read still answers `200`. |
+| (absent) | Nothing is stored; it was kept at a different facility (the row stays); the setting is off; or the caller is a patient, an account-only outreach session or an OIDC bearer caller. |
+
+An `ended` or `expired` read clears only the version it read, so a set from
+another tab in between is kept. Since there is one open patient per sign-in,
+the patient opened last in any tab is the one restored.
+
+### What clears it
+
+- The user's clear, or a new set.
+- `POST /auth/facility` to a different facility: the row kept at any other
+  facility is deleted in the transaction that stores 0129's choice (`keep`,
+  `ask`), or, with 0129 `off`, in one transaction with the move's
+  `auth.facility.select` audit row (a failure answers 503
+  `DEPENDENCY_UNAVAILABLE` and the move is not recorded). The delete runs
+  under a savepoint: a missing 0140 table or grant (42P01, 42501) clears
+  nothing, logs `auth.open_patient.unavailable` with operation
+  `clear_elsewhere`, and never rolls back the move (nothing could have been
+  stored without the table).
+- An `ended` or `expired` read.
+- Sign-out, sign-out everywhere or the sign-in ending: the row is read only
+  through a live staff session of the sign-in, so it is never read again. It
+  is not deleted at sign-out (see Open points).
+
+### Errors
+
+| HTTP | Code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | A missing, extra (`hid`, `healthId`, `matchRef`, `nin`, any other) or non-UUID field. |
+| 400 | `FACILITY_REQUIRED` | No valid `X-Facility-ID`. |
+| 400 | `PURPOSE_OF_USE_REQUIRED` | "Choose why you are opening this record." (`purpose` missing, or not `direct-care` or `emergency`.) |
+| 401 | `AUTHENTICATION_REQUIRED` | "Please sign in again." (Also when the sign-in ended between the check and the store.) |
+| 403 | `PATIENT_SCOPE_DENIED` | A patient session. |
+| 403 | `FACILITY_ACCESS_DENIED` | "You are not working at this facility." (Also 0140's guard refusing the row: the membership or facility ended after the request was authorized.) |
+| 403 | `OPEN_PATIENT_NOT_ALLOWED` | "You don't have access to this patient's records now. Ask for their Access PIN or send an access request." |
+| 404 | (plain) | The setting is off, or the caller has no Identity sign-in (an OIDC bearer caller). |
+| 503 | `DEPENDENCY_UNAVAILABLE` | "Something went wrong on our side. Please try again." |
+
+### Audit
+
+- `auth.open-patient.set`: the patient and purpose, outcome `success` (in the
+  store's transaction, with `expiresAt`), `denied` (`not_allowed`,
+  `facility_access_denied`) or `failure`. For a UUID that is no patient the
+  row has no patient and carries `requestedPatientId` and `patientFound: false`
+  in its details.
+- `auth.open-patient.clear`: the patient when a row was cleared, and
+  `cleared` true or false.
+- `auth.open-patient.restore`: each session read that checks a stored patient,
+  naming the patient, with the state. A card is never sent without its row.
+- The patient's access history is unchanged: restoring is not an opening.
+- The service logs one event, `auth.open_patient.unavailable`, with only the
+  operation that failed (`read`, `check`, `store`, `clear`, `clear_elsewhere`,
+  `audit`), and `auth.open_patient.startup_check_unavailable` with the
+  attempt number for each failed start-up read.
+
+### Database (0140)
+
+`auth.session_open_patient`: one row per sign-in family (`family_id`, the id of
+the sign-in's first session, as 0129's), with `account_id`, `facility_id`,
+`membership_id`, `patient_id`, `purpose` (`direct-care` or `emergency`),
+`set_at`, `expires_at` (after `set_at`, at most 8 hours later) and
+`row_version`. Five ON DELETE RESTRICT keys (the sign-in, the account, the
+facility, the patient, and the membership by its id, facility and account). No
+row-level security, as 0129's table: access by grant only, SELECT, INSERT,
+UPDATE and DELETE to the Identity runtime. The guard
+`auth.guard_session_open_patient_change()` admits a row only for a live staff
+sign-in of an active account at its current token version, and an active,
+unheld membership of that account at that facility (0129's admission), else
+23514 `SESSION_OPEN_PATIENT_INVALID`; an update cannot move a row to another
+sign-in or account (55000 `SESSION_OPEN_PATIENT_IMMUTABLE`). The patient is the
+access check's: the guard reads patients only through row-level security.
+Sign-out deletes nothing: the row stays, unread, until a sweep (see Open
+points). `auth.session_open_patient_target_exists(uuid)` (SQL, STABLE,
+SECURITY DEFINER owned by `identity.patients`' owner, EXECUTE to the Identity
+runtime only) answers whether a patient row with that id exists, whatever its
+status; it is never sent to the caller.
+
+Old services on this schema never read or write the table.
+
+### Screen notes
+
+- After the chart opens (after any read the access check allowed), call
+  `POST /auth/open-patient`; when the patient is closed, call `.../clear`.
+- On reload, read `GET /auth/session`: `restored` reopens that patient's chart
+  with the card as its header while the chart loads; `ended` shows "Your
+  access to this patient has ended", then Find patient; `expired` or no field
+  opens Home; `unavailable` opens Home and says nothing.
+- On `restored`, use the returned `purpose` for every chart read.
+  `direct-care` reopens the normal chart. `emergency` reopens the read-only
+  break-glass view, with no write controls, never the direct-care chart (its
+  reads would be refused). An emergency restore lasts only as long as the
+  break-glass grant: once it ends, the next session read answers `ended`.
+- A 404 from either route means "not served": keep today's behaviour (a reload
+  opens Home) and show no "restore" control.
+- Never put the patient id in the address.
+
+### Open points
+
+- Rows of signed-out or ended sign-ins stay (unreadable) until the next set
+  for that sign-in, which cannot come. A sweep deleting rows past their
+  `expires_at` can follow if the owner wants the table kept small; nothing
+  reads them meanwhile.

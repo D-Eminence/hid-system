@@ -91,6 +91,8 @@ export const outsideTestInputs = [
   ['services/ehr-api/test/database/registration-case-list.integration.sql',['identity-api']],
   // #279: qoreid-nin-desk.spec.ts holds this suite to the desk NIN holder read.
   ['services/ehr-api/test/database/desk-nin-holder.integration.sql',['identity-api']],
+  // SX-8: open-patient-sql.spec.ts holds this suite to Identity's open-patient statements.
+  ['services/ehr-api/test/database/session-open-patient.integration.sql',['identity-api']],
   ['services/ehr-api/test/fixtures/order-route-cannot-complete-reasons.sql',['lab-api','pharmacy-api']],
   ['services/ocr-worker/src/',['ocr-api']],
   ['services/identity-api/src/identity/dto/authorize-outreach.dto.ts',['outreach-api']],

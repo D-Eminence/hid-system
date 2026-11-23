@@ -1924,3 +1924,10 @@ revoke all on function
   identity.staff_role_change_member(uuid,uuid,uuid,boolean),
   identity.staff_role_change_apply(identity.staff_facility_memberships,bigint,text,text,text,text,text,text,uuid,uuid,text),
   identity.staff_role_licences(uuid) from public;
+
+-- The open patient a staff sign-in keeps across a reload (0140, SX-8),
+-- exactly as 0140 grants: the Identity runtime only.
+grant select, insert, update, delete on auth.session_open_patient to hid_identity_runtime;
+revoke all on function auth.guard_session_open_patient_change() from public;
+revoke all on function auth.session_open_patient_target_exists(uuid) from public;
+grant execute on function auth.session_open_patient_target_exists(uuid) to hid_identity_runtime;
