@@ -1,7 +1,7 @@
 import { Logger } from '@nestjs/common';
 import * as environment from '../config/environment';
 import { DomainProblem } from '../common/problem';
-import type { DataAccessContext } from '../common/request-context';
+import type { DataAccessContext, HidRequest } from '../common/request-context';
 import { IdentityService } from './identity.service';
 import type { AuthorizationDecision, IdentityPatient, IdentityProvider } from './identity.types';
 import { NinRegistrationController } from './nin-registration.controller';
@@ -284,7 +284,8 @@ describe('ID-0 NIN service breaker', () => {
       // NIN service, the second was refused here and never sent.
       expect(audit.record).toHaveBeenNthCalledWith(1, expect.objectContaining({
         action: 'identity.nin.verify', outcome: 'failure',
-        details: { provider: 'deterministic-test', errorType: 'DomainProblem', code: 'NIN_PROVIDER_UNAVAILABLE', providerCalled: true } }));
+        details: { provider: 'deterministic-test', errorType: 'DomainProblem', code: 'NIN_PROVIDER_UNAVAILABLE', providerCalled: true,
+          ninCheck: 'provider_error' } }));
       expect(audit.record).toHaveBeenNthCalledWith(2, expect.objectContaining({
         action: 'identity.nin.verify', outcome: 'failure',
         details: { provider: 'deterministic-test', errorType: 'DomainProblem', code: 'NIN_PROVIDER_UNAVAILABLE',
@@ -308,7 +309,8 @@ describe('ID-0 NIN service breaker', () => {
       answer({ verified: false, provider: 'deterministic-test', reference: 'test-ref',
         verifiedAt: new Date(start + NIN_BREAKER_RETRY_AFTER_MS).toISOString(),
         demographics: { firstName: 'Ada', lastName: 'Fictional', dateOfBirth: '1991-04-05' } });
-      await expect(first).rejects.toMatchObject({ code: 'NIN_VERIFICATION_FAILED' });
+      // A provider that does not say why is read as "no record" (Q117: 422 NIN_NOT_VERIFIED).
+      await expect(first).rejects.toMatchObject({ code: 'NIN_NOT_VERIFIED' });
       expect(breaker.state()).toBe('closed');
     });
 
@@ -345,7 +347,7 @@ describe('ID-0 NIN service breaker', () => {
       const { service, breaker } = resolver(verify);
       for (let attempt = 0; attempt < 3; attempt += 1) {
         await expect(service.resolve(input, `resolve-key-0000000000${attempt}`, context))
-          .rejects.toMatchObject({ code: 'NIN_VERIFICATION_FAILED' });
+          .rejects.toMatchObject({ status: 422, code: 'NIN_NOT_VERIFIED' });
       }
       expect(breaker.state()).toBe('closed');
       expect(warn).not.toHaveBeenCalled();
@@ -355,11 +357,11 @@ describe('ID-0 NIN service breaker', () => {
   describe('registration-capabilities', () => {
     function capabilities(mode: 'test' | 'deferred' | 'unavailable', breaker: NinProviderBreaker) {
       jest.spyOn(environment, 'getEnvironment').mockReturnValue({ NIN_PROVIDER_MODE: mode } as never);
-      return new NinRegistrationController({} as never, breaker).capabilities();
+      return new NinRegistrationController({} as never, breaker).capabilities({} as HidRequest);
     }
 
-    it('reports the NIN service available, and registration without a NIN on (ID-2, 0130)', () => {
-      expect(capabilities('test', new NinProviderBreaker())).toEqual({
+    it('reports the NIN service available, and registration without a NIN on (ID-2, 0130)', async () => {
+      expect(await capabilities('test', new NinProviderBreaker())).toEqual({
         nin: { enabled: true, state: 'test-only', available: true },
         withoutNin: { enabled: true, phoneRequiredUnlessChild: true,
           reasons: ['nin_service_unavailable', 'no_nin', 'not_carried', 'child', 'foreign_national'] },
@@ -367,17 +369,17 @@ describe('ID-0 NIN service breaker', () => {
       });
     });
 
-    it('reports it unavailable while the breaker is tripped, and again once it can retry', () => {
+    it('reports it unavailable while the breaker is tripped, and again once it can retry', async () => {
       const breaker = new NinProviderBreaker();
       const now = jest.spyOn(Date, 'now').mockReturnValue(10_000);
       breaker.recordFailure(new DomainProblem(503, 'NIN_PROVIDER_UNAVAILABLE', 'down'));
-      expect(capabilities('test', breaker).nin.available).toBe(false);
+      expect((await capabilities('test', breaker)).nin.available).toBe(false);
       now.mockReturnValue(10_000 + NIN_BREAKER_RETRY_AFTER_MS);
-      expect(capabilities('test', breaker).nin.available).toBe(true);
+      expect((await capabilities('test', breaker)).nin.available).toBe(true);
     });
 
-    it.each(['deferred', 'unavailable'] as const)('reports %s NIN checks as not available', (mode) => {
-      const answer = capabilities(mode, new NinProviderBreaker());
+    it.each(['deferred', 'unavailable'] as const)('reports %s NIN checks as not available', async (mode) => {
+      const answer = await capabilities(mode, new NinProviderBreaker());
       expect(answer.nin).toEqual({ enabled: false, state: mode, available: false });
       expect(JSON.stringify(answer)).not.toMatch(FORBIDDEN_WORD);
     });
