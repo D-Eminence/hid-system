@@ -512,6 +512,8 @@ try {
   //   boundary hid_owner_check has, below), an owner that neither is a superuser nor bypasses row-level security, as
   //   P8 expects of production's other owners (the outreach tables' among them). A superuser owner skips forced
   //   row-level security, so a suite could pass on the first and the same commands fail under such an owner.
+  //   The cluster's superuser, hid_rehearsal_admin, runs the suites on both and owns the schema only on the first;
+  //   a superuser holds every privilege, so a suite's runtime-role check skips superusers as well as the owner.
   // The copy is of the freshly migrated database the suites were written for, not of hid_owner_check's backup, which
   // also holds the baseline records and every runtime workflow's rows. schema.integration.sql (above, on the superuser
   // owner's database, where its OCR owner emulation does nothing) runs on the copy too, so that emulation is exercised.

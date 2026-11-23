@@ -1411,6 +1411,9 @@ select pg_temp.assert('d17: the login roles reach their wrappers through their g
   and has_function_privilege('hid_identity_api_runtime', 'identity.admin_find_order_routes(text,text)', 'EXECUTE')
   and not exists (select 1 from pg_roles runtime where runtime.rolname ~ '^hid_'
     and runtime.oid <> (select p.proowner from pg_proc p where p.oid = 'ehr.order_route_correction_state(ehr.order_routes)'::regprocedure)
+    -- not a superuser (CI's rehearsal superuser is named hid_rehearsal_admin, and is not the owner on its
+    -- non-superuser-owned copy; no runtime role is one)
+    and not runtime.rolsuper
     and (has_function_privilege(runtime.oid, 'ehr.order_route_correction_state(ehr.order_routes)', 'EXECUTE')
       or has_function_privilege(runtime.oid, 'ehr.order_route_correctable_until(ehr.order_routes)', 'EXECUTE'))));
 select pg_temp.assert('d17: T9 has row-level security enabled and forced, three policies (select, insert, delete), '
@@ -1428,6 +1431,9 @@ select pg_temp.assert('d17: T9 has row-level security enabled and forced, three 
   and not exists (select 1 from pg_trigger t where t.tgrelid = 'ehr.order_route_correction_capabilities'::regclass)
   and not exists (select 1 from pg_roles runtime where runtime.rolname ~ '^hid_'
     and runtime.oid <> (select c.relowner from pg_class c where c.oid = 'ehr.order_route_correction_capabilities'::regclass)
+    -- not a superuser (CI's rehearsal superuser is named hid_rehearsal_admin, and is not the owner on its
+    -- non-superuser-owned copy; no runtime role is one)
+    and not runtime.rolsuper
     and (has_table_privilege(runtime.oid, 'ehr.order_route_correction_capabilities', 'SELECT')
       or has_table_privilege(runtime.oid, 'ehr.order_route_correction_capabilities', 'INSERT')
       or has_table_privilege(runtime.oid, 'ehr.order_route_correction_capabilities', 'DELETE')

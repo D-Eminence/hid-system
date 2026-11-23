@@ -1585,6 +1585,9 @@ select pg_temp.assert('d18: the login roles reach their own wrapper and C32 thro
   and not has_function_privilege('hid_schema_test_runtime', 'identity.admin_order_route_not_completed(uuid)', 'EXECUTE')
   and not exists (select 1 from pg_roles runtime where runtime.rolname ~ '^hid_'
     and runtime.rolname <> current_setting('hid.test.o')
+    -- not a superuser (CI's rehearsal superuser is named hid_rehearsal_admin, and is not the owner on its
+    -- non-superuser-owned copy; no runtime role is one)
+    and not runtime.rolsuper
     and (has_function_privilege(runtime.oid, 'ehr.cannot_complete_order_route(text,uuid,bigint,text,boolean,text,character)', 'EXECUTE')
       or has_function_privilege(runtime.oid, 'ehr.guard_order_route_unable_ending()', 'EXECUTE'))));
 select pg_temp.assert('d18: T10 belongs to the closer''s owner, has row-level security enabled and forced, four '

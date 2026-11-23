@@ -994,6 +994,9 @@ select pg_temp.assert('the report table: row-level security enabled and forced, 
     where c.oid = 'ehr.order_route_wrong_patient_reports'::regclass and acl.grantee <> c.relowner)
   and not exists (select 1 from pg_roles runtime where runtime.rolname ~ '^hid_'
     and runtime.oid <> (select c.relowner from pg_class c where c.oid = 'ehr.order_route_wrong_patient_reports'::regclass)
+    -- not a superuser (CI's rehearsal superuser is named hid_rehearsal_admin, and is not the owner on its
+    -- non-superuser-owned copy; no runtime role is one)
+    and not runtime.rolsuper
     and (has_table_privilege(runtime.oid, 'ehr.order_route_wrong_patient_reports', 'SELECT')
       or has_table_privilege(runtime.oid, 'ehr.order_route_wrong_patient_reports', 'INSERT')
       or has_table_privilege(runtime.oid, 'ehr.order_route_wrong_patient_reports', 'UPDATE')
