@@ -1545,7 +1545,9 @@ signs a version (Q124 A) and the governed loader (a later slice) loads it.
   the new one on, in one transaction under SHARE ROW EXCLUSIVE on the
   versions.
 - **Refusals:** `q` missing or under 2 characters gives
-  `CATALOG_SEARCH_TEXT_TOO_SHORT`. `q` over 100 characters, a bad `limit`,
+  `CATALOG_SEARCH_TEXT_TOO_SHORT`. Characters are counted as the database
+  counts them (code points), so an emoji alone is too short. `q` over 100
+  characters, a bad `limit`,
   `doseForm` or `route`, or a parameter given twice or unknown gives
   `VALIDATION_FAILED`. `q` containing `HID-` and Health ID characters, a
   six-character word of the Health ID alphabet mixing letters and digits,
@@ -1567,7 +1569,7 @@ signs a version (Q124 A) and the governed loader (a later slice) loads it.
   checks so a retired id is never reused), `ehr.duplicate_class_rules`,
   and the screens.
 - **Checks:** the database suite `catalog-search` (41 cases), the ehr-api
-  spec (64 tests), and three steps in
+  spec (68 tests), and three steps in
   `verify-prescription-details-runtime.mjs`: before a list, with a list
   loaded by owner SQL (the doctor and the pharmacist search), and the
   refusals and the audit rows.
