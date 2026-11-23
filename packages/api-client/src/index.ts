@@ -120,6 +120,7 @@ export type {
   PharmacyResourceReference,
   PharmacyWorkItem,
   PharmacyWorkItemMedication,
+  PharmacyWorkItemOrderRoute,
   PharmacyWorkItemPatient,
   ReversePharmacyDispensingInput,
 } from './pharmacy';
