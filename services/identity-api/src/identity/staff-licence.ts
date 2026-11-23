@@ -49,9 +49,10 @@ export const STAFF_ROLE_LABELS: Readonly<Record<StaffRole, { title: string; lowe
  * that 0136's count named, beside their own role, so they read the laboratory's and the pharmacy's work lists again
  * and the doctor starts paper readings again. A staff profile names them (the Staff page and support's staff view
  * list every role a membership holds). They are not staff roles: never invited, never added or removed through SX-4
- * (not in STAFF_ROLES, so every invitation and role DTO refuses them), and they need no licence. 0147 never makes
- * them a membership's own role (membership_role, app_role); see the contract's 0147 section for the one SX-4 case
- * that can until 0139's remove is replaced.
+ * (not in STAFF_ROLES, so every invitation and role DTO refuses them, and so does the database), and they need no
+ * licence. Neither ever becomes a membership's own role (membership_role, app_role): 0147 also replaces SX-4's change
+ * so that SX-4 leaves them out of what it counts and chooses, and removing doctor revokes them too (work_list_reader
+ * stays while the membership holds admin); see the contract's 0147 section. SX-4's answers still list them.
  */
 export const NARROW_ROLES = ['work_list_reader', 'reading_starter'] as const;
 export type NarrowRole = typeof NARROW_ROLES[number];

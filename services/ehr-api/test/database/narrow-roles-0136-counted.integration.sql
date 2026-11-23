@@ -3,14 +3,18 @@
 -- (lab.work-item.read, pharmacy.work-item.read) and reading_starter
 -- (ocr.job.start), given to exactly the staff 0136 counted, with the stop
 -- unless the counts are 9, 1 and 1 (production) or 0, 0 and 0 (a database
--- without them). Rollback-only. On a migrated database it first takes
--- 0147's roles, rows, grants and audit rows away for its transaction (0).
--- The migration file is then run here as written (psql \ir), inside a
--- savepoint after each fixture, as the runner runs it inside its
--- transaction:
+-- without them), and SX-4's change function replaced (0147's D5). Rollback-
+-- only. On a migrated database it first takes 0147's roles, rows, grants
+-- and audit rows away for its transaction, and puts SX-4's change function
+-- back as Release B leaves it (0147's marked lines taken out, which 0147's
+-- post-check proves gives that body) (0). The migration file is then run
+-- here as written (psql \ir), inside a savepoint after each fixture, as the
+-- runner runs it inside its transaction:
 --   1. 0, 0 and 0 before any fixture: 0147 applies, creates the two roles
 --      with exactly their three rows, grants nothing and writes no audit row,
---      and changes no other role's row, function, policy or grant;
+--      changes no other role's row, policy or grant, and changes no function
+--      but SX-4's change, and that one only by lines marked 0147 (Q137 B),
+--      with its owner, grants, comment and settings kept;
 --   2. fixtures at real facilities: 9 administrators and 1 doctor 0136 would
 --      count today (granted before 0136's applied_at), and decoys: an
 --      administrator and a doctor at the sealed QA hospital and an
@@ -33,7 +37,24 @@
 --   5. 9, 1 and 1 with the doctor also an administrator: one work-list row
 --      for that membership (9 in all) and its reading row;
 --   6. the preconditions: a role row 0136 removed put back refuses, naming
---      it.
+--      it; SX-4's change function not as Release B leaves it refuses;
+--   7. SX-4 after 0147 at 9, 1 and 1, through support's commands as the
+--      Identity runtime calls them: removing doctor from the counted doctor
+--      whose only other roles are the narrow ones is refused as the last
+--      role; either narrow role named to add or remove is refused (the
+--      commands and the change function itself); an added role and a
+--      removed other role leave the narrow roles, and the answers list them;
+--      removing doctor from that doctor with the front desk role revokes
+--      both narrow roles (by support, with the remove's reason, one
+--      role-remove audit row each in the system actor's form), and moves
+--      membership_role and app_role to the front desk role, not a narrow
+--      role; the doctor who is also an administrator keeps work_list_reader
+--      (reading_starter revoked, the role columns to admin); the facility
+--      administrator's form (the change function called as its remove
+--      calls it) writes the staff actor's rows.
+-- 0147's locks are measured in 4: on a database where 0147 has not run (0
+-- then replaces nothing), the function's own locks too; on a migrated one,
+-- 0's replacement already holds those, so 4 sees the table locks only.
 -- Synthetic values only: uuid prefix c147, @example.invalid addresses.
 set plpgsql.variable_conflict = error;
 begin;
@@ -60,10 +81,17 @@ create function pg_temp.made() returns text language sql as $$
       || ' grants, ' || (select count(*) from audit.events where correlation_id = '0147-narrow-roles-q137b')
       || ' audit rows';
 $$;
--- Every function body, policy and table privilege, to show 0147 changes none.
+-- A function body with the lines 0147 marks taken out (0147's post-check).
+create function pg_temp.unmarked(body text) returns text language sql immutable as $$
+  select regexp_replace(body, '[^\n]*-- 0147 \(Q137 B\)\n', '', 'g');
+$$;
+-- Every function (body less 0147's marked lines, grants, owner, settings,
+-- comment), policy and table privilege, to show 0147 changes nothing else.
 create function pg_temp.catalog_print() returns text language sql as $$
-  select md5(coalesce((select string_agg(proc.oid::text || ':' || md5(proc.prosrc) || ':' || coalesce(proc.proacl::text, '')
-                                         || ':' || proc.proowner, ',' order by proc.oid)
+  select md5(coalesce((select string_agg(proc.oid::text || ':' || md5(pg_temp.unmarked(proc.prosrc)) || ':'
+                                         || coalesce(proc.proacl::text, '') || ':' || proc.proowner || ':'
+                                         || proc.prosecdef || ':' || coalesce(proc.proconfig::text, '') || ':'
+                                         || coalesce(obj_description(proc.oid, 'pg_proc'), ''), ',' order by proc.oid)
                          from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
                         where namespace.nspname not in ('pg_catalog', 'information_schema')
                           and namespace.nspname not like 'pg_temp%' and namespace.nspname not like 'pg_toast%'), '')
@@ -85,8 +113,25 @@ set local session_replication_role = origin;
 delete from auth.account_roles where role_code in ('work_list_reader', 'reading_starter');
 delete from auth.role_permissions where role_code in ('work_list_reader', 'reading_starter');
 delete from auth.roles where code in ('work_list_reader', 'reading_starter');
+-- SX-4's change function back to Release B's body: its CREATE OR REPLACE
+-- statement with 0147's marked lines taken out (owner, grants and comment
+-- kept). Nothing to do where 0147 has not run.
+do $$
+declare
+  apply_oid regprocedure := 'identity.staff_role_change_apply(identity.staff_facility_memberships,bigint,text,text,'
+    'text,text,text,text,uuid,uuid,text)'::regprocedure;
+  body text := (select proc.prosrc from pg_proc proc where proc.oid = apply_oid);
+begin
+  if body <> pg_temp.unmarked(body) then
+    execute replace(pg_get_functiondef(apply_oid), body, pg_temp.unmarked(body));
+  end if;
+end $$;
 select pg_temp.expect('0a the state before 0147, for this transaction', '0 roles, 0 rows, 0 grants, 0 audit rows',
   pg_temp.made());
+select pg_temp.expect('0b SX-4''s change function as Release B leaves it', '25ecccbb09f5118cf0e7f7c1e98c5479',
+  (select md5(proc.prosrc) from pg_proc proc
+    where proc.oid = 'identity.staff_role_change_apply(identity.staff_facility_memberships,bigint,text,text,text,text,'
+                     'text,text,uuid,uuid,text)'::regprocedure));
 create temporary table rows_before on commit drop as
   select role_code, permission_code from auth.role_permissions;
 select pg_temp.catalog_print() as catalog_before \gset
@@ -110,16 +155,23 @@ select pg_temp.expect('1c no other role''s row changed', '0 0',
                          except select role_code, permission_code from rows_before) more)
   || ' ' || (select count(*) from (select role_code, permission_code from rows_before
                                    except select role_code, permission_code from auth.role_permissions) fewer));
-select pg_temp.expect('1d no function body, policy or table privilege changed (runtime-grants.sql unchanged)', 'same',
+select pg_temp.expect('1d no function changed but by lines marked 0147 (Q137 B), with owners, grants, settings and comments kept; no policy or table privilege changed (runtime-grants.sql unchanged)', 'same',
   case when pg_temp.catalog_print() = :'catalog_before' then 'same' else 'changed' end);
+select pg_temp.expect('1d2 SX-4''s change function is the only one with such lines, and it has them',
+  'identity.staff_role_change_apply',
+  (select string_agg(namespace.nspname || '.' || proc.proname, ', ' order by namespace.nspname, proc.proname)
+     from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
+    where namespace.nspname not in ('pg_catalog', 'information_schema') and namespace.nspname not like 'pg_temp%'
+      and proc.prosrc <> pg_temp.unmarked(proc.prosrc)));
 select pg_temp.expect('1e neither role can be invited or added or removed through SX-4 anywhere', '0',
   (select count(*)::text from (values ('hospital', 'ehr'), ('clinic', 'ehr'), ('laboratory', 'laboratory'),
                                       ('pharmacy', 'pharmacy'), ('other', 'ehr'), ('other', 'migrate'))
                                kind(organization_type, product_code)
      cross join lateral unnest(identity.staff_invitable_roles(kind.organization_type, kind.product_code)) offered(code)
     where offered.code in ('work_list_reader', 'reading_starter')));
-select pg_temp.expect('1f 0139''s role lists still name only the five hospital roles',
-  'false false', (select string_agg((proc.prosrc ~ 'work_list_reader|reading_starter')::text, ' ' order by proc.proname)
+select pg_temp.expect('1f 0139''s role lists still name only the five hospital roles; SX-4''s change names the narrow roles only in 0147''s lines',
+  'false false', (select string_agg((pg_temp.unmarked(proc.prosrc) ~ 'work_list_reader|reading_starter')::text, ' '
+                                    order by proc.proname)
             from pg_proc proc where proc.oid in (
               'identity.staff_role_change_apply(identity.staff_facility_memberships,bigint,text,text,text,text,text,text,uuid,uuid,text)'::regprocedure,
               'identity.add_facility_staff_role(uuid,bigint,text,text,text,text,text,text,character)'::regprocedure)));
@@ -333,10 +385,16 @@ rollback to savepoint variant;
 create temporary table locks_before on commit drop as
   select lock_row.relation, lock_row.mode from pg_locks lock_row
    where lock_row.pid = pg_backend_pid() and lock_row.granted and lock_row.locktype = 'relation';
+create temporary table object_locks_before on commit drop as
+  select lock_row.classid, lock_row.objid, lock_row.mode from pg_locks lock_row
+   where lock_row.pid = pg_backend_pid() and lock_row.granted and lock_row.locktype = 'object';
 :run0147
 create temporary table locks_after on commit drop as
   select lock_row.relation, lock_row.mode from pg_locks lock_row
    where lock_row.pid = pg_backend_pid() and lock_row.granted and lock_row.locktype = 'relation';
+create temporary table object_locks_after on commit drop as
+  select lock_row.classid, lock_row.objid, lock_row.mode from pg_locks lock_row
+   where lock_row.pid = pg_backend_pid() and lock_row.granted and lock_row.locktype = 'object';
 select pg_temp.expect('4a at 9, 1 and 1 it applies: 10 work-list rows, 1 reading row, 11 audit rows',
   'applied | 2 roles, 3 rows, 11 grants, 11 audit rows',
   pg_temp.answer(:'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made());
@@ -440,7 +498,7 @@ select pg_temp.expect('4m and it holds every declared table at its declared mode
               from declared_locks declared
              where not exists (select 1 from locks_after after
                                 where after.relation = declared.relation and after.mode = declared.mode)), ''));
-select pg_temp.expect('4n besides tables it locks only indexes and audit.events'' sequence, at most ROW EXCLUSIVE', '',
+select pg_temp.expect('4n besides tables it locks only indexes, audit.events'' sequence and pg_proc''s TOAST table (D5''s body), at most ROW EXCLUSIVE', '',
   coalesce((select string_agg(new_lock.relation::regclass::text || ' ' || new_lock.mode, '; ')
               from (select after.relation, after.mode from locks_after after
                     except select before.relation, before.mode from locks_before before) new_lock
@@ -448,7 +506,27 @@ select pg_temp.expect('4n besides tables it locks only indexes and audit.events'
               join pg_namespace namespace on namespace.oid = class.relnamespace
              where class.relkind not in ('r', 'p', 'v') and class.relpersistence <> 't'
                and namespace.nspname not in ('pg_catalog', 'information_schema')
-               and (class.relkind not in ('i', 'S') or pg_temp.strength(new_lock.mode) > 3)), ''));
+               and (class.relkind not in ('i', 'S', 't') or pg_temp.strength(new_lock.mode) > 3
+                    or (class.relkind = 't' and class.oid <> (select toast.reltoastrelid from pg_class toast
+                                                               where toast.oid = 'pg_catalog.pg_proc'::regclass)))), ''));
+-- D5's CREATE OR REPLACE: object locks, ACCESS SHARE, on the identity schema,
+-- the membership row type (its first argument) and plpgsql only (dropping
+-- them waits for this transaction). On a migrated database 0 already holds
+-- them, so none is new there.
+select pg_temp.expect('4n2 the only objects it locks are the identity schema, the membership row type and plpgsql, at ACCESS SHARE', '',
+  coalesce((select string_agg(new_lock.classid::regclass::text || ' ' || new_lock.objid || ' ' || new_lock.mode, '; ')
+              from (select after.classid, after.objid, after.mode from object_locks_after after
+                    except select before.classid, before.objid, before.mode from object_locks_before before) new_lock
+             where not exists (select 1 from pg_type type_row
+                                join pg_namespace namespace on namespace.oid = type_row.typnamespace
+                               where new_lock.classid = 'pg_type'::regclass and type_row.oid = new_lock.objid
+                                 and namespace.nspname like 'pg_temp%')
+               and (new_lock.mode <> 'AccessShareLock'
+                or (new_lock.classid, new_lock.objid) not in (
+                     ('pg_namespace'::regclass, 'identity'::regnamespace::oid),
+                     ('pg_type'::regclass, 'identity.staff_facility_memberships'::regtype::oid),
+                     ('pg_language'::regclass, (select language_row.oid from pg_language language_row
+                                                 where language_row.lanname = 'plpgsql'))))), ''));
 -- A second run.
 create temporary table grants_after_first on commit drop as
   select id from auth.account_roles where role_code in ('work_list_reader', 'reading_starter');
@@ -489,10 +567,274 @@ select pg_temp.expect('6a a role row not as 0136 left it is refused, naming it',
   pg_temp.answer(:'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made());
 rollback to savepoint variant;
 
+-- SX-4's change function not as Release B leaves it: a changed body, or
+-- EXECUTE granted to PUBLIC. 0147 refuses before it changes anything.
+do $$
+declare
+  apply_oid regprocedure := 'identity.staff_role_change_apply(identity.staff_facility_memberships,bigint,text,text,'
+    'text,text,text,text,uuid,uuid,text)'::regprocedure;
+begin
+  execute replace(pg_get_functiondef(apply_oid), E'  closed record;\n', E'  closed record;\n  changed_elsewhere text;\n');
+end $$;
+:run0147
+select pg_temp.expect('6b SX-4''s change function with another body is refused',
+  '55000 0147: identity.staff_role_change_apply is not as Release B leaves it (0139''s body, SECURITY INVOKER with its '
+  || 'search_path, EXECUTE for neither PUBLIC nor the Identity runtime); nothing applied | 0 roles, 0 rows, 0 grants, 0 audit rows',
+  pg_temp.answer(:'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made());
+rollback to savepoint variant;
+grant execute on function
+  identity.staff_role_change_apply(identity.staff_facility_memberships,bigint,text,text,text,text,text,text,uuid,uuid,text)
+  to public;
+:run0147
+select pg_temp.expect('6c SX-4''s change function executable by PUBLIC is refused',
+  '55000 0147: identity.staff_role_change_apply is not as Release B leaves it (0139''s body, SECURITY INVOKER with its '
+  || 'search_path, EXECUTE for neither PUBLIC nor the Identity runtime); nothing applied | 0 roles, 0 rows, 0 grants, 0 audit rows',
+  pg_temp.answer(:'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made());
+rollback to savepoint variant;
+
+-- 7. SX-4 after 0147 at 9, 1 and 1 (D5). Support's commands run as the
+-- Identity runtime in the context withPlatformTransaction sets (F1 is a
+-- governed facility, so support changes its roles); each command is built
+-- as text first (with the membership's current version) and its answer read
+-- back as text: roles before | roles after (| requests closed | grants
+-- revoked for a remove), or the refusal's SQLSTATE and message.
+insert into auth.accounts (id, subject, email, display_name, status) values
+  ('c1477000-0000-4000-8000-000000000001', 'synthetic:narrow-roles:support', 'narrow-roles-support@example.invalid',
+   'Narrow Roles Support', 'active');
+insert into auth.account_roles (id, account_id, role_code, scope_type, grant_reason) values
+  ('c1477000-0000-4000-8000-000000000002', 'c1477000-0000-4000-8000-000000000001', 'platform_super_admin', 'platform',
+   'Synthetic 0147 suite support');
+create function pg_temp.as_support(correlation text) returns void language sql as $$
+  select set_config('app.actor_subject', 'synthetic:narrow-roles:support', true),
+    set_config('app.membership_id', '', true), set_config('app.facility_id', '', true),
+    set_config('app.correlation_id', correlation, true), set_config('app.purpose_of_use', 'healthcare-operations', true);
+$$;
+create function pg_temp.sx4(command text) returns text language plpgsql as $$
+declare
+  answer text;
+begin
+  execute command into answer;
+  return answer;
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end
+$$;
+grant execute on function pg_temp.as_support(text), pg_temp.sx4(text) to hid_identity_api_runtime;
+create function pg_temp.version(n integer) returns bigint language sql as $$
+  select membership.row_version from identity.staff_facility_memberships membership
+   where membership.id = pg_temp.nr_id('3', n);
+$$;
+create function pg_temp.support_remove(n integer, role_code text, label text) returns text language sql as $$
+  select format('select concat_ws('' | '', array_to_string(r.previous_roles, '' ''), array_to_string(r.roles, '' ''), '
+                || 'r.requests_closed, r.grants_revoked) from identity.admin_remove_facility_staff_role(%L, %L, %s, %L, '
+                || '%L, %L, %L) r', pg_temp.nr_facility(n), pg_temp.nr_id('3', n), pg_temp.version(n), role_code,
+                'Synthetic 0147 suite remove ' || label, 'narrow-roles-sx4-' || label,
+                encode(sha256(('narrow-roles-sx4-' || label)::bytea), 'hex'));
+$$;
+create function pg_temp.support_add(n integer, role_code text, label text) returns text language sql as $$
+  select format('select concat_ws('' | '', array_to_string(r.previous_roles, '' ''), array_to_string(r.roles, '' '')) '
+                || 'from identity.admin_add_facility_staff_role(%L, %L, %s, %L, null, null, null, %L, %L, %L) r',
+                pg_temp.nr_facility(n), pg_temp.nr_id('3', n), pg_temp.version(n), role_code,
+                'Synthetic 0147 suite add ' || label, 'narrow-roles-sx4-' || label,
+                encode(sha256(('narrow-roles-sx4-' || label)::bytea), 'hex'));
+$$;
+-- SX-4's change function called directly, as the four commands call it (as
+-- its owner), for member n: the facility administrator's form when an
+-- attester membership is given, support's otherwise.
+create function pg_temp.change(n integer, action text, role_code text, attester integer) returns text language sql as $$
+  select format('select concat_ws('' | '', array_to_string(r.previous_roles, '' ''), array_to_string(r.roles, '' ''), '
+                || 'r.requests_closed, r.grants_revoked) from identity.staff_role_change_apply((select membership '
+                || 'from identity.staff_facility_memberships membership where membership.id = %L), %s, %L, %L, null, '
+                || 'null, null, null, %L, %L, %L) r', pg_temp.nr_id('3', n), pg_temp.version(n), action, role_code,
+                case when attester is null then 'c1477000-0000-4000-8000-000000000001'::uuid
+                     else pg_temp.nr_id('1', attester) end,
+                case when attester is null then null else pg_temp.nr_id('3', attester) end,
+                case when attester is null then 'Role removed by Health ID support'
+                     else 'Role removed by the facility administrator' end);
+$$;
+-- A member's facility roles held now, and its two role columns.
+create function pg_temp.held(n integer) returns text language sql as $$
+  select coalesce((select string_agg(assignment.role_code, ' ' order by assignment.role_code)
+                     from auth.account_roles assignment
+                    where assignment.membership_id = pg_temp.nr_id('3', n) and assignment.revoked_at is null), '')
+      || ' | ' || membership.membership_role || ' ' || membership.app_role
+    from identity.staff_facility_memberships membership where membership.id = pg_temp.nr_id('3', n);
+$$;
+-- The role-remove audit rows SX-4's change function wrote for the narrow
+-- roles: role, roles before -> after, cause and the role removed.
+create function pg_temp.narrow_rows(n integer) returns text language sql as $$
+  select coalesce(string_agg(event_row.details->>'roleCode' || ' ' || (event_row.details->'previousRoles')::text
+                             || ' -> ' || (event_row.details->'roles')::text || ' ' || (event_row.details->>'cause')
+                             || ' ' || (event_row.details->>'removedRole'), ' | ' order by event_row.details->>'roleCode'), '')
+    from audit.events event_row
+   where event_row.action = 'identity.facility-staff.role-remove' and event_row.resource_id = pg_temp.nr_id('3', n)::text
+     and event_row.details->>'roleCode' in ('work_list_reader', 'reading_starter');
+$$;
+-- How each narrow role row of member n stands: revoked or held, and for a
+-- revoked one whether by the given account, with which reason, and at the
+-- moment doctor was revoked.
+create function pg_temp.narrow_state(n integer, by_account uuid) returns text language sql as $$
+  select string_agg(assignment.role_code || ' '
+                    || case when assignment.revoked_at is null then 'held'
+                            else 'revoked ' || (assignment.revoked_by = by_account) || ' ' || assignment.revocation_reason
+                                 || ' ' || (assignment.revoked_at = (select doctor.revoked_at from auth.account_roles doctor
+                                                                     where doctor.membership_id = assignment.membership_id
+                                                                       and doctor.role_code = 'doctor'))
+                       end, ' | ' order by assignment.role_code)
+    from auth.account_roles assignment
+   where assignment.membership_id = pg_temp.nr_id('3', n)
+     and assignment.role_code in ('work_list_reader', 'reading_starter');
+$$;
+savepoint sx4;
+
+-- The counted doctor (doctor and the two narrow roles).
+:run0147
+select pg_temp.support_remove(10, 'doctor', 'remove-doctor-last') as sx4_command \gset
+set local role hid_identity_api_runtime;
+select pg_temp.as_support('narrow-roles-sx4-0001');
+select pg_temp.sx4(:'sx4_command') as sx4_answer \gset
+reset role;
+select pg_temp.expect('7a doctor is the counted doctor''s last role but the narrow ones: the remove is refused, nothing changes',
+  'applied | P0001 FACILITY_STAFF_LAST_ROLE | doctor reading_starter work_list_reader | doctor doctor',
+  pg_temp.answer(:'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || :'sx4_answer' || ' | ' || pg_temp.held(10));
+select pg_temp.version(10) as version_before \gset
+select pg_temp.support_add(10, 'work_list_reader', 'add-narrow') as add_command,
+       pg_temp.support_remove(10, 'reading_starter', 'remove-narrow') as remove_command \gset
+set local role hid_identity_api_runtime;
+select pg_temp.as_support('narrow-roles-sx4-0002');
+select pg_temp.sx4(:'add_command') as add_answer, pg_temp.sx4(:'remove_command') as remove_answer \gset
+reset role;
+select pg_temp.sx4(pg_temp.change(10, 'add', 'work_list_reader', null)) as add_change,
+       pg_temp.sx4(pg_temp.change(10, 'remove', 'reading_starter', null)) as remove_change \gset
+select pg_temp.expect('7b a narrow role named to add or remove is refused, by the commands and by SX-4''s change itself',
+  '22023 STAFF_INVITATION_INVALID | 22023 STAFF_INVITATION_INVALID | 22023 STAFF_INVITATION_INVALID | '
+  || '22023 STAFF_INVITATION_INVALID | doctor reading_starter work_list_reader | doctor doctor | same version',
+  :'add_answer' || ' | ' || :'remove_answer' || ' | ' || :'add_change' || ' | ' || :'remove_change' || ' | '
+  || pg_temp.held(10) || ' | ' || case when pg_temp.version(10) = :version_before then 'same version' else 'changed' end);
+select pg_temp.support_add(10, 'receptionist', 'add-desk-first') as sx4_command \gset
+set local role hid_identity_api_runtime;
+select pg_temp.as_support('narrow-roles-sx4-0003');
+select pg_temp.sx4(:'sx4_command') as sx4_answer \gset
+reset role;
+select pg_temp.expect('7c an added role leaves the narrow roles and the role columns; the answer lists every role',
+  'doctor reading_starter work_list_reader | doctor reading_starter receptionist work_list_reader | '
+  || 'doctor reading_starter receptionist work_list_reader | doctor doctor',
+  :'sx4_answer' || ' | ' || pg_temp.held(10));
+select pg_temp.support_remove(10, 'receptionist', 'remove-desk') as sx4_command \gset
+set local role hid_identity_api_runtime;
+select pg_temp.as_support('narrow-roles-sx4-0004');
+select pg_temp.sx4(:'sx4_command') as sx4_answer \gset
+reset role;
+select pg_temp.expect('7d removing a role other than doctor leaves the narrow roles, and writes no row for them',
+  'doctor reading_starter receptionist work_list_reader | doctor reading_starter work_list_reader | 0 | 0 | '
+  || 'doctor reading_starter work_list_reader | doctor doctor | reading_starter held | work_list_reader held | ',
+  :'sx4_answer' || ' | ' || pg_temp.held(10) || ' | '
+  || pg_temp.narrow_state(10, 'c1477000-0000-4000-8000-000000000001') || ' | ' || pg_temp.narrow_rows(10));
+select pg_temp.support_add(10, 'receptionist', 'add-desk-again') as sx4_command \gset
+set local role hid_identity_api_runtime;
+select pg_temp.as_support('narrow-roles-sx4-0005');
+select pg_temp.sx4(:'sx4_command') as add_answer \gset
+reset role;
+select pg_temp.support_remove(10, 'doctor', 'remove-doctor') as sx4_command \gset
+set local role hid_identity_api_runtime;
+select pg_temp.as_support('narrow-roles-sx4-0006');
+select pg_temp.sx4(:'sx4_command') as sx4_answer \gset
+reset role;
+select pg_temp.expect('7e support removes doctor from the counted doctor with the front desk role: both narrow roles go too',
+  'doctor reading_starter work_list_reader | doctor reading_starter receptionist work_list_reader | '
+  || 'doctor reading_starter receptionist work_list_reader | receptionist | 0 | 0 | receptionist | receptionist receptionist',
+  :'add_answer' || ' | ' || :'sx4_answer' || ' | ' || pg_temp.held(10));
+select pg_temp.expect('7f each narrow role revoked by support, with the remove''s reason, when doctor was',
+  'reading_starter revoked true Role removed by Health ID support true | '
+  || 'work_list_reader revoked true Role removed by Health ID support true',
+  pg_temp.narrow_state(10, 'c1477000-0000-4000-8000-000000000001'));
+select pg_temp.expect('7g one role-remove audit row each, with the roles before and after it',
+  'reading_starter ["reading_starter", "receptionist", "work_list_reader"] -> ["receptionist", "work_list_reader"] '
+  || 'role-removed doctor | work_list_reader ["receptionist", "work_list_reader"] -> ["receptionist"] role-removed doctor',
+  pg_temp.narrow_rows(10));
+select pg_temp.expect('7h in the system actor''s form for support: the facility and the membership, no person',
+  '2 2',
+  (select count(*) || ' ' || count(*) filter (
+            where event_row.correlation_id = 'narrow-roles-sx4-0006' and event_row.actor_type = 'system'
+              and event_row.actor_subject is null and event_row.actor_account_id is null
+              and event_row.actor_membership_id is null and event_row.patient_id is null
+              and event_row.organization_id = 'c1476000-0000-4000-8000-000000000001'
+              and event_row.facility_id = pg_temp.nr_facility(10) and event_row.outcome = 'success'
+              and event_row.resource_type = 'staff-membership' and event_row.purpose_of_use = 'healthcare-operations'
+              and event_row.reason = 'Role removed by Health ID support' and event_row.provenance = 'application'
+              and event_row.source_system = 'identity-api'
+              and event_row.details->>'membershipId' = pg_temp.nr_id('3', 10)::text)
+     from audit.events event_row
+    where event_row.action = 'identity.facility-staff.role-remove'
+      and event_row.resource_id = pg_temp.nr_id('3', 10)::text
+      and event_row.details->>'roleCode' in ('work_list_reader', 'reading_starter')));
+select pg_temp.expect('7i the doctor now reads no work list and starts readings through the front desk role only',
+  '- - start', pg_temp.three(10));
+rollback to savepoint sx4;
+
+-- The counted doctor is also an administrator (as in 5).
+set local session_replication_role = replica;
+update auth.account_roles set revoked_at = clock_timestamp(), revoked_by = pg_temp.nr_id('1', 1),
+       revocation_reason = 'Synthetic 0147 suite revocation'
+ where membership_id = pg_temp.nr_id('3', 7) and role_code = 'admin';
+insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason, granted_at)
+values ('c1474000-0000-4000-8000-000000000108', pg_temp.nr_id('1', 10), 'admin', 'facility', pg_temp.nr_id('3', 10),
+        pg_temp.nr_facility(10), 'Synthetic 0147 suite role', :'zero136_applied'::timestamptz - interval '1 day');
+set local session_replication_role = origin;
+:run0147
+select pg_temp.support_remove(10, 'doctor', 'remove-doctor-admin') as sx4_command \gset
+set local role hid_identity_api_runtime;
+select pg_temp.as_support('narrow-roles-sx4-0007');
+select pg_temp.sx4(:'sx4_command') as sx4_answer \gset
+reset role;
+select pg_temp.expect('7j an administrator who loses doctor keeps work_list_reader; the role columns move to admin',
+  'applied | admin doctor reading_starter work_list_reader | admin work_list_reader | 0 | 0 | admin work_list_reader | admin admin',
+  pg_temp.answer(:'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || :'sx4_answer' || ' | ' || pg_temp.held(10));
+select pg_temp.expect('7k only reading_starter revoked, with its one audit row',
+  'reading_starter revoked true Role removed by Health ID support true | work_list_reader held | '
+  || 'reading_starter ["admin", "reading_starter", "work_list_reader"] -> ["admin", "work_list_reader"] role-removed doctor',
+  pg_temp.narrow_state(10, 'c1477000-0000-4000-8000-000000000001') || ' | ' || pg_temp.narrow_rows(10));
+select pg_temp.expect('7l it reads both work lists still, and starts no reading', 'lab pharmacy -', pg_temp.three(10));
+rollback to savepoint sx4;
+
+-- The facility administrator's form: SX-4's change function called as
+-- identity.remove_facility_staff_role calls it, by administrator 1 (F1 is
+-- governed, so the command itself is support's there; the function is the
+-- same).
+:run0147
+set local session_replication_role = replica;
+insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
+values ('c1474000-0000-4000-8000-000000000109', pg_temp.nr_id('1', 10), 'receptionist', 'facility',
+        pg_temp.nr_id('3', 10), pg_temp.nr_facility(10), 'Synthetic 0147 suite role');
+set local session_replication_role = origin;
+select set_config('app.actor_subject', 'staff:narrow-roles-1', true),
+  set_config('app.correlation_id', 'narrow-roles-sx4-0008', true);
+select pg_temp.sx4(pg_temp.change(10, 'remove', 'doctor', 1)) as sx4_answer \gset
+select set_config('app.actor_subject', '', true), set_config('app.correlation_id', '', true);
+select pg_temp.expect('7m the administrator''s remove of doctor revokes both narrow roles, by the administrator',
+  'applied | doctor reading_starter receptionist work_list_reader | receptionist | 0 | 0 | receptionist | receptionist receptionist | '
+  || 'reading_starter revoked true Role removed by the facility administrator true | '
+  || 'work_list_reader revoked true Role removed by the facility administrator true',
+  pg_temp.answer(:'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || :'sx4_answer' || ' | ' || pg_temp.held(10)
+  || ' | ' || pg_temp.narrow_state(10, pg_temp.nr_id('1', 1)));
+select pg_temp.expect('7n its two audit rows name the administrator as the staff actor',
+  '2 2',
+  (select count(*) || ' ' || count(*) filter (
+            where event_row.correlation_id = 'narrow-roles-sx4-0008' and event_row.actor_type = 'staff'
+              and event_row.actor_subject = 'staff:narrow-roles-1' and event_row.actor_account_id = pg_temp.nr_id('1', 1)
+              and event_row.actor_membership_id = pg_temp.nr_id('3', 1) and event_row.patient_id is null
+              and event_row.facility_id = pg_temp.nr_facility(10)
+              and event_row.reason = 'Role removed by the facility administrator')
+     from audit.events event_row
+    where event_row.action = 'identity.facility-staff.role-remove'
+      and event_row.resource_id = pg_temp.nr_id('3', 10)::text
+      and event_row.details->>'roleCode' in ('work_list_reader', 'reading_starter')));
+rollback to savepoint sx4;
+
 do $$
 begin
-  if currval('q137b_passed') <> 35 then
-    raise exception '0147 narrow roles suite failed: % cases ran, 35 expected', currval('q137b_passed');
+  if currval('q137b_passed') <> 54 then
+    raise exception '0147 narrow roles suite failed: % cases ran, 54 expected', currval('q137b_passed');
   end if;
   raise notice '0147 narrow roles suite: % cases passed', currval('q137b_passed');
 end $$;

@@ -9401,8 +9401,9 @@ amendment on #258, for the owner to confirm at signing.
   reason "Owner decision Q137 B (23 November 2026): access 0136 removed",
   `granted_by` null) and one `identity.facility-staff.role-add` audit row each
   (system actor; the facility and the membership only, with the role codes
-  before and after). No other role's row changes; no function, policy or
-  grant changes, so `runtime-grants.sql` is unchanged.
+  before and after). No other role's row changes and no policy or grant
+  changes, so `runtime-grants.sql` is unchanged. One function is replaced:
+  SX-4's change (`identity.staff_role_change_apply`, see "SX-4 after 0147").
 - **What the members see:** from their next request, the counted
   administrators and doctor pass `GET /lab/work-items`, `GET
   /lab/work-items/:id`, `GET /pharmacy/work-items` and `GET
@@ -9415,18 +9416,38 @@ amendment on #258, for the owner to confirm at signing.
   (`STAFF_ROLES` and 0139's lists stay the five hospital roles; requests
   naming them answer 400 `VALIDATION_FAILED`). A staff profile (the Staff
   page's `members[].roles`, support's staff view) lists them, and the
-  website shows the labels above. 0147 never makes them the membership's
-  own role columns, which the session's `roles` list (but see "Ending"); the
-  session's `permissions` include their codes.
-- **Ending:** the rows end with the membership, as every role does. SX-4
-  cannot remove them one by one (a follow-up would replace a 0139 function).
-  **Known gap until that follow-up:** 0139's remove counts every role held,
-  so removing `doctor` through SX-4 from the counted doctor is allowed,
-  leaves both narrow roles (the work lists stay readable), and moves the
-  membership's `membership_role` and `app_role` to `reading_starter` (the
-  first role left, alphabetically), which the session's `roles` then name.
-  Until it is fixed, end that membership instead of removing its `doctor`
-  role. Administrators are not affected (SX-4 never removes `admin`).
+  website shows the labels above. Neither ever becomes the membership's own
+  role columns, which the session's `roles` list; the session's
+  `permissions` include their codes.
+- **SX-4 after 0147.** 0147 replaces SX-4's change function as 0139 replaced
+  the openers: pinned to Release B's body, only lines marked `0147 (Q137 B)`
+  added (its post-check proves that taking them out gives Release B's body
+  back), owner, grants, comment and settings kept. With it:
+  - what SX-4 counts and checks leaves the two narrow roles out: "already
+    held" and "not held", the last role (409 `FACILITY_STAFF_LAST_ROLE`), and
+    the role that `membership_role` and `app_role` move to after a remove
+    (409 `FACILITY_STAFF_ROLE_COLUMN_CONFLICT` when none can) are among the
+    other roles only. So removing `doctor` from the counted doctor who holds
+    no other staff role is refused as the last role: end the membership
+    instead;
+  - naming either narrow role is refused in the database too (400
+    `STAFF_INVITATION_INVALID`), besides the DTOs' 400 `VALIDATION_FAILED`;
+  - removing `doctor` also revokes that membership's `reading_starter`, and
+    its `work_list_reader` unless it still holds `admin` (an administrator
+    who loses `doctor` keeps the work lists): revoked with `doctor`, by the
+    caller, with the remove's reason, and one
+    `identity.facility-staff.role-remove` audit row each (the administrator
+    as the staff actor, support as the system actor; the membership, the
+    narrow role, the role codes before and after, `cause` `role-removed`,
+    `removedRole` `doctor`). Adding `doctor` back does not give them back;
+  - `roles` in SX-4's answer (and `previousRoles` and `roles` in its audit
+    rows) still lists every active role, the narrow ones too, as SX-4's
+    "Answers" says; after a remove of `doctor` it no longer lists the ones
+    revoked with it.
+  Nothing else in SX-4 changes. Administrators are not otherwise affected
+  (SX-4 never removes `admin`).
+- **Ending:** the rows end with the membership, as every role does, or with
+  `doctor` as above. SX-4 cannot add or remove them by name.
 - **Undo:** mark both roles inactive (`auth.roles.active = false`); every
   member is back where 0136 left them from their next request.
 
