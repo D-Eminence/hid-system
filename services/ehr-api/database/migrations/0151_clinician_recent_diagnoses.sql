@@ -27,7 +27,12 @@
 --    sets them) and records only for a membership holding
 --    ehr.diagnosis.write at that facility (auth.membership_has_permission);
 --    otherwise, or with no code, it records nothing. A pick already listed
---    has its display, time and count updated.
+--    has its display, time and count updated. It never waits for another
+--    save: it first takes the membership's recording lock with
+--    pg_try_advisory_xact_lock(7409, hashtext(membership id)), held to the
+--    end of the save's transaction, and records nothing when another
+--    transaction holds it (see Locks). A best-effort side record never
+--    fails or holds up a clinical save.
 -- 3. ehr.recent_diagnoses(limit) (SECURITY DEFINER, STABLE): the session's
 --    membership's picks at its facility, newest first, at most limit
 --    (1-50); none for a membership without ehr.diagnosis.write. 22023
@@ -38,6 +43,19 @@
 -- Locks: the new table and functions only; no foreign key, so no existing
 -- relation is locked. Busy refusals: none; the preconditions' refusals
 -- start with "0151: ".
+--
+-- The recording lock (at run time, not while applying): the two-key form
+-- pg_try_advisory_xact_lock(7409, hashtext(membership id)), class key 7409
+-- for this record only. No other code in this repository takes the two-key
+-- form (every other advisory lock here takes the one-key form on
+-- hashtextextended of a text key, and the two key spaces never overlap),
+-- and nothing else may use class key 7409. Only this function writes the
+-- table, always under its membership's lock, so the upsert and the
+-- 200-cap trim never wait on another transaction's rows (two saves of one
+-- clinician recording the same codes in opposite orders, or a trim taking
+-- the oldest row another save is about to keep, cannot deadlock). The
+-- save that finds the lock taken skips its record; two memberships whose
+-- ids share a hash only skip a record now and then.
 --
 -- Old services on this schema: nothing calls the functions. New services
 -- on a schema without this file: the record call fails inside its
@@ -109,6 +127,10 @@ begin
                                            facility_value, 'ehr.diagnosis.write') then
     return;
   end if;
+  -- Never wait: another transaction of this membership is recording.
+  if not pg_try_advisory_xact_lock(7409, hashtext(membership_value::text)) then
+    return;
+  end if;
   insert into ehr.clinician_recent_diagnoses as recent
          (membership_id, facility_id, code_system, code, display)
   values (membership_value, facility_value, requested_code_system, requested_code, requested_display)
@@ -178,16 +200,28 @@ $$;
 comment on table ehr.clinician_recent_diagnoses is
   '0151 (ORD-9): each member''s own last diagnosis picks at their facility (code system, code, display, last used, count), at most 200 per membership; no patient id. Row-level security on, no policy, no grant: read and written only by ehr.recent_diagnoses and ehr.record_recent_diagnosis.';
 comment on function ehr.record_recent_diagnosis(text, text, text) is
-  '0151 (ORD-9): records a diagnosis pick for the session''s membership (ehr.diagnosis.write at the session''s facility), in the save''s transaction; records nothing otherwise or with no code. At most 200 per membership.';
+  '0151 (ORD-9): records a diagnosis pick for the session''s membership (ehr.diagnosis.write at the session''s facility), in the save''s transaction; records nothing otherwise or with no code. Never waits: records nothing while another transaction of the membership holds its recording lock (pg_try_advisory_xact_lock, class key 7409). At most 200 per membership.';
 comment on function ehr.recent_diagnoses(integer) is
   '0151 (ORD-9): the session''s membership''s diagnosis picks at its facility, newest first, at most limit (1-50); none without ehr.diagnosis.write. 22023 RECENT_DIAGNOSES_INVALID for a limit outside 1-50.';
 
--- 5. Post-checks.
+-- 5. Post-checks. The owner is the owner of 0149's ehr.catalog_versions, a
+-- relation this file did not make, so a run by another role (the cluster
+-- superuser on a schema the migration owner built) is refused.
 do $$
 declare
   owner_oid oid := (select relation.relowner from pg_class relation
-                     where relation.oid = 'ehr.clinician_recent_diagnoses'::regclass);
+                     where relation.oid = 'ehr.catalog_versions'::regclass);
 begin
+  if (select relation.relowner from pg_class relation
+       where relation.oid = 'ehr.clinician_recent_diagnoses'::regclass) is distinct from owner_oid
+     or exists (select 1 from pg_proc proc
+                 where proc.oid in ('ehr.record_recent_diagnosis(text,text,text)'::regprocedure,
+                                    'ehr.recent_diagnoses(integer)'::regprocedure)
+                   and proc.proowner is distinct from owner_oid) then
+    raise exception using errcode = '55000',
+      message = '0151: the recent diagnoses table and functions are not owned by the owner of ehr.catalog_versions '
+                || '(apply 0151 as the role that applied 0149 and 0150)';
+  end if;
   if not (select relation.relrowsecurity from pg_class relation
            where relation.oid = 'ehr.clinician_recent_diagnoses'::regclass)
      or exists (select 1 from pg_policy policy where policy.polrelid = 'ehr.clinician_recent_diagnoses'::regclass)

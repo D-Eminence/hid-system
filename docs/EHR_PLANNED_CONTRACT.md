@@ -1876,17 +1876,27 @@ live table is altered.
     records only for a membership holding `ehr.diagnosis.write` at that
     facility (`auth.membership_has_permission`), and nothing with no code.
     The same pick again updates its display, time and count. At most 200
-    per membership; the oldest drop off.
+    per membership; the oldest drop off. It never waits for another save:
+    it first takes the membership's recording lock,
+    `pg_try_advisory_xact_lock(7409, hashtext(membership id))` (class key
+    7409 for this record only; no other code takes the two-key form), held
+    to the end of the save's transaction, and records nothing while another
+    transaction holds it. So two saves of one clinician cannot deadlock on
+    their picks or on the 200-cap trim; the later one may skip its record.
   - `ehr.recent_diagnoses(limit)` gives the session's membership's picks at
     its facility, newest first, and none without the permission. 22023
     `RECENT_DIAGNOSES_INVALID` outside 1-50.
   - EXECUTE on both to the EHR runtime and the schema test runtime only.
 - **Recording:** `DiagnosesService.createInTransaction` (the route's and
   EHR-C5's consultation's) calls the record after the insert, in a
-  savepoint, so it never fails the save. A schema without 0151 (42883), or
-  any other failure, is rolled back to the savepoint and the diagnosis
-  saves as before. A serialization failure or deadlock still fails the
-  whole transaction. An idempotent replay records nothing.
+  savepoint. It is a best-effort side record and never fails or holds up
+  the clinical save: any failure of the record, a schema without 0151
+  (42883), a deadlock (40P01) or a lock not available (55P03) included, is
+  rolled back to the savepoint and the diagnosis saves as before, with a
+  warning naming only the SQLSTATE (none for 42883). Only a serialization
+  failure (40001) in a SERIALIZABLE transaction is passed on, so the whole
+  transaction is run again; the diagnosis saves are READ COMMITTED. An
+  idempotent replay records nothing.
 - **Route:** `GET /api/v1/ehr/terminology/diagnoses/recent?limit=` as
   above. It takes `X-Facility-Id` and no purpose header, and needs
   `ehr.diagnosis.write`. The answer is never kept (the global

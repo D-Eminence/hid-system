@@ -72,11 +72,13 @@ interface Tables {
  * at a time, and statements are answered as PostgreSQL would for the rows
  * the services read. Inserting a diagnosis with code 'FAIL' breaks a CHECK.
  * ehr.record_recent_diagnosis (0151) adds to `recent`, or fails with the
- * code given to failRecent.
+ * code given to failRecent; the transaction is READ COMMITTED unless
+ * setIsolation says otherwise.
  */
 function fakeDatabase() {
   let tables: Tables = { keys: [], encounters: [], notes: [], revisions: [], vitals: [], diagnoses: [], recent: [] };
   let recentFailure: string | undefined;
+  let isolation = 'read committed';
   const counters: Record<string, number> = {};
   const nextId = (table: string) => {
     counters[table] = (counters[table] ?? 0) + 1;
@@ -200,6 +202,10 @@ function fakeDatabase() {
           savepoints.push(sql.replace(/ ehr_recent_diagnosis$/, ''));
           return one([]);
         }
+        if (sql === "select current_setting('transaction_isolation') as isolation") {
+          savepoints.push('read isolation');
+          return one([{ isolation }]);
+        }
         if (sql === 'select ehr.record_recent_diagnosis($1, $2, $3)') {
           if (recentFailure) throw Object.assign(new Error('recent diagnoses failed'), { code: recentFailure });
           work.recent.push({ codeSystem: values[0], code: values[1], display: values[2] });
@@ -246,6 +252,7 @@ function fakeDatabase() {
     seedEncounter: (row: Row) => { tables.encounters.push(row); },
     refuseConsent: () => { allowed = false; },
     failRecent: (code: string) => { recentFailure = code; },
+    setIsolation: (level: string) => { isolation = level; },
   };
 }
 
@@ -385,26 +392,64 @@ describe('EHR-C5 one-call consultation (service)', () => {
     expect(db.tables().recent).toHaveLength(2);
   });
 
-  it('saves the consultation when a pick cannot be recorded; a serialization failure still fails it whole', async () => {
-    for (const code of ['42883', '42501', '23514']) {
+  it('saves the consultation when a pick cannot be recorded, a deadlock (40P01) or lock not available (55P03) included', async () => {
+    for (const code of ['42883', '42501', '23514', '40P01', '55P03', '40001']) {
       const db = fakeDatabase();
       db.failRecent(code);
+      const warn = jest.spyOn((db.diagnoses as unknown as { logger: { warn: () => void } }).logger, 'warn')
+        .mockImplementation(() => undefined);
       const saved = await db.consultations.create(contextFor('correlation-0001'), patientId, body(), KEY);
       expect(saved.diagnoses).toHaveLength(2);
       expect(db.tables().diagnoses).toHaveLength(2);
       expect(db.tables().recent).toEqual([]);
-      expect(db.savepoints).toEqual(
-        ['savepoint', 'rollback to savepoint', 'savepoint', 'rollback to savepoint']);
+      // A serialization failure is checked against the isolation level (READ COMMITTED here) after the rollback.
+      const each = code === '40001' ? ['savepoint', 'rollback to savepoint', 'read isolation']
+        : ['savepoint', 'rollback to savepoint'];
+      expect(db.savepoints).toEqual([...each, ...each]);
       expect(db.audits.map((row) => row.action)).toEqual(['ehr.encounter.create', 'ehr.note.create',
         'ehr.vital.create', 'ehr.diagnosis.create', 'ehr.diagnosis.create']);
+      // A warning with the SQLSTATE only (none for a schema without 0151): no patient, member, facility or request id.
+      expect(warn.mock.calls).toEqual(code === '42883' ? []
+        : [[`A recent diagnosis could not be recorded (${code})`], [`A recent diagnosis could not be recorded (${code})`]]);
     }
-    for (const code of ['40001', '40P01']) {
+  });
+
+  it('saves a single diagnosis (the route) when its pick meets a deadlock or a lock not available', async () => {
+    for (const code of ['40P01', '55P03']) {
       const db = fakeDatabase();
+      jest.spyOn((db.diagnoses as unknown as { logger: { warn: () => void } }).logger, 'warn')
+        .mockImplementation(() => undefined);
+      const context = contextFor('correlation-0001');
+      const visit = await db.encounters.create(context, patientId, { ...body().visit, reuseOpenVisit: true },
+        'separate-key-visit-01');
       db.failRecent(code);
-      await expect(db.consultations.create(contextFor('correlation-0001'), patientId, body(), KEY)).rejects.toBeDefined();
-      expect(db.tables()).toEqual({ keys: [], encounters: [], notes: [], revisions: [], vitals: [], diagnoses: [],
-        recent: [] });
+      const saved = await db.diagnoses.create(context, patientId, visit.id, diagnosis(), 'separate-key-diagnosis-0');
+      expect(saved).toMatchObject({ code: 'B50.9', encounterId: visit.id });
+      expect(db.tables().diagnoses).toHaveLength(1);
+      expect(db.tables().recent).toEqual([]);
+      expect(db.savepoints).toEqual(['savepoint', 'rollback to savepoint']);
     }
+  });
+
+  it('passes a serialization failure on only in a SERIALIZABLE transaction, so the whole save is refused', async () => {
+    const db = fakeDatabase();
+    db.setIsolation('serializable');
+    db.failRecent('40001');
+    await expect(db.consultations.create(contextFor('correlation-0001'), patientId, body(), KEY))
+      .rejects.toMatchObject({ code: '40001' });
+    expect(db.tables()).toEqual({ keys: [], encounters: [], notes: [], revisions: [], vitals: [], diagnoses: [],
+      recent: [] });
+    expect(db.audits).toEqual([]);
+    expect(db.savepoints).toEqual(['savepoint', 'rollback to savepoint', 'read isolation']);
+    // A deadlock is rolled back to the savepoint even then: the save goes on.
+    const deadlock = fakeDatabase();
+    deadlock.setIsolation('serializable');
+    deadlock.failRecent('40P01');
+    jest.spyOn((deadlock.diagnoses as unknown as { logger: { warn: () => void } }).logger, 'warn')
+      .mockImplementation(() => undefined);
+    const saved = await deadlock.consultations.create(contextFor('correlation-0001'), patientId, body(), KEY);
+    expect(saved.diagnoses).toHaveLength(2);
+    expect(deadlock.tables().recent).toEqual([]);
   });
 
   it('writes exactly the audit rows the separate routes write', async () => {
