@@ -2008,10 +2008,13 @@ revoke all on function pharmacy.own_work_item_steps(uuid[]), pharmacy.validate_w
 revoke all on pharmacy.work_item_acceptances from public;
 
 -- The national medicine and lab-test lists (0149, ORD-7 of the Akos EHR
--- plan, first slice; design note on hid-system#258, 23 November 2026),
--- exactly as 0149 grants them: the two searches and the status to the EHR
--- runtime and the schema test runtime; no privilege on the tables, the
--- query helper or the versions' guard for any runtime.
+-- plan, first slice; design note on hid-system#258, 23 November 2026, and
+-- Rahman's reviews), exactly as 0149 grants and revokes them: the two
+-- searches and the status to the EHR runtime and the schema test runtime;
+-- no privilege for any runtime on the four tables (the versions, the two
+-- lists and the retired ids), the query helper, the versions' guard or the
+-- two lists' insert trigger functions (fixed ids and sealed versions), which
+-- their triggers run as the inserting role, the tables' owner.
 grant execute on function ehr.search_catalog_medicines(text, integer, text, text),
   ehr.search_catalog_lab_tests(text, integer),
   ehr.catalog_status() to hid_ehr_runtime, hid_schema_test_runtime;
@@ -2019,5 +2022,8 @@ revoke all on function ehr.search_catalog_medicines(text, integer, text, text),
   ehr.search_catalog_lab_tests(text, integer),
   ehr.catalog_status(),
   ehr.catalog_search_query(text),
-  ehr.catalog_versions_guard() from public;
-revoke all on ehr.catalog_versions, ehr.catalog_medicines, ehr.catalog_lab_tests from public;
+  ehr.catalog_versions_guard(),
+  ehr.catalog_medicine_id_fixed(),
+  ehr.catalog_lab_test_id_fixed() from public;
+revoke all on ehr.catalog_versions, ehr.catalog_medicines, ehr.catalog_lab_tests, ehr.catalog_retired_codes
+  from public;
