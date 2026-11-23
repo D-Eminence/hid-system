@@ -1,4 +1,4 @@
--- 0152 PROPOSAL, NOT SIGNED: completing a document upload works again for the
+-- 0146 PROPOSAL, NOT SIGNED: completing a document upload works again for the
 -- EHR API (hotfix for POST /api/v1/ehr/documents/:id/complete). Written on
 -- staging-novu-ci-20261005 at 06f98040 (0001-0137 applied: Release A, live
 -- since 23 November 2026). It needs only 0001-0137 (in fact only 0112's body
@@ -62,15 +62,15 @@ declare
   mismatch text;
 begin
   if to_regclass('identity.qoreid_nin_checks') is null then
-    raise exception using errcode = '55000', message = '0152: 0001-0137 must be applied first';
+    raise exception using errcode = '55000', message = '0146: 0001-0137 must be applied first';
   end if;
   if to_regprocedure('ehr.reject_document_object_rebinding()') is null or to_regclass('ocr.jobs') is null then
-    raise exception using errcode = '55000', message = '0152: ehr.reject_document_object_rebinding() or ocr.jobs is missing';
+    raise exception using errcode = '55000', message = '0146: ehr.reject_document_object_rebinding() or ocr.jobs is missing';
   end if;
   if (select md5(proc.prosrc) from pg_proc proc
        where proc.oid = 'ehr.reject_document_object_rebinding()'::regprocedure)
-     = '0f8ae7f14b52b332f07811bcdd4ff0d3' then
-    raise exception using errcode = '55000', message = '0152: already applied';
+     = 'b110135d5f09c1bbe04316e01cc2eeba' then
+    raise exception using errcode = '55000', message = '0146: already applied';
   end if;
   -- 0112's body, byte for byte, with 0112's attributes.
   select string_agg(problem, '; ') into mismatch
@@ -103,16 +103,16 @@ begin
     ) problems;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = '0152: ehr.reject_document_object_rebinding() is not as 0112 left it: ' || mismatch;
+      message = '0146: ehr.reject_document_object_rebinding() is not as 0112 left it: ' || mismatch;
   end if;
   if not pg_has_role(current_user,
        (select proc.proowner from pg_proc proc where proc.oid = 'ehr.reject_document_object_rebinding()'::regprocedure),
        'USAGE') then
     raise exception using errcode = '42501',
-      message = '0152: the applier does not own ehr.reject_document_object_rebinding() (nor inherit its owner)';
+      message = '0146: the applier does not own ehr.reject_document_object_rebinding() (nor inherit its owner)';
   end if;
   -- Recorded for the post-check: owner and ACL before the replacement.
-  perform set_config('m0152.before', (
+  perform set_config('m0146.before', (
     select format('%s|%s', proc.proowner, coalesce(proc.proacl::text, '')) from pg_proc proc
      where proc.oid = 'ehr.reject_document_object_rebinding()'::regprocedure), true);
 end
@@ -136,7 +136,7 @@ begin
        and old.object_version_id is distinct from new.object_version_id) then
     raise exception using errcode = '55000', message = 'Document object identity and declared integrity metadata are immutable';
   end if;
-  -- 0152: the owner of ocr.jobs by name, so a role without USAGE on schema
+  -- 0146: the owner of ocr.jobs by name, so a role without USAGE on schema
   -- ocr (the EHR runtime completing an upload) can run this check.
   if (old.status in ('source_deleting', 'source_deleted') or new.status in ('source_deleting', 'source_deleted'))
      and not (current_user = (select pg_catalog.pg_get_userbyid(class_row.relowner) from pg_catalog.pg_class class_row
@@ -162,19 +162,19 @@ do $$
 begin
   if (select md5(proc.prosrc) from pg_proc proc
        where proc.oid = 'ehr.reject_document_object_rebinding()'::regprocedure)
-     <> '0f8ae7f14b52b332f07811bcdd4ff0d3'
+     <> 'b110135d5f09c1bbe04316e01cc2eeba'
      or exists (select 1 from pg_proc proc join pg_language language_row on language_row.oid = proc.prolang
                  where proc.oid = 'ehr.reject_document_object_rebinding()'::regprocedure
                    and (language_row.lanname <> 'plpgsql' or proc.prosecdef or proc.provolatile <> 'v'
                      or proc.proisstrict or proc.proconfig is distinct from '{"search_path=ehr, pg_temp"}'::text[]
                      or proc.prosrc ~ '::\s*(pg_catalog\.)?reg'
                      or format('%s|%s', proc.proowner, coalesce(proc.proacl::text, ''))
-                        <> current_setting('m0152.before')))
+                        <> current_setting('m0146.before')))
      or not exists (select 1 from pg_trigger trigger_row
                      where trigger_row.tgrelid = 'ehr.documents'::regclass
                        and trigger_row.tgname = 'documents_reject_object_rebinding' and trigger_row.tgenabled = 'O'
                        and trigger_row.tgfoid = 'ehr.reject_document_object_rebinding()'::regprocedure) then
-    raise exception using errcode = '55000', message = '0152: post-check failed';
+    raise exception using errcode = '55000', message = '0146: post-check failed';
   end if;
 end
 $$;

@@ -95,7 +95,7 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0152",
+    "last": "0146",
     "count": 147,
     "files": [
       {
@@ -683,8 +683,8 @@
         "sha256": "e27367ace883df85dfc4630043ffeb3e43144615b3603f187532ce2b6420bcb2"
       },
       {
-        "name": "0152_document_guard_without_ocr_schema_lookup.sql",
-        "sha256": "3d6bb7fb1e2db37e13667a50a2ddc793c10719f6fe8ec0a8aa85723d83fdcd5c"
+        "name": "0146_document_guard_without_ocr_schema_lookup.sql",
+        "sha256": "b50d4250743c171709828dc59c7839c594ff729b4f64d14124c2909dbd830612"
       }
     ]
   },

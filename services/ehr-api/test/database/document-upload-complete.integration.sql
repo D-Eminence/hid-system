@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- Completing a document upload as the EHR API (0152 proposal; the fault came
+-- Completing a document upload as the EHR API (0146 proposal; the fault came
 -- with 0112). Rollback-only. Every person, facility, patient and storage key
 -- here is made up (Fixture Upload Clinic, Fixture Upload Doctor, Fixture
 -- Upload Patient), apart from the sealed QA tenant's own seeded rows
@@ -17,7 +17,7 @@
 --      completion (app.change_reason, then the UPDATE ... RETURNING to
 --      'uploaded', then the audit row) all succeed: row_version 2, one
 --      ehr.record_versions row with the change reason, the view shows
---      'uploaded'. Before 0152 the UPDATE fails with 42501 "permission
+--      'uploaded'. Before 0146 the UPDATE fails with 42501 "permission
 --      denied for schema ocr" in ehr.reject_document_object_rebinding();
 --   3. the same for the QA Clinician (doctor) at QA Hospital, the sealed QA
 --      tenant, with QA Patient One's seeded share;
