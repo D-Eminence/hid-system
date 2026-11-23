@@ -46,8 +46,16 @@
 -- 3. ehr.catalog_lab_tests: the same for lab tests: the fixed id
 --    (LAB-nnnn), the code system and code the test is ordered with (LOINC or
 --    HID-LAB; a test with no code is never loaded), the name, other names,
---    specimen, category (the contract's nine), source, withdrawn, and the
---    tsvector with its GIN index; append-only as 2.
+--    specimen, category (the contract's nine, and blood-bank, immunology
+--    and histopathology, which the combined list (#312) uses), source,
+--    withdrawn, and the tsvector with its GIN index; append-only as 2.
+-- 3b. Fixed ids: ehr.catalog_retired_codes (each id the loader drops, with
+--    why; append-only) and BEFORE INSERT triggers on the two lists that
+--    refuse (55000) a retired id (CATALOG_ID_RETIRED), an id whose medicine
+--    (generic name, strength, dose form) or test (code system, code, name)
+--    differs from an earlier version's, or a lab code another id held
+--    (CATALOG_ID_CHANGED). So a code is never changed or reused in the
+--    database, not only in the seed file's test.
 -- 4. ehr.search_catalog_medicines(q, limit, dose form, route) and
 --    ehr.search_catalog_lab_tests(q, limit) (SECURITY DEFINER, STABLE): the
 --    active version's rows that are not withdrawn, where every word of q
@@ -96,8 +104,9 @@
 --
 -- Undo (by hand only): drop the two search functions and the status
 -- function, then the three tables (lab tests and medicines before
--- versions; their triggers go with them), then the guard function and
--- the query helper. Nothing else refers to them.
+-- versions; their triggers go with them), the retired ids, then the guard,
+-- the two id triggers' functions and the query helper. Nothing else refers
+-- to them.
 --
 -- 0. Preconditions (catalog reads only; 55000 and nothing applied).
 -- 1-6. As above. 7. Post-checks.
@@ -114,7 +123,7 @@ begin
     raise exception using errcode = '55000', message = '0149: platform.reject_mutation() is not as 0001 made it';
   end if;
   if to_regclass('ehr.catalog_versions') is not null or to_regclass('ehr.catalog_medicines') is not null
-     or to_regclass('ehr.catalog_lab_tests') is not null
+     or to_regclass('ehr.catalog_lab_tests') is not null or to_regclass('ehr.catalog_retired_codes') is not null
      or exists (select 1 from pg_proc proc where proc.pronamespace = 'ehr'::regnamespace
                  and proc.proname in ('search_catalog_medicines', 'search_catalog_lab_tests', 'catalog_status')) then
     raise exception using errcode = '55000', message = '0149: already applied';
@@ -205,7 +214,7 @@ create table ehr.catalog_lab_tests (
   other_names text not null default '' check (length(other_names) <= 2000),
   specimen text check (specimen is null or length(specimen) between 1 and 100),
   category text not null check (category in ('haematology', 'chemistry', 'microbiology', 'serology', 'parasitology',
-    'urine-and-stool', 'hormones', 'molecular', 'other')),
+    'urine-and-stool', 'hormones', 'molecular', 'blood-bank', 'immunology', 'histopathology', 'other')),
   source text not null check (source ~ '^[a-z0-9][a-z0-9-]{0,63}$'),
   withdrawn boolean not null default false,
   search_terms tsvector generated always as
@@ -222,6 +231,80 @@ create trigger catalog_lab_tests_append_only
 create trigger catalog_lab_tests_no_truncate
   before truncate on ehr.catalog_lab_tests
   for each statement execute function platform.reject_mutation();
+
+-- 3b. Fixed ids. A list id keeps its meaning in every version and is never
+-- reused: the retired ids (the loader records each one it drops), and two
+-- BEFORE INSERT triggers that refuse a retired id, an id whose medicine
+-- (generic name, strength, dose form) or test (code system, code, name)
+-- differs from an earlier version's, and a lab code another id held.
+create table ehr.catalog_retired_codes (
+  kind text not null check (kind in ('medicine', 'lab_test')),
+  list_id text not null,
+  reason text not null check (length(btrim(reason)) between 8 and 500),
+  retired_at timestamptz not null default clock_timestamp(),
+  constraint catalog_retired_codes_pkey primary key (list_id),
+  constraint catalog_retired_codes_kind_id_check
+    check ((kind = 'medicine' and list_id ~ '^MED-[0-9]{5}$') or (kind = 'lab_test' and list_id ~ '^LAB-[0-9]{4}$'))
+);
+revoke all on ehr.catalog_retired_codes from public;
+create trigger catalog_retired_codes_append_only
+  before update or delete on ehr.catalog_retired_codes
+  for each row execute function platform.reject_mutation();
+create trigger catalog_retired_codes_no_truncate
+  before truncate on ehr.catalog_retired_codes
+  for each statement execute function platform.reject_mutation();
+create index catalog_medicines_list_id_idx on ehr.catalog_medicines (list_id);
+create index catalog_lab_tests_list_id_idx on ehr.catalog_lab_tests (list_id);
+create index catalog_lab_tests_code_idx on ehr.catalog_lab_tests (code_system, code);
+
+create function ehr.catalog_medicine_id_fixed()
+returns trigger
+language plpgsql
+set search_path = pg_catalog, pg_temp
+as $$
+begin
+  if exists (select 1 from ehr.catalog_retired_codes retired where retired.list_id = new.list_id) then
+    raise exception using errcode = '55000', message = 'CATALOG_ID_RETIRED: ' || new.list_id;
+  end if;
+  if exists (select 1 from ehr.catalog_medicines earlier
+              where earlier.list_id = new.list_id and earlier.version_id <> new.version_id
+                and (earlier.generic_name, earlier.strength, earlier.dose_form)
+                    is distinct from (new.generic_name, new.strength, new.dose_form)) then
+    raise exception using errcode = '55000', message = 'CATALOG_ID_CHANGED: ' || new.list_id;
+  end if;
+  return new;
+end;
+$$;
+revoke all on function ehr.catalog_medicine_id_fixed() from public;
+create trigger catalog_medicines_id_fixed
+  before insert on ehr.catalog_medicines
+  for each row execute function ehr.catalog_medicine_id_fixed();
+
+create function ehr.catalog_lab_test_id_fixed()
+returns trigger
+language plpgsql
+set search_path = pg_catalog, pg_temp
+as $$
+begin
+  if exists (select 1 from ehr.catalog_retired_codes retired where retired.list_id = new.list_id) then
+    raise exception using errcode = '55000', message = 'CATALOG_ID_RETIRED: ' || new.list_id;
+  end if;
+  if exists (select 1 from ehr.catalog_lab_tests earlier
+              where earlier.version_id <> new.version_id
+                and ((earlier.list_id = new.list_id
+                      and (earlier.code_system, earlier.code, earlier.display)
+                          is distinct from (new.code_system, new.code, new.display))
+                  or (earlier.list_id <> new.list_id and earlier.code_system = new.code_system
+                      and earlier.code = new.code))) then
+    raise exception using errcode = '55000', message = 'CATALOG_ID_CHANGED: ' || new.list_id;
+  end if;
+  return new;
+end;
+$$;
+revoke all on function ehr.catalog_lab_test_id_fixed() from public;
+create trigger catalog_lab_tests_id_fixed
+  before insert on ehr.catalog_lab_tests
+  for each row execute function ehr.catalog_lab_test_id_fixed();
 
 -- The words of a search: lower case, split at anything that is not a
 -- letter or a digit (so "co-amox" is two words, as the index splits
@@ -402,6 +485,8 @@ comment on table ehr.catalog_versions is
   '0149 (ORD-7): one row per loaded version of the national medicine or lab-test list, with its seed file''s sha256 and the clinical lead''s approval (Q124 A); at most one active per kind; never deleted. Loaded by the governed loader, never by a migration.';
 comment on table ehr.catalog_medicines is
   '0149 (ORD-7): the national medicine list, one row per list row per version (MED-nnnnn, the code under HID-MED). No patient data.';
+comment on table ehr.catalog_retired_codes is
+  '0149 (ORD-7): the list ids the loader has dropped, with why; never reused (the lists'' insert triggers refuse them). Append-only.';
 comment on table ehr.catalog_lab_tests is
   '0149 (ORD-7): the national lab-test list, one row per list row per version (LAB-nnnn), ordered under LOINC or HID-LAB. No patient data.';
 comment on function ehr.search_catalog_medicines(text, integer, text, text) is
@@ -418,7 +503,7 @@ declare
 begin
   if exists (select 1 from pg_class relation, lateral aclexplode(coalesce(relation.relacl, acldefault('r', relation.relowner))) acl
               where relation.oid in ('ehr.catalog_versions'::regclass, 'ehr.catalog_medicines'::regclass,
-                                     'ehr.catalog_lab_tests'::regclass)
+                                     'ehr.catalog_lab_tests'::regclass, 'ehr.catalog_retired_codes'::regclass)
                 and acl.grantee <> relation.relowner) then
     raise exception using errcode = '55000', message = '0149: a catalogue table is granted to a role other than its owner';
   end if;
@@ -426,11 +511,15 @@ begin
               where proc.oid in ('ehr.search_catalog_medicines(text,integer,text,text)'::regprocedure,
                                  'ehr.search_catalog_lab_tests(text,integer)'::regprocedure,
                                  'ehr.catalog_status()'::regprocedure, 'ehr.catalog_search_query(text)'::regprocedure,
-                                 'ehr.catalog_versions_guard()'::regprocedure)
+                                 'ehr.catalog_versions_guard()'::regprocedure,
+                                 'ehr.catalog_medicine_id_fixed()'::regprocedure,
+                                 'ehr.catalog_lab_test_id_fixed()'::regprocedure)
                 and acl.grantee <> proc.proowner
                 and (acl.grantee = 0 or pg_get_userbyid(acl.grantee) not in ('hid_ehr_runtime', 'hid_schema_test_runtime')
                      or proc.oid in ('ehr.catalog_search_query(text)'::regprocedure,
-                                     'ehr.catalog_versions_guard()'::regprocedure))) then
+                                     'ehr.catalog_versions_guard()'::regprocedure,
+                                     'ehr.catalog_medicine_id_fixed()'::regprocedure,
+                                     'ehr.catalog_lab_test_id_fixed()'::regprocedure))) then
     raise exception using errcode = '55000', message = '0149: a catalogue function is granted to a role other than the EHR and schema test runtimes';
   end if;
   if (select count(*) from pg_proc proc
@@ -449,11 +538,17 @@ begin
            ('ehr.catalog_medicines'::regclass, 'catalog_medicines_append_only', 'platform.reject_mutation()'::regprocedure),
            ('ehr.catalog_medicines'::regclass, 'catalog_medicines_no_truncate', 'platform.reject_mutation()'::regprocedure),
            ('ehr.catalog_lab_tests'::regclass, 'catalog_lab_tests_append_only', 'platform.reject_mutation()'::regprocedure),
-           ('ehr.catalog_lab_tests'::regclass, 'catalog_lab_tests_no_truncate', 'platform.reject_mutation()'::regprocedure)))
-     <> 6 then
+           ('ehr.catalog_lab_tests'::regclass, 'catalog_lab_tests_no_truncate', 'platform.reject_mutation()'::regprocedure),
+           ('ehr.catalog_medicines'::regclass, 'catalog_medicines_id_fixed', 'ehr.catalog_medicine_id_fixed()'::regprocedure),
+           ('ehr.catalog_lab_tests'::regclass, 'catalog_lab_tests_id_fixed', 'ehr.catalog_lab_test_id_fixed()'::regprocedure),
+           ('ehr.catalog_retired_codes'::regclass, 'catalog_retired_codes_append_only',
+            'platform.reject_mutation()'::regprocedure),
+           ('ehr.catalog_retired_codes'::regclass, 'catalog_retired_codes_no_truncate',
+            'platform.reject_mutation()'::regprocedure)))
+     <> 10 then
     raise exception using errcode = '55000', message = '0149: a catalogue table is missing its append-only trigger';
   end if;
-  if exists (select 1 from ehr.catalog_versions) then
+  if exists (select 1 from ehr.catalog_versions) or exists (select 1 from ehr.catalog_retired_codes) then
     raise exception using errcode = '55000', message = '0149: the lists must be empty after this file';
   end if;
 end

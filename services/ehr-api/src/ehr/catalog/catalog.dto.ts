@@ -6,9 +6,13 @@ import { IsOptionalButNotNull } from '../../common/validation';
 export const CATALOG_DOSE_FORMS = ['tablet', 'capsule', 'liquid', 'injection', 'cream', 'inhaler', 'drops', 'other'] as const;
 export type CatalogDoseForm = (typeof CATALOG_DOSE_FORMS)[number];
 
-/** ORD-7: the lab-test categories (planned contract, "Lab test search"). */
+/**
+ * ORD-7: the lab-test categories: the planned contract's nine ("Lab test
+ * search") and blood-bank, immunology and histopathology, which the
+ * combined list (#312) uses.
+ */
 export const CATALOG_LAB_CATEGORIES = ['haematology', 'chemistry', 'microbiology', 'serology', 'parasitology',
-  'urine-and-stool', 'hormones', 'molecular', 'other'] as const;
+  'urine-and-stool', 'hormones', 'molecular', 'blood-bank', 'immunology', 'histopathology', 'other'] as const;
 
 export const CATALOG_SEARCH_DEFAULT_LIMIT = 10;
 export const CATALOG_SEARCH_MAX_LIMIT = 25;

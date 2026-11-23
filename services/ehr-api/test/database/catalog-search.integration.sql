@@ -18,7 +18,8 @@
 --      codes and ATC codes outside their forms are refused; a loaded row
 --      and a version never change but for the loader's switch (55000), and
 --      the switch (old off, then new on) works; the status names each
---      seed file;
+--      seed file; a retired id, a changed id and a reused lab code are
+--      refused, an unchanged id loads in a new version;
 --   4. the EHR runtime may run the searches and read no table.
 -- Synthetic values only: uuid prefix c149. Medicine and test names are list
 -- facts, not patient data.
@@ -224,6 +225,47 @@ update ehr.catalog_versions set active = true where id = 'c1490000-0000-4000-800
 select pg_temp.expect('3q the status names the seed file of each active version',
   'lab_test ' || repeat('b', 64) || ', medicine ' || repeat('a', 64),
   (select string_agg(format('%s %s', kind, file_sha256), ', ' order by kind) from ehr.catalog_status()));
+
+-- Fixed ids (3b): a retired id, a changed id and a reused lab code are refused; an unchanged id in a new version loads.
+insert into ehr.catalog_retired_codes (kind, list_id, reason) values
+  ('medicine', 'MED-01375', 'Synthetic: the same medicine is listed under another name');
+insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference, approved_at) values
+  ('c1490000-0000-4000-8000-000000000004', 'medicine', '2026.2', repeat('e', 64), 'synthetic next sign-off', now()),
+  ('c1490000-0000-4000-8000-000000000005', 'lab_test', '2026.2', repeat('f', 64), 'synthetic next sign-off', now());
+select pg_temp.expect('3r a retired id never loads again',
+  '55000 CATALOG_ID_RETIRED: MED-01375',
+  pg_temp.refusal($q$insert into ehr.catalog_medicines (version_id, list_id, generic_name, dose_form, source)
+    values ('c1490000-0000-4000-8000-000000000004', 'MED-01375', 'prussian blue', 'capsule', 'who-eml-24')$q$));
+select pg_temp.expect('3s an id keeps its medicine and its test: another strength, another code or another name is refused',
+  '55000 CATALOG_ID_CHANGED: MED-00001|55000 CATALOG_ID_CHANGED: LAB-0001|55000 CATALOG_ID_CHANGED: LAB-0001',
+  pg_temp.refusal($q$insert into ehr.catalog_medicines (version_id, list_id, generic_name, strength, dose_form, source)
+    values ('c1490000-0000-4000-8000-000000000004', 'MED-00001', 'amoxicillin', '250 mg', 'capsule', 'nigeria-eml-8')$q$)
+  || '|' || pg_temp.refusal($q$insert into ehr.catalog_lab_tests (version_id, list_id, code_system, code, display, category,
+    source) values ('c1490000-0000-4000-8000-000000000005', 'LAB-0001', 'LOINC', '58410-2', 'Full blood count',
+    'haematology', 'hid-common-tests')$q$)
+  || '|' || pg_temp.refusal($q$insert into ehr.catalog_lab_tests (version_id, list_id, code_system, code, display, category,
+    source) values ('c1490000-0000-4000-8000-000000000005', 'LAB-0001', 'LOINC', '57021-8', 'Complete blood count',
+    'haematology', 'hid-common-tests')$q$));
+select pg_temp.expect('3t a lab code another id held is never reused', '55000 CATALOG_ID_CHANGED: LAB-0099',
+  pg_temp.refusal($q$insert into ehr.catalog_lab_tests (version_id, list_id, code_system, code, display, category, source)
+    values ('c1490000-0000-4000-8000-000000000005', 'LAB-0099', 'HID-LAB', 'MP-SMEAR', 'Malaria smear', 'parasitology',
+    'hid-common-tests')$q$));
+select pg_temp.expect('3u an unchanged id loads in a new version (other names, form words and routes may change)', 'none none',
+  pg_temp.refusal($q$insert into ehr.catalog_medicines (version_id, list_id, generic_name, other_names, strength, dose_form,
+    dose_form_text, routes, source) values ('c1490000-0000-4000-8000-000000000004', 'MED-00001', 'amoxicillin',
+    'Amoxil; Ospamox', '500 mg', 'capsule', 'Capsules', '{oral}', 'nigeria-eml-8')$q$)
+  || ' ' || pg_temp.refusal($q$insert into ehr.catalog_lab_tests (version_id, list_id, code_system, code, display,
+    other_names, category, source) values ('c1490000-0000-4000-8000-000000000005', 'LAB-0001', 'LOINC', '57021-8',
+    'Full blood count', 'FBC', 'haematology', 'hid-common-tests')$q$));
+select pg_temp.expect('3v the retired ids are append-only, and a kind must fit its id', '55000 55000 23514',
+  left(pg_temp.refusal($q$delete from ehr.catalog_retired_codes$q$), 5) || ' '
+  || left(pg_temp.refusal($q$update ehr.catalog_retired_codes set reason = 'Synthetic other reason'$q$), 5) || ' '
+  || left(pg_temp.refusal($q$insert into ehr.catalog_retired_codes (kind, list_id, reason)
+       values ('lab_test', 'MED-00009', 'Synthetic wrong kind')$q$), 5));
+select pg_temp.expect('3w the new categories load', 'none',
+  pg_temp.refusal($q$insert into ehr.catalog_lab_tests (version_id, list_id, code_system, code, display, category, source)
+    values ('c1490000-0000-4000-8000-000000000005', 'LAB-0098', 'LOINC', '882-1', 'Blood group and Rh', 'blood-bank',
+    'hid-common-tests')$q$));
 
 -- 4. As the EHR runtime: the searches answer; the tables do not.
 set local role hid_ehr_runtime;

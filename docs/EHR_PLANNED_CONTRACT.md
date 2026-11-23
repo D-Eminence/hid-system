@@ -1509,6 +1509,14 @@ signs a version (Q124 A) and the governed loader (a later slice) loads it.
     mg capsule"). `genericName` is the list's INN as written (lower case).
   - `source` is the list's own value: `nigeria-eml-8`, `who-eml-24` or
     `hid-common-tests` (#312).
+  - A lab test's `category` may also be `blood-bank`, `immunology` or
+    `histopathology`, which the combined list uses (twelve values in all).
+- **Fixed ids:** `ehr.catalog_retired_codes` keeps each id the loader
+  drops, and insert triggers refuse a retired id, an id whose medicine
+  (generic name, strength, dose form) or test (code system, code, name)
+  differs from an earlier version's, and a lab code another id held. So a
+  code is never changed or reused, in the database as well as in the seed
+  file's test.
   - `atcCode` is always `null` until the WHOCC terms are settled, though
     the table can hold the code.
   - `attribution` is read from the active versions: each loaded version
