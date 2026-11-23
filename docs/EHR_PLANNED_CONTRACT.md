@@ -2014,16 +2014,19 @@ file's seed in `docs/codes/catalog-approvals.json`.
   - The entry whose code `q` is comes first: `q` upper-cased and trimmed,
     with or without its dot ("9A03.0" or "9a030"), and found even without
     the dot. A code copied with punctuation around it is still that code:
-    characters that are neither letters, digits nor dots are taken off both
-    ends, then full stops off the end, before its shape is tested ("NB91.",
-    "NB91,", "(NB91)"). So a parent code such as 9A03 comes before its
+    any run of characters that are neither letters nor digits is taken off
+    both ends before its shape is tested ("NB91.", "NB91,", "(NB91)",
+    "(NB91).", "NB91 .", ".NB91", "NB91,."); the code's own dot stays
+    ("(9A03.0)." is 9A03.0). So a parent code such as 9A03 comes before its
     child codes, whose titles are shorter. Then entries whose title or one
     of our other names starts with `q`, then shorter titles. With the
     2026-01 release loaded, each of its 17,255 codes searched by itself
-    comes first: as written, with a full stop after it, in brackets, and
-    without its dot. Typed without its dot, a code whose six characters
-    have a Health ID's shape (582 codes, such as `2B6B2Y`) is refused as a
-    Health ID would be; with its dot (`2B6B.2Y`) it is found.
+    comes first: as written, with a full stop after it, in brackets, in
+    brackets with a full stop after them, with a space and a full stop
+    after it, with a full stop before it, and without its dot. Typed
+    without its dot, a code whose six characters have a Health ID's shape
+    (582 codes, such as `2B6B2Y`) is refused as a Health ID would be; with
+    its dot (`2B6B.2Y`) it is found.
   - `matchedName` is our other name when it is what matched, or when it
     starts with `q` and the title does not. So `q=falciparum` gives 1F40
     first, named "falciparum malaria", as the example above.
