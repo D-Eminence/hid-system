@@ -44,6 +44,24 @@ export const STAFF_ROLE_LABELS: Readonly<Record<StaffRole, { title: string; lowe
   receptionist: { title: 'Receptionist', lower: 'receptionist' },
 });
 
+/**
+ * The two narrow roles of owner decision Q137 B (migration 0147): given only to the administrators and the doctor
+ * that 0136's count named, beside their own role, so they read the laboratory's and the pharmacy's work lists again
+ * and the doctor starts paper readings again. A staff profile names them (the Staff page and support's staff view
+ * list every role a membership holds). They are not staff roles: never invited, never added or removed through SX-4
+ * (not in STAFF_ROLES, so every invitation and role DTO refuses them), and they need no licence. 0147 never makes
+ * them a membership's own role (membership_role, app_role); see the contract's 0147 section for the one SX-4 case
+ * that can until 0139's remove is replaced.
+ */
+export const NARROW_ROLES = ['work_list_reader', 'reading_starter'] as const;
+export type NarrowRole = typeof NARROW_ROLES[number];
+
+/** The narrow roles' labels, as STAFF_ROLE_LABELS: the title a staff profile shows and the lower-case words. */
+export const NARROW_ROLE_LABELS: Readonly<Record<NarrowRole, { title: string; lower: string }>> = Object.freeze({
+  work_list_reader: { title: 'Lab and pharmacy work lists', lower: 'lab and pharmacy work lists' },
+  reading_starter: { title: 'Start a paper reading', lower: 'start a paper reading' },
+});
+
 /** The licence body a role needs, or null (receptionist: no licence). */
 export function staffRoleLicenceBody(role: string): LicenceBody | null {
   return (STAFF_ROLES as readonly string[]).includes(role) ? LICENCE_BODY_BY_ROLE[role as StaffRole] : null;

@@ -4,9 +4,12 @@ import {
   AcceptStaffInvitationDto, AdministratorLicenceDto, ChangeFacilityStaffRoleDto, CreateStaffInvitationDto,
   EndFacilityStaffDto, ExpectedVersionDto, OpenStaffInvitationDto, SignedInInvitationDto,
 } from './dto/staff-invitation.dto';
+import { AddFacilityStaffRoleDto, AdminAddFacilityStaffRoleDto, AdminRemoveFacilityStaffRoleDto,
+  RemoveFacilityStaffRoleDto } from './dto/staff-role.dto';
 import {
-  licenceNumberAcceptable, normalizeLicenceNumber, selfServiceAdministratorRole, selfServiceReviewableRoles,
-  STAFF_ROLE_LABELS, staffInvitableRoles, staffRoleLicenceBody,
+  ADMINISTRATOR_GRANTABLE_ROLES, licenceNumberAcceptable, NARROW_ROLE_LABELS, NARROW_ROLES, normalizeLicenceNumber,
+  ORGANIZATION_TYPES, selfServiceAdministratorRole, selfServiceReviewableRoles, STAFF_ROLE_LABELS, STAFF_ROLES,
+  staffInvitableRoles, staffRoleLicenceBody,
 } from './staff-licence';
 import {
   acceptableStaffPersonName, DOMAIN_LIKE, EMAIL_FACILITY_NAME, emailFacilityName, hasReservedWord, shownInviterName,
@@ -70,6 +73,43 @@ describe('staff vocabulary (SPEC 3.6, 4.2)', () => {
       .toEqual(['MDCN', 'NMCN', 'MLSCN', 'PCN', null, null, null]);
     expect(Object.fromEntries(Object.entries(STAFF_ROLE_LABELS).map(([role, label]) => [role, label.lower]))).toEqual({
       doctor: 'doctor', nurse: 'nurse', lab: 'laboratory scientist', pharmacist: 'pharmacist', receptionist: 'receptionist' });
+  });
+
+  // Owner decision Q137 B (0147): two narrow roles a staff profile names, which nobody invites, grants at review or
+  // adds and removes through SX-4.
+  it('names the narrow roles of Q137 B for a staff profile, and offers them nowhere', () => {
+    expect(NARROW_ROLES).toEqual(['work_list_reader', 'reading_starter']);
+    expect(Object.fromEntries(Object.entries(NARROW_ROLE_LABELS).map(([role, label]) => [role, label.title]))).toEqual({
+      work_list_reader: 'Lab and pharmacy work lists', reading_starter: 'Start a paper reading' });
+    for (const role of NARROW_ROLES) {
+      expect(STAFF_ROLES).not.toContain(role);
+      expect(ADMINISTRATOR_GRANTABLE_ROLES).not.toContain(role);
+      expect(Object.keys(STAFF_ROLE_LABELS)).not.toContain(role);
+      expect(staffRoleLicenceBody(role)).toBeNull();
+      for (const type of ORGANIZATION_TYPES) {
+        for (const product of ['ehr', 'migrate', 'laboratory', 'pharmacy']) {
+          expect(staffInvitableRoles(type, product)).not.toContain(role);
+          expect(selfServiceReviewableRoles(type, product)).not.toContain(role);
+        }
+      }
+    }
+  });
+
+  it.each(NARROW_ROLES)('refuses %s in an invitation and in every SX-4 add and remove', async (role) => {
+    const invitation = { name: 'Ada Obi', email: 'ada.obi@example.test', role: 'receptionist', attested: true,
+      currentPassword: 'p' };
+    const add = { expectedVersion: 2, role: 'receptionist', attested: true, reason: 'Covers the front desk',
+      currentPassword: 'p' };
+    const remove = { expectedVersion: 2, role: 'receptionist', reason: 'Moved to the ward', currentPassword: 'p' };
+    const supportAdd = { role: 'receptionist', attested: true, reason: 'Covers the front desk' };
+    const supportRemove = { role: 'receptionist', reason: 'Moved to the ward' };
+    const cases: [new () => unknown, Record<string, unknown>][] = [[CreateStaffInvitationDto, invitation],
+      [AddFacilityStaffRoleDto, add], [RemoveFacilityStaffRoleDto, remove], [AdminAddFacilityStaffRoleDto, supportAdd],
+      [AdminRemoveFacilityStaffRoleDto, supportRemove]];
+    for (const [metatype, value] of cases) {
+      await expect(validate(metatype, value)).resolves.toBeDefined();
+      await refused(metatype, { ...value, role });
+    }
   });
 
   it('normalizes a licence number and checks the database\'s pattern', () => {

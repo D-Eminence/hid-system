@@ -55,6 +55,28 @@
     }
   ],
   "columnNotes": "Akos's table has one Doctor column; clinician holds the same seeded permissions as doctor today, so it is compared with that column. Facility admin stands for both admin and org_admin. The administrator awaiting review (org_admin_awaiting_review) is a short-lived state and is not compared.",
+  "narrowRoles": {
+    "about": "Owner decision Q137 B (migration 0147): two narrow roles, given only to the administrators and the doctor that 0136's count named, beside their own role, so they get back exactly what 0136 took from them. They are not columns of Akos's table and never a staff kind: nobody is invited to them, support never grants them at review, and SX-4 neither adds nor removes them. A staff profile names them by these labels. Their seeded permissions are pinned in todayRolePermissions like the columns' roles.",
+    "roles": [
+      {
+        "code": "work_list_reader",
+        "label": "Lab and pharmacy work lists",
+        "besides": [
+          "admin",
+          "doctor"
+        ],
+        "givesBack": "the laboratory's and the pharmacy's work lists (0136 C4 and C6)"
+      },
+      {
+        "code": "reading_starter",
+        "label": "Start a paper reading",
+        "besides": [
+          "doctor"
+        ],
+        "givesBack": "starting a paper reading, with the doctor's ocr.job.write (0136 Q111 A)"
+      }
+    ]
+  },
   "homeOpensOn": {
     "frontDesk": "Arrivals and check-in",
     "nurse": "Triage queue",
@@ -475,6 +497,13 @@
       "outreach.registration.read",
       "outreach.registration.write",
       "workforce.manage"
+    ],
+    "work_list_reader": [
+      "lab.work-item.read",
+      "pharmacy.work-item.read"
+    ],
+    "reading_starter": [
+      "ocr.job.start"
     ]
   },
   "todayDifferences": [
