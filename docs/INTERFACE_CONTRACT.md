@@ -9676,6 +9676,13 @@ else holds it, and nothing is charged for a refusal the database gives first:
    (else 404 or 403).
 2. The patient's own verified NIN: the same NIN answers `already_linked` (no
    QoreID call); another answers 409 `PATIENT_ALREADY_HAS_NIN`.
+2a. The legacy NIN crosswalk (0057), kept as the patient's own check keeps it
+   (0058, 0092). While a legacy migration run is in flight, the answer is 503
+   `NIN_LINK_TRY_LATER`. A patient promoted from the legacy system whose
+   earlier records attest a different NIN gets 409 `PATIENT_ALREADY_HAS_NIN`
+   ("This patient's earlier records hold a different NIN. Ask Health ID
+   support to review it."): a different NIN goes to governed review and never
+   replaces the attested one. Neither calls QoreID.
 3. The NIN check, with the name and date of birth on the patient's record:
    the desk's check (deferred or switched off, the sealed tenants, Q110's
    record, the NIN service behind ID-0's breaker, 0137's guard as path
@@ -9686,6 +9693,9 @@ else holds it, and nothing is charged for a refusal the database gives first:
 4. Only after a match: a NIN another record holds answers 409
    `NIN_ON_ANOTHER_RECORD`. Nothing changes and the other record is never
    named. Under Q110 this is a NIN a Health ID holds whose record matched.
+   It is also a NIN the legacy crosswalk attests for another patient, so a
+   migrated patient's NIN never goes on a duplicate record. The attested NIN
+   itself links to its own patient.
 5. The link, in one transaction (`identity.link_patient_nin`): the checks
    again under the NIN's and the patient's locks, the evidence
    (`identity.patient_nin_links`), the verified `nin` identifier (source
@@ -9712,7 +9722,7 @@ Answer `200`:
 | 403 | `PERMISSION_DENIED` | existing |
 | 403 | `NIN_LINK_NOT_PERMITTED` | "You can add a NIN only for this facility's own patients." |
 | 404 | `PATIENT_NOT_FOUND` | "No such patient." (unknown, inactive, merged, or across the seals) |
-| 409 | `PATIENT_ALREADY_HAS_NIN` | "This patient already has a verified NIN." |
+| 409 | `PATIENT_ALREADY_HAS_NIN` | "This patient already has a verified NIN.", or for a migrated patient whose earlier records hold another NIN, "This patient's earlier records hold a different NIN. Ask Health ID support to review it." |
 | 409 | `NIN_ON_ANOTHER_RECORD` | "This NIN is already on another patient record. Ask an approver to review the two records." |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | "This request key was already used for a different request." |
 | 409 | `NIN_CHECK_IN_PROGRESS`, `NIN_CHECK_HELD` | as 0137, with `retryAfterSeconds` |
@@ -9720,19 +9730,28 @@ Answer `200`:
 | 502 | `QOREID_PROVIDER_RESPONSE_INVALID` | as 0137 |
 | 503 | `NIN_PROVIDER_UNAVAILABLE` | NIN checks off here, a sealed tenant's desk, or the breaker open (nothing sent) |
 | 503 | `NIN_PROVIDER_DEFERRED` | staging with NIN checks deferred |
+| 503 | `NIN_LINK_TRY_LATER` | "A NIN cannot be added just now. Please try again later." (a legacy migration run in flight; nothing sent) |
 | 504 | `QOREID_TIMEOUT` | as 0137 |
 
 Audit: one `identity.patient.nin-link` row for each answer and each refusal:
 the patient (none for `PATIENT_NOT_FOUND`), `outcome` (`nin_linked`,
 `already_linked`) or `refusal` (`not_found`, `not_permitted`,
 `already_has_nin`, `no_record`, `details_mismatch`, `on_another_record` with
-`otherPatientId`, `key_reused`), and `qoreidCalled`. Never the NIN or its
-HMAC. The desk's NIN check writes its own `identity.nin.verify` and
+`otherPatientId`, `key_reused`, `source_nin_differs`, `legacy_records_pending`),
+and `qoreidCalled`. A replayed answer writes `outcome` `replayed` with
+`replayed: true`, so the patient's access log still shows the link once. Never
+the NIN or its HMAC. The desk's NIN check writes its own `identity.nin.verify` and
 `identity.qoreid.nin-check` rows as for registration.
 
 The patient's access log (`GET /api/v1/identity/me/access-log`) gains the
 action `nin_added` with `facilityName` ("NIN added at <facility>") for each
-link; an `already_linked` answer adds nothing.
+link; an `already_linked` answer or a replay adds nothing.
+
+A desk link leaves the patient's assurance state as it is: the desk confirms
+the person in front of it against the record, while the assurance state is
+about the patient's own login. The patient can still raise it: after a desk
+link, the patient's own NIN check finds their verified row for that NIN
+(0092's `bound_exact`) and moves them to `NIN_VERIFIED` as today.
 
 Screen notes: show "Verify NIN" on a patient whose `ninStatus` is
 `not_verified`, to staff with `identity.registration.write`, for this
