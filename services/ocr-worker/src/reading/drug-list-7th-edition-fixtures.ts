@@ -1,7 +1,7 @@
 /**
  * Test data: every name the 7th edition drug list recognised (its generics, synonyms and active brands, 598
  * names), frozen from drug-list.ts at commit 06f98040, before the list moved to the 8th edition on 2026-11-23.
- * drug-list.spec.ts checks that each is still recognised or, where it is near a listed name, kept apart from it.
+ * drug-list.spec.ts checks that each is still recognised or, where it is near a listed name, kept apart from that name.
  */
 export const SEVENTH_EDITION_NAMES: readonly string[] = [
   'abacavir', 'abacavir + efavirenz + lamivudine', 'abacavir + lamivudine', 'abiraterone', 'acetazolamide',
