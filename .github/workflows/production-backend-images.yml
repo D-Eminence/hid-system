@@ -1,10 +1,10 @@
 name: Production backend candidates
 on:
   pull_request:
-    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/production-runtime-assessment.json', 'security/gateway-runtime.vex.json', '.dockerignore', '.gitattributes', 'infra/aws/runtime/workload-issuer/**', 'docs/rollback/0136_affected_staff_counts.sql**', '.github/workflows/production-backend-images.yml', '.github/workflows/staging-backend-images.yml']
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/production-runtime-assessment.json', 'security/gateway-runtime.vex.json', '.dockerignore', '.gitattributes', 'infra/aws/runtime/workload-issuer/**', 'docs/rollback/0136_affected_staff_counts.sql**', 'scripts/generate-ocr-drug-list.mjs**', 'docs/codes/drafts/hid-medicines-and-lab-tests.csv**', '.github/workflows/production-backend-images.yml', '.github/workflows/staging-backend-images.yml']
   push:
     branches: [staging-novu-ci-20261005]
-    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/production-runtime-assessment.json', 'security/gateway-runtime.vex.json', '.dockerignore', '.gitattributes', 'infra/aws/runtime/workload-issuer/**', 'docs/rollback/0136_affected_staff_counts.sql**', '.github/workflows/production-backend-images.yml']
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/production-runtime-assessment.json', 'security/gateway-runtime.vex.json', '.dockerignore', '.gitattributes', 'infra/aws/runtime/workload-issuer/**', 'docs/rollback/0136_affected_staff_counts.sql**', 'scripts/generate-ocr-drug-list.mjs**', 'docs/codes/drafts/hid-medicines-and-lab-tests.csv**', '.github/workflows/production-backend-images.yml']
   workflow_dispatch:
     inputs:
       component:

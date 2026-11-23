@@ -96,6 +96,9 @@ export const outsideTestInputs = [
   ['infra/aws/runtime/workload-issuer/',['identity-api']],
   // ehr-api's zero136-count-block.spec.ts checks 0136 carries this file's count block (Q113 A).
   ['docs/rollback/0136_affected_staff_counts.sql',['ehr-api']],
+  // ocr-worker's drug-generics.spec.ts runs this generator on this CSV and compares with the checked-in drug list.
+  ['scripts/generate-ocr-drug-list.mjs',['ocr-worker']],
+  ['docs/codes/drafts/hid-medicines-and-lab-tests.csv',['ocr-worker']],
 ];
 const noImagePackages = ['ui','offline','telemetry','identity-browser-client'];
 // Never copied into a production image and never run by the production build.

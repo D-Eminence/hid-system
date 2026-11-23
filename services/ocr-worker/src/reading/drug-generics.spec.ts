@@ -4,14 +4,17 @@ import { join } from 'node:path';
 import { GENERATED_DRUG_GENERICS } from './drug-generics.generated';
 import { NEML_GENERICS, normaliseDrugName } from './drug-list';
 
-const ROOT = join(__dirname, '../../../..');
-const SCRIPT = join(ROOT, 'scripts/generate-ocr-drug-list.mjs');
+// The generator finds the CSV from its own place, so the test names only the files it needs (the build's test-read
+// scanner maps each to ocr-worker: scripts/production-backend-build.mjs outsideTestInputs).
+const SCRIPT = join(__dirname, '../../../../scripts/generate-ocr-drug-list.mjs');
+const CSV = join(__dirname, '../../../../docs/codes/drafts/hid-medicines-and-lab-tests.csv');
 const GENERATED = join(__dirname, 'drug-generics.generated.ts');
 
 describe('the generated drug list (drug-generics.generated.ts)', () => {
   it('matches the medicine rows of docs/codes/drafts/hid-medicines-and-lab-tests.csv exactly', () => {
     // Runs the generator on the CSV and compares its output with the checked-in file, byte for byte.
-    const expected = execFileSync(process.execPath, [SCRIPT, '--stdout'], { cwd: ROOT, encoding: 'utf8' });
+    const expected = execFileSync(process.execPath, [SCRIPT, '--stdout'], { encoding: 'utf8' });
+    expect(readFileSync(CSV, 'utf8')).toContain('MED-00001');
     expect(readFileSync(GENERATED, 'utf8')).toBe(expected);
   });
 
