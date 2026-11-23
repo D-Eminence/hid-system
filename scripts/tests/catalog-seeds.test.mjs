@@ -545,6 +545,27 @@ test('0149\'s own refusals in the transaction (55000, 23514) are refusals with t
     (error) => !(error instanceof LoadRefusal) && error.code === '57P01')
 })
 
+test('0150\'s refusals of a diagnosis row (55000, 23514) are refusals too, with the database\'s message; nothing loaded', async () => {
+  const seed = { format: SEED_FORMAT, kind: 'diagnosis', version: '2026-01',
+    attribution: ['Synthetic notice: ICD-11, World Health Organization, CC BY-ND 3.0 IGO.'], retired: [], items: [
+      { code: '1F40', title: 'Malaria due to Plasmodium falciparum', otherNames: [], chapter: '01', residual: false }] }
+  const approval = { approvalReference: 'Synthetic sign-off reference', approvedAt: '2026-12-01T09:00:00+01:00' }
+  const cases = [
+    ['55000', 'CATALOG_VERSION_SEALED: diagnosis 2026-01'],
+    ['23514', 'new row for relation "catalog_diagnoses" violates check constraint "catalog_diagnoses_code_check"'],
+    ['23514', 'new row for relation "catalog_diagnoses" violates check constraint "catalog_diagnoses_title_check"'],
+  ]
+  for (const [code, message] of cases) {
+    const client = new StandInClient({ failOn: { sql: 'insert into ehr.catalog_diagnoses',
+      error: Object.assign(new Error(message), { code }) } })
+    await assert.rejects(loadSeed(client, { seed, fileSha256: 'a'.repeat(64), approval, approvalsSha256: 'b'.repeat(64) }),
+      (error) => error instanceof LoadRefusal && !error.busy
+        && refusalLine(error) === `load-catalog: the database refused the load: ${message} (${code}); nothing loaded`, message)
+    assert.equal(client.statements.at(-1).sql, 'rollback', message)
+    assert.ok(!client.statements.some(({ sql: text }) => text === 'commit'), message)
+  }
+})
+
 test('a failure that is not a refusal ends with one plain line too (exit 1), never a stack trace', () => {
   const { folder, seedPath, approvalsPath } = signedFiles(build().medicine)
   try {

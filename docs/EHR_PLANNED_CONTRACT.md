@@ -1983,7 +1983,10 @@ file's seed in `docs/codes/catalog-approvals.json`.
   lists, a release that is or has been live takes no new entry (55000
   `CATALOG_VERSION_SEALED`): only a release still loading takes entries.
   Instead of the planned `ehr.terminology_icd11`, the list shares ORD-7's
-  versions, loader and sign-off.
+  versions, loader and sign-off. The loader takes 0150's refusals as it
+  takes 0149's: a sealed release (55000) or a table check (23514) ends the
+  load as a refusal (exit 2) with the database's message, and nothing is
+  loaded.
 - **The seed** `docs/codes/drafts/icd11-mms-2026-01.json` is built by
   `catalog:build-icd11-seed` from WHO's `SimpleTabulation-ICD-11-MMS-en.zip`
   (2026-01, sha256 `f1356588…`). That is the file
