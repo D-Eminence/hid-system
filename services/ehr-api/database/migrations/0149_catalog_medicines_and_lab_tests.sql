@@ -21,26 +21,34 @@
 -- migration)
 -- 1. ehr.catalog_versions: one row per loaded version of a list (kind
 --    'medicine' or 'lab_test'): its version label, the sha256 of the seed
---    file it came from, the approval reference (the lead's sign-off) and
---    when it was approved and loaded, and whether it is the active version.
---    At most one active version per kind (a unique partial index). Its
---    attribution: the notices the signed file's sources require (LOINC's,
---    the WHO Model List's), at most 5, shown on the screens' About page. A
---    version row is never deleted and never changes but for the loader's
---    switch (active, and loaded_at): a trigger refuses anything else (55000),
---    and TRUNCATE. The loader (a later slice) switches in one transaction
---    under SHARE ROW EXCLUSIVE on this table: the old version off, then the
---    new one on (two statements: one turning both would meet the
---    one-active index row by row), so two loaders cannot both win and a
---    search sees the old list or the new one, never neither.
+--    file it came from, the approval reference (the lead's sign-off), the
+--    sha256 of the approvals file that holds that sign-off, when it was
+--    approved and loaded, whether it is the active version, and whether it
+--    is sealed. At most one active version per kind (a unique partial
+--    index). Its attribution: the notices the signed file's sources require
+--    (LOINC's, the WHO Model List's), at most 5, shown on the screens'
+--    About page. A version row is never deleted and never changes but for
+--    the loader's switch (active, loaded_at, and sealed from false to
+--    true): a trigger refuses anything else (55000), and TRUNCATE. The
+--    guard seals a version when it goes live (an active version is always
+--    sealed; a check says so) and a sealed version stays sealed, so a
+--    version that is or has ever been live gains no row (3b): only a
+--    version still loading takes rows. The loader (a later slice) switches
+--    in one transaction under SHARE ROW EXCLUSIVE on this table: the old
+--    version off, then the new one on (two statements: one turning both
+--    would meet the one-active index row by row), so two loaders cannot
+--    both win and a search sees the old list or the new one, never neither.
 -- 2. ehr.catalog_medicines: one row per list row per version: the fixed id
 --    (MED-nnnnn, the code under codeSystem HID-MED), the generic name (the
 --    INN), other names (one text, names separated by "; "), strength, dose
 --    form (section 46's values), the list's words for the form, routes,
 --    ATC code, a common adult dose hint, the source and its section and
 --    sub-list, and withdrawn. A generated tsvector over the generic name and
---    the other names (configuration 'simple': no stemming, no stop words)
---    with a GIN index. A row never changes once loaded (UPDATE, DELETE and
+--    the other names, split into words exactly as a search splits q (lower
+--    case, at anything that is not a letter or a digit, so "MTB/RIF",
+--    "COVID-19", "HIV 1/2", "U/A" and "G&XM" give the index the words q
+--    gives; configuration 'simple': no stemming, no stop words), with a GIN
+--    index. A row never changes once loaded (UPDATE, DELETE and
 --    TRUNCATE refused by platform.reject_mutation()): a correction or a
 --    withdrawal is a new version, so old prescriptions keep their meaning.
 -- 3. ehr.catalog_lab_tests: the same for lab tests: the fixed id
@@ -48,27 +56,33 @@
 --    HID-LAB; a test with no code is never loaded), the name, other names,
 --    specimen, category (the contract's nine, and blood-bank, immunology
 --    and histopathology, which the combined list (#312) uses), source,
---    withdrawn, and the tsvector with its GIN index; append-only as 2.
+--    withdrawn, and the tsvector (split as in 2) with its GIN index;
+--    append-only as 2.
 -- 3b. Fixed ids: ehr.catalog_retired_codes (each id the loader drops, with
 --    why; append-only) and BEFORE INSERT triggers on the two lists that
 --    refuse (55000) a retired id (CATALOG_ID_RETIRED), an id whose medicine
 --    (generic name, strength, dose form) or test (code system, code, name)
 --    differs from an earlier version's, or a lab code another id held
 --    (CATALOG_ID_CHANGED). So a code is never changed or reused in the
---    database, not only in the seed file's test.
+--    database, not only in the seed file's test. The same triggers first
+--    refuse (55000) a row for a sealed version (CATALOG_VERSION_SEALED),
+--    reading the version row FOR SHARE, so an insert waits for a switch in
+--    progress and a switch waits for an insert in progress: no row joins a
+--    list once it has been live. The retired ids belong to no version.
 -- 4. ehr.search_catalog_medicines(q, limit, dose form, route) and
 --    ehr.search_catalog_lab_tests(q, limit) (SECURITY DEFINER, STABLE): the
 --    active version's rows that are not withdrawn, where every word of q
 --    starts a word of the generic name or of one other name (prefix match,
---    letters and digits only, case ignored; the first 6 words of q, each cut
---    to 40 characters; q never reaches to_tsquery as typed). Names that
---    start with q (LIKE's %, _ and \ escaped) come first, then by name in
---    the "C" collation, then strength and the list id, so the order is the
---    same on every load. At most limit rows (1-25), and whether more
---    matched. matched_name is the other name that matched when the generic
---    name did not. q of 2-100 characters after trimming, limit 1-25, a dose
---    form of section 46 and a route of letters, spaces and hyphens, else
---    22023 CATALOG_SEARCH_INVALID; q is never stored or logged here.
+--    letters and digits only, case ignored, each name split as q is; the
+--    first 6 words of q, each cut to 40 characters; q never reaches
+--    to_tsquery as typed). Names that start with q (LIKE's %, _ and
+--    \ escaped) come first, then by name in the "C" collation, then strength
+--    and the list id, so the order is the same on every load. At most limit
+--    rows (1-25), and whether more matched. matched_name is the other name
+--    that matched when the generic name did not. q of 2-100 characters
+--    after trimming, limit 1-25, a dose form of section 46 and a route of
+--    letters, spaces and hyphens, else 22023 CATALOG_SEARCH_INVALID; q is
+--    never stored or logged here.
 -- 5. ehr.catalog_status(): per kind, whether an active version exists, its
 --    label, when it was approved, how many rows it offers, its attribution
 --    and the sha256 of the signed file it was loaded from (so the screens
@@ -85,16 +99,21 @@
 --
 -- Locks: only the new tables and functions. No foreign key reaches an
 -- existing table (the new tables reference only each other), the triggers
--- call 0001's platform.reject_mutation() and this file's guard, and no
+-- call 0001's platform.reject_mutation() and this file's functions, and no
 -- existing object is altered or granted on, so the file takes no lock on
 -- any existing relation: it never waits on a running service and stops
--- nothing. Checked before commit on PostgreSQL 16 (0001-0137 + this file):
--- pg_locks lists relation locks only on the three new tables, their indexes
--- and TOAST tables, besides ACCESS SHARE on system catalogs and ROW
--- EXCLUSIVE on pg_description (the comments); its 16 object locks are all
--- ACCESS SHARE (the schema and the types and functions the new objects
--- use), which no running service conflicts with. There is no busy refusal
--- to name: the preconditions' refusals start with "0149: ".
+-- nothing. Checked before commit on PostgreSQL 16 (0001-0146 + this file,
+-- applied by a NOSUPERUSER NOBYPASSRLS owner): pg_locks lists relation
+-- locks only on the four new tables, their 12 indexes, and their 4 TOAST
+-- tables and TOAST indexes, besides ACCESS SHARE on the system catalogs
+-- read and ROW EXCLUSIVE on pg_description (the comments) and on pg_proc's
+-- TOAST table and its index (the longer function bodies). Its 24 object
+-- locks are 21 ACCESS SHARE (the schema, plpgsql, the owner and the two
+-- runtime roles, 0001's platform.reject_mutation(), and the new types,
+-- constraints and trigger functions) and 3 SHARE UPDATE EXCLUSIVE, on this
+-- file's own new searches and status, from COMMENT ON. No running service
+-- conflicts with any of them. There is no busy refusal to name: the
+-- preconditions' refusals start with "0149: ".
 --
 -- Old services on this schema: nothing calls the new functions. New
 -- services on a schema without this file (42883 from the functions):
@@ -138,16 +157,21 @@ create table ehr.catalog_versions (
   version text not null check (version ~ '^[0-9A-Za-z][0-9A-Za-z.-]{0,31}$'),
   file_sha256 char(64) not null check (file_sha256 ~ '^[0-9a-f]{64}$'),
   approval_reference text not null check (length(btrim(approval_reference)) between 8 and 500),
+  approvals_sha256 text not null check (approvals_sha256 ~ '^[0-9a-f]{64}$'),
   approved_at timestamptz not null,
   loaded_at timestamptz not null default clock_timestamp(),
   active boolean not null default false,
+  sealed boolean not null default false,
   attribution text[] not null default '{}' check (cardinality(attribution) <= 5 and array_position(attribution, null) is null),
-  constraint catalog_versions_kind_version_uq unique (kind, version)
+  constraint catalog_versions_kind_version_uq unique (kind, version),
+  constraint catalog_versions_active_sealed_check check (sealed or not active)
 );
 create unique index catalog_versions_one_active_uq on ehr.catalog_versions (kind) where active;
 revoke all on ehr.catalog_versions from public;
 -- A version row never changes but for the loader's switch (active, and
--- loaded_at when it is loaded again), and is never deleted.
+-- loaded_at when it is loaded again) and its sealing, and is never deleted.
+-- A version is sealed when it goes live and stays sealed; the lists' insert
+-- triggers (3b) refuse a row for a sealed version.
 create function ehr.catalog_versions_guard()
 returns trigger
 language plpgsql
@@ -157,10 +181,19 @@ begin
   if tg_op = 'DELETE' then
     raise exception using errcode = '55000', message = 'ehr.catalog_versions rows are never deleted';
   end if;
-  if (new.id, new.kind, new.version, new.file_sha256, new.approval_reference, new.approved_at, new.attribution)
+  if (new.id, new.kind, new.version, new.file_sha256, new.approval_reference, new.approvals_sha256, new.approved_at,
+      new.attribution)
      is distinct from
-     (old.id, old.kind, old.version, old.file_sha256, old.approval_reference, old.approved_at, old.attribution) then
-    raise exception using errcode = '55000', message = 'ehr.catalog_versions: only active and loaded_at may change';
+     (old.id, old.kind, old.version, old.file_sha256, old.approval_reference, old.approvals_sha256, old.approved_at,
+      old.attribution) then
+    raise exception using errcode = '55000',
+      message = 'ehr.catalog_versions: only active, loaded_at and sealed may change';
+  end if;
+  if old.sealed and not new.sealed then
+    raise exception using errcode = '55000', message = 'ehr.catalog_versions: a sealed version stays sealed';
+  end if;
+  if new.active then
+    new.sealed := true;
   end if;
   return new;
 end;
@@ -190,8 +223,9 @@ create table ehr.catalog_medicines (
   source_section text check (source_section is null or length(source_section) <= 40),
   source_list text check (source_list is null or source_list in ('main', 'restricted', 'specialist')),
   withdrawn boolean not null default false,
-  search_terms tsvector generated always as
-    (to_tsvector('simple'::regconfig, generic_name || ' ' || other_names)) stored,
+  -- Split as a search splits q (ehr.catalog_search_query): lower case, at anything not a letter or a digit.
+  search_terms tsvector generated always as (to_tsvector('simple'::regconfig,
+    regexp_replace(lower(generic_name || ' ' || other_names), '[^[:alnum:]]+', ' ', 'g'))) stored,
   constraint catalog_medicines_pkey primary key (version_id, list_id)
 );
 create index catalog_medicines_search_idx on ehr.catalog_medicines using gin (search_terms);
@@ -217,8 +251,9 @@ create table ehr.catalog_lab_tests (
     'urine-and-stool', 'hormones', 'molecular', 'blood-bank', 'immunology', 'histopathology', 'other')),
   source text not null check (source ~ '^[a-z0-9][a-z0-9-]{0,63}$'),
   withdrawn boolean not null default false,
-  search_terms tsvector generated always as
-    (to_tsvector('simple'::regconfig, display || ' ' || other_names)) stored,
+  -- Split as a search splits q (ehr.catalog_search_query): lower case, at anything not a letter or a digit.
+  search_terms tsvector generated always as (to_tsvector('simple'::regconfig,
+    regexp_replace(lower(display || ' ' || other_names), '[^[:alnum:]]+', ' ', 'g'))) stored,
   constraint catalog_lab_tests_pkey primary key (version_id, list_id),
   constraint catalog_lab_tests_code_uq unique (version_id, code_system, code)
 );
@@ -236,7 +271,13 @@ create trigger catalog_lab_tests_no_truncate
 -- reused: the retired ids (the loader records each one it drops), and two
 -- BEFORE INSERT triggers that refuse a retired id, an id whose medicine
 -- (generic name, strength, dose form) or test (code system, code, name)
--- differs from an earlier version's, and a lab code another id held.
+-- differs from an earlier version's, and a lab code another id held. They
+-- first refuse a row for a sealed version (one that is or has been live),
+-- reading the version row FOR SHARE: a switch that seals it waits for the
+-- insert's transaction, and an insert waits for a switch in progress, then
+-- reads the version as switched. The trigger functions run as the inserting
+-- role: only the tables' owner may insert, and it holds the UPDATE privilege
+-- that FOR SHARE needs.
 create table ehr.catalog_retired_codes (
   kind text not null check (kind in ('medicine', 'lab_test')),
   list_id text not null,
@@ -262,7 +303,15 @@ returns trigger
 language plpgsql
 set search_path = pg_catalog, pg_temp
 as $$
+declare
+  target record;
 begin
+  select versions.kind, versions.version, versions.sealed into target
+    from ehr.catalog_versions versions where versions.id = new.version_id for share;
+  if target.sealed then
+    raise exception using errcode = '55000',
+      message = 'CATALOG_VERSION_SEALED: ' || target.kind || ' ' || target.version;
+  end if;
   if exists (select 1 from ehr.catalog_retired_codes retired where retired.list_id = new.list_id) then
     raise exception using errcode = '55000', message = 'CATALOG_ID_RETIRED: ' || new.list_id;
   end if;
@@ -285,7 +334,15 @@ returns trigger
 language plpgsql
 set search_path = pg_catalog, pg_temp
 as $$
+declare
+  target record;
 begin
+  select versions.kind, versions.version, versions.sealed into target
+    from ehr.catalog_versions versions where versions.id = new.version_id for share;
+  if target.sealed then
+    raise exception using errcode = '55000',
+      message = 'CATALOG_VERSION_SEALED: ' || target.kind || ' ' || target.version;
+  end if;
   if exists (select 1 from ehr.catalog_retired_codes retired where retired.list_id = new.list_id) then
     raise exception using errcode = '55000', message = 'CATALOG_ID_RETIRED: ' || new.list_id;
   end if;
@@ -308,7 +365,8 @@ create trigger catalog_lab_tests_id_fixed
 
 -- The words of a search: lower case, split at anything that is not a
 -- letter or a digit (so "co-amox" is two words, as the index splits
--- "co-amoxiclav", and "E/U/Cr" three), empty words dropped, the first 6
+-- "co-amoxiclav", and "E/U/Cr" three; the index and the per-name checks
+-- split the names the same way), empty words dropped, the first 6
 -- words only, each cut to 40 characters; and the prefix query they make.
 -- q never reaches to_tsquery as typed: each word is letters and digits
 -- only and quoted, so "(", ":*" or "&|!" make no word and answer nothing,
@@ -362,9 +420,12 @@ begin
   return query
     with matched as (
       select medicine.*, version_row.version as version_label,
-             case when to_tsvector('simple'::regconfig, medicine.generic_name) @@ query then null
+             case when to_tsvector('simple'::regconfig,
+                         regexp_replace(lower(medicine.generic_name), '[^[:alnum:]]+', ' ', 'g')) @@ query then null
                   else (select other.name from unnest(string_to_array(medicine.other_names, '; ')) as other(name)
-                         where other.name <> '' and to_tsvector('simple'::regconfig, other.name) @@ query
+                         where other.name <> ''
+                           and to_tsvector('simple'::regconfig,
+                                 regexp_replace(lower(other.name), '[^[:alnum:]]+', ' ', 'g')) @@ query
                          order by lower(other.name) collate "C", other.name collate "C" limit 1) end as matched
         from ehr.catalog_medicines medicine
         join ehr.catalog_versions version_row on version_row.id = medicine.version_id
@@ -375,7 +436,9 @@ begin
          and (requested_route is null or lower(requested_route) = any(medicine.routes))),
     shown as (
       select matched.* from matched
-       where to_tsvector('simple'::regconfig, matched.generic_name) @@ query or matched.matched is not null),
+       where to_tsvector('simple'::regconfig, regexp_replace(lower(matched.generic_name), '[^[:alnum:]]+', ' ', 'g'))
+             @@ query
+          or matched.matched is not null),
     ranked as (
       select shown.*, count(*) over () as total,
              row_number() over (order by (lower(coalesce(shown.matched, shown.generic_name)) like starts escape '\') desc,
@@ -417,9 +480,12 @@ begin
   return query
     with matched as (
       select test.*, version_row.version as version_label,
-             case when to_tsvector('simple'::regconfig, test.display) @@ query then null
+             case when to_tsvector('simple'::regconfig,
+                         regexp_replace(lower(test.display), '[^[:alnum:]]+', ' ', 'g')) @@ query then null
                   else (select other.name from unnest(string_to_array(test.other_names, '; ')) as other(name)
-                         where other.name <> '' and to_tsvector('simple'::regconfig, other.name) @@ query
+                         where other.name <> ''
+                           and to_tsvector('simple'::regconfig,
+                                 regexp_replace(lower(other.name), '[^[:alnum:]]+', ' ', 'g')) @@ query
                          order by lower(other.name) collate "C", other.name collate "C" limit 1) end as matched
         from ehr.catalog_lab_tests test
         join ehr.catalog_versions version_row on version_row.id = test.version_id
@@ -428,7 +494,9 @@ begin
          and test.search_terms @@ query),
     shown as (
       select matched.* from matched
-       where to_tsvector('simple'::regconfig, matched.display) @@ query or matched.matched is not null),
+       where to_tsvector('simple'::regconfig, regexp_replace(lower(matched.display), '[^[:alnum:]]+', ' ', 'g'))
+             @@ query
+          or matched.matched is not null),
     ranked as (
       select shown.*, count(*) over () as total,
              row_number() over (order by (lower(coalesce(shown.matched, shown.display)) like starts escape '\') desc,
@@ -482,7 +550,7 @@ end
 $$;
 
 comment on table ehr.catalog_versions is
-  '0149 (ORD-7): one row per loaded version of the national medicine or lab-test list, with its seed file''s sha256 and the clinical lead''s approval (Q124 A); at most one active per kind; never deleted. Loaded by the governed loader, never by a migration.';
+  '0149 (ORD-7): one row per loaded version of the national medicine or lab-test list, with its seed file''s sha256, the clinical lead''s approval (Q124 A) and the approvals file''s sha256; at most one active per kind; sealed when it goes live, after which it gains no rows; never deleted. Loaded by the governed loader, never by a migration.';
 comment on table ehr.catalog_medicines is
   '0149 (ORD-7): the national medicine list, one row per list row per version (MED-nnnnn, the code under HID-MED). No patient data.';
 comment on table ehr.catalog_retired_codes is

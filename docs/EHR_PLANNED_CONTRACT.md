@@ -1530,8 +1530,11 @@ signs a version (Q124 A) and the governed loader (a later slice) loads it.
   - `listVersion` is `null` when nothing matched.
   - A search matches when each word of `q` starts a word of the generic
     name or of one other name. Words are split at anything that is not a
-    letter or digit, so "co-amox" finds co-amoxiclav and "E/U/Cr" finds
-    electrolytes. Only the first 6 words count, each cut to 40 characters;
+    letter or digit, in `q` and in the names alike (the index and the
+    per-name checks use the search's own split), so "co-amox" finds
+    co-amoxiclav, "E/U/Cr" finds electrolytes, and "MTB/RIF", "HIV 1/2",
+    "COVID-19", "U/A" and "G&XM" find the tests named so. Only the first 6
+    words count, each cut to 40 characters;
     `q` never reaches the query parser as typed, so brackets or operators
     answer nothing, never an error. Brand names come with the loader (they
     are other names).
@@ -1541,9 +1544,18 @@ signs a version (Q124 A) and the governed loader (a later slice) loads it.
 - **Immutability:** a loaded row never changes; a correction or a
   withdrawal is a new version. Triggers refuse UPDATE, DELETE and TRUNCATE
   on the two lists, and on a version anything but the loader's switch
-  (`active`, `loaded_at`). The loader switches the old version off, then
-  the new one on, in one transaction under SHARE ROW EXCLUSIVE on the
-  versions.
+  (`active`, `loaded_at`, and `sealed` from false to true). The loader
+  switches the old version off, then the new one on, in one transaction
+  under SHARE ROW EXCLUSIVE on the versions.
+  - **Sealed versions:** a version is sealed when it goes live (an active
+    version is always sealed) and stays sealed. The lists' insert triggers
+    refuse a row for a sealed version (55000 `CATALOG_VERSION_SEALED`),
+    reading the version row FOR SHARE so an insert and a switch wait for
+    each other. So a live or replaced version never gains a row its signed
+    file did not hold; only a version still loading takes rows.
+  - Each version also records the sha256 of the approvals file that holds
+    the lead's sign-off (`approvals_sha256`), which never changes, like the
+    approval reference.
 - **Refusals:** `q` missing or under 2 characters gives
   `CATALOG_SEARCH_TEXT_TOO_SHORT`. Characters are counted as the database
   counts them (code points), so an emoji alone is too short. `q` over 100
@@ -1565,10 +1577,10 @@ signs a version (Q124 A) and the governed loader (a later slice) loads it.
   audited (the method and route, never `q`).
 - **Not in this slice:** facility items and `ehr.catalog.facility-item.write`,
   lab requests by name only (`labTestNameOnly` stays `false`), the
-  loader and seed files (with `ehr.catalog_retired_codes`, which the loader
-  checks so a retired id is never reused), `ehr.duplicate_class_rules`,
-  and the screens.
-- **Checks:** the database suite `catalog-search` (41 cases), the ehr-api
+  loader and seed files (the loader records each id it drops in
+  `ehr.catalog_retired_codes`, which is in this slice),
+  `ehr.duplicate_class_rules`, and the screens.
+- **Checks:** the database suite `catalog-search` (59 cases), the ehr-api
   spec (68 tests), and three steps in
   `verify-prescription-details-runtime.mjs`: before a list, with a list
   loaded by owner SQL (the doctor and the pharmacist search), and the

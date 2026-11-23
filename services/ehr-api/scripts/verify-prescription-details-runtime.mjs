@@ -585,13 +585,16 @@ try {
   step('ORD-7: before a signed list is loaded the status says not available and a search answers nothing, '
     + 'with no purpose of use, kept a minute by the browser');
 
-  // A list loaded as the governed loader of a later slice will (owner SQL: no route loads a list). Synthetic rows.
+  // A list loaded as the governed loader of a later slice will (owner SQL: no route loads a list): the versions
+  // (still loading), their rows, then the switch, which seals them. Synthetic rows.
   const loincNotice = 'Synthetic notice: this material contains content from LOINC (http://loinc.org).';
   const [medicineVersion, labVersion] = [randomUUID(), randomUUID()];
-  await owner.query(`insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference, approved_at,
-      active, attribution) values
-    ($1, 'medicine', '2026.1', repeat('a', 64), 'synthetic sign-off reference', '2026-12-01T09:00:00+01:00', true, '{}'),
-    ($2, 'lab_test', '2026.1', repeat('b', 64), 'synthetic sign-off reference', '2026-12-01T09:00:00+01:00', true, $3)`,
+  await owner.query(`insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference,
+      approvals_sha256, approved_at, attribution) values
+    ($1, 'medicine', '2026.1', repeat('a', 64), 'synthetic sign-off reference', repeat('1', 64),
+     '2026-12-01T09:00:00+01:00', '{}'),
+    ($2, 'lab_test', '2026.1', repeat('b', 64), 'synthetic sign-off reference', repeat('1', 64),
+     '2026-12-01T09:00:00+01:00', $3)`,
   [medicineVersion, labVersion, [loincNotice]]);
   await owner.query(`insert into ehr.catalog_medicines (version_id, list_id, generic_name, other_names, strength,
       dose_form, dose_form_text, routes, atc_code, common_adult_dose, source) values
@@ -604,6 +607,8 @@ try {
   await owner.query(`insert into ehr.catalog_lab_tests (version_id, list_id, code_system, code, display, other_names,
       specimen, category, source) values ($1, 'LAB-0001', 'LOINC', '57021-8', 'Full blood count', 'FBC; CBC',
       'Blood (EDTA)', 'haematology', 'hid-common-tests')`, [labVersion]);
+  await owner.query('update ehr.catalog_versions set active = true where id = any($1::uuid[])',
+    [[medicineVersion, labVersion]]);
   const loaded = seed => ({ available: true, version: '2026.1', approvedAt: '2026-12-01', fileSha256: seed.repeat(64) });
   assert.deepEqual(expectStatus(await catalogGet(ownPharmacist, '/status'), 200, 'catalogue status after a list'),
     { medicines: loaded('a'), labTests: loaded('b'), diagnoses: { available: false, release: null }, labTestNameOnly: false,
