@@ -1,4 +1,6 @@
 import { PharmacyApiClient, PharmacyApiProblem } from '@hid/api-client';
+import type { PharmacyWorkItem, PharmacyWorkItemOrderRoute } from '@hid/api-client';
+import { orderRouteCard } from '../pharmacy/order-route-cards';
 
 const context = {
   authorization: 'Bearer propagated-user', correlationId: 'client-contract-1234',
@@ -159,5 +161,127 @@ describe('PharmacyApiClient transport contract', () => {
       withdrawnReason: 'sent_elsewhere' }), { status: 200, headers: { 'content-type': 'application/json' } }));
     await expect(client.getWorkItem(base.id, context)).resolves.toMatchObject({ withdrawn: true,
       withdrawnReason: 'sent_elsewhere' });
+  });
+
+  // PRIV P4.3: an item another facility sent here through an order route never carries that facility's
+  // prescription or encounter id; it carries its route card (and its patient while the route allows a read)
+  // instead. Before this, the client required both ids and answered 502 for the whole list.
+  describe('an item from another facility\'s order route', () => {
+    const routeId = '123e4567-e89b-42d3-a456-426614174020';
+    const own = { id: '123e4567-e89b-42d3-a456-426614174003', patientId: '123e4567-e89b-42d3-a456-426614174004',
+      facilityId: context.facilityId, sourceEhrPrescriptionId: '123e4567-e89b-42d3-a456-426614174005',
+      sourceEhrPrescriptionVersion: 1, sourceEncounterId: '123e4567-e89b-42d3-a456-426614174006', status: 'accepted',
+      medication: { codeSystem: null, code: null, display: 'Amoxicillin 500 mg capsule' }, doseQuantity: 1,
+      doseUnit: 'capsule', routeCode: 'oral', frequency: 'Every 8 hours', instructions: 'After food',
+      acceptedAt: '2026-11-19T09:00:00.000Z', version: 1, dispensing: null };
+    // The card as pharmacy-api builds it from a C18 row (bigint version as text), so this follows the server's shape.
+    const card = orderRouteCard({ work_item_id: '123e4567-e89b-42d3-a456-426614174021', route_id: routeId,
+      reference: 'RX-7Q2K', effective_state: 'accepted', access: 'work', ordering_facility_name: 'Ordering Hospital',
+      orderer_name: 'Dr Ada Obi', orderer_licence_body: 'Fictional Medical Board', orderer_licence_number: 'FMB-0042',
+      patient_full_name: 'Bisi Route', patient_sex: 'female', patient_date_of_birth: '1988-04-05',
+      patient_health_id_last4: 'RT42', row_version: '3', ended_kind: null });
+    const routeCard: PharmacyWorkItemOrderRoute = { id: routeId, reference: 'RX-7Q2K', effectiveState: 'accepted',
+      access: 'work', version: 3, endedKind: null, orderingFacilityName: 'Ordering Hospital', ordererName: 'Dr Ada Obi',
+      ordererLicence: { body: 'Fictional Medical Board', number: 'FMB-0042' } };
+    const routePatient = { fullName: 'Bisi Route', sex: 'female', dateOfBirth: '1988-04-05', healthIdLast4: 'RT42' };
+    // As pharmacy-api projects a route-backed row: no source ids, the card and its patient.
+    const { sourceEhrPrescriptionId: _prescription, sourceEncounterId: _encounter, ...unsourced } = own;
+    const routed = { ...unsourced, id: '123e4567-e89b-42d3-a456-426614174021',
+      patientId: '123e4567-e89b-42d3-a456-426614174022', orderRoute: card.orderRoute, patient: card.patient,
+      medication: { codeSystem: null, code: null, display: 'Metformin 500 mg tablet' }, frequency: 'Twice a day',
+      instructions: 'With meals' };
+    // A fresh Response for every call: a body can be read only once.
+    const respond = (payload: unknown) => {
+      global.fetch = jest.fn().mockImplementation(async () => new Response(JSON.stringify(payload),
+        { status: 200, headers: { 'content-type': 'application/json' } }));
+    };
+    const client = new PharmacyApiClient({ baseUrl: 'https://pharmacy.test' });
+
+    it('lists an own item and a route-backed item, the route-backed one with its card and without source ids',
+      async () => {
+        expect(card.orderRoute).toStrictEqual(routeCard);
+        respond({ items: [own, routed] });
+        const [first, second] = await client.listWorkItems(context);
+        expect(first).toStrictEqual(own);
+        expect(second).toStrictEqual({ ...unsourced, id: routed.id, patientId: routed.patientId,
+          medication: routed.medication, frequency: 'Twice a day', instructions: 'With meals',
+          orderRoute: routeCard, patient: routePatient });
+        expect(second).not.toHaveProperty('sourceEhrPrescriptionId');
+        expect(second).not.toHaveProperty('sourceEncounterId');
+        expect(second?.orderRoute?.orderingFacilityName).toBe('Ordering Hospital');
+      });
+
+    it('reads one route-backed item by id, keeping only the card\'s own fields', async () => {
+      // No licence on record (left out), and a key the card does not define (dropped, never shown).
+      const ended = { ...card.orderRoute, access: 'read', effectiveState: 'completed', endedKind: 'support',
+        reference: null, ordererName: null, ordererLicence: undefined,
+        prescriptionId: '123e4567-e89b-42d3-a456-426614174099' };
+      respond({ ...routed, orderRoute: ended });
+      const item = await client.getWorkItem(routed.id, context);
+      expect(item.orderRoute).toStrictEqual({ id: routeId, reference: null, effectiveState: 'completed', access: 'read',
+        version: 3, endedKind: 'support', orderingFacilityName: 'Ordering Hospital', ordererName: null });
+      expect(item).not.toHaveProperty('sourceEhrPrescriptionId');
+      expect(item).not.toHaveProperty('sourceEncounterId');
+      expect(item.patient).toEqual(routePatient);
+      expect(String((global.fetch as jest.Mock).mock.calls[0]?.[0]))
+        .toBe(`https://pharmacy.test/api/v1/pharmacy/work-items/${routed.id}`);
+    });
+
+    it('still reads a route-backed item whose card pharmacy-api could not read', async () => {
+      const { orderRoute: _card, patient: _patient, ...cardless } = routed;
+      respond({ items: [cardless] });
+      const [listed] = await client.listWorkItems(context);
+      respond(cardless);
+      const read = await client.getWorkItem(cardless.id, context);
+      for (const item of [listed, read]) {
+        expect(item).toStrictEqual({ ...cardless, medication: routed.medication });
+        for (const key of ['orderRoute', 'patient', 'sourceEhrPrescriptionId', 'sourceEncounterId']) {
+          expect(item).not.toHaveProperty(key);
+        }
+      }
+    });
+
+    it('refuses a malformed route card, as any other malformed field', async () => {
+      respond({ items: [own, { ...routed, orderRoute: null }] });
+      await expect(client.listWorkItems(context)).rejects.toMatchObject({ status: 502 });
+      const { id: _id, ...noId } = card.orderRoute;
+      for (const orderRoute of [null, [card.orderRoute], 'Ordering Hospital', noId, { ...card.orderRoute, id: '' },
+        { ...card.orderRoute, version: 3.5 }, { ...card.orderRoute, version: '3' }, { ...card.orderRoute, access: '' },
+        { ...card.orderRoute, ordererLicence: null }, { ...card.orderRoute, ordererLicence: { number: 'FMB-0042' } }]) {
+        respond({ ...routed, orderRoute });
+        const refusal = await client.getWorkItem(routed.id, context).catch((error: unknown) => error);
+        expect(refusal).toBeInstanceOf(PharmacyApiProblem);
+        expect(refusal).toMatchObject({ status: 502 });
+      }
+    });
+
+    it('still refuses a source id that is sent but not a non-empty string', async () => {
+      for (const malformed of [{ sourceEhrPrescriptionId: '' }, { sourceEhrPrescriptionId: null },
+        { sourceEncounterId: '' }, { sourceEncounterId: 7 }]) {
+        respond({ ...own, ...malformed });
+        await expect(client.getWorkItem(own.id, context)).rejects.toMatchObject({ status: 502 });
+      }
+    });
+
+    it('reads this facility\'s own items exactly as before', async () => {
+      const detailed = { ...own, medication: { ...own.medication, strength: '500 mg', doseForm: 'capsule' },
+        patient: { fullName: 'Amaka Card', sex: null, dateOfBirth: '1991-02-03', healthIdLast4: 'AAA2' },
+        priority: 'urgent', duration: { value: 7, unit: 'day' }, quantityToDispense: 21, quantityUnit: 'capsule',
+        withdrawn: true, withdrawnReason: 'changed' };
+      respond({ items: [own, detailed] });
+      const [plain, rich] = await client.listWorkItems(context);
+      // The objects the client answered for these two before the change, field for field and in the same order.
+      const before: PharmacyWorkItem[] = [{ id: own.id, patientId: own.patientId, facilityId: context.facilityId,
+        sourceEhrPrescriptionId: own.sourceEhrPrescriptionId, sourceEhrPrescriptionVersion: 1,
+        sourceEncounterId: own.sourceEncounterId, status: 'accepted', medication: own.medication, doseQuantity: 1,
+        doseUnit: 'capsule', routeCode: 'oral', frequency: 'Every 8 hours', instructions: 'After food',
+        acceptedAt: own.acceptedAt, version: 1, dispensing: null }];
+      before.push({ ...before[0]!, medication: detailed.medication, patient: detailed.patient, priority: 'urgent',
+        duration: { value: 7, unit: 'day' }, quantityToDispense: 21, quantityUnit: 'capsule', withdrawn: true,
+        withdrawnReason: 'changed' });
+      expect([plain, rich]).toStrictEqual(before);
+      expect(Object.keys(plain ?? {})).toEqual(Object.keys(before[0]!));
+      expect(Object.keys(rich ?? {})).toEqual(Object.keys(before[1]!));
+    });
   });
 });

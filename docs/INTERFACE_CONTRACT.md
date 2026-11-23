@@ -1906,6 +1906,14 @@ and `endedKind` (null while the route is live). After a report the work item
 leaves the list for members without the patient's consent; any write on it
 answers 409 `ORDER_ROUTE_CLOSED`, and a Lab release under consent is refused.
 
+`PharmacyWorkItem` in `@hid/api-client` makes `sourceEhrPrescriptionId` and
+`sourceEncounterId` optional: pharmacy-api sends them only on this facility's
+own items and leaves both out on an item from another facility's order route
+(PRIV P4.3). It gains the optional `orderRoute` card
+(`PharmacyWorkItemOrderRoute`), present only when pharmacy-api could read the
+route. Before this the client answered 502 for a list or read holding a
+route-backed item. pharmacy-api's answer is unchanged.
+
 Support (Identity, `@FacilityOptional`, platform transactions):
 
 ```text
