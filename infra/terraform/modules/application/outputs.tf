@@ -83,6 +83,15 @@ output "emergency_contact_environment" {
   }
 }
 
+output "staff_feature_environment" {
+  description = "STAFF_FACILITY_SELECTION_MODE, OWN_WORK_PATIENT_CARD_ENABLED and PRESCRIPTION_DISPENSING_DETAILS_ENABLED in each workload's container environment, for tests; not exported by the root module."
+  value = {
+    for name, environment in local.workload_environment : name => {
+      for key, value in environment : key => value if contains(local.staff_feature_keys, key)
+    }
+  }
+}
+
 output "web_push_bindings" {
   description = "WEB_PUSH_ environment and secret names in each workload's container definition, for tests; names only, not exported by the root module."
   value = {

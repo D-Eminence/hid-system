@@ -424,6 +424,30 @@ variable "qoreid_nin_only_enrollment_enabled" {
   default     = false
 }
 
+# Staff features built behind service settings, off by default. Off writes
+# nothing into the container environment, so no task definition changes.
+variable "staff_facility_selection_mode" {
+  description = "identity-api STAFF_FACILITY_SELECTION_MODE (0129): off, keep (a reload opens at the facility the staff member chose) or ask (as keep, and the website asks at sign-in). Needs migration 0129."
+  type        = string
+  default     = "off"
+  validation {
+    condition     = contains(["off", "keep", "ask"], var.staff_facility_selection_mode)
+    error_message = "staff_facility_selection_mode must be off, keep or ask."
+  }
+}
+
+variable "own_work_patient_card_enabled" {
+  description = "lab-api and pharmacy-api OWN_WORK_PATIENT_CARD_ENABLED (0124, 0133 D4): the patient's name, sex, date of birth and Health ID ending on this facility's own work. Needs migrations 0124 and 0133."
+  type        = bool
+  default     = false
+}
+
+variable "prescription_dispensing_details_enabled" {
+  description = "ehr-api and pharmacy-api PRESCRIPTION_DISPENSING_DETAILS_ENABLED (0125): strength, form, duration, quantity to dispense and priority on new prescriptions and on the pharmacy's own work. Needs migration 0125."
+  type        = bool
+  default     = false
+}
+
 variable "qoreid_secret_arn" {
   description = "Existing secret containing clientId and secret. Terraform never stores their values."
   type        = string

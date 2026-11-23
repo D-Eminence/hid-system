@@ -368,6 +368,33 @@ which is in neither repository.
   visits Settings; do it only if the private key is exposed (steps 0 to 3
   again with a new pair).
 
+### Staff features
+
+Three staff features are built into the live images (hid-system
+staging-novu-ci-20261005: identity-api at 4c843270; ehr-api, lab-api and
+pharmacy-api at 06f98040) and are off unless their setting is written. Their
+migrations are on live (0124 and 0125, then Release A 0128-0137).
+`environments/production.tfvars` turns them on; no other environment does.
+Off writes nothing into the container, so turning one off again is the same as
+never having turned it on.
+
+| Terraform input | Container setting | Services | What staff get |
+| --- | --- | --- | --- |
+| `staff_facility_selection_mode = "keep"` (off, keep or ask) | `STAFF_FACILITY_SELECTION_MODE` | identity-api | A staff member with more than one facility keeps the one they chose after a reload, a new tab or a refresh, instead of being moved back to their primary facility (0129). `ask` also asks at sign-in; not used yet. |
+| `own_work_patient_card_enabled = true` | `OWN_WORK_PATIENT_CARD_ENABLED` | lab-api, pharmacy-api | The patient's name, sex, date of birth and Health ID ending on this facility's own lab requests and prescriptions, each shown in the patient's access history (0124, 0133 D4). |
+| `prescription_dispensing_details_enabled = true` | `PRESCRIPTION_DISPENSING_DETAILS_ENABLED` | ehr-api, pharmacy-api | Prescribers can add strength, form, duration, quantity to dispense and priority to a new prescription; the pharmacy sees them on its own work (0125). |
+
+Plan and apply exactly as in section 4 (`production_release_infrastructure.py
+plan`, review, then `apply --accepted-review-sha256`). The plan should only
+replace the task definitions of identity-api, ehr-api, lab-api and
+pharmacy-api (one or two new environment names each, as in the table) and
+update those four services in place, with no image change. With the mode on,
+identity-api refuses to start if `auth.session_facility_selection` or its
+grants are missing; ECS then rolls the service back by itself (circuit
+breaker), so read `/hid/staging/identity-api` and follow "If a helper apply
+stops part-way". Off switch: commit the default (`"off"` or `false`) on dev,
+then plan and apply the same way.
+
 ### Support chat Health ID check
 
 The public support chat (`POST /api/v1/support/chat`, support-api, Lex) must

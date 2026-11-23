@@ -47,6 +47,19 @@ qoreid_enabled                     = true
 qoreid_secret_arn                  = "arn:aws:secretsmanager:eu-west-1:659225405023:secret:/hid/staging/qoreid-lt0E2p"
 qoreid_nin_only_enrollment_enabled = true
 
+# Staff features built and off by default, turned on once their migrations are
+# on live (Release A: 0128-0137 applied; 0124 and 0125 before it). Live images:
+# identity-api from hid-system 4c843270; ehr-api, lab-api and pharmacy-api from
+# 06f98040. See DEVOPS_HANDOVER.md "Staff features".
+# identity-api: a reload, new tab or refresh keeps the facility the staff member chose (0129).
+staff_facility_selection_mode = "keep"
+# lab-api and pharmacy-api: the patient's name, sex, date of birth and Health ID
+# ending on this facility's own lab requests and prescriptions (0124, 0133 D4).
+own_work_patient_card_enabled = true
+# ehr-api and pharmacy-api: strength, form, duration, quantity to dispense and
+# priority on new prescriptions and on the pharmacy's own work (0125).
+prescription_dispensing_details_enabled = true
+
 availability_zones       = ["eu-west-1a", "eu-west-1b"]
 public_subnet_cidrs      = ["10.30.0.0/24", "10.30.1.0/24"]
 application_subnet_cidrs = ["10.30.10.0/24", "10.30.11.0/24"]
