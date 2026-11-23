@@ -14,6 +14,21 @@ variable "qoreid_nin_only_enrollment_enabled" {
   default = false
 }
 
+variable "staff_facility_selection_mode" {
+  type    = string
+  default = "off"
+}
+
+variable "own_work_patient_card_enabled" {
+  type    = bool
+  default = false
+}
+
+variable "prescription_dispensing_details_enabled" {
+  type    = bool
+  default = false
+}
+
 variable "qoreid_secret_arn" {
   type    = string
   default = ""

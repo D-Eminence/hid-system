@@ -235,6 +235,22 @@ locals {
     { name = "WEB_PUSH_VAPID_PRIVATE_KEY", arn = var.runtime_secret_arns["notification-provider"], key = "webPushVapidPrivateKey" }
   ] : []
 
+  # Staff features built behind service settings (each off by default in the
+  # service). Off writes nothing, so no task definition changes; on writes the
+  # exact value each service parses (STAFF_FACILITY_SELECTION_MODE off|keep|ask
+  # in identity-api; OWN_WORK_PATIENT_CARD_ENABLED and
+  # PRESCRIPTION_DISPENSING_DETAILS_ENABLED true|false in the others).
+  staff_facility_selection_environment = var.staff_facility_selection_mode == "off" ? {} : {
+    STAFF_FACILITY_SELECTION_MODE = var.staff_facility_selection_mode
+  }
+  own_work_patient_card_environment = var.own_work_patient_card_enabled ? {
+    OWN_WORK_PATIENT_CARD_ENABLED = "true"
+  } : {}
+  prescription_dispensing_details_environment = var.prescription_dispensing_details_enabled ? {
+    PRESCRIPTION_DISPENSING_DETAILS_ENABLED = "true"
+  } : {}
+  staff_feature_keys = ["STAFF_FACILITY_SELECTION_MODE", "OWN_WORK_PATIENT_CARD_ENABLED", "PRESCRIPTION_DISPENSING_DETAILS_ENABLED"]
+
   workload_environment = {
     identity-api = merge(local.common_api_environment, local.workload_token_files.identity-api, {
       # The separate staging public website calls only Identity's public APIs.
@@ -278,7 +294,7 @@ locals {
       }, local.support_workload_caller ? {
       # The one caller allowed on the support Health ID match route.
       IDENTITY_SUPPORT_CALLER_SUBJECT = lookup(local.identity_subjects, "support", "")
-    } : {}, local.emergency_contact_identity_environment, local.web_push_environment)
+    } : {}, local.emergency_contact_identity_environment, local.web_push_environment, local.staff_facility_selection_environment)
 
     ehr-api = merge(local.common_api_environment, local.workload_token_files.ehr-api, {
       PORT                                    = "3002"
@@ -307,7 +323,7 @@ locals {
       AI_GENERATION_MODEL_ID                  = var.ai_generation_provider == "anthropic" ? var.anthropic_model_id : "eu.anthropic.claude-sonnet-4-6"
       ANTHROPIC_PROCESSING_APPROVED           = tostring(var.ai_allow_anthropic_us_processing)
       AI_EMBEDDING_MODEL_ID                   = "amazon.titan-embed-text-v2:0"
-    })
+    }, local.prescription_dispensing_details_environment)
     lab-api = merge(local.common_api_environment, local.workload_token_files.lab-api, {
       PORT                           = "3003"
       DATABASE_POOL_MAX              = "5"
@@ -319,7 +335,7 @@ locals {
       LAB_WORKLOAD_AUDIENCE          = "hid-lab-api"
       LAB_EHR_CALLER_SUBJECT         = lookup(local.identity_subjects, "ehr", "")
       LAB_OCR_CALLER_SUBJECT         = lookup(local.identity_subjects, "ocr", "")
-    })
+    }, local.own_work_patient_card_environment)
 
     pharmacy-api = merge(local.common_api_environment, local.workload_token_files.pharmacy-api, {
       PORT                           = "3004"
@@ -332,7 +348,7 @@ locals {
       PHARMACY_WORKLOAD_AUDIENCE     = "hid-pharmacy-api"
       PHARMACY_EHR_CALLER_SUBJECT    = lookup(local.identity_subjects, "ehr", "")
       PHARMACY_OCR_CALLER_SUBJECT    = lookup(local.identity_subjects, "ocr", "")
-    })
+    }, local.own_work_patient_card_environment, local.prescription_dispensing_details_environment)
 
     ocr-api = merge(local.common_api_environment, local.workload_token_files.ocr-api, {
       PORT                           = "3005"

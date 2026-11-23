@@ -154,6 +154,11 @@ module "application" {
   deployment_account_id               = var.expected_account_id
   deployment_alert_kms_key_arn        = module.operations.alert_topic_kms_key_arn
 
+  # Staff features built behind service settings. Each adds its key only while on.
+  staff_facility_selection_mode           = var.staff_facility_selection_mode
+  own_work_patient_card_enabled           = var.own_work_patient_card_enabled
+  prescription_dispensing_details_enabled = var.prescription_dispensing_details_enabled
+
   # Emergency-contact delivery. Each switch adds its keys only while on.
   emergency_contact_notification_enabled = var.emergency_contact_notification_enabled
   emergency_contact_delivery_enabled     = var.emergency_contact_delivery_enabled
