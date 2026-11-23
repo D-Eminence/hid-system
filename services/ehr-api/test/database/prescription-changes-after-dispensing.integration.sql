@@ -236,7 +236,12 @@ begin
   -- fingerprint, and the first resume after it would read 'edited') meets
   -- this case and decides whether to add its name to the left-out keys by
   -- replacing pharmacy.prescription_change_after_dispensing(); a timestamptz
-  -- or interval column must be left out.
+  -- or interval column must be left out. A migration that changes a
+  -- column's type so that its jsonb text changes (numeric(12,4) to
+  -- numeric(14,6) turns 1.0000 into 1.000000), or renames or drops a column
+  -- that holds values, meets this case too: that also changes every later
+  -- fingerprint, and the first resume after it reads 'edited' (the safe
+  -- side).
   perform pg_temp.expect('1h ehr.prescriptions'' columns and types, in order (a migration that adds one decides C2''s excluded keys)',
     (select string_agg(attribute.attname || ' ' || format_type(attribute.atttypid, attribute.atttypmod)
               || case when attribute.attnotnull then ' not null' else '' end

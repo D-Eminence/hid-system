@@ -10344,11 +10344,11 @@ item list and read gain `changedAfterDispensing: { change, changedAt,
 changeCount }`, the latest change first; the changes shown are on hold,
 cancelled, entered in error, edited and resumed; no acknowledgement, no
 change on the prescriber's side, and no backfill. Built in #<PR, to come> on
-ORD-4 (#303, 0144), Q123 A (#298) and Release A (0001-0137, staging
-`70f92be9`). Migration 0148 needs 0001-0137 and checks that in its section
-0; it relies on nothing of 0144, so the two may be applied in either order.
-Its number is provisional: Release B's other items hold 0138-0146, and
-numbers are given in merge order at the Release B cut-off. Nothing in this
+Release B (0001-0146, staging `926b1c58`), where ORD-4 (#303, 0144) and
+Q123 A (#298) are live; it was first written on ORD-4's branch over Release
+A. Migration 0148 needs 0001-0137 and checks that in its section 0; 0138-0146
+changed nothing it pins or reads. Its number is provisional: Release B holds
+0138-0146, and later numbers are given in merge order. Nothing in this
 section is live until the owner signs Release B's declaration, which names
 0148 and `runtime-grants.sql` with their sha256; until then the screens
 follow the "Before this ships" note of the planned contract's Q132 A section
@@ -10429,19 +10429,19 @@ change after 0148 (no backfill).
   seen. No audit or outbox row, and no change to the progress call.
 - `pharmacyStep` (ORD-4) stays `dispensed` or `dispensing_reversed`;
   `status`, `acceptedAt`, `version` and `dispensing` keep their meaning.
-- With ORD-12 (refills, 0149-0150) "after dispensing" means after the first
-  fill, and `resumed` compares with the first fill's content. 0148 pins
-  `pharmacy.claim_prescription_dispensing()` (md5
+- With ORD-12 (refills, 0152, provisional) "after dispensing" means after
+  the first fill, and `resumed` compares with the first fill's content. 0148
+  pins `pharmacy.claim_prescription_dispensing()` (md5
   2c7f20d7c0df7c582bccc0291f452fdd), which sets `dispensed_at` only while it
   is null and today refuses a second fill (23514
   `PRESCRIPTION_SOURCE_NOT_DISPENSABLE`, DETAIL `not_claimed`), so ORD-12
   replaces it, keeps `dispensed_at` as the first fill's and never clears it.
-  0148 merges before 0149-0150, or is pinned again if ORD-12 lands first.
-  ORD-12's create-only `refills_allowed` column is added to the
-  fingerprint's left-out fields by ORD-12, replacing the trigger function,
-  or the first resume after ORD-12 reads `edited`. After any change, 0101's
-  version check refuses the next refill; ORD-12 decides what a refill after
-  a change means.
+  0148 merges before 0152, or is pinned again if ORD-12 lands first. Its
+  refills column follows the fingerprint's rule (below): a NOT NULL or
+  defaulted refills column must be left out; a nullable one needs nothing.
+  ORD-12 adds `refills_allowed` as a nullable column, so the trigger
+  function stays as it is. After any change, 0101's version check refuses
+  the next refill; ORD-12 decides what a refill after a change means.
 
 ### Work item answers
 
@@ -10549,7 +10549,7 @@ route rules, which Q132 A does not make.
   after that day; a change does not move it up or bring it back. A read by
   its id still answers it, with the notice.
 - The dispensing and its reversal, ORD-4's Accept and steps, the order-route
-  routes, and the readers Release A's pharmacy-api calls
+  routes, and the readers today's pharmacy-api calls
   (`own_work_item_states`, `own_withdrawn_work_items`,
   `own_work_access_for`, the cards, the list queries).
 
@@ -10616,8 +10616,12 @@ route rules, which Q132 A does not make.
   that migration adds the column's name to the left-out keys by replacing
   the function (CREATE OR REPLACE FUNCTION takes no lock on
   `ehr.prescriptions`); a later `timestamptz` or `interval` column must be
-  left out. The database suite pins `ehr.prescriptions`' columns, so such a
-  migration meets a failing case.
+  left out. A later ALTER COLUMN TYPE that changes a column's jsonb text
+  (`numeric(12,4)` to `numeric(14,6)` turns `1.0000` into `1.000000`), or a
+  RENAME or DROP of a column that holds values, also changes every later
+  fingerprint, so the first resume after it reads `edited` too (the safe
+  side). The database suite pins `ehr.prescriptions`' columns and their
+  types, so such a migration meets a failing case.
 - The reader
   `pharmacy.work_item_changes_after_dispensing(requested_work_item_ids
   uuid[])` returns `(work_item_id, change, changed_at, change_count)`
@@ -10678,34 +10682,39 @@ route rules, which Q132 A does not make.
   policies unchanged; they probe the reader (more than 200 ids and null
   refused; no session, and a synthetic session facility, answer no row) and
   leave the table empty.
-- Locks, measured with `pg_locks` before commit, with a superuser applier
-  and with a NOSUPERUSER NOBYPASSRLS one: ACCESS SHARE on
-  `pharmacy.work_items` and `pharmacy.prescription_item_claims`, and on the
-  nine tables on which the post-check probe of the reader plans queries
-  through `auth.membership_has_permission(...)` (`auth.accounts`,
+- Locks, measured with `pg_locks` before commit, with a superuser applier and
+  with a NOSUPERUSER NOBYPASSRLS one: ACCESS SHARE on `pharmacy.work_items`
+  and `pharmacy.prescription_item_claims`, and on the nine tables on which the
+  post-check probe of the reader plans queries through
+  `auth.membership_has_permission(...)` (`auth.accounts`,
   `auth.account_roles`, `auth.roles`, `auth.role_permissions`,
-  `auth.permissions`, `identity.staff_facility_memberships`,
-  `identity.staff`, `identity.facilities` and `identity.organizations`), and
-  on the indexes of all eleven; then, last, SHARE ROW EXCLUSIVE on
-  `ehr.prescriptions` (what CREATE TRIGGER needs; no policy is added, so not
-  ACCESS EXCLUSIVE), held to commit; no other application table but the new
-  one. Section 0 takes no table lock. They are taken in one attempt, NOWAIT
-  (an index waits at most 10 ms), tried again every 100 ms for at most 50
-  attempts (5 to 5.5 seconds), else 55P03 with nothing applied; only one
-  attempt when the transaction already holds an earlier migration's locks,
-  as in the runner's dry run (with 0144 pending first there, 0148 takes one
-  attempt). A post-check probe that meets a busy lock stops the file with
-  55P03 (busy, nothing applied). From the SHARE ROW EXCLUSIVE to commit
-  every prescription INSERT and UPDATE waits (ehr-api's create and PATCH,
-  `ehr.send_order_route`'s activation, the owner-only installs); reads, `FOR
-  UPDATE` and `FOR SHARE` (0101's dispensing, 0144's acceptance) are not
-  blocked, and nothing fails. An autovacuum or ANALYZE of
-  `ehr.prescriptions` (SHARE UPDATE EXCLUSIVE) makes an attempt fail, so one
-  still running after the last attempt stops the file, nothing applied. In
-  the dry run the lock lasts until the dry run ends. On a copy with 20,000
-  prescriptions, work items and claims the file took 44 to 78 ms, of which
-  the hold from the SHARE ROW EXCLUSIVE to commit was 20 to 25 ms, with
-  either applier.
+  `auth.permissions`, `identity.staff_facility_memberships`, `identity.staff`,
+  `identity.facilities` and `identity.organizations`), and on the indexes of
+  all eleven; then, last, SHARE ROW EXCLUSIVE on `ehr.prescriptions` (what
+  CREATE TRIGGER needs; no policy is added, so not ACCESS EXCLUSIVE), held to
+  commit; no other application table but the new one. Section 0 takes no table
+  lock. They are taken in one attempt, NOWAIT (an index waits at most 10 ms),
+  tried again every 100 ms for at most 50 attempts (5 to 5.5 seconds), else
+  55P03 with nothing applied; only one attempt when the transaction already
+  holds an earlier migration's locks, as in the runner's dry run (with an
+  earlier file pending first there, 0148 takes one attempt). A post-check
+  probe that meets a busy lock stops the file with 55P03 in the same wording
+  ("... is busy (...), so it does not wait; nothing applied; run the release
+  again at a quieter time"), so the dry run's retry (`isBusyRefusal`) treats
+  it as busy, as it does section 1's refusals; `npm run db:test-runner` reads
+  all five of 0148's busy texts from the file and checks each. From the SHARE
+  ROW EXCLUSIVE to commit every prescription INSERT and UPDATE waits
+  (ehr-api's create and PATCH, `ehr.send_order_route`'s activation, the
+  owner-only installs); reads, `FOR UPDATE` and `FOR SHARE` (0101's
+  dispensing, 0144's acceptance) are not blocked, and nothing fails. An
+  autovacuum or ANALYZE of `ehr.prescriptions` (SHARE UPDATE EXCLUSIVE) makes
+  an attempt fail, so one still running after the last attempt stops the file,
+  nothing applied. In the dry run the lock lasts until the dry run ends. On
+  Release B (0001-0146 with its runtime roles) with 20,000 prescriptions, work
+  items and claims, the file took 32 to 60 ms to commit, of which the hold
+  from the SHARE ROW EXCLUSIVE to commit was 15 to 31 ms, in ten runs with
+  each applier (on the earlier base, 0001-0137 and 0144, 44 to 78 ms and 20 to
+  26 ms).
 - Undo is by hand only, in the order 0148's header gives, each step leaving
   every image working. (1) `set lock_timeout = '100ms'; drop trigger
   prescriptions_pharmacy_change_after_dispensing on ehr.prescriptions;`,
@@ -10730,19 +10739,18 @@ route rules, which Q132 A does not make.
 
 ### Older and newer images
 
-Release A images on a database with 0148: each change of an active or
-on-hold prescription by today's ehr-api fires the trigger, which finds no
-dispensed claim (one index probe) or records a row; nothing ehr-api reads or
-answers changes (its PATCH audit and 0133 D8's marking of the send are
-unchanged). Today's pharmacy-api calls nothing new, and 0148 replaces no
+Release B images (the live ones) on a database with 0148: each change of an
+active or on-hold prescription by today's ehr-api fires the trigger, which
+finds no dispensed claim (one index probe) or records a row; nothing ehr-api
+reads or answers changes (its PATCH audit and 0133 D8's marking of the send
+are unchanged). Today's pharmacy-api calls nothing new, and 0148 replaces no
 function it calls; changes recorded meanwhile show once the new pharmacy-api
-serves. New pharmacy-api on a database without 0148: the reader answers
-42883 and no item carries the field; every ORD-4 field answers as before. No
-header is needed: the list and the read are browser calls and the field is
-optional, ehr-api never reads them (it only passes the hand-off's replay
-through), and Release A's `@hid/api-client` builds the item from the fields
-it knows and drops this one. Either image may be deployed, or rolled back,
-first.
+serves. New pharmacy-api on a database without 0148: the reader answers 42883
+and no item carries the field; every ORD-4 field answers as before. No header
+is needed: the list and the read are browser calls and the field is optional,
+ehr-api never reads them (it only passes the hand-off's replay through), and
+Release B's `@hid/api-client` builds the item from the fields it knows and
+drops this one. Either image may be deployed, or rolled back, first.
 
 ### Runtime proof
 
