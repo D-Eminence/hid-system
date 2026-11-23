@@ -6,6 +6,7 @@ import type { DataAccessContext } from '../common/request-context';
 import { WORK_ITEM_PROGRESS_MAX_IDS, WorkItemProgressDto } from './dto/work-item-progress.dto';
 import { PharmacyWorkItemProgressController } from './work-item-progress.controller';
 import { PharmacyOwnWork } from './own-work-access';
+import { PharmacyRefills } from './prescription-refills';
 import { OWN_PROGRESS_ACCEPTED_HEADER, OWN_PROGRESS_ACCEPTED_VERSION, OWN_PROGRESS_HEADER, OWN_PROGRESS_VERSION,
   PharmacyWorkItemProgressService, WORK_ITEM_PROGRESS_QUERY } from './work-item-progress.service';
 
@@ -431,5 +432,76 @@ describe('ORD-4: accepted in the prescriber\'s progress', () => {
     expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), context, 'pharmacy.work-item.progress.read',
       { patientId: ids.patient, resourceType: 'pharmacy-work-item-collection', resourceId: ids.facility },
       { requestedCount: 11, foundCount: 10, workItemIds: rows.map((row) => row.work_item_id), breakGlass: false });
+  });
+});
+
+/*
+ * ORD-12 (refills, 0152): an item may have several fills. The progress reads
+ * each item once (WORK_ITEM_PROGRESS_QUERY, setting on or off): `dispensedAt`
+ * the first fill (0133's claim time), the status and `reversedAt` the latest
+ * fill's, and while PRESCRIPTION_REFILLS_ENABLED is on `lastFilledAt`, the
+ * latest fill's time. (The same statement was run against PostgreSQL 16 with
+ * 0152: one row for an item with two fills, the first and the latest times.)
+ */
+describe('ORD-12: refills in the prescriber\'s progress', () => {
+  const first = new Date('2026-11-18T11:05:00Z');
+  const latest = new Date('2026-11-21T09:30:00Z');
+  const rows = [
+    { work_item_id: ids.workA, source_ehr_prescription_id: ids.rxA, accepted_at: new Date('2026-11-18T10:40:00Z'),
+      dispensed_at: first, last_filled_at: latest, reversed_at: null },
+    { work_item_id: ids.workB, source_ehr_prescription_id: ids.rxB, accepted_at: new Date('2026-11-18T10:41:00Z'),
+      dispensed_at: first, last_filled_at: latest, reversed_at: new Date('2026-11-21T10:00:00Z') },
+    { work_item_id: ids.workC, source_ehr_prescription_id: ids.rxC, accepted_at: new Date('2026-11-18T10:42:00Z'),
+      dispensed_at: null, last_filled_at: null, reversed_at: null },
+  ];
+  const asked = { patientId: ids.patient, sourceEhrPrescriptionIds: [ids.rxA, ids.rxB, ids.rxC, ids.rxD] };
+  const build = (on: boolean) => {
+    const built = harness(rows);
+    const service = new PharmacyWorkItemProgressService(built.database as never, built.identity as never,
+      built.audit as never, undefined, new PharmacyRefills(on));
+    return { ...built, service };
+  };
+
+  it('PR1 reads each item once: the first fill, the latest fill and the latest fill\'s reversal, by fill number', () => {
+    const flat = WORK_ITEM_PROGRESS_QUERY.replace(/\s+/g, ' ');
+    expect(flat).toContain('left join lateral (select df.dispensed_at from pharmacy.dispensings df where '
+      + 'df.work_item_id=w.id order by df.fill_number asc limit 1) f on true');
+    expect(flat).toContain('left join lateral (select df.id, df.dispensed_at from pharmacy.dispensings df where '
+      + 'df.work_item_id=w.id order by df.fill_number desc limit 1) l on true');
+    expect(flat).toContain('left join pharmacy.dispensing_reversals r on r.dispensing_id=l.id');
+    expect(flat).toContain('f.dispensed_at, l.dispensed_at as last_filled_at, r.reversed_at');
+    expect(flat).not.toMatch(/left join pharmacy\.dispensings d on/);
+  });
+
+  it('PR2 setting off: today\'s fields; dispensedAt the first fill, the status and reversedAt the latest fill\'s', async () => {
+    const { service } = build(false);
+    const answer = await service.read(context, asked, true, true);
+    expect(answer.items).toEqual([
+      { sourceEhrPrescriptionId: ids.rxA, status: 'dispensed', receivedAt: '2026-11-18T10:40:00.000Z',
+        dispensedAt: first.toISOString(), reversedAt: null, acceptedAt: null },
+      { sourceEhrPrescriptionId: ids.rxB, status: 'dispensing_reversed', receivedAt: '2026-11-18T10:41:00.000Z',
+        dispensedAt: first.toISOString(), reversedAt: '2026-11-21T10:00:00.000Z', acceptedAt: null },
+      { sourceEhrPrescriptionId: ids.rxC, status: 'received', receivedAt: '2026-11-18T10:42:00.000Z',
+        dispensedAt: null, reversedAt: null, acceptedAt: null },
+      { sourceEhrPrescriptionId: ids.rxD, status: 'not_received', receivedAt: null, dispensedAt: null, reversedAt: null,
+        acceptedAt: null }]);
+  });
+
+  it('PR3 setting on: lastFilledAt after today\'s fields, the latest fill\'s time, null before the first fill', async () => {
+    const { service } = build(true);
+    const answer = await service.read(context, asked, true, true);
+    expect(answer.items.map((item) => [item.status, item.dispensedAt, item.lastFilledAt])).toEqual([
+      ['dispensed', first.toISOString(), latest.toISOString()],
+      ['dispensing_reversed', first.toISOString(), latest.toISOString()],
+      ['received', null, null], ['not_received', null, null]]);
+    expect(Object.keys(answer.items[0]!)).toEqual(['sourceEhrPrescriptionId', 'status', 'receivedAt', 'dispensedAt',
+      'reversedAt', 'acceptedAt', 'lastFilledAt']);
+  });
+
+  it('PR4 an older ehr-api (no headers) gets the same times, with the statuses it knows', async () => {
+    const { service } = build(true);
+    const answer = await service.read(context, asked);
+    expect(answer.items.map((item) => [item.status, item.lastFilledAt])).toEqual([['dispensed', latest.toISOString()],
+      ['dispensing_reversed', latest.toISOString()], ['received', null], ['not_received', null]]);
   });
 });

@@ -1644,8 +1644,11 @@ most 200 items: open work first, oldest first, then done work, newest first.
 Lab work is open while any test it asks for has no released result at its
 current version (or that result is marked entered in error); a work item with
 no requested test is open. Pharmacy work is open while it has no dispensing;
-a reversed dispensing counts as done, because a work item takes one dispensing
-only and cannot be dispensed again. Earlier backends answered the 200 oldest items
+a reversed dispensing counts as done, because a reversed fill still counts and
+the item cannot be dispensed again, unless a refill is open (ORD-12: while
+pharmacy-api's `PRESCRIPTION_REFILLS_ENABLED` is on, an own item with a refill
+open is open work too, after the items waiting for their first fill; one row
+per item whatever its fills; see "ORD-12. Prescription refills"). Earlier backends answered the 200 oldest items
 the member could read whatever their state, so a busy facility stopped seeing
 new work. The open-first order changed no field of the answer and no audit row.
 
@@ -12138,16 +12141,18 @@ is the spec. Migration 0152 needs 0001-0146 and 0148 applied and checks that
 in its section 0; its number is provisional (the next after 0148-0151), and
 nothing here is live until the owner signs the declaration that names it.
 The services' part (ehr-api's `refillsAllowed`, pharmacy-api's fill number,
-refusals and one row per item, the event-dispatcher's `fillNumber`,
-`@hid/api-client`) is added to this section with its build. Recording a fill
-above 1 sits behind `PRESCRIPTION_REFILLS_ENABLED`, off by default and
-separate from 0125's setting; with it off no refill is recorded.
+refusals, refills and one row per item, the event-dispatcher's `fillNumber`,
+`@hid/api-client`) is "The services" below. Recording a fill above 1 sits
+behind `PRESCRIPTION_REFILLS_ENABLED`, off by default and separate from
+0125's setting; with it off no refill is recorded.
 
 Release order: 0147, 0148, 0149-0151, then 0152; then the event-dispatcher
 that accepts `fillNumber` on `MedicationDispensed` (an older one fails such
 an event for good); then pharmacy-api; then ehr-api and the staff front
-ends; the setting on last, and only once both staff front ends (health and
-`apps/pharmacy`) handle more than one fill per item. The first
+ends; the setting on last (pharmacy-api's, then ehr-api's, never ehr-api's
+first, so no prescriber sets refills the pharmacy cannot record), and only
+once both staff front ends (health and `apps/pharmacy`) handle more than one
+fill per item. The first
 refills-aware pharmacy-api gives one row per item whatever the setting (the
 latest fill, its fill number, and 0152's reader), so it needs 0152.
 Rollback floor: once any refill is recorded, pharmacy-api must not roll
@@ -12367,6 +12372,136 @@ writes no version, so it records nothing and ends no refill.
   calls it; `refills_allowed` can stay. The database suite shows the first
   step: refills refused, first fills recorded, nothing lost.
 
+### The services
+
+Each of ehr-api and pharmacy-api reads its own `PRESCRIPTION_REFILLS_ENABLED`
+(`true` or `false`, default `false`; any other value stops the service at
+start), as each reads 0125's setting, and separately from it. The
+event-dispatcher and `@hid/api-client` have no setting.
+
+**pharmacy-api, whatever the setting** (from its first refills-aware image,
+which needs 0152's `fill_number`):
+
+- One row per work item, whatever its number of fills: on the work list, a
+  single read, the hand-off replay (accept-ehr-prescription), the accept route
+  and the dispensing route's read of the item. `dispensing` is the item's
+  latest fill (the highest fill number) and `reversed` that fill's, so
+  `pharmacyStep` keeps its meaning (`dispensed`, or `dispensing_reversed` when
+  the latest fill is reversed). The progress call ehr-api makes (ORD-3) also
+  reads each item once: `dispensedAt` is the first fill's time (0133's claim
+  time, unchanged), and the status and `reversedAt` follow the latest fill.
+- A dispensing replays by this member's Idempotency-Key, or by the work item
+  and the fill asked for, against the request's digest: the same request
+  answers the recorded fill (201) and writes nothing, whatever the key. A
+  first fill's digest is today's, with or without `fillNumber: 1`, so a fill
+  recorded by an older image replays. Another request is 409: for a first fill
+  `PHARMACY_WORK_ITEM_ALREADY_DISPENSED` (as today), for a refill
+  `PHARMACY_FILL_NUMBER_CHANGED` (the fill) or `IDEMPOTENCY_CONFLICT` (this
+  member's key used for another request).
+- Only an item's latest fill can be reversed; a reversal of an earlier one is
+  409 `PHARMACY_DISPENSING_NOT_LATEST_FILL` (after its own replay, which is
+  unchanged). A reversal and a refill of one item at once make one of the two
+  SERIALIZABLE transactions fail, and it runs again.
+- 0152's refusals answer plain 409s, never a 500: `NO_REFILLS_LEFT`
+  `PHARMACY_NO_REFILLS_LEFT`, `REFILL_PRESCRIPTION_ENDED`
+  `PHARMACY_REFILL_PRESCRIPTION_ENDED` (and 0101's and 0133's as before). Two
+  requests for one fill at once: the loser meets 0152's key or a
+  serialization failure, runs again, and is answered by the replay rule; a
+  second 23505 on either key (the winner hidden from this member) is the 409
+  the replay would give.
+- Off, that is all: the answers carry today's fields only, a dispensing body
+  carrying `fillNumber` is refused 400 `VALIDATION_FAILED` ("property
+  fillNumber should not exist", as today), no fill above the first is
+  recorded, and nothing reads 0152's reader. An item whose refills were
+  recorded while the setting was on stays one row.
+
+**pharmacy-api, setting on:**
+
+| Where | What |
+|---|---|
+| Dispensing body | optional `fillNumber`, a whole number 1-12 (null refused); left out, fill 1. It must be the fills recorded plus one, else 409 `PHARMACY_FILL_NUMBER_CHANGED` with `fillsRecorded`. A refill of an item from another facility's order route is 409 `PHARMACY_NO_REFILLS_LEFT` before the insert. Only a first fill accepts a received item (ORD-4). |
+| Dispensing answer (create, replay, read) | `fillNumber` |
+| Work item (list, read; hand-off answers) | `dispensing.fillNumber`; `lastFilledAt` (the latest fill's time) once dispensed; on the list and a read, `refills: { allowed, recorded, open, closedReason }` after the other fields and before `changedAfterDispensing` |
+| Progress (ehr-api's ORD-3 call) | `lastFilledAt` after the other fields (today's ehr-api drops it) |
+| `MedicationDispensed` | written for every fill; its payload names `fillNumber` on a refill only (a first fill's is today's) |
+| Audit `pharmacy.dispensing.create` | `fillNumber` on a refill |
+
+`refills` on an own item is 0152's reader's answer for it (`allowed` the
+refills allowed, null as 0; `recorded` every fill, a reversed one included;
+`open` and `closedReason`: `none_left`, `stopped`, `changed`, `ended`, null
+while open and before the first fill; a reason the image does not know is
+null). A route-backed item answers `allowed: 0`, `recorded` 0 or 1, `open:
+false` and `none_left` once filled, without asking the reader (its
+prescription is the other facility's). When the reader cannot be read (a
+schema without it, a refusal, a timeout) `refills` is left out, no item is
+kept open for a refill, a warning is logged, and the answer is otherwise
+whole, as with 0125's details.
+
+The work list's open rule: an own item is open while it has no fill, or while
+0152's reader says a refill is open. Before the list chooses its 200 rows it
+asks the reader about the candidates: at most 200 own items the member may
+read with 1 to 11 fills whose end date (`ends_on`, as accepted) is not before
+today in Lagos, the latest fill first. Those with a refill open are open work
+of any age; among the open work, items waiting for their first fill come
+first (oldest first), then items with a refill open (oldest first), then done
+work (newest first, the 90-day window of Q123 A). An own item with a refill
+open beyond those 200 candidates is listed as done work (and not at all once
+received more than 90 days ago). The list then asks the reader once more, for
+the shown own rows it has not answered, so each own row carries `refills`.
+Cost, under a NOSUPERUSER NOBYPASSRLS owner: the candidates are one more
+statement over the member's own items, and the reader 1.6-2.3 seconds per 200
+items ("The database (0152)"); a list can ask it twice. The single read asks
+it for its one item.
+
+**ehr-api, setting on:** a prescription create may carry `refillsAllowed`, a
+whole number 0-11 (null, fractions and anything else refused 400 naming it),
+stored in `refills_allowed` (left out: null, none); every answer of the
+prescriptions routes (list, read, create, its replay, update) carries
+`refillsAllowed` (null as 0) after the other fields (after 0125's details when
+they are on); the list says `refills: true`; the update body never takes it.
+The create's Idempotency-Key digest of a body without it is today's. Off,
+everything is as before: `refillsAllowed` is refused 400 as any unknown field,
+and no statement names the column. `ownProgress` is unchanged. The prescriber
+sees the refills allowed; nothing tells the prescriber that a change after
+the first fill ended the remaining refills (0152 leaves
+`ehr.withdraw_own_pharmacy_send` and 0133's and 0144's steps as they are,
+and the change is the prescriber's own); the pharmacy sees 0148's notice,
+`refills.closedReason` and a refused refill's reason. An owner's repair in
+replica mode records nothing and ends no refill. The pharmacist hand-off
+(accept-ehr-prescription) sends no refills: pharmacy-api reads them from 0152.
+
+**event-dispatcher:** `MedicationDispensed` may carry `fillNumber`, a whole
+number 1-12, on that event only; any other value, or the key on any other
+event, is terminal (`EVENT_PAYLOAD_POLICY_REJECTED` or
+`INVALID_EVENT_ENVELOPE`), as before. Released before pharmacy-api: an older
+dispatcher fails a refill's event for good.
+
+**notification-worker** (unchanged): it claims each event by its id and sends
+one notice per event (the inbox key and Novu's idempotency key are the event
+id, the workflow `patient-update-v1`), and never groups by work item, so each
+fill sends one notice and none is dropped or doubled.
+
+**`@hid/api-client`:** `PharmacyWorkItem.dispensing.fillNumber`,
+`lastFilledAt` and `refills` (`PharmacyWorkItemRefills`,
+`PharmacyRefillsClosedReason`), `PharmacyDispensing.fillNumber` and
+`CreatePharmacyDispensingInput.fillNumber`. The parsers are lenient: absent
+or malformed, each is left out and the item reads as before (never a 502);
+an unknown closed reason reads as null.
+
+**Front ends:** pharmacy-api's setting goes on only once both staff front ends
+(health and `apps/pharmacy`) take the latest fill as `dispensing`, offer
+Dispense again only while `refills.open` (sending `fillNumber:
+refills.recorded + 1`), offer Reverse on the latest fill only, say "Fill 2 of
+3" (`fillNumber` of `allowed + 1`) and word each new 409 by its code.
+
+**Rollback floor and undo:** once any refill is recorded, pharmacy-api must
+not roll back below its first refills-aware image (an older one joins
+dispensings one row per fill: the item twice, with an arbitrary fill's ids),
+and the event-dispatcher must not roll back below its image while a refill's
+event may be undelivered. Turning pharmacy-api's setting off stops new
+refills; recorded fills stay, one row per item. ehr-api may roll back: its
+older image names no `refills_allowed`, and the stored values stay.
+
 ### Runtime proof
 
 The database suite `prescription-refills` holds the cases, through the EHR
@@ -12396,3 +12531,17 @@ S7 list (`pharmacy-dispensing-source`, `prescription-dispensing-details`,
 and the schema suite) pin 0152's; `own-facility-pharmacy-lab-work`'s case 8
 shows the EHR runtime may not run the reader and that it answers nothing
 for prescription ids.
+
+The services' unit tests: pharmacy-api's `prescription-refills.spec.ts` (one
+row per item with several fills, setting off and on; today's fields only
+while off; the refills field, own and route-backed, and a failing reader; the
+open rule on the list beyond 90 days and the candidates; recording, numbering,
+replaying and refusing fills, the races and a second 23505; every fill's
+event; the latest-fill reversal; the body pipe; the setting's wiring),
+`work-item-progress.spec.ts` (ORD-12 block), and
+`pharmacy-client-refills.contract.spec.ts` (`@hid/api-client`'s types and
+parsers); ehr-api's `prescription-refills.spec.ts`; the event-dispatcher's
+`event-contracts.spec.ts`. pharmacy-api's statements were also run against
+PostgreSQL 16 with 0152 (both owners) through the Pharmacy runtime, and the
+runtime verifiers that dispense (own-facility work, order routes, own-work
+patient cards, prescription details) pass against such a database.

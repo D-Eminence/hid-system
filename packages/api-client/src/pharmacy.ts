@@ -107,7 +107,30 @@ export interface PharmacyWorkItem {
   instructions: string;
   acceptedAt: string;
   version: number;
-  dispensing: { id: string; status: 'dispensed'; reversed: boolean } | null;
+  /**
+   * The item's dispensing, or null before any. With refills (ORD-12, database
+   * 0152) an item can have several fills, and this is the latest (the highest
+   * fill number): `reversed` is whether that fill was reversed, and its id is
+   * the one a reversal names (only the latest fill can be reversed; an earlier
+   * one answers 409 PHARMACY_DISPENSING_NOT_LATEST_FILL). `fillNumber` (1 for
+   * the first fill, 2-12 for refills) is present while pharmacy-api's
+   * PRESCRIPTION_REFILLS_ENABLED is on, and left out when it is not a whole
+   * number 1-12.
+   */
+  dispensing: { id: string; status: 'dispensed'; reversed: boolean; fillNumber?: number } | null;
+  /**
+   * ORD-12: when the latest fill was recorded (ISO time), present on a
+   * dispensed item while PRESCRIPTION_REFILLS_ENABLED is on. Show "Last
+   * dispensed 19 Nov" (Africa/Lagos).
+   */
+  lastFilledAt?: string;
+  /**
+   * ORD-12: the item's refills, present while PRESCRIPTION_REFILLS_ENABLED is
+   * on (see PharmacyWorkItemRefills); left out on an older pharmacy-api, with
+   * the setting off, when pharmacy-api could not read them, and when they are
+   * malformed (the item reads as before, never a 502).
+   */
+  refills?: PharmacyWorkItemRefills;
   /** Present only when pharmacy-api sent it (see PharmacyWorkItemPatient). */
   patient?: PharmacyWorkItemPatient;
   /**
@@ -205,6 +228,35 @@ export interface PharmacyWorkItem {
 
 export type PharmacyStep = 'received' | 'accepted' | 'dispensed' | 'dispensing_reversed';
 
+/**
+ * ORD-12: why no further fill can be recorded: `none_left` (every fill the
+ * prescription allows is recorded; a reversed fill counts), `stopped` (the
+ * prescription is on hold, completed, cancelled or entered in error),
+ * `changed` (the prescribing team changed it after it was accepted: an edit,
+ * or a hold then resume), `ended` (its end date, the Lagos day, is past).
+ */
+export type PharmacyRefillsClosedReason = 'none_left' | 'changed' | 'stopped' | 'ended';
+
+/**
+ * ORD-12's refills on a work item:
+ * - `allowed`: the refills the prescription allows (0-11; an item from
+ *   another facility's order route allows none and takes one fill);
+ * - `recorded`: the fills recorded, a reversed fill included;
+ * - `open`: another fill may be recorded now. Offer "Dispense" again only
+ *   when `open` is true, and send `fillNumber: recorded + 1`;
+ * - `closedReason`: why not, once a fill is recorded (null while open, before
+ *   the first fill, and when pharmacy-api sends a reason this client does not
+ *   know).
+ * Label: "Fill {recorded} of {allowed + 1}" ("Fill 2 of 3"); while open, the
+ * fill about to be recorded is recorded + 1.
+ */
+export interface PharmacyWorkItemRefills {
+  allowed: number;
+  recorded: number;
+  open: boolean;
+  closedReason: PharmacyRefillsClosedReason | null;
+}
+
 export interface PharmacistAcceptance {
   acceptedAt: string;
   /** Never null: pharmacy-api reads it from columns that are NOT NULL (0023's work item, 0144's acceptance). */
@@ -249,6 +301,12 @@ export interface PharmacyDispensing {
   dispensedAt: string;
   reversalId: string | null;
   version: number;
+  /**
+   * ORD-12: which fill this is, 1 for the first and 2 to 12 for refills,
+   * present while pharmacy-api's PRESCRIPTION_REFILLS_ENABLED is on, and left
+   * out when it is not a whole number 1-12.
+   */
+  fillNumber?: number;
 }
 
 export interface PharmacyDispensingReversal {
@@ -307,6 +365,21 @@ export interface CreatePharmacyDispensingInput {
   quantityDispensed: number;
   quantityUnit: string;
   reason: string;
+  /**
+   * ORD-12: the fill this records, the item's `refills.recorded + 1` (1 for
+   * the first fill, 2-12 for refills). Send it only to a pharmacy-api whose
+   * work item answered `refills` (PRESCRIPTION_REFILLS_ENABLED on): with the
+   * setting off, or on an older pharmacy-api, any field the route does not
+   * take is refused 400 VALIDATION_FAILED. Left out, the request is a first
+   * fill, as before. The same fill with the same body replays the recorded
+   * fill (201), whatever the Idempotency-Key, so a second press records
+   * nothing. Refusals (409): PHARMACY_FILL_NUMBER_CHANGED with
+   * `fillsRecorded` (another fill was recorded since the item was read: read
+   * it again), PHARMACY_NO_REFILLS_LEFT, PHARMACY_REFILL_PRESCRIPTION_ENDED,
+   * PHARMACY_PRESCRIPTION_NOT_DISPENSABLE (held, stopped or changed),
+   * PHARMACY_WORK_ITEM_ALREADY_DISPENSED (a first fill on an item that has one).
+   */
+  fillNumber?: number;
 }
 
 export interface ReversePharmacyDispensingInput {
@@ -705,6 +778,7 @@ function parseWorkItem(payload: unknown): PharmacyWorkItem {
     acceptedAt: text(value, 'acceptedAt'), version: integer(value, 'version'),
     dispensing: dispensing ? {
       id: text(dispensing, 'id'), status: 'dispensed', reversed: dispensing.reversed === true,
+      ...parseFillNumber(dispensing.fillNumber),
     } : null,
     ...parseWorkItemOrderRoute(value.orderRoute),
     ...parseWorkItemPatient(value.patient),
@@ -713,8 +787,35 @@ function parseWorkItem(payload: unknown): PharmacyWorkItem {
       ...(value.withdrawnReason === 'changed' || value.withdrawnReason === 'sent_elsewhere'
         ? { withdrawnReason: value.withdrawnReason } : {}) } : {}),
     ...parseWorkItemStep(value),
+    ...(typeof value.lastFilledAt === 'string' && value.lastFilledAt.length > 0 ? { lastFilledAt: value.lastFilledAt } : {}),
+    ...parseWorkItemRefills(value.refills),
     ...parseChangedAfterDispensing(value.changedAfterDispensing),
   };
+}
+
+const REFILLS_CLOSED_REASONS: readonly PharmacyRefillsClosedReason[] = ['none_left', 'changed', 'stopped', 'ended'];
+
+const wholeNumber = (value: unknown, min: number, max: number): value is number =>
+  typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max;
+
+/** ORD-12's fill number on a dispensing: kept only when it is a whole number 1-12 (lenient: left out otherwise). */
+function parseFillNumber(value: unknown): { fillNumber?: number } {
+  return wholeNumber(value, 1, 12) ? { fillNumber: value } : {};
+}
+
+/**
+ * ORD-12's refills on a work item. Lenient, as the work list parses every
+ * item and refusing one would leave the pharmacist with no list: absent (an
+ * older pharmacy-api, the setting off) or malformed (not an object, `allowed`
+ * not a whole number 0-11, `recorded` not a whole number 0-12, `open` not a
+ * boolean), it is left out and the item reads as before. A `closedReason` this
+ * client does not know is read as null. Keys other than the four are dropped.
+ */
+function parseWorkItemRefills(value: unknown): Pick<PharmacyWorkItem, 'refills'> {
+  if (!isRecord(value) || !wholeNumber(value.allowed, 0, 11) || !wholeNumber(value.recorded, 0, 12)
+    || typeof value.open !== 'boolean') return {};
+  const closedReason = REFILLS_CLOSED_REASONS.find((reason) => reason === value.closedReason) ?? null;
+  return { refills: { allowed: value.allowed, recorded: value.recorded, open: value.open, closedReason } };
 }
 
 function parseDispensing(payload: unknown): PharmacyDispensing {
@@ -727,6 +828,7 @@ function parseDispensing(payload: unknown): PharmacyDispensing {
     quantityDispensed: finiteNumber(value, 'quantityDispensed'),
     quantityUnit: text(value, 'quantityUnit'), dispensedAt: text(value, 'dispensedAt'),
     reversalId: nullableText(value, 'reversalId'), version: integer(value, 'version'),
+    ...parseFillNumber(value.fillNumber),
   };
 }
 

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import type { QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { DomainProblem } from '../common/problem';
@@ -7,6 +7,7 @@ import { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
 import type { WorkItemProgressDto } from './dto/work-item-progress.dto';
 import { OWN_WORK_OFF, PharmacyOwnWork, type OwnWorkState } from './own-work-access';
+import { PharmacyRefills, REFILLS_OFF } from './prescription-refills';
 
 /**
  * Where a prescription is in this facility's own pharmacy (ORD-3):
@@ -17,6 +18,8 @@ import { OWN_WORK_OFF, PharmacyOwnWork, type OwnWorkState } from './own-work-acc
  *   (accept-ehr-prescription), when it was accepted as it was made;
  * - dispensed: it was dispensed (dispensedAt);
  * - dispensing_reversed: it was dispensed and the dispensing was reversed;
+ *   with refills (ORD-12, 0152), these two follow the latest fill, and
+ *   `dispensedAt` stays the first fill's (0133's claim time);
  * - withdrawn (0133): sent by itself to the pharmacy, then held, cancelled,
  *   entered in error, edited or resumed before it was dispensed; the pharmacy
  *   holds the version sent, which it can no longer dispense;
@@ -66,11 +69,18 @@ export interface PharmacyProgressItem {
    * elsewhere), or null (none yet, or it cannot be read).
    */
   acceptedAt?: string | null;
+  /**
+   * ORD-12, only while PRESCRIPTION_REFILLS_ENABLED is on: the latest fill's
+   * time (null before the first). `dispensedAt` stays the first fill's and
+   * `reversedAt` is the latest fill's reversal. An ehr-api that does not read
+   * it drops it (its parser keeps the fields it names).
+   */
+  lastFilledAt?: string | null;
 }
 
 interface ProgressRow extends QueryResultRow {
   work_item_id: string; source_ehr_prescription_id: string; accepted_at: Date;
-  dispensed_at: Date | null; reversed_at: Date | null;
+  dispensed_at: Date | null; reversed_at: Date | null; last_filled_at: Date | null;
 }
 
 /**
@@ -79,16 +89,22 @@ interface ProgressRow extends QueryResultRow {
  * order route to another facility are not this facility's own and are left
  * out (their progress is on the route). Row-level security applies as well:
  * the clinician reads under their own consent grant (pharmacy.work_item_allows
- * and pharmacy.context_allows), never the pharmacist's. A work item takes one
- * dispensing and a dispensing one reversal (0023), so the joins add no rows.
- * Exported for the tests.
+ * and pharmacy.context_allows), never the pharmacist's. One row per work
+ * item, whatever its number of fills (ORD-12, 0152, setting on or off): the
+ * first fill's time (`dispensed_at`, 0133's claim time), the latest fill's
+ * (`last_filled_at`) and the latest fill's reversal (one per dispensing,
+ * 0023), each by fill number. It needs 0152's `fill_number`. Exported for the
+ * tests.
  */
 export const WORK_ITEM_PROGRESS_QUERY = `select w.id::text as work_item_id,
   w.source_ehr_prescription_id::text as source_ehr_prescription_id, w.accepted_at,
-  d.dispensed_at, r.reversed_at
+  f.dispensed_at, l.dispensed_at as last_filled_at, r.reversed_at
   from pharmacy.work_items w
-  left join pharmacy.dispensings d on d.work_item_id=w.id
-  left join pharmacy.dispensing_reversals r on r.dispensing_id=d.id
+  left join lateral (select df.dispensed_at from pharmacy.dispensings df where df.work_item_id=w.id
+    order by df.fill_number asc limit 1) f on true
+  left join lateral (select df.id, df.dispensed_at from pharmacy.dispensings df where df.work_item_id=w.id
+    order by df.fill_number desc limit 1) l on true
+  left join pharmacy.dispensing_reversals r on r.dispensing_id=l.id
   where w.patient_id=$1::uuid and w.facility_id=$2::uuid and w.order_route_id is null
     and w.source_ehr_prescription_id=any($3::uuid[])`;
 
@@ -103,7 +119,10 @@ export const WORK_ITEM_PROGRESS_QUERY = `select w.id::text as work_item_id,
 @Injectable()
 export class PharmacyWorkItemProgressService {
   constructor(private readonly database: DatabaseService, private readonly identity: IdentityService,
-    private readonly audit: AuditService, private readonly ownWork: PharmacyOwnWork = OWN_WORK_OFF) {}
+    private readonly audit: AuditService, private readonly ownWork: PharmacyOwnWork = OWN_WORK_OFF,
+    // ORD-12: `lastFilledAt` while PRESCRIPTION_REFILLS_ENABLED is on; off by default, so every existing caller is
+    // unchanged. @Optional, as PharmacyService's last parameters are.
+    @Optional() private readonly refills: PharmacyRefills = REFILLS_OFF) {}
 
   /**
    * `current`: the caller sent OWN_PROGRESS_HEADER (it reads 'withdrawn' and
@@ -148,7 +167,10 @@ export class PharmacyWorkItemProgressService {
       const found = new Map(rows.map((row) => [row.source_ehr_prescription_id.toLowerCase(), row]));
       return { items: input.sourceEhrPrescriptionIds.map((id) => {
         const row = found.get(id.toLowerCase());
-        return project(id, row, row ? states.get(row.work_item_id) : undefined, current, current && accepted);
+        const item = project(id, row, row ? states.get(row.work_item_id) : undefined, current, current && accepted);
+        // ORD-12 (refills on): the latest fill's time, null whenever dispensedAt is.
+        return this.refills.enabled
+          ? { ...item, lastFilledAt: item.dispensedAt === null ? null : iso(row?.last_filled_at ?? null) } : item;
       }) };
     });
   }

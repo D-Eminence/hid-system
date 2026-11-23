@@ -34,6 +34,18 @@ const ALLOWED_PAYLOAD_KEYS: Readonly<Record<EventProducer, ReadonlySet<string>>>
     'status', 'resolutionKind']),
 };
 
+/**
+ * ORD-12 (refills, 0152): every fill writes MedicationDispensed (the patient's
+ * record shows every dispensing), and pharmacy-api names the fill on a refill
+ * only (`fillNumber`, 2 and above), so a first fill's payload is as before.
+ * Taken here as a whole number 1-12 (0152's CHECK), on that event only; any
+ * other value fails the event for good, as any field outside the contract
+ * does. This dispatcher is released before the pharmacy-api that writes it:
+ * an older one refuses the key (terminal), and the event would never be
+ * delivered.
+ */
+const FILL_NUMBER_EVENT = 'MedicationDispensed';
+
 const FORBIDDEN_KEYS = new Set(['nin', 'rawnin', 'name', 'firstname', 'lastname', 'fullname',
   'dateofbirth', 'dob', 'email', 'phone', 'demographics', 'rawtext', 'extractedtext',
   'ocrtext', 'fulltext', 'resultvalue', 'numericvalue', 'textvalue', 'value',
@@ -63,7 +75,8 @@ export function eventEnvelope(event: ClaimedEvent): HidEventEnvelopeV1 {
     // "scope" is allowed on the PIN notice only (database 0120), not on any
     // other identity event.
     if (!ALLOWED_PAYLOAD_KEYS[event.producer].has(key)
-        && !(key === 'scope' && event.eventType === 'PatientAccessPinVerified')) {
+        && !(key === 'scope' && event.eventType === 'PatientAccessPinVerified')
+        && !(key === 'fillNumber' && event.producer === 'pharmacy' && event.eventType === FILL_NUMBER_EVENT)) {
       throw new EventContractFailure('EVENT_PAYLOAD_POLICY_REJECTED', 'Event payload contains a field outside its producer contract');
     }
   }
@@ -81,6 +94,11 @@ export function eventEnvelope(event: ClaimedEvent): HidEventEnvelopeV1 {
     throw new EventContractFailure('INVALID_EVENT_ENVELOPE', event.eventType === 'PatientAccessPinVerified'
       ? 'Patient PIN notification contract is invalid'
       : 'Emergency notification contract is invalid');
+  }
+  const fillNumber = event.payload.fillNumber;
+  if (fillNumber !== undefined && (typeof fillNumber !== 'number' || !Number.isInteger(fillNumber)
+      || fillNumber < 1 || fillNumber > 12)) {
+    throw new EventContractFailure('INVALID_EVENT_ENVELOPE', 'Dispensing fill number is invalid');
   }
   validateRecursively(event.payload, 0);
   return Object.freeze({ schema: 'ng.hid.event-envelope', schemaVersion: 1,

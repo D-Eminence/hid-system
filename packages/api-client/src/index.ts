@@ -126,6 +126,8 @@ export type {
   PharmacyWorkItemMedication,
   PharmacyWorkItemOrderRoute,
   PharmacyWorkItemPatient,
+  PharmacyWorkItemRefills,
+  PharmacyRefillsClosedReason,
   ReversePharmacyDispensingInput,
 } from './pharmacy';
 export { EhrApiClient, EhrApiProblem } from './ehr';

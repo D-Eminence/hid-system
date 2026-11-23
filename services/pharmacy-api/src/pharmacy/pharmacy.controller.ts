@@ -5,10 +5,11 @@ import { requireIdempotencyKey } from '../common/idempotency';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
 import { AcceptEhrPrescriptionDto } from './dto/accept-ehr-prescription.dto';
 import { AcceptWorkItemDto } from './dto/accept-work-item.dto';
-import { CreateDispensingDto, ReverseDispensingDto } from './dto/dispensing.dto';
+import { ReverseDispensingDto } from './dto/dispensing.dto';
 import { ListImportedMedicationsQueryDto, OcrMedicationImportBatchDto, OcrMedicationImportDto }
   from './dto/ocr-medication-import.dto';
 import { PharmacyService } from './pharmacy.service';
+import { CreateDispensingBodyPipe, type CreateDispensingInput } from './prescription-refills';
 
 @Controller('pharmacy')
 export class PharmacyController {
@@ -55,11 +56,17 @@ export class PharmacyController {
     return answer;
   }
 
+  /**
+   * The body is checked by CreateDispensingBodyPipe: today's
+   * CreateDispensingDto, or with `fillNumber` while PRESCRIPTION_REFILLS_ENABLED
+   * is on (ORD-12). Its declared type is a union, so the global pipe leaves it
+   * to that pipe. 201 for a recorded fill and for its replay.
+   */
   @Post('work-items/:workItemId/dispensings')
   @HttpCode(201)
   @RequirePermissions('pharmacy.dispensing.create')
   dispense(@Param('workItemId', new ParseUUIDPipe({ version: '4' })) id: string,
-    @Body() input: CreateDispensingDto, @Headers('idempotency-key') key: string | undefined,
+    @Body(CreateDispensingBodyPipe) input: CreateDispensingInput, @Headers('idempotency-key') key: string | undefined,
     @Req() request: HidRequest) {
     return this.pharmacy.dispense(requireRequestContext(request), id, input, requireIdempotencyKey(key));
   }

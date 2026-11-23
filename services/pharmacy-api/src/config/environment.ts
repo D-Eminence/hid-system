@@ -49,6 +49,9 @@ const environmentSchema = z.object({
   OWN_WORK_PATIENT_CARD_ENABLED: booleanString,
   // The prescriber's priority, strength, form, duration and quantity on own work (0125): off by default, off is exactly as before.
   PRESCRIPTION_DISPENSING_DETAILS_ENABLED: booleanString,
+  // Recording refills (ORD-12, needs 0152): off by default, separate from 0125's setting. Off, no fill above the
+  // first is recorded and every answer is today's, except that an item with several fills is still one row.
+  PRESCRIPTION_REFILLS_ENABLED: booleanString,
 }).superRefine((environment, context) => {
   if (environment.PHARMACY_SERVICE_IDENTITY_MODE === 'local-secret'
       && !environment.PHARMACY_INTERNAL_SERVICE_TOKEN) {

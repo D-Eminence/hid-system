@@ -70,7 +70,11 @@ producer payload keys are explicitly registered. Payloads are limited to 8 KiB
 and recursively checked for raw identifiers, demographics/contact fields, OCR
 text, Lab values, and medication text. Unsupported versions, unknown fields,
 invalid identifiers, or sensitive payload keys become safe terminal delivery
-evidence; payload content is never logged.
+evidence; payload content is never logged. One key is registered for one event
+only: `fillNumber` (a whole number 1-12) on Pharmacy's `MedicationDispensed`,
+which pharmacy-api names on a refill only (ORD-12, database 0152; every fill
+writes its own event); the dispatcher that takes it is released before that
+pharmacy-api.
 
 ## Claim and retry lifecycle
 

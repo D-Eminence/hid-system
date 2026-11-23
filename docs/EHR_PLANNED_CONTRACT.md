@@ -1156,7 +1156,7 @@ Status: planned, not live. Owner decision Q131 A, 19 Nov 2026: yes to refills.
 
 (ORD-12 is a new package id; the build plan lists this under its gaps as "N-9b refills".)
 
-Today one pharmacy work item takes one dispensing only. `pharmacy.dispensings.work_item_id` is unique (`0023:118`), and a second dispensing answers 409 `PHARMACY_WORK_ITEM_ALREADY_DISPENSED` (`pharmacy.service.ts:368`). Section 13 says it too: "partial fills and refills are not modeled".
+Before ORD-12 one pharmacy work item takes one dispensing only. `pharmacy.dispensings.work_item_id` is unique (`0023:118`), and a second dispensing answers 409 `PHARMACY_WORK_ITEM_ALREADY_DISPENSED` (Release B's `PharmacyService.dispense`, its replay lookup by key or work item). Section 13 says it too: "partial fills and refills are not modeled". The interface contract's "ORD-12. Prescription refills" has the build (0152 and the services); where this section and that one differ, that one is right.
 
 ### Routes
 
@@ -1173,38 +1173,51 @@ Prescription create body: new optional field (owner decision Q131 A, 19 Nov 2026
 
 | Field | Value |
 |---|---|
-| `refillsAllowed` | whole number 0-11. Left out means 0. Set at creation only, like the 0125 fields. The update body never changes it; for a different number, write a new prescription. |
+| `refillsAllowed` | whole number 0-11. Left out means none (stored as null, answered as 0). Set at creation only, like the 0125 fields. The update body never changes it; for a different number, write a new prescription. Taken only while ehr-api's `PRESCRIPTION_REFILLS_ENABLED` is on; off, it is refused 400 like any unknown field. |
 
-Every prescription answer gains `refillsAllowed`. `ownProgress` (ORD-3) gains `fillsDispensed` (whole number) and `refillsRemaining` (whole number, or `null` when not known).
+Every prescription answer of the prescriptions routes (list, read, create, its replay, update) gains `refillsAllowed` (a number; none given is 0), while ehr-api's `PRESCRIPTION_REFILLS_ENABLED` is on. `ownProgress` (ORD-3) is unchanged: `dispensedAt` stays the first fill's time (0133's claim time), and the status and `reversedAt` follow the latest fill. The prescriber sees the refills allowed, not how many are left (clinical owner's answers, 23 Nov 2026).
 
-Own pharmacy work items (no order route) gain:
+Own pharmacy work items (no order route) gain, while pharmacy-api's `PRESCRIPTION_REFILLS_ENABLED` is on (0152's reader, `pharmacy.work_item_refills`):
 
 ```json
-{ "refillsAllowed": 2, "fillsDispensed": 1, "refillsRemaining": 1, "lastDispensedAt": "2026-11-19T11:05:00.000Z" }
+{ "dispensing": { "id": "…", "status": "dispensed", "reversed": false, "fillNumber": 2 },
+  "lastFilledAt": "2026-11-19T11:05:00.000Z",
+  "refills": { "allowed": 2, "recorded": 2, "open": true, "closedReason": null } }
 ```
 
-Dispensing: the body is unchanged (`CreateDispensingDto`: `expectedWorkItemVersion`, `quantityDispensed`, `quantityUnit`, `reason` 8-500), and the `Idempotency-Key` is required as today.
-- A work item now takes up to `1 + refillsAllowed` dispensings (owner decision Q131 A, 19 Nov 2026).
+- `dispensing` is the latest fill (the highest fill number) and `reversed` that fill's, setting on or off; `pharmacyStep` keeps its meaning.
+- `refills.closedReason` is `none_left`, `stopped`, `changed` or `ended` once a fill is recorded and no further one is open; null while open and before the first fill. A route-backed item answers `{ "allowed": 0, "recorded": 0 or 1, "open": false }`.
+- "Refills left" is `allowed + 1 - recorded` while `open`.
+
+Dispensing: the body gains an optional `fillNumber` (1-12) while pharmacy-api's setting is on; left out it is fill 1, so today's clients keep working; off, the field is refused 400 like any unknown field. The `Idempotency-Key` is required as today.
+- A work item now takes up to `1 + refillsAllowed` dispensings (owner decision Q131 A, 19 Nov 2026). `fillNumber` must be the fills recorded plus one.
+- Replay is by the work item, the fill number and the request (and by this member's key, as before): the same fill with the same body answers the recorded fill (201) whatever the key, so a second press records nothing; the same fill number with another body is 409.
 - The answer gains `fillNumber`: 1 is the first fill, 2 and above are refills.
 - A refill also needs the prescription to be active, unchanged since the item was accepted, and not past its `endsOn` (Lagos day). 0152's dispensing check does this: 0101's guard (active, at the accepted version), then, for a refill only, the refill count and the Lagos day. A first fill is not checked against `endsOn`, as today.
-- A reversed fill still counts as used. A reversal never gives a refill back, as today a reversed dispensing counts as done.
+- A reversed fill still counts as used. A reversal never gives a refill back, as today a reversed dispensing counts as done. Only the latest fill can be reversed.
 
 Routed prescriptions (an outside pharmacy) do not carry refills in this package, as the 0125 details don't ("item 4b, later"). After the hospital pharmacy's first fill, refills stay at the hospital pharmacy. The prescriber may route to an outside pharmacy only until the hospital pharmacy starts dispensing (Q119 and Q121 A). Splitting one prescription across several pharmacies is a later project.
 
 Pharmacy work list:
 - Its default stays open work plus the last 90 days (Q123 A).
-- An item with refills left whose prescription is still active is also listed, marked "Refills left: N", until the refills are used or the prescription ends.
+- One row per item, whatever its number of fills (setting on or off).
+- An own item is open while it has no fill, or while a refill is open (fills recorded below `1 + refillsAllowed`, the prescription active at the accepted version, its end date not past, the setting on). Open items are listed whatever their age, those waiting for a first fill first; done items keep the 90-day window.
 
-Audit: today's `pharmacy.dispensing.create` row, plus `fillNumber`. No new patient read, so no new audit row.
+Audit: today's `pharmacy.dispensing.create` row, plus `fillNumber` on a refill. No new patient read, so no new audit row.
+
+Events: every fill writes `MedicationDispensed` (the patient's record shows every dispensing); `fillNumber` is in its payload on refills only. notification-worker sends one notice per event (it deduplicates by event id, never by work item).
 
 ### Errors
 
 | HTTP | Code | Message |
 |---|---|---|
 | 400 | `VALIDATION_FAILED` | Names `refillsAllowed` (not a whole number 0-11, or `null`). |
-| 409 | `PHARMACY_NO_REFILLS_LEFT` | No refills are left on this prescription. Ask the prescriber for a new one. |
+| 400 | `VALIDATION_FAILED` | Names `fillNumber` (not a whole number 1-12, or `null`; any `fillNumber` while pharmacy-api's setting is off). |
+| 409 | `PHARMACY_NO_REFILLS_LEFT` | No refills are left on this prescription. Ask the prescriber for a new one. (Also a refill of an item from another facility's order route.) |
 | 409 | `PHARMACY_REFILL_PRESCRIPTION_ENDED` | This prescription has ended. Ask the prescriber for a new one. |
-| 409 | `PHARMACY_WORK_ITEM_ALREADY_DISPENSED` | Unchanged, for a prescription with no refills. |
+| 409 | `PHARMACY_FILL_NUMBER_CHANGED` | Another fill was recorded since the item was read (`fillsRecorded` says how many). |
+| 409 | `PHARMACY_DISPENSING_NOT_LATEST_FILL` | A reversal of a fill that is not the item's latest. |
+| 409 | `PHARMACY_WORK_ITEM_ALREADY_DISPENSED` | Unchanged, for a first fill (no `fillNumber`, or 1) on an item that has one, with another body. |
 | 409 | `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` | Unchanged (0101): held, stopped, changed or entered in error. |
 | 412 | `PHARMACY_WORK_ITEM_VERSION_CONFLICT` | Unchanged. |
 
@@ -1213,8 +1226,8 @@ Audit: today's `pharmacy.dispensing.create` row, plus `fillNumber`. No new patie
 - **Before this ships:** hide a refills field. Next to Quantity, show "Refills are not available yet. Write a new prescription for each fill." Do not put refills in the instructions text: the pharmacy cannot record a second fill today.
 - **After:**
   - Prescribe form: "Refills" (0-11, default 0).
-  - Prescription row: "Dispensed 11:05 · 1 refill left".
-  - Pharmacy: "Fill 2 of 3", with "Last dispensed 19 Nov". On the error, show its message.
+  - Prescription row: "Dispensed 11:05 · 2 refills allowed" (the prescriber sees the refills allowed, not how many are left).
+  - Pharmacy: "Fill 2 of 3" (`dispensing.fillNumber` of `refills.allowed + 1`), with "Last dispensed 19 Nov" (`lastFilledAt`). Offer Dispense again only while `refills.open`, sending `fillNumber: refills.recorded + 1`; offer Reverse on the latest fill only. On the error, show the screen's own words for its code.
   - When routing to an outside pharmacy: "Refills apply at this hospital's pharmacy only."
 
 ### Depends on
@@ -1222,7 +1235,7 @@ Audit: today's `pharmacy.dispensing.create` row, plus `fillNumber`. No new patie
 - 0125 (section 46) and 0101 (dispensing guard).
 - ORD-2 (0133, own pharmacy work) and ORD-3.
 - Q123 A and Q119 and Q121 A (decided). Q131 A (decided 19 Nov 2026).
-- ORD-11 does not notify for refills, only for the first fill and reversals.
+- ORD-11 does not notify for refills, only for the first fill and reversals. (The patient's notice from `MedicationDispensed`, notification-worker, comes for every fill.)
 
 ### Target
 
@@ -1234,7 +1247,9 @@ Release B (lane D), as the build plan's default ("refills are added to the 0125 
 - the locks: ACCESS EXCLUSIVE NOWAIT on `ehr.prescriptions` and `pharmacy.dispensings` (after ACCESS SHARE on the tables it reads), retried every 100 ms for 5 seconds, or one attempt only when the runner's dry run already holds an earlier migration's locks (0148's rule; 0125's 50 × 100 ms loop has no such rule);
 - the list and progress fields.
 
-If the pharmacy half misses the Release B cut-off, it moves to Release C. Release B then ships the field and its display only, and the screen keeps the "not available yet" line for second fills.
+The services (built; the interface contract's "ORD-12. Prescription refills", "The services"): ehr-api's `refillsAllowed`, pharmacy-api's fill number, refusals, refills and one row per item, the event-dispatcher's `fillNumber`, `@hid/api-client`'s types. Release order: 0152, the event-dispatcher, pharmacy-api, ehr-api, both staff front ends; then pharmacy-api's setting, and ehr-api's no earlier. Rollback floor: once any refill is recorded, pharmacy-api must not roll back below its first refills-aware image.
+
+If the pharmacy half misses the Release B cut-off, it moves to Release C, and both settings stay off until it ships: a prescriber is never offered refills the pharmacy cannot record, and the screen keeps the "not available yet" line for second fills.
 
 ## ORD-7: Medicine and lab-test lists, and lab tests by name only (planned, Release B, needs a migration: yes)
 
