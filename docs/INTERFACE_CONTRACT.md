@@ -9216,7 +9216,8 @@ listed; it is counted in `hiddenCount` (and still deleted on time). At most
 50, newest save first.
 
 Drafts are deleted 7 days after the last save, except while a legal hold
-(0096) names the patient or the author: a hold overrides lifecycle deletion
+(0096) names the patient or the author (owner decision Q138 A, 23 November
+2026): a hold overrides lifecycle deletion
 (DATABASE.md), so the draft is kept, unreadable once expired, until the hold
 is released.
 

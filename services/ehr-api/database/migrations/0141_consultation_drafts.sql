@@ -1,8 +1,10 @@
 -- 0141: consultation drafts saved on the server (EHR-C6, Akos N-5 and the
 -- auto-save part of P1-13, Release B; the planned contract's "EHR-C6").
 -- Owner decision Q126 A, 19 November 2026: author only; deleted 7 days after
--- the last save. Booked as 0141 on hid-system#258; numbers are given in merge
--- order at the Release B cut-off. This file requires 0001-0137 applied.
+-- the last save. Owner decision Q138 A, 23 November 2026: a legal hold keeps
+-- a draft past its 7 days (D5, D6). Booked as 0141 on hid-system#258; numbers
+-- are given in merge order at the Release B cut-off. This file requires
+-- 0001-0137 applied.
 --
 -- A draft is the unfinished consultation form, saved while the clinician
 -- types. It is not part of the patient's record: no version history, no
@@ -46,7 +48,7 @@
 --    first, with one ehr.consultation-draft.expire audit row each (system
 --    actor, the run's correlation id, never the content), and answers how
 --    many. A draft whose patient or author is under an unreleased legal hold
---    (platform.legal_holds, 0096) is kept: a hold overrides lifecycle
+--    (platform.legal_holds, 0096) is kept (Q138 A): a hold overrides lifecycle
 --    deletion (DATABASE.md). The expiry is tested again on the row deleted,
 --    so a save that renewed the draft meanwhile keeps it.
 -- D6 ehr.consultation_draft_held(patient, account): whether an unreleased
