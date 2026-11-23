@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0140",
-    "count": 141,
+    "last": "0141",
+    "count": 142,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -661,6 +661,10 @@
       {
         "name": "0140_session_open_patient.sql",
         "sha256": "2b8951941ae66419b922dbbf9c6542d7b5a2207a36a8d49e6a83b47a7750a1d2"
+      },
+      {
+        "name": "0141_consultation_drafts.sql",
+        "sha256": "2a6b55854cce84347db47760e7691afcb60572673dc5c01756bd99431e7b32ab"
       }
     ]
   },

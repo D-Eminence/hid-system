@@ -31,6 +31,7 @@ import { ConsultationsModule } from './consultation/consultations.module';
 // EHR-C7 (0135): the waiting list.
 import { VisitQueueModule } from './worklist/visit-queue.module';
 
+import { ConsultationDraftsModule } from './consultation-drafts/consultation-drafts.module';
 @Module({
   imports: [
     ClinicalInfrastructureModule,
@@ -44,6 +45,7 @@ import { VisitQueueModule } from './worklist/visit-queue.module';
     PrescriptionsModule,
     LabRequestsModule,
     OrderRoutesModule,
+    ConsultationDraftsModule,
     ConsultationsModule,
     // EHR-C7 (0135): the waiting list.
     VisitQueueModule,
