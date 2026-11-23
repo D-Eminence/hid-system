@@ -12,6 +12,7 @@ import { LabOrderRouteAccess, basisDetails } from './order-route-access';
 import { LabOrderRouteCards, type OrderRouteCard, type WorkItemRoutePatient } from './order-route-cards';
 import { LabOwnWorkPatientCards, OWN_WORK_PATIENT_CARDS_OFF } from './own-work-patient-cards';
 import { LabOwnWork, OWN_WORK_OFF, type OwnWorkState } from './own-work-access';
+import { workListSince } from './work-list-window';
 
 interface WorkItemRow extends QueryResultRow {
   id: string; patient_id: string; facility_id: string; ordering_facility_id: string;
@@ -45,8 +46,11 @@ const WORK_ITEM_COLUMNS = ['id', 'patient_id', 'facility_id', 'ordering_facility
  * so new and waiting work always shows however much is done; done work fills
  * the rest, newest first. Before, the oldest 200 rows the member could read
  * were answered whatever their state, so a busy facility stopped seeing new
- * work. $1 is the session's facility (DataAccessContext.facilityId). Exported
- * for the tests.
+ * work. $1 is the session's facility (DataAccessContext.facilityId). Open work
+ * of any age is listed, done work only if received (`accepted_at`) on or after
+ * the Lagos midnight that starts the day in $2 (YYYY-MM-DD, workListSince();
+ * owner decision Q123 A), before the order and the limit. Exported for the
+ * tests.
  *
  * A work item is open until every test it asks for has a result whose current
  * version is released and not marked entered in error (the same released truth
@@ -70,6 +74,8 @@ const WORK_ITEM_COLUMNS = ['id', 'patient_id', 'facility_id', 'ordering_facility
  * keeps every read within the facility, before any row's check. Known limit
  * (no schema change in this step, docs/INTERFACE_CONTRACT.md): past roughly
  * 2,000 work items at a laboratory the list exceeds lab-api's 15-second limit.
+ * The 90-day window does not lift it: whether an older item is still open is
+ * worked out as for any other, so every work item is still read.
  * With OWN_WORK_PATIENT_CARD_ENABLED on, each list load also calls
  * lab.work_item_patient_cards (0124) once for its own rows, at most 200. That
  * is a statement of its own, so it does not count toward this query's
@@ -94,6 +100,7 @@ export const WORK_LIST_QUERY = `with released_tests as materialized (
       left join released_tests d on d.requested_test_id=t.id
       where w.facility_id=$1::uuid
       group by w.id) x
+    where x.open_work or x.accepted_at >= ($2::date::timestamp at time zone 'Africa/Lagos')
     order by ${workOrder('x')} limit 200)
 select w.id::text,w.patient_id::text,w.facility_id::text,w.ordering_facility_id::text,
   w.source_ehr_order_id::text,w.source_ehr_order_version::text,w.source_encounter_id::text,w.status,w.priority,
@@ -223,7 +230,9 @@ export class LabWorkItemsService {
    * The work list. Row-level security shows this facility's rows the member
    * may read: under a consent grant, or bound to an order route that allows
    * a read now (P4c, strict policy). Open work comes first, oldest first, then
-   * done work, newest first, 200 rows in all (WORK_LIST_QUERY). Each item
+   * done work, newest first, 200 rows in all (WORK_LIST_QUERY). Open work of
+   * any age is listed; done work only if received on or after `since`, the
+   * Lagos day 90 days before today (Q123 A), which the answer carries. Each item
    * says whether it still has work to do (`openWork`, the open_work the list
    * is ordered by: false once every test it asks for has a released result,
    * so the website can show it as done). A same-facility row also carries
@@ -245,9 +254,10 @@ export class LabWorkItemsService {
     if (!context.actor.permissions.includes('lab.work-item.read')) {
       throw new DomainProblem(403, 'LAB_WORK_ITEM_ACCESS_DENIED', 'Lab work-item read permission is required');
     }
+    const since = workListSince();
     const page = await this.database.withTransaction(context, async (client) => {
       const result = await client.query<WorkItemRow & { test_name:string; accession_id:string|null; accession_number:string|null;
-        open_work:boolean; specimen_statuses:string[]|null }>(WORK_LIST_QUERY, [context.facilityId]);
+        open_work:boolean; specimen_statuses:string[]|null }>(WORK_LIST_QUERY, [context.facilityId, since]);
       const routed = result.rows.filter((row) => row.order_route_id).map((row) => row.id);
       const cards = await this.routeCards.cards(client, routed, context.correlationId);
       const ownIds = result.rows.filter((row) => !row.order_route_id).map((row) => row.id);
@@ -260,7 +270,7 @@ export class LabWorkItemsService {
       return { items: result.rows.map((row) => ({ ...this.project(row, cards.get(row.id), own.get(row.id)),testName:row.test_name,
         accessionId:row.accession_id,accessionNumber:row.accession_number,specimenStatuses:row.specimen_statuses ?? [],
         openWork:row.open_work, ...clinicalIndication(row) })),
-      ...receiving, ...this.routeCards.lateCorrection(context), ...this.routeCards.cannotComplete(context) };
+      since, ...receiving, ...this.routeCards.lateCorrection(context), ...this.routeCards.cannotComplete(context) };
     });
     return { ...page, ...(await this.routeCards.flags()) };
   }

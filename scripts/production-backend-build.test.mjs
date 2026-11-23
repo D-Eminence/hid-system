@@ -218,7 +218,7 @@ test('gateway VEX edits rebuild only the gateway',()=>assert.deepEqual(selectCom
 test('committed gateway VEX covers only the reviewed Alpine OpenSSL findings and expires by 2026-12-01',()=>{
   const vex=JSON.parse(readFileSync(new URL('../'+gatewayVexPath,import.meta.url)));
   assert.ok(Date.parse(vex.hid_expires_at)<=Date.parse('2026-12-01T00:00:00Z'));
-  assert.deepEqual(vex.statements.map(s=>s.vulnerability.name).sort(),['CVE-2026-107496','CVE-2026-88823','CVE-2026-95691','CVE-2026-95692']);
+  assert.deepEqual(vex.statements.map(s=>s.vulnerability.name).sort(),['CVE-2026-107493','CVE-2026-107494','CVE-2026-107496','CVE-2026-121482','CVE-2026-124709','CVE-2026-84786','CVE-2026-88823','CVE-2026-95691','CVE-2026-95692']);
   for(const s of vex.statements){
     assert.equal(s.status,'not_affected');assert.equal(s.justification,'vulnerable_code_not_in_execute_path');
     assert.deepEqual(s.products.map(p=>p['@id']).sort(),[gatewayPurl('libcrypto3'),gatewayPurl('libssl3')]);

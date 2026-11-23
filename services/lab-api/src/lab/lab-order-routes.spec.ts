@@ -548,7 +548,7 @@ describe('Lab work list with route-backed rows (C12)', () => {
         crossFacilityWork: true });
       // D17: to a member who may receive lab requests the work list also says the late correction is served,
       // and D18 that "We can't complete this order" is.
-      expect(Object.keys(answer)).toEqual(['items', 'receives', 'routesHere', 'lateCorrection', 'cannotComplete',
+      expect(Object.keys(answer)).toEqual(['items', 'since', 'receives', 'routesHere', 'lateCorrection', 'cannotComplete',
         'crossFacilityOrders', 'crossFacilityWork']);
       expect(answer.lateCorrection).toBe(true);
       expect(answer.cannotComplete).toBe(true);
