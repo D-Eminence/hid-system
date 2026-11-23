@@ -532,7 +532,16 @@ try {
       const guard = liveGuards[verifier];
       if (!guard) return join(live, verifier);
       const original = await readFile(join(live, verifier), 'utf8');
-      assert.equal(original.split(guard[0]).length, 2, `the live ${basename(verifier)} guard is not as expected`);
+      // A live tree with 0128 (Release A and later) reads the shape itself (`has0128 ? 14 : 12`): no old line, so
+      // its verifier runs as it is. The old line, where present, must be there exactly once.
+      const occurrences = original.split(guard[0]).length - 1;
+      if (occurrences === 0) {
+        if (!guardsChanged.some((entry) => entry.verifier === verifier)) {
+          guardsChanged.push({ verifier, live_sha256: sha256(original), unchanged: 'the live verifier has no pre-0128 line' });
+        }
+        return join(live, verifier);
+      }
+      assert.equal(occurrences, 1, `the live ${basename(verifier)} guard is not as expected`);
       const copy = join(live, verifier.replace(/[^/]+$/, (name) => `rehearsal-copy-${name}`));
       await writeFile(copy, original.replace(guard[0], guard[1]));
       if (!guardsChanged.some((entry) => entry.verifier === verifier)) {
