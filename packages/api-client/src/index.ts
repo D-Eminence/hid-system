@@ -109,6 +109,8 @@ export type {
   CreatePharmacyDispensingInput,
   ListPharmacyImportedMedicationsOptions,
   PharmacistAcceptance,
+  PharmacyChangeAfterDispensing,
+  PharmacyChangedAfterDispensing,
   PharmacyDispensing,
   PharmacyDispensingReversal,
   PharmacyImportedMedicationEvidence,

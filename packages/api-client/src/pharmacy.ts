@@ -128,6 +128,35 @@ export interface PharmacyWorkItem {
    * read; the id is never shown.
    */
   pharmacistAcceptance?: PharmacistAcceptance | null;
+  /**
+   * Q132 A (Release B, database 0148): present only on a dispensed item
+   * (reversed or not) whose prescription the prescribing team changed after
+   * the item was dispensed, so the pharmacist can contact the patient. Left
+   * out when nothing was changed, on an older pharmacy-api or database, and
+   * when pharmacy-api could not read it (it then logs a warning: no notice
+   * does not prove no change). Never next to `withdrawn`, which exists only
+   * before a dispensing. `pharmacyStep` stays `dispensed` or
+   * `dispensing_reversed`.
+   *
+   * Show the words for the code, never the code, a version or an id, and
+   * keep them in the screen's strings file. On this hospital's own item:
+   * - `on_hold`: "Changed after dispensing: put on hold by the prescribing team"
+   * - `cancelled`: "Changed after dispensing: cancelled by the prescribing team"
+   * - `entered_in_error`: "Changed after dispensing: entered in error by the prescribing team"
+   * - `edited`: "Changed after dispensing: edited by the prescribing team"
+   * - `resumed`: "Changed after dispensing: resumed by the prescribing team"
+   * - no `change` (a code this client does not know): "Changed after
+   *   dispensing by the prescribing team"
+   * On an item from another facility's order route say "by
+   * {orderingFacilityName}" (the item's order route card) in place of "by the
+   * prescribing team", or "by the ordering facility" with no card or no name.
+   * "The prescribing team", not "the prescriber": anyone at the prescribing
+   * facility who may change the prescription can do so. With `changeCount`
+   * above 1 add " (changed {n} times)". Then the time, "Last change: 20 Nov
+   * 2026, 09:15" (Africa/Lagos), and the next step, "Contact the patient."
+   * There is no "Dismiss" or "Seen": the notice stays on the item.
+   */
+  changedAfterDispensing?: PharmacyChangedAfterDispensing;
 }
 
 export type PharmacyStep = 'received' | 'accepted' | 'dispensed' | 'dispensing_reversed';
@@ -137,6 +166,30 @@ export interface PharmacistAcceptance {
   /** Never null: pharmacy-api reads it from columns that are NOT NULL (0023's work item, 0147's acceptance). */
   acceptedByMembershipId: string;
   acceptedWith: 'accept' | 'dispensing' | 'order_route' | 'hand_off';
+}
+
+/**
+ * Q132 A: what the prescribing team did after the dispensing. `edited`: an
+ * active prescription's content changed, or it was resumed from a hold and
+ * no longer says what was dispensed. `resumed`: resumed from a hold exactly
+ * as dispensed. A stop (`entered_in_error`, `cancelled`, `on_hold`) wins over
+ * an edit sent in the same change.
+ */
+export type PharmacyChangeAfterDispensing = 'on_hold' | 'cancelled' | 'entered_in_error' | 'edited' | 'resumed';
+
+/**
+ * Q132 A's notice: the latest shown change (`change`, `changedAt`: "the
+ * latest change first" is these two, not a list) and how many shown changes
+ * there were after the dispensing (`changeCount`, 1 or more). `change` is
+ * absent when pharmacy-api sent a code this client does not know: the notice
+ * is kept, because a safety notice is better shown without its reason than
+ * not at all.
+ */
+export interface PharmacyChangedAfterDispensing {
+  change?: PharmacyChangeAfterDispensing;
+  /** ISO time, as the database recorded it (after any dispensing the change waited for). */
+  changedAt: string;
+  changeCount: number;
 }
 
 export interface PharmacyDispensing {
@@ -534,6 +587,42 @@ function parseWorkItemStep(value: Record<string, unknown>): Pick<PharmacyWorkIte
     acceptedWith: acceptedWith as PharmacistAcceptance['acceptedWith'] } };
 }
 
+const CHANGES_AFTER_DISPENSING: readonly PharmacyChangeAfterDispensing[] = ['on_hold', 'cancelled', 'entered_in_error',
+  'edited', 'resumed'];
+
+/**
+ * Q132 A's notice on a dispensed item.
+ *
+ * Lenient for a value: absent, it is left out (an older pharmacy-api or
+ * database, or no change). A `change` string this client does not know (a
+ * newer pharmacy-api) keeps the notice without `change`, so the screen still
+ * says "Changed after dispensing by the prescribing team". This differs on
+ * purpose from ORD-4's steps (parseWorkItemStep), which leave an unknown
+ * value out: a step is where the item is in the pharmacy's own work, while
+ * this notice tells the pharmacist to contact the patient, and dropping it
+ * is worse than showing it without its reason (open point 5, accepted by Ola
+ * on 20 November 2026). Keys other than the three are dropped.
+ *
+ * Strict for a type only, refused with 502 like any other broken field:
+ * the notice not an object (null and arrays included); `changedAt` not a
+ * non-empty string; `changeCount` not a whole number of 1 or more (a notice
+ * always counts at least its own change); `change` present but not a string
+ * (null included). None of these is a newer value, only a broken answer.
+ */
+function parseChangedAfterDispensing(value: unknown): Pick<PharmacyWorkItem, 'changedAfterDispensing'> {
+  if (value === undefined) return {};
+  if (!isRecord(value)) throw malformedField('changedAfterDispensing');
+  const changedAt = text(value, 'changedAt');
+  const changeCount = value.changeCount;
+  if (typeof changeCount !== 'number' || !Number.isSafeInteger(changeCount) || changeCount < 1) {
+    throw malformedField('changeCount');
+  }
+  const change = value.change;
+  if (change !== undefined && typeof change !== 'string') throw malformedField('change');
+  const known = CHANGES_AFTER_DISPENSING.find((code) => code === change);
+  return { changedAfterDispensing: { ...(known ? { change: known } : {}), changedAt, changeCount } };
+}
+
 function parseWorkItem(payload: unknown): PharmacyWorkItem {
   const value = record(payload, 'Pharmacy work item');
   const dispensing = value.dispensing === null ? null : record(value.dispensing, 'Pharmacy dispensing summary');
@@ -556,6 +645,7 @@ function parseWorkItem(payload: unknown): PharmacyWorkItem {
       ...(value.withdrawnReason === 'changed' || value.withdrawnReason === 'sent_elsewhere'
         ? { withdrawnReason: value.withdrawnReason } : {}) } : {}),
     ...parseWorkItemStep(value),
+    ...parseChangedAfterDispensing(value.changedAfterDispensing),
   };
 }
 
