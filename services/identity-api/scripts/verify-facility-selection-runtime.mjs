@@ -120,6 +120,8 @@ const { FacilitySelectionStartupCheck, FACILITY_SELECTION_UNAVAILABLE_EVENT } = 
 const { facilityAdmittedOnProduct, facilityFitsProduct } = load('auth/product-gate.ts');
 const { FacilityStaffController } = load('identity/facility-staff.controller.ts');
 const { FacilityStaffService } = load('identity/facility-staff.service.ts');
+// SX-4 (0139): FacilityStaffController's add and remove one role.
+const { FacilityStaffRolesService } = load('identity/facility-staff-roles.service.ts');
 const { StaffInvitationsService } = load('identity/staff-invitations.service.ts');
 const { StaffReauthenticationService } = load('identity/staff-reauthentication.service.ts');
 const { CorrelationMiddleware } = load('common/correlation.middleware.ts');
@@ -161,7 +163,7 @@ const boot = async (mode) => {
     providers: [DatabaseService, TokenService, LocalAuthProvider, CurrentStaffContextService,
       CurrentPatientContextService, AuthService, AuthSessionAuditService, AuditService, WorkloadAuthService,
       TurnstileService, FacilitySelectionStartupCheck, FacilityStaffService, StaffInvitationsService,
-      StaffReauthenticationService,
+      StaffReauthenticationService, FacilityStaffRolesService,
       // Only staff invitations send email; ending a membership sends none.
       { provide: NotificationOtpClient, useValue: {} },
       { provide: GoogleAuthenticationService, useValue: {} }] }).compile();

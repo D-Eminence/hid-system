@@ -170,6 +170,8 @@ describe('registration without a NIN (0130, ID-2)', () => {
       ['22023', 'NO_NIN_REGISTRATION_NOT_A_CHILD', 400, 'NOT_A_CHILD'],
       ['22023', 'NO_NIN_REGISTRATION_INVALID', 400, 'REGISTRATION_WITHOUT_NIN_INVALID'],
       ['22023', 'IDEMPOTENCY_KEY_REUSED', 409, 'IDEMPOTENCY_KEY_REUSED'],
+      // 0145 (ID-7): a stated Health ID of this facility's unknown patient record.
+      ['P0001', 'PATIENT_RECORD_UNKNOWN', 409, 'PATIENT_RECORD_UNKNOWN'],
     ])('answers %s %s as %s %s, in plain words, and audits the refusal', async (sqlstate, message, status, code) => {
       const { service, audit } = setup([databaseError(sqlstate, message)]);
       const failure = await service.register(body(), 'no-nin-spec-key-0006', context()).catch((error: unknown) => error);
@@ -213,6 +215,8 @@ describe('registration without a NIN (0130, ID-2)', () => {
       ['55000', 'VERSION_CONFLICT', 412, 'VERSION_CONFLICT'],
       ['55000', 'PATIENT_NOT_A_REVIEW_CANDIDATE', 409, 'PATIENT_NOT_A_REVIEW_CANDIDATE'],
       ['55000', 'NO_NIN_REVIEW_NOT_AWAITING', 409, 'REGISTRATION_CASE_ALREADY_DECIDED'],
+      // 0145 (ID-7): the trigger refuses a case resolved to a record that is still unknown.
+      ['P0001', 'PATIENT_RECORD_UNKNOWN', 409, 'PATIENT_RECORD_UNKNOWN'],
     ])('answers %s %s as %s %s', async (sqlstate, message, status, code) => {
       const { service, audit } = setup([databaseError(sqlstate, message)]);
       const failure = await service.review(caseId, 'reject', { expectedVersion: 1, reason: 'Checked the card at the desk' },

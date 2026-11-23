@@ -113,7 +113,8 @@ function setup(options: Setup = {}) {
   const progress = {
     pharmacy: jest.fn(async (_context: unknown, _patient: string, items: readonly { id: string }[]) =>
       (options.pharmacy ?? ((list) => new Map(list.map((item) => [item.id, { status: 'dispensed',
-        receivedAt: '2026-11-18T09:00:00Z', dispensedAt: '2026-11-18T09:05:00Z', reversedAt: null }]))))(items)),
+        receivedAt: '2026-11-18T09:00:00Z', acceptedAt: '2026-11-18T09:02:00Z', dispensedAt: '2026-11-18T09:05:00Z',
+        reversedAt: null }]))))(items)),
     lab: jest.fn(async (_context: unknown, _patient: string, items: readonly { id: string }[]) =>
       (options.lab ?? ((list) => new Map(list.map((item) => [item.id, { status: 'received',
         receivedAt: '2026-11-18T09:00:00Z', collectedAt: null, lastResultAt: null }]))))(items)),
@@ -184,8 +185,10 @@ describe('EHR-C4 chart summary: sections by permission', () => {
     expect(answer).toMatchObject({ patientId, facilityId, purposeOfUse: 'direct-care', limits: CHART_LIMITS });
     expect(answer.sections.demographics).toEqual({ patientId, fullName: 'Ada Fictional', firstName: 'Ada',
       lastName: 'Fictional', dateOfBirth: '1990-01-01', gender: 'female' });
+    // ORD-4: the medication's ownProgress carries acceptedAt as the progress read gave it.
     expect(answer.sections.medications).toEqual({ more: false, items: [{ ...medication, startsOn: '2026-11-18',
-      endsOn: null, ownProgress: expect.objectContaining({ status: 'dispensed' }) }] });
+      endsOn: null, ownProgress: { status: 'dispensed', receivedAt: '2026-11-18T09:00:00Z',
+        acceptedAt: '2026-11-18T09:02:00Z', dispensedAt: '2026-11-18T09:05:00Z', reversedAt: null } }] });
     expect(answer.sections.openLabRequests?.items[0]).toEqual({ ...labRequest,
       ownProgress: expect.objectContaining({ status: 'received' }) });
     expect(answer.sections.problems).toEqual({ items: [problem], more: false });

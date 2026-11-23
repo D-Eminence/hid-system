@@ -21,6 +21,7 @@ import { resetEnvironmentForTests } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { AdminFacilityStaffController } from './admin-facility-staff.controller';
 import { FacilityStaffController } from './facility-staff.controller';
+import { FacilityStaffRolesService } from './facility-staff-roles.service';
 import { FacilityStaffService } from './facility-staff.service';
 import { StaffInvitationsPublicController } from './staff-invitations-public.controller';
 import { StaffInvitationsSignedInController } from './staff-invitations-signed-in.controller';
@@ -145,7 +146,7 @@ describe('facility staff routes over HTTP', () => {
       controllers: [StaffInvitationsSignedInController, StaffInvitationsPublicController, FacilityStaffController,
         AdminFacilityStaffController],
       providers: [
-        StaffInvitationsService, FacilityStaffService,
+        StaffInvitationsService, FacilityStaffService, FacilityStaffRolesService,
         { provide: StaffReauthenticationService, useValue: reauthentication },
         { provide: DatabaseService, useValue: database },
         { provide: NotificationOtpClient, useValue: notification },

@@ -257,6 +257,12 @@ describe('the registration desk fields (0114)', () => {
         query: jest.fn(async (sql: string, values: unknown[] = []) => {
           statements.push({ sql: sql.replace(/\s+/g, ' ').trim(), values });
           if (sql.includes('registration.idempotency_key = $3')) return { rows: [] };
+          if (sql.includes('identifier.lookup_hmac = $1') && sql.includes('identifier.verification_reference')) {
+            // Q110: the patient holding the NIN verified, read before any NIN check; the record answers.
+            return { rows: options.ninMatch ? [{ patient_id: ninPatient, first_name: 'Amina', last_name: 'Okafor',
+              dob: '1990-01-02', gender: null, verification_provider: 'synthetic', verification_reference: 'ref-0',
+              verified_at: '2026-10-01T08:00:00.000Z' }] : [] };
+          }
           if (sql.includes('identifier.lookup_hmac = $1')) {
             return { rows: options.ninMatch ? [{ patient_id: ninPatient, hid_code: 'HID-NINPAT' }] : [] };
           }
