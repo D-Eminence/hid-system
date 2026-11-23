@@ -2098,7 +2098,7 @@ None new. The list and the read keep their errors. A failure of the new reader n
 - **The prescriber's order row:** unchanged.
 - **Before this ships:** nothing changes on screen.
 - **`@hid/api-client`:** `PharmacyWorkItem` gains `changedAfterDispensing?` with `change?`, `changedAt` and `changeCount`. A notice with a `change` the client does not know is kept without `change`, unlike ORD-4's steps, which are dropped: a safety notice is better shown without its reason than not at all. A notice that is not an object, a missing time, or a count that is not a whole number of 1 or more is refused with 502, like any other broken field.
-- **Items from another facility through `@hid/api-client`:** the client today refuses a list that holds such an item (it requires ids such an item never carries) and has no `orderRoute`. A separate fix comes first, in its own PR; until it lands, "by <ordering facility>" cannot be shown through the client.
+- **Items from another facility through `@hid/api-client`:** the client accepts such items, without the ids they never carry and with their `orderRoute` card, since `2a9aa2f3` (in Release B), so "by <ordering facility>" can be shown through the client. pharmacy-api's client contract spec pins a route-backed notice.
 
 ### Depends on
 

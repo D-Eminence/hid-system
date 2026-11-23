@@ -10857,12 +10857,9 @@ or more, or a `change` that is present and not a string answers 502
 keeps the notice without `change` (unlike ORD-4's steps, which are dropped:
 a safety notice is better shown without its reason than not at all); other
 keys are dropped. pharmacy-api's `pharmacy-client-changes.contract.spec.ts`
-pins these rules for own items. Today's client refuses a list that holds a
-route-backed item (it requires `sourceEhrPrescriptionId` and
-`sourceEncounterId`, which such an item never carries) and has no
-`orderRoute`, so it cannot say "by <ordering facility>"; that is older than
-Q132 A and is fixed in its own small PR first. Until then route-backed
-notices are proved on the service side.
+pins these rules for own items and for a route-backed item (no source ids,
+its `orderRoute` card built by pharmacy-api's own `orderRouteCard()`): the
+client accepts route-backed items since `2a9aa2f3`, which is in Release B.
 
 ## QA-1. QA Hospital pharmacist and lab scientist (sealed QA only; Akos Release A, migration 0134)
 
