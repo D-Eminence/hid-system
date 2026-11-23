@@ -1473,7 +1473,8 @@ try {
     [rx9Route.id, pharmacyFacility.name]);
   // Q132 A (V5): after rx9's dispensing at the outside pharmacy, the hospital's doctor puts rx9 on hold. The outside
   // pharmacist, who dispensed it, reads on_hold (one change) beside the route's card naming the ordering facility;
-  // the hospital's own item, sent elsewhere and never dispensed, shows nothing. Then the doctor marks rx9 entered
+  // rx2's item, dispensed (and reversed) at the same outside pharmacy for the same patient and never changed, shows
+  // nothing on the same list. Then the doctor marks rx9 entered
   // in error: that closes the route at once (0086), so the item leaves the outside list and its read answers 404
   // PHARMACY_WORK_ITEM_NOT_FOUND (the stated limit: a receiving pharmacy without a grant never sees "entered in
   // error"); both changes are still recorded.
@@ -1485,14 +1486,17 @@ try {
   assert.deepEqual([rx9OutsideHeld.changedAfterDispensing?.change, rx9OutsideHeld.changedAfterDispensing?.changeCount,
     typeof rx9OutsideHeld.changedAfterDispensing?.changedAt, rx9OutsideHeld.orderRoute?.orderingFacilityName],
   ['on_hold', 1, 'string', hospital.name], `rx9's outside item after the hold: ${JSON.stringify(rx9OutsideHeld)}`);
-  const rx9OutsideListed = expectStatus(await pharmacyCall(pharmacist, 'GET', '/work-items'), 200,
-    'the outside list after the hold').items.find(item => item.id === rx9Item.id);
+  const outsideListAfterHold = expectStatus(await pharmacyCall(pharmacist, 'GET', '/work-items'), 200,
+    'the outside list after the hold').items;
+  const rx9OutsideListed = outsideListAfterHold.find(item => item.id === rx9Item.id);
   assert.equal(rx9OutsideListed?.changedAfterDispensing?.change, 'on_hold',
     `rx9 on the outside list after the hold: ${JSON.stringify(rx9OutsideListed)}`);
-  const rx9OwnAfterHold = expectStatus(await pharmacyCall(hospitalPharmacist, 'GET', `/work-items/${rx9Own.id}`), 200,
-    'the hospital\'s rx9 item after the hold');
-  assert.equal(rx9OwnAfterHold.changedAfterDispensing, undefined,
-    `the hospital's undispensed rx9 item shows no change: ${JSON.stringify(rx9OwnAfterHold.changedAfterDispensing)}`);
+  // A second dispensed item on the same list, whose prescription never changed: no notice (the notice is on the
+  // changed item only, not on another item of the same patient at the same pharmacy).
+  const rx2OutsideListed = outsideListAfterHold.find(item => item.id === rx2Accepted.workItemId);
+  assert.deepEqual([rx2OutsideListed?.dispensing?.status, rx2OutsideListed?.dispensing?.reversed,
+    rx2OutsideListed?.orderRoute?.id, rx2OutsideListed?.changedAfterDispensing], ['dispensed', true, rxRoute2.id, undefined],
+  `rx2's dispensed, unchanged item on the outside list after rx9's hold: ${JSON.stringify(rx2OutsideListed)}`);
   expectStatus(await ehrCall(doctor, 'PATCH', `${enc}/prescriptions/${rx9.id}`,
     { expectedRowVersion: Number(rx9HeldAfter.rowVersion), status: 'entered_in_error',
       changeReason: 'Synthetic entry in error after the outside dispensing' }), 200, 'rx9 entered in error');
@@ -1503,7 +1507,8 @@ try {
     where work_item_id = $1 order by prescription_version`, [rx9Item.id]);
   assert.deepEqual(rx9Changes.map(row => [row.status_before, row.status_after]),
     [['active', 'on_hold'], ['on_hold', 'entered_in_error']], `rx9's recorded changes: ${JSON.stringify(rx9Changes)}`);
-  const q132Route = { heldAfterOutsideDispensing: 'on_hold (1) with the ordering facility', hospitalItem: 'nothing',
+  const q132Route = { heldAfterOutsideDispensing: 'on_hold (1) with the ordering facility',
+    unchangedDispensedItem: 'rx2\'s (dispensed and reversed, never changed): no notice on the same list',
     enteredInError: 'route closed: left the outside list, read 404 PHARMACY_WORK_ITEM_NOT_FOUND; both changes recorded' };
   step('Q132 A: a hold after the outside dispensing shows on the outside item; an entry in error closes the route');
 

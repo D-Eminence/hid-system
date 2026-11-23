@@ -10771,7 +10771,10 @@ dispensing, the pharmacist without a consent grant lists and reads
 after the doctor then holds rx1, `on_hold` and 2, while the prescriber's
 side stays as ORD-2 says (no `pharmacyHandoff`, "already has", `ownProgress`
 `dispensed`): the change is shown on the pharmacy's item, not on the
-prescriber's side; a hand-off item dispensed by a pharmacist without a grant
+prescriber's side; a second dispensed item whose prescription did not
+change (rx4's) carries no notice beside rx1's; a hand-off item put on hold
+before any dispensing is not flagged `withdrawn` (0133 D8 marks automatic
+sends only); a hand-off item dispensed by a pharmacist without a grant
 and then cancelled by the doctor reads `cancelled`, 1; and a change racing a
 dispensing (the dispensing inserted and held uncommitted on one connection,
 the PATCH's UPDATE run on another until `pg_stat_activity` shows it waiting
@@ -10779,8 +10782,10 @@ on a lock, then the dispensing committed) records one row, with `changed_at`
 after `dispensed_at` and a version above the item's.
 `verify-order-routes-runtime.mjs`: after the outside pharmacy dispenses rx9,
 the hospital's doctor holds it, and the outside pharmacist reads `on_hold`,
-1, with `orderRoute.orderingFacilityName`, while the hospital's pharmacist
-reads nothing; entered in error, the item leaves the outside pharmacy's list
+1, with `orderRoute.orderingFacilityName`, while rx2's item, dispensed
+(and reversed) at the same outside pharmacy for the same patient and never
+changed, carries no notice on the same list; entered in error, the item
+leaves the outside pharmacy's list
 and its read answers 404 `PHARMACY_WORK_ITEM_NOT_FOUND`; the same race through the
 route (the PATCH waiting in `prescriptions_order_routes_sync`) records one
 row; and, on the disposable database only, with the trigger renamed to sort
