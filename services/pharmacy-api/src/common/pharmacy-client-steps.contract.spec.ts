@@ -55,7 +55,7 @@ describe('PharmacyApiClient work item steps (ORD-4)', () => {
   it('leaves both out for an older pharmacy-api, an unknown step and an unknown acceptedWith, and keeps the list',
     async () => {
       respond({ items: [
-        // An older pharmacy-api, or a database without 0147: neither field.
+        // An older pharmacy-api, or a database without 0145: neither field.
         base,
         // A newer step, with or without an acceptance: not looked at further.
         { ...base, pharmacyStep: 'on_hold_at_counter', pharmacistAcceptance: null },

@@ -1894,8 +1894,8 @@ revoke all on pharmacy.own_prescription_sends, pharmacy.prescription_item_claims
 -- its install is the owner's alone.
 revoke all on function identity.sealed_qa_hospital_work_staff_install() from public;
 
--- A pharmacist accepts a prescription before dispensing (0147, ORD-4, owner
--- decision Q125 B of 19 November 2026), exactly as 0147 grants it: SELECT and
+-- A pharmacist accepts a prescription before dispensing (0145, ORD-4, owner
+-- decision Q125 B of 19 November 2026), exactly as 0145 grants it: SELECT and
 -- INSERT on pharmacy.work_item_acceptances to the Pharmacy runtime and the
 -- schema test runtime, with the other Pharmacy tables above (as
 -- pharmacy.dispensings; no UPDATE or DELETE: its rows are never changed);

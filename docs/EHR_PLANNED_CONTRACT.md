@@ -1507,7 +1507,7 @@ Akos items: P1-12, R-1, P2-5 (and P0-5's coding ask).
 
 Status: planned, not live.
 
-Build plan of 18 Nov 2026, migration 0145 (provisional), lane D. This
+Build plan of 18 Nov 2026, migration number given at merge (0145 was provisional; ORD-4 took it), lane D. This
 section follows owner decision Q124 A, 19 Nov 2026: ICD-11 is the search list, and
 ICD-10 codes typed in are still accepted.
 
@@ -1630,7 +1630,7 @@ facility, newest first. `limit` is 1-50, default 20.
     a name-only diagnosis.
 - While the setting is off, the routes behave exactly as today.
 
-**Database (0145).**
+**Database (number given at merge).**
 - `ehr.diagnoses.code_system` and `code` (`0004:180-181`) become nullable,
   with a pair CHECK added NOT VALID, then validated.
 - New tables: `ehr.terminology_icd11` (code, title, release, a
@@ -1657,7 +1657,7 @@ facility, newest first. `limit` is 1-50, default 20.
 
 ### Screen notes
 
-- **Before 0145 ships** (`catalog/status` gives `diagnoses.available: false`
+- **Before its migration ships** (`catalog/status` gives `diagnoses.available: false`
   or answers 404):
   - Keep the built-in list of 57 with code system `ICD-10` and dotted codes
     (Wave 0 R-1).
@@ -1693,7 +1693,7 @@ facility, newest first. `limit` is 1-50, default 20.
 
 ### Target
 
-Release B (0145).
+a release after Release B (number given at merge).
 
 Size: **M**: one search table and loader input, the recent table, the
 nullable code, and the sensitive-list split. The ICD-11 sensitive ranges
@@ -1830,7 +1830,7 @@ Akos items:
 - N-1 (the "Accepted" status)
 - N-8 (the pharmacy part of "accepted by"; the laboratory keeps "Sample taken" as its first visible step, see Screen notes)
 
-Status: planned, not live. Built in #<PR, to come> (migration 0147, provisional); live when Release B is signed. The contract as built is the section "ORD-4. The pharmacist accepts a prescription before dispensing" in [INTERFACE_CONTRACT.md](INTERFACE_CONTRACT.md), and this section is corrected to match the build (the ORD-4 build spec of 20 Nov 2026). Owner decision Q125 B, 19 Nov 2026: the pharmacy "Accepted" step is wanted.
+Status: planned, not live. Built in #<PR, to come> (migration 0145, provisional); live when Release B is signed. The contract as built is the section "ORD-4. The pharmacist accepts a prescription before dispensing" in [INTERFACE_CONTRACT.md](INTERFACE_CONTRACT.md), and this section is corrected to match the build (the ORD-4 build spec of 20 Nov 2026). Owner decision Q125 B, 19 Nov 2026: the pharmacy "Accepted" step is wanted.
 
 Today (Release A, 0133) this hospital's pharmacy has a prescription as soon as the prescriber activates it. The automatic send makes the work item and records the prescriber as the one who accepted it into Pharmacy, with the fixed reason "Sent automatically when the prescription was activated" (0133 D7; never recorded as a pharmacist's acceptance, ORD-2). So the work item's `status: "accepted"` and `acceptedAt` (`pharmacy.service.ts:730` and `:736` on Release A) only mean "the pharmacy has it". No pharmacist has taken it on. ORD-4 adds that step: a pharmacist accepts the prescription, and the prescriber sees "Accepted" between "Sent to pharmacy" and "Dispensed".
 
@@ -1924,7 +1924,7 @@ Rules:
 
 **"We can't complete this order" (D18, section 24).** This is for prescriptions from another facility, and it is unchanged. Such an item is `accepted` when its route is accepted, so the command is offered exactly as today (`POST /api/v1/pharmacy/order-routes/:routeId/cannot-complete`, `pharmacy.order-route.receive`). ORD-4 adds no "can't complete" for this hospital's own prescriptions. A pharmacist who accepted one and then cannot dispense it tells the prescriber, who holds or stops it (the item is then `withdrawn`).
 
-**Database** (migration 0147, number provisional, given in merge order at the Release B cut-off; needs 0001-0137):
+**Database** (migration 0145, number provisional, given in merge order at the Release B cut-off; needs 0001-0137):
 - A new table, `pharmacy.work_item_acceptances`: one row per work item (`work_item_id` unique), with patient, facility, `accepted_by`, `accepted_by_membership_id`, `accepted_at`, `accepted_with` (`accept` or `dispensing`), the idempotency key, the request digest and the correlation id, and unique `(facility_id, accepted_by, idempotency_key)`. No foreign keys (0133 D6's pattern; the insert trigger checks what they would). Rows are never updated or deleted (0023's `pharmacy.reject_immutable_evidence()`; no runtime holds UPDATE or DELETE). Row-level security, enabled and forced, follows the dispensings table: four policies, the two consent and order-route ones (`pharmacy.context_allows`) and 0133's two own-work ones for a row anchored on its work item (0133's own-work policies are now 46). SELECT and INSERT for `hid_pharmacy_runtime` and `hid_schema_test_runtime`, here and in `runtime-grants.sql`.
 - An insert trigger, `pharmacy.validate_work_item_acceptance()` (SECURITY DEFINER), owned by the owner of `pharmacy.validate_dispensing()`: 0133 D5's two `ehr.prescriptions` policies name only that role, so with another owner a pharmacist with no consent grant would find no prescription under forced row-level security. No role may execute it. It refuses with 23514, in this order:
   - "Pharmacist acceptance does not match its work item and actor context": the session is incomplete, or its purpose is not `direct-care` (an emergency session and any other purpose are refused, as for a dispensing), or the row is not the session's (facility, account, membership), or the work item is not found with the row's patient and facility;
@@ -2753,7 +2753,7 @@ Audit:
 
 ### Depends on
 
-- ORD-6 (one group for the tests), ORD-7 (0144, catalogue picks; national list approved by Health ID's named clinical lead, owner decision Q124 A, 19 Nov 2026), ORD-9 (0145, diagnosis search; ICD-11 list with ICD-10 still accepted, owner decision Q124 A, 19 Nov 2026).
+- ORD-6 (one group for the tests), ORD-7 (number given at merge, catalogue picks; national list approved by Health ID's named clinical lead, owner decision Q124 A, 19 Nov 2026), ORD-9 (number given at merge, diagnosis search; ICD-11 list with ICD-10 still accepted, owner decision Q124 A, 19 Nov 2026).
 - EHR-C6 (0141, owner decision Q126 A, 19 Nov 2026).
 - FR-1 and Q105, 0117 (allergy check), ORD-10 (duplicate warnings).
 - 0136 and SX-1 for the new permission row.
