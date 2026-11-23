@@ -5,7 +5,8 @@
 -- facilities (QA Hospital included) Health ID support does it, with a
 -- licence check. Booked as 0139 on hid-system#258; numbers are given in
 -- merge order at the Release B cut-off. This file requires 0001-0137
--- applied.
+-- applied, and the owners of the two openers it replaces (D6) able to lock
+-- identity.staff_facility_memberships.
 --
 -- One membership may already hold several roles (auth.account_roles); until
 -- now the screens could only replace them with one role (0086's
@@ -60,7 +61,11 @@
 --        an open waits for a remove in flight and then reads the
 --        permission after it, and a remove waits for an open in flight and
 --        then revokes the grant it made. Opens by the same member do not
---        wait for each other.
+--        wait for each other. That lock is checked against each opener's
+--        owner, which CREATE OR REPLACE keeps, and FOR SHARE needs UPDATE on
+--        a column of the table: section 0 refuses (55000, nothing applied),
+--        naming the owner, unless each owner has it, and the post-check
+--        checks it again.
 --
 -- What a command does (identity.staff_role_change_apply)
 --   Add inserts one auth.account_roles row for the membership; for a
@@ -228,6 +233,17 @@ begin
          is distinct from expected.body_md5;
   if mismatch is not null then
     raise exception using errcode = '55000', message = '0139: these functions are not as this file reads them: ' || mismatch;
+  end if;
+  -- D6: the openers' FOR SHARE runs as each one's owner, which CREATE OR REPLACE keeps; it needs UPDATE.
+  select string_agg(format('the owner of %s, %s,', opener.signature, pg_get_userbyid(proc.proowner)), ' and '
+                    order by opener.position) into mismatch
+    from (values (1, 'identity.open_own_facility_patient(text,uuid)'),
+                 (2, 'identity.activate_break_glass(text,text,integer)')) opener(position, signature)
+    join pg_proc proc on proc.oid = to_regprocedure(opener.signature)
+   where not has_any_column_privilege(proc.proowner, 'identity.staff_facility_memberships'::regclass, 'UPDATE');
+  if mismatch is not null then
+    raise exception using errcode = '55000',
+      message = '0139: ' || mismatch || ' may not lock identity.staff_facility_memberships (FOR SHARE needs UPDATE); nothing applied';
   end if;
   select string_agg(expected.constraint_name, ', ') into mismatch
     from (values
@@ -1457,6 +1473,7 @@ do $$
 declare
   runtime_exists boolean := exists (select 1 from pg_roles where rolname = 'hid_identity_runtime');
   function_name text;
+  mismatch text;
 begin
   if (select array_agg(holder.role_code order by holder.role_code) from auth.role_permissions holder
        where holder.permission_code = 'platform.facility-staff.manage')
@@ -1527,6 +1544,17 @@ $d6$, '')) <> '585d55fe4f7b5773cea96ae8729cc99c'
      or has_function_privilege('public', 'identity.open_own_facility_patient(text,uuid)', 'EXECUTE')
      or has_function_privilege('public', 'identity.activate_break_glass(text,text,integer)', 'EXECUTE') then
     raise exception using errcode = '55000', message = '0139 post-check: a replaced opener is not its signed body plus 0139''s lines';
+  end if;
+  -- D6: and each one's owner may still take its FOR SHARE (as in 0).
+  select string_agg(format('the owner of %s, %s,', opener.signature, pg_get_userbyid(proc.proowner)), ' and '
+                    order by opener.position) into mismatch
+    from (values (1, 'identity.open_own_facility_patient(text,uuid)'),
+                 (2, 'identity.activate_break_glass(text,text,integer)')) opener(position, signature)
+    join pg_proc proc on proc.oid = to_regprocedure(opener.signature)
+   where not has_any_column_privilege(proc.proowner, 'identity.staff_facility_memberships'::regclass, 'UPDATE');
+  if mismatch is not null then
+    raise exception using errcode = '55000',
+      message = '0139 post-check: ' || mismatch || ' may not lock identity.staff_facility_memberships (FOR SHARE needs UPDATE)';
   end if;
 end
 $$;
