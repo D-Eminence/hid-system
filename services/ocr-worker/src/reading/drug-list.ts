@@ -39,10 +39,14 @@ import { editDistance, fuzzyListMatch, letterCount, LOOKALIKE_DISTANCE, MAX_EDIT
  *
  * Until 2026-11-23 the names were typed by hand from the Nigeria Essential Medicines List, 7th edition, 2020
  * (https://extranet.who.int/cpcd/sites/default/files/public_file_repository/NGA_Nigeria-Essential-Medicine-List_2020.pdf).
- * Each name on that list that the new list gives under another spelling or salt is kept in SYNONYMS (marked "kept
- * from the 7th edition list"), so it is still recognised; the names the new list does not have in any form were
- * dropped. A few were left unmapped on purpose, because mapping would show a form or product the prescriber never
- * wrote; each is shown as read with "?":
+ * Each name on that list that the new list gives under another spelling is kept in SYNONYMS (marked "kept from the
+ * 7th edition list"), so it is still recognised. Each that is more specific than the new list's entry (a salt or a
+ * product the new list folds into a broader name: lithium carbonate, ferrous sulfate, calcium lactate, isophane
+ * insulin) is kept as its own name in CHART_NAMES, never mapped onto the broader one. The names the new list does not
+ * have in any form were dropped; those within a letter or two of a listed name (neomycin, vitamin b12, vitamin e)
+ * joined UNLISTED_LOOKALIKES, so a misreading of them is never respelled into the listed one. A few were left
+ * unmapped on purpose, because mapping would show a form or product the prescriber never wrote; each is shown as
+ * read with "?":
  * - fluticasone: the new list has only fluticasone furoate (a nasal spray) and the combination salmeterol +
  *   fluticasone, while plain "fluticasone" on Nigerian charts usually means the propionate (a different ester and
  *   dose).
@@ -110,20 +114,16 @@ export const SYNONYMS: Readonly<Record<string, string>> = {
   'bendrofluazide': 'bendroflumethiazide',
   'dabigatran': 'dabigatran etexilate',
   'fluocinolone': 'fluocinolone acetonide',
-  'ferrous sulfate': 'ferrous salt',
-  'isophane insulin': 'intermediate-acting insulin',
   'lugol\'s iodine': 'iodine + potassium iodide',
   'triiodothyronine': 'liothyronine',
   'sodium bicarbonate': 'sodium hydrogen carbonate',
-  'calcium lactate': 'calcium',
-  'lithium carbonate': 'lithium',
   // Added (not in the lists' brackets): British and older names commonly written in Nigeria.
   'frusemide': 'furosemide',
   'co-amoxiclav': 'amoxicillin + clavulanic acid',
   'lignocaine': 'lidocaine',
   'phenobarbitone': 'phenobarbital',
   'salbutamol sulphate': 'salbutamol',
-  'ferrous sulphate': 'ferrous salt',
+  'ferrous sulphate': 'ferrous sulfate',
   'magnesium sulphate': 'magnesium sulfate',
   'hyoscine n-butylbromide': 'hyoscine butylbromide',
   'ors': 'oral rehydration salts',
@@ -131,6 +131,24 @@ export const SYNONYMS: Readonly<Record<string, string>> = {
   'glyburide': 'glibenclamide',
   'acyclovir': 'aciclovir',
 };
+
+/**
+ * Names more specific than the list's entry for them: a salt or a product that the list folds into a broader name
+ * (lithium, calcium, ferrous salt, intermediate-acting insulin). Each is recognised as its own name, never as the
+ * broader one, so the record never says less than the chart: lithium salts are not interchangeable, iron and calcium
+ * salts carry different elemental doses, and "intermediate-acting insulin" would hide which insulin it was. The
+ * first four were names on the 7th edition list. A SYNONYM is only for the same substance named another way.
+ */
+export const CHART_NAMES: readonly string[] = [
+  'lithium carbonate', 'ferrous sulfate', 'calcium lactate', 'isophane insulin', 'lithium citrate',
+];
+
+/**
+ * Listed names that leave the salt open. A name reaches one of these only as written: never after salt words are
+ * taken off ("lithium citrate" is not "Lithium?", "calcium phosphate" is not "Calcium?"), since the salt is then the
+ * medicine. Such a name is recognised only if it is on CHART_NAMES.
+ */
+export const SALT_OPEN_NAMES: readonly string[] = ['lithium', 'calcium'];
 
 const LISTED_GENERICS = new Set(NEML_GENERICS);
 /** Whether a brand row's generic is on the list, as written or (for a combination brand) each part on its own. */
@@ -166,19 +184,26 @@ export { editDistance, LOOKALIKE_DISTANCE, MAX_EDIT_DISTANCE, MIN_FUZZY_LETTERS,
  * them apart; this keeps apart a misreading of one of them as well (arteether is one letter from artemether, which
  * the distance rule alone would let through). Lorazepam and folinic acid left this list on 2026-11-23, when the new
  * source listed them; gemifloxacin left it then too, since gatifloxacin, the listed name it was near, is not on the
- * new list.
+ * new list. Neomycin (two letters from bleomycin), vitamin B12 and vitamin E (a letter from vitamin B1, B2, B6, A, C
+ * and D) joined it then: the 7th edition list had them, which kept a misreading of them from the listed name, and
+ * the new list does not.
  */
 export const UNLISTED_LOOKALIKES: readonly string[] = [
   'arteether', 'clobetasone', 'pefloxacin', 'norfloxacin', 'esomeprazole', 'ganciclovir',
   'famciclovir', 'oxazepam', 'felodipine', 'nisoldipine', 'prednisone', 'dicloxacillin', 'ornidazole',
   'econazole', 'bifonazole', 'tioconazole', 'methsuximide', 'dihydralazine', 'quinidine', 'rocuronium',
   'ropivacaine', 'mepivacaine', 'digitoxin', 'fosinopril', 'pentobarbital', 'saxagliptin',
+  // Added 2026-11-23: on the 7th edition list, not on the new one, and a letter or two from a listed name.
+  'neomycin', 'vitamin b12', 'vitamin e',
 ];
 
+/** Salt words written after a name that do not change which medicine it is (except after SALT_OPEN_NAMES). */
+const SALT_ONLY_WORDS = new Set(['hydrochloride', 'hcl', 'sodium', 'potassium', 'sulfate', 'sulphate', 'maleate',
+  'phosphate', 'acetate', 'citrate']);
 /** Salt and form words written after a name that do not change which medicine it is. */
-const SALT_WORDS = new Set(['hydrochloride', 'hcl', 'sodium', 'potassium', 'sulfate', 'sulphate', 'maleate',
-  'phosphate', 'acetate', 'citrate', 'tab', 'tabs', 'tablet', 'tablets', 'cap', 'caps', 'capsule', 'capsules',
-  'inj', 'injection', 'syrup', 'syr', 'susp', 'suspension', 'cream', 'oint', 'ointment', 'drops', 'iv', 'im', 'po']);
+const SALT_WORDS = new Set([...SALT_ONLY_WORDS, 'tab', 'tabs', 'tablet', 'tablets', 'cap', 'caps', 'capsule',
+  'capsules', 'inj', 'injection', 'syrup', 'syr', 'susp', 'suspension', 'cream', 'oint', 'ointment', 'drops', 'iv',
+  'im', 'po']);
 
 /** Lower case, "?" and punctuation other than "+" and "-" removed, "/" and "&" read as "+", spaces collapsed. */
 export function normaliseDrugName(text: string): string {
@@ -205,6 +230,7 @@ const entry = (name: string, generic: string, brand: string | null): Entry =>
 /** Every name the drug list knows, normalised, with the generic it stands for (list-match.spec.ts checks them all). */
 export const DRUG_ENTRIES: readonly Entry[] = [
   ...NEML_GENERICS.map((name) => entry(name, name, null)),
+  ...CHART_NAMES.map((name) => entry(name, name, null)),
   ...Object.entries(SYNONYMS).map(([name, generic]) => entry(name, generic, null)),
   ...Object.entries(BRAND_NAMES).map(([name, generic]) => entry(name, generic, name)),
 ];
@@ -212,6 +238,13 @@ export const DRUG_ENTRIES: readonly Entry[] = [
 const capitalise = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
 const LOOKALIKE_KEYS = UNLISTED_LOOKALIKES.map(normaliseDrugName);
+const SALT_OPEN_KEYS = new Set(SALT_OPEN_NAMES.map(normaliseDrugName));
+/**
+ * Whether a match was reached by taking a salt word off a name, onto a listed name that leaves the salt open
+ * ("lithium citrate" onto lithium). Taking off only form words ("lithium tabs") is fine.
+ */
+const saltDropped = (match: Entry, name: string, whole: string) => name !== whole
+  && SALT_OPEN_KEYS.has(match.target) && whole.split(' ').some((word) => SALT_ONLY_WORDS.has(word));
 
 /**
  * The listed medicine a proposed drug name stands for, or null. Exact (normalised, salt and form words taken off)
@@ -228,10 +261,10 @@ export function matchDrugName(proposed: string): DrugMatch | null {
     display: brand === null ? `${capitalise(generic)}?` : `${capitalise(brand)}? (${generic})` });
   for (const name of candidates) {
     const exact = DRUG_ENTRIES.find((candidate) => candidate.key === name);
-    if (exact) return found(exact, true);
+    if (exact) return saltDropped(exact, name, whole) ? null : found(exact, true);
   }
   const best = fuzzyListMatch(candidates, DRUG_ENTRIES);
-  if (best === null) return null;
+  if (best === null || saltDropped(best.entry, best.name, whole)) return null;
   const nearUnlisted = candidates.some((name) =>
     LOOKALIKE_KEYS.some((key) => editDistance(name, key) <= LOOKALIKE_DISTANCE));
   return nearUnlisted ? null : found(best.entry, false);
@@ -249,7 +282,7 @@ export function drugLookalike(proposed: string): DrugMatch | null {
   if (letterCount(whole) === 0) return null;
   const candidates = [...new Set([whole, withoutSalts(whole)].filter((name) => name.length > 0))];
   const best = fuzzyListMatch(candidates, DRUG_ENTRIES);
-  if (best === null) return null;
+  if (best === null || saltDropped(best.entry, best.name, whole)) return null;
   const { generic, brand } = best.entry.value;
   return { generic, brand, exact: false,
     display: brand === null ? `${capitalise(generic)}?` : `${capitalise(brand)}? (${generic})` };
