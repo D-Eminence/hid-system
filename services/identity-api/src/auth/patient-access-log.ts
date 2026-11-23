@@ -12,8 +12,12 @@ import { DomainProblem } from '../common/problem';
  * emergency search by name and date of birth found the patient; the screen
  * says "Found in an emergency search at <facility>".
  */
+/**
+ * nin_added (0138, ID-6): a facility's desk linked a NIN to the patient's
+ * record; the screen says "NIN added at <facility>".
+ */
 export const ACCESS_LOG_ACTIONS = ['viewed', 'changed', 'access_granted', 'access_ended', 'emergency_access',
-  'found_in_emergency_search'] as const;
+  'found_in_emergency_search', 'nin_added'] as const;
 export const ACCESS_LOG_ACTOR_KINDS = ['clinician', 'facility', 'patient', 'support', 'system'] as const;
 
 export interface AccessLogEvent {

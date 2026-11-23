@@ -67,6 +67,11 @@ const facilitySelectionAskRegional = Template.fromStack(new HidRegionalStack(fac
   'FacilitySelectionAskRegionalTest', {
     configuration: environmentConfig('production', { staffFacilitySelectionMode: 'ask' }),
   })).toJSON() as typeof regional;
+const openPatientApplication = new App();
+const openPatientRegional = Template.fromStack(new HidRegionalStack(openPatientApplication,
+  'OpenPatientRegionalTest', {
+    configuration: environmentConfig('staging', { stagingMode: 'economy', staffOpenPatientEnabled: 'true' }),
+  })).toJSON() as typeof regional;
 
 function resources(template: typeof regional, type: string): Array<[string, Resource]> {
   return Object.entries(template.Resources).filter(([, resource]) => resource.Type === type);
@@ -125,6 +130,18 @@ test('environment names are typed and production is multi-AZ', () => {
   assert.equal(environmentConfig('development').staffFacilitySelectionMode, 'off');
   assert.equal(environmentConfig('staging', { stagingMode: 'economy' }).staffFacilitySelectionMode, 'off');
   assert.equal(environmentConfig('staging', { stagingMode: 'sleep' }).staffFacilitySelectionMode, 'off');
+  // SX-8 (0140): the open patient kept across a reload. Off unless true is
+  // given at synth time; anything else refuses to synthesize.
+  for (const invalid of ['on', 'TRUE', 'True', ' true', 'true ', '', '1', 'yes']) {
+    assert.throws(() => environmentConfig('staging', { stagingMode: 'economy', staffOpenPatientEnabled: invalid }),
+      /HID_STAFF_OPEN_PATIENT_ENABLED must be true or false when supplied/);
+  }
+  assert.equal(environmentConfig('development').staffOpenPatientEnabled, false);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy' }).staffOpenPatientEnabled, false);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', staffFacilitySelectionMode: 'keep' }).staffOpenPatientEnabled, false);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', staffOpenPatientEnabled: 'false' }).staffOpenPatientEnabled, false);
+  assert.equal(environmentConfig('production', { staffOpenPatientEnabled: 'true' }).staffOpenPatientEnabled, true);
+  assert.equal(environmentSettingsFrom({ HID_STAFF_OPEN_PATIENT_ENABLED: 'true' }).staffOpenPatientEnabled, 'true');
   assert.equal(environmentConfig('production').staffFacilitySelectionMode, 'off');
   for (const mode of ['off', 'keep', 'ask'] as const) {
     assert.equal(environmentConfig('staging', { stagingMode: 'economy', staffFacilitySelectionMode: mode }).staffFacilitySelectionMode, mode);
@@ -164,16 +181,18 @@ test('each setting is named, read by its own variable, and changes only its own 
     ownWorkPatientCardEnabled: 'HID_OWN_WORK_PATIENT_CARD_ENABLED',
     prescriptionDispensingDetailsEnabled: 'HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED',
     staffFacilitySelectionMode: 'HID_STAFF_FACILITY_SELECTION_MODE',
+    staffOpenPatientEnabled: 'HID_STAFF_OPEN_PATIENT_ENABLED',
   });
   assert.equal(new Set(Object.values(environmentSettingVariables)).size, Object.keys(environmentSettingVariables).length);
   // Read from an environment by name; unset and unrelated variables are left out.
   assert.deepEqual(environmentSettingsFrom({
     HID_INFRA_ENV: 'staging', HID_STAGING_MODE: 'economy', HID_QOREID_ENABLED: 'true',
     HID_OWN_WORK_PATIENT_CARD_ENABLED: 'false', HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED: 'true',
-    HID_STAFF_FACILITY_SELECTION_MODE: 'ask', HID_SOMETHING_ELSE: 'true', PATH: '/usr/bin',
+    HID_STAFF_FACILITY_SELECTION_MODE: 'ask', HID_STAFF_OPEN_PATIENT_ENABLED: 'true', HID_SOMETHING_ELSE: 'true',
+    PATH: '/usr/bin',
   }), {
     stagingMode: 'economy', qoreIdEnabled: 'true', ownWorkPatientCardEnabled: 'false',
-    prescriptionDispensingDetailsEnabled: 'true', staffFacilitySelectionMode: 'ask',
+    prescriptionDispensingDetailsEnabled: 'true', staffFacilitySelectionMode: 'ask', staffOpenPatientEnabled: 'true',
   });
   assert.deepEqual(environmentSettingsFrom({}), {});
   assert.deepEqual(environmentSettingsFrom({ HID_QOREID_ENABLED: undefined }), {});
@@ -184,6 +203,7 @@ test('each setting is named, read by its own variable, and changes only its own 
     ['ownWorkPatientCardEnabled', 'true', { ownWorkPatientCardEnabled: true }],
     ['prescriptionDispensingDetailsEnabled', 'true', { prescriptionDispensingDetailsEnabled: true }],
     ['staffFacilitySelectionMode', 'keep', { staffFacilitySelectionMode: 'keep' }],
+    ['staffOpenPatientEnabled', 'true', { staffOpenPatientEnabled: true }],
   ];
   for (const [name, value, changed] of alone) {
     const fromSettings = environmentConfig('production', { [name]: value });
@@ -201,7 +221,7 @@ test('each setting is named, read by its own variable, and changes only its own 
   // The CDK entry reads every setting by its variable, never by position.
   const entry = readFileSync(new URL('../bin/hid-infrastructure.ts', import.meta.url), 'utf8');
   assert.match(entry, /environmentConfig\(process\.env\.HID_INFRA_ENV, environmentSettingsFrom\(process\.env\)\)/);
-  assert.doesNotMatch(entry, /process\.env\.HID_(STAGING_MODE|QOREID_ENABLED|OWN_WORK|PRESCRIPTION|STAFF_FACILITY)/);
+  assert.doesNotMatch(entry, /process\.env\.HID_(STAGING_MODE|QOREID_ENABLED|OWN_WORK|PRESCRIPTION|STAFF_FACILITY|STAFF_OPEN)/);
 });
 
 test('staging requires the selected Novu region while production configuration is unchanged', () => {
@@ -699,6 +719,29 @@ test('the staff facility selection mode (0129) is passed to identity-api only, o
     for (const task of others) {
       assert.doesNotMatch(JSON.stringify(task.ContainerDefinitions), /STAFF_FACILITY_SELECTION_MODE/,
         `${JSON.stringify(task.Family)} should not carry STAFF_FACILITY_SELECTION_MODE`);
+    }
+  }
+});
+
+test('the open patient setting (SX-8, 0140) is passed to identity-api only, false unless true is given', () => {
+  const cases: Array<[typeof regional, string]> = [
+    [regional, 'false'], [stagingRegional, 'false'], [fidelityRegional, 'false'], [sleepRegional, 'false'],
+    [qoreIdStagingRegional, 'false'], [facilitySelectionKeepRegional, 'false'], [openPatientRegional, 'true'],
+  ];
+  for (const [template, expected] of cases) {
+    const tasks = properties(template, 'AWS::ECS::TaskDefinition');
+    const identity = tasks.find(item => JSON.stringify(item.Family).includes('identity-api'));
+    assert.ok(identity, 'missing identity-api');
+    const api = (identity.ContainerDefinitions as Array<{ Name: string; Environment: Array<{ Name: string; Value: unknown }> }>)
+      .find(item => item.Name === 'identity-api')!;
+    const environment = Object.fromEntries(api.Environment.map(item => [item.Name, item.Value]));
+    assert.equal(environment.STAFF_OPEN_PATIENT_ENABLED, expected);
+    assert.equal(environment.STAFF_FACILITY_SELECTION_MODE, template === facilitySelectionKeepRegional ? 'keep' : 'off');
+    const others = tasks.filter(task => task !== identity);
+    assert.ok(others.length > 0);
+    for (const task of others) {
+      assert.doesNotMatch(JSON.stringify(task.ContainerDefinitions), /STAFF_OPEN_PATIENT_ENABLED/,
+        `${JSON.stringify(task.Family)} should not carry STAFF_OPEN_PATIENT_ENABLED`);
     }
   }
 });

@@ -109,8 +109,11 @@ const harness = (options: { enabled?: boolean; detailsError?: Error } = {}) => {
 const ITEM_KEYS = ['id', 'patientId', 'facilityId', 'sourceEhrPrescriptionId', 'sourceEncounterId',
   'sourceEhrPrescriptionVersion', 'status', 'medication', 'doseQuantity', 'doseUnit', 'routeCode', 'frequency',
   'instructions', 'acceptedAt', 'version', 'dispensing'];
+// ORD-4: a route-backed item always carries its step and its acceptance (with its route), from its own row, after
+// `dispensing`; an own item only when ORD-4's steps reader answers it, which these tests never ask (0133 off).
 const ROUTED_KEYS = ['id', 'patientId', 'facilityId', 'sourceEhrPrescriptionVersion', 'status', 'orderRoute', 'patient',
-  'medication', 'doseQuantity', 'doseUnit', 'routeCode', 'frequency', 'instructions', 'acceptedAt', 'version', 'dispensing'];
+  'medication', 'doseQuantity', 'doseUnit', 'routeCode', 'frequency', 'instructions', 'acceptedAt', 'version', 'dispensing',
+  'pharmacyStep', 'pharmacistAcceptance'];
 
 describe('prescription details on own work: off (the default)', () => {
   it.each([['no setting passed (every existing caller)', undefined], ['PRESCRIPTION_DISPENSING_DETAILS_ENABLED=false', false]])(
@@ -187,7 +190,7 @@ describe('prescription details on own work: on', () => {
     expect(sqls).toContain('rollback to savepoint pharmacy_prescription_details');
     expect(sqls).not.toContain('release savepoint pharmacy_prescription_details');
     expect(page.items.map((item) => Object.keys(item).slice(ITEM_KEYS.length))).toEqual([['duration'], ['duration'], [],
-      [], []]);
+      ['pharmacyStep', 'pharmacistAcceptance'], []]);
     expect(Logger.prototype.warn).toHaveBeenCalledWith({ message: 'Prescription details on own work could not be read',
       sqlState: '42883', correlationId: reader.correlationId });
   });

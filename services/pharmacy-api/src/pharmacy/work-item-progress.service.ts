@@ -12,6 +12,9 @@ import { OWN_WORK_OFF, PharmacyOwnWork, type OwnWorkState } from './own-work-acc
  * Where a prescription is in this facility's own pharmacy (ORD-3):
  * - not_received: no work item here that the clinician may read;
  * - received: the pharmacy has it and has not dispensed it;
+ * - accepted (ORD-4): a pharmacist here accepted it (acceptedAt), and it is
+ *   not dispensed: by the accept route, or handed in by hand
+ *   (accept-ehr-prescription), when it was accepted as it was made;
  * - dispensed: it was dispensed (dispensedAt);
  * - dispensing_reversed: it was dispensed and the dispensing was reversed;
  * - withdrawn (0133): sent by itself to the pharmacy, then held, cancelled,
@@ -20,11 +23,13 @@ import { OWN_WORK_OFF, PharmacyOwnWork, type OwnWorkState } from './own-work-acc
  * - sent_elsewhere (0133 D14, owner's Q121 A): the pharmacy had it
  *   (receivedAt), and it was sent to another facility's pharmacy before it
  *   was dispensed; the item here is withdrawn and off the pharmacy's list.
- * The last two are answered only to an ehr-api that reads them (header
- * X-HID-Own-Progress: 0133); see OWN_PROGRESS_HEADER.
+ * withdrawn and sent_elsewhere are answered only to an ehr-api that reads
+ * them (header X-HID-Own-Progress: 0133); see OWN_PROGRESS_HEADER. accepted
+ * and acceptedAt only to one that also reads them (X-HID-Own-Progress-Accepted:
+ * ord4); see OWN_PROGRESS_ACCEPTED_HEADER.
  */
-export type PharmacyProgressStatus = 'not_received' | 'received' | 'dispensed' | 'dispensing_reversed' | 'withdrawn'
-  | 'sent_elsewhere';
+export type PharmacyProgressStatus = 'not_received' | 'received' | 'accepted' | 'dispensed' | 'dispensing_reversed'
+  | 'withdrawn' | 'sent_elsewhere';
 
 /**
  * ehr-api sends this header, with OWN_PROGRESS_VERSION, when it reads
@@ -36,12 +41,31 @@ export type PharmacyProgressStatus = 'not_received' | 'received' | 'dispensed' |
 export const OWN_PROGRESS_HEADER = 'x-hid-own-progress';
 export const OWN_PROGRESS_VERSION = '0133';
 
+/**
+ * ORD-4: an ehr-api that reads 'accepted' and `acceptedAt` sends this header,
+ * with OWN_PROGRESS_ACCEPTED_VERSION, beside OWN_PROGRESS_HEADER, which stays
+ * exactly '0133' (a Release A pharmacy-api matches it exactly). Each value is
+ * matched exactly, and the new statuses need both: without this one,
+ * 'accepted' is answered 'received' (times kept) and `acceptedAt` is left
+ * out, so an ehr-api from before ORD-4, which treats a whole answer with a
+ * status it does not know as unknown, reads every answer as before. Either
+ * image can then be deployed, or rolled back, first.
+ */
+export const OWN_PROGRESS_ACCEPTED_HEADER = 'x-hid-own-progress-accepted';
+export const OWN_PROGRESS_ACCEPTED_VERSION = 'ord4';
+
 export interface PharmacyProgressItem {
   sourceEhrPrescriptionId: string;
   status: PharmacyProgressStatus;
   receivedAt: string | null;
   dispensedAt: string | null;
   reversedAt: string | null;
+  /**
+   * ORD-4, only to a caller sending both headers: when a pharmacist here
+   * accepted it, whatever the status now (also dispensed, withdrawn or sent
+   * elsewhere), or null (none yet, or it cannot be read).
+   */
+  acceptedAt?: string | null;
 }
 
 interface ProgressRow extends QueryResultRow {
@@ -81,8 +105,12 @@ export class PharmacyWorkItemProgressService {
   constructor(private readonly database: DatabaseService, private readonly identity: IdentityService,
     private readonly audit: AuditService, private readonly ownWork: PharmacyOwnWork = OWN_WORK_OFF) {}
 
-  /** `current`: the caller sent OWN_PROGRESS_HEADER (it reads 'withdrawn' and 'sent_elsewhere'). */
-  async read(context: DataAccessContext, input: WorkItemProgressDto, current = false):
+  /**
+   * `current`: the caller sent OWN_PROGRESS_HEADER (it reads 'withdrawn' and
+   * 'sent_elsewhere'). `accepted`: it also sent OWN_PROGRESS_ACCEPTED_HEADER
+   * (it reads 'accepted' and `acceptedAt`); taken only with `current`.
+   */
+  async read(context: DataAccessContext, input: WorkItemProgressDto, current = false, accepted = false):
   Promise<{ items: PharmacyProgressItem[] }> {
     // The clinician's browser request to ehr-api was a read (GET), and this
     // route only reads, so Identity is told GET: its delegated path then
@@ -114,12 +142,13 @@ export class PharmacyWorkItemProgressService {
         patientId: input.patientId, resourceType: 'pharmacy-work-item-collection', resourceId: context.facilityId,
       }, { requestedCount: input.sourceEhrPrescriptionIds.length, foundCount: rows.length,
         workItemIds: rows.map((row) => row.work_item_id), breakGlass: decision.breakGlass });
-      // 0133: whether each item was withdrawn before it was dispensed, and why (no flag when it cannot be read).
+      // 0133: whether each item was withdrawn before it was dispensed, and why (no flag when it cannot be read);
+      // ORD-4: in the same reader statement, its pharmacist's acceptance (none when it cannot be read).
       const states = await this.ownWork.states(client, rows.map((row) => row.work_item_id), context.correlationId, 'flag');
       const found = new Map(rows.map((row) => [row.source_ehr_prescription_id.toLowerCase(), row]));
       return { items: input.sourceEhrPrescriptionIds.map((id) => {
         const row = found.get(id.toLowerCase());
-        return project(id, row, row ? states.get(row.work_item_id) : undefined, current);
+        return project(id, row, row ? states.get(row.work_item_id) : undefined, current, current && accepted);
       }) };
     });
   }
@@ -127,22 +156,44 @@ export class PharmacyWorkItemProgressService {
 
 /**
  * The status, in this order: a reversal, a dispensing, sent elsewhere,
- * withdrawn, else received. To a caller without OWN_PROGRESS_HEADER,
- * 'withdrawn' is 'received' (times kept) and 'sent_elsewhere' 'not_received'
- * (times null), the statuses an ehr-api from before 0133 knows.
+ * withdrawn, accepted (ORD-4), else received. To a caller without
+ * OWN_PROGRESS_HEADER, 'withdrawn' is 'received' (times kept) and
+ * 'sent_elsewhere' 'not_received' (times null), the statuses an ehr-api from
+ * before 0133 knows. To a caller without both headers (`accepted` false),
+ * 'accepted' is 'received' (times kept) and `acceptedAt` is left out; with
+ * both, every item carries `acceptedAt`, null when there is none.
  */
 function project(id: string, row: ProgressRow | undefined, state: OwnWorkState | undefined,
-  current: boolean): PharmacyProgressItem {
+  current: boolean, accepted: boolean): PharmacyProgressItem {
   const notReceived: PharmacyProgressItem = { sourceEhrPrescriptionId: id, status: 'not_received', receivedAt: null,
-    dispensedAt: null, reversedAt: null };
+    dispensedAt: null, reversedAt: null, ...(accepted ? { acceptedAt: null } : {}) };
   if (!row) return notReceived;
+  const acceptedAt = acceptedTime(row, state);
   const status: PharmacyProgressStatus = row.reversed_at ? 'dispensing_reversed'
     : row.dispensed_at ? 'dispensed'
       : state?.withdrawn === true && state.withdrawnReason === 'sent_elsewhere' ? 'sent_elsewhere'
-        : state?.withdrawn === true ? 'withdrawn' : 'received';
+        : state?.withdrawn === true ? 'withdrawn'
+          : acceptedAt !== null ? 'accepted' : 'received';
   if (!current && status === 'sent_elsewhere') return notReceived;
-  return { sourceEhrPrescriptionId: id, status: !current && status === 'withdrawn' ? 'received' : status,
-    receivedAt: iso(row.accepted_at), dispensedAt: iso(row.dispensed_at), reversedAt: iso(row.reversed_at) };
+  const answered: PharmacyProgressStatus = (!current && status === 'withdrawn') || (!accepted && status === 'accepted')
+    ? 'received' : status;
+  return { sourceEhrPrescriptionId: id, status: answered, receivedAt: iso(row.accepted_at),
+    dispensedAt: iso(row.dispensed_at), reversedAt: iso(row.reversed_at),
+    ...(accepted ? { acceptedAt: iso(acceptedAt) } : {}) };
+}
+
+/**
+ * ORD-4: when a pharmacist here accepted the item, from ORD-4's steps reader
+ * only: its stored acceptance (the accept route, or its first dispensing);
+ * else, for an item not sent automatically (handed in by a pharmacist by
+ * hand), the time it was handed in; else, or when the reader did not answer
+ * (a schema without it, or a failure), none, so it is never guessed.
+ */
+function acceptedTime(row: ProgressRow, state: OwnWorkState | undefined): Date | null {
+  const steps = state?.steps;
+  if (!steps) return null;
+  if (steps.acceptance) return steps.acceptance.acceptedAt;
+  return steps.sentAutomatically ? null : row.accepted_at;
 }
 
 function iso(value: Date | string | null): string | null {
