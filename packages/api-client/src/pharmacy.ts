@@ -178,7 +178,7 @@ export type PharmacyStep = 'received' | 'accepted' | 'dispensed' | 'dispensing_r
 
 export interface PharmacistAcceptance {
   acceptedAt: string;
-  /** Never null: pharmacy-api reads it from columns that are NOT NULL (0023's work item, 0145's acceptance). */
+  /** Never null: pharmacy-api reads it from columns that are NOT NULL (0023's work item, 0144's acceptance). */
   acceptedByMembershipId: string;
   acceptedWith: 'accept' | 'dispensing' | 'order_route' | 'hand_off';
 }
@@ -545,7 +545,7 @@ function malformedField(key: string): PharmacyApiProblem {
  *
  * Lenient for a value. Both are left out, and the item reads as on Release
  * A, when `pharmacyStep` is absent (an older pharmacy-api, or a database
- * without 0145), and when `pharmacyStep` or `acceptedWith` is a string this
+ * without 0144), and when `pharmacyStep` or `acceptedWith` is a string this
  * client does not know (a newer pharmacy-api). listWorkItems parses every
  * item, so refusing one newer value would leave the pharmacist with no work
  * list at all. An unknown step is not looked at further, and neither is the
@@ -559,7 +559,7 @@ function malformedField(key: string): PharmacyApiProblem {
  * - `acceptedWith` not a string;
  * - with a known `acceptedWith`, `acceptedAt` or `acceptedByMembershipId`
  *   not a non-empty string (both are NOT NULL wherever pharmacy-api reads
- *   them: 0023's work item and 0145's acceptance).
+ *   them: 0023's work item and 0144's acceptance).
  * None of these is a newer value, only a broken answer.
  */
 function parseWorkItemStep(value: Record<string, unknown>): Pick<PharmacyWorkItem, 'pharmacyStep' | 'pharmacistAcceptance'> {
