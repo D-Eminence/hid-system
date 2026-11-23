@@ -22,7 +22,7 @@ describe('the generated drug list (drug-generics.generated.ts)', () => {
     expect([...NEML_GENERICS].sort()).toEqual(NEML_GENERICS);
     // Combinations stay whole, and a cleaned name reads as the script's CLEANED_NAMES gives it.
     expect(NEML_GENERICS).toEqual(expect.arrayContaining(['amoxicillin + clavulanic acid', 'artemether + lumefantrine',
-      'activated charcoal', 'soluble insulin', 'compound sodium lactate solution']));
+      'activated charcoal', 'soluble insulin', "ringer's lactate"]));
     expect(NEML_GENERICS).not.toContain('charcoal, activated');
   });
 });

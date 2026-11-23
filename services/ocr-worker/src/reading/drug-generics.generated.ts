@@ -5,7 +5,7 @@
 // drug-generics.spec.ts fails when this file does not match the CSV. Each name is followed by the first CSV row
 // that gives it and the source list(s) it comes from.
 
-/** The 686 generic medicine names of the CSV above (drug-list.ts says where they come from). */
+/** The 682 generic medicine names of the CSV above (drug-list.ts says where they come from). */
 export const GENERATED_DRUG_GENERICS: readonly string[] = [
   'abacavir', // MED-00370 nigeria-eml-8
   'abacavir + dolutegravir + lamivudine', // MED-01420 who-eml-24
@@ -174,7 +174,6 @@ export const GENERATED_DRUG_GENERICS: readonly string[] = [
   'colchicine', // MED-01142 nigeria-eml-8
   'colecalciferol', // MED-01219 nigeria-eml-8
   'colistin', // MED-00259 nigeria-eml-8
-  'compound sodium lactate solution', // MED-01618 who-eml-24
   'crotamiton', // MED-01295 nigeria-eml-8
   'cyclizine', // MED-01095 nigeria-eml-8
   'cyclophosphamide', // MED-00474 nigeria-eml-8
@@ -222,7 +221,6 @@ export const GENERATED_DRUG_GENERICS: readonly string[] = [
   'docetaxel', // MED-00486 nigeria-eml-8
   'docusate sodium', // MED-01105 nigeria-eml-8
   'dolutegravir', // MED-00362 nigeria-eml-8
-  'dolutegravir + lamivudine + tenofovir', // MED-01421 who-eml-24
   'domperidone', // MED-00818 nigeria-eml-8
   'donepezil', // MED-01069 nigeria-eml-8
   'dopamine', // MED-00700 nigeria-eml-8
@@ -232,7 +230,6 @@ export const GENERATED_DRUG_GENERICS: readonly string[] = [
   'edrophonium', // MED-01122 nigeria-eml-8
   'efavirenz', // MED-00363 nigeria-eml-8
   'efavirenz + emtricitabine + tenofovir', // MED-01422 who-eml-24
-  'efavirenz + lamivudine + tenofovir', // MED-01423 who-eml-24
   'eflornithine', // MED-00324 nigeria-eml-8
   'elexacaftor + tezacaftor + ivacaftor', // MED-01456 who-eml-24
   'emicizumab', // MED-01502 who-eml-24
@@ -551,7 +548,6 @@ export const GENERATED_DRUG_GENERICS: readonly string[] = [
   'protamine sulfate', // MED-00131 nigeria-eml-8
   'protionamide', // MED-01276 nigeria-eml-8
   'protirelin', // MED-01305 nigeria-eml-8
-  'prussian blue', // MED-01375 who-eml-24
   'pyrantel', // MED-00156 nigeria-eml-8
   'pyrazinamide', // MED-00338 nigeria-eml-8
   'pyridostigmine', // MED-01124 nigeria-eml-8
