@@ -282,6 +282,43 @@ class CoreTests(unittest.TestCase):
                 self.assertEqual(c.schema_contract(root,['scripts/x.py'],carry=True),{'changed':False})
                 (root/migration).write_text('select 1;')
 
+    def test_a_reviewed_change_to_a_migration_a_failed_release_left_pending_needs_no_carrier(self):
+        # Released commit L has 0001 applied. Release F adds 0002 and 0003 and fails, so both stay
+        # pending. Commit H changes the pending 0002 and re-signs the declaration (as #313 did).
+        with tempfile.TemporaryDirectory() as folder:
+            root=pathlib.Path(folder); m='services/ehr-api/database/migrations/'
+            applied,changed,other=m+'0001_applied.sql',m+'0002_pending.sql',m+'0003_pending.sql'
+            metadata=root/'config/production-schema-compatibility.json'
+            def run(*args): return c.git(*args,cwd=root)
+            def write(name,text): (root/name).parent.mkdir(parents=True,exist_ok=True); (root/name).write_text(text)
+            def declare(*names):
+                c.atomic_json(metadata,{'schema':'hid.schema-compatibility/v1','backward_compatible':True,
+                    'reviewed_by':'HID reviewer','evidence':'existing check','files':{n:c.file_sha(root/n) for n in names}})
+            def commit(message):
+                run('add','-A'); run('-c','user.name=t','-c','user.email=t@example.invalid','commit','-q','-m',message)
+                return run('rev-parse','HEAD')
+            run('init','-q')
+            write(applied,'select 1;'); declare(applied); released=commit('L')
+            write(changed,'select 2;'); write(other,'select 3;'); declare(changed,other); failed=commit('F')
+            write(changed,'select 22;'); declare(changed,other); head=commit('H')
+            def candidate(base):
+                with patch.dict(os.environ,{'BASE_SHA':base}):
+                    contract=c.schema_contract(root,c.changed_paths(root))
+                if contract.get('changed'): c.require_additive_schema_change(root,base,contract)
+                return contract
+            # From the failed commit, only 0002 changed, and as an edit: refused.
+            with self.assertRaisesRegex(c.ReleaseError,'EXACT_SCHEMA_CHANGE_DECLARATION_REQUIRED'): candidate(failed)
+            declare(changed); commit('H2 declares only the edited file')
+            with self.assertRaisesRegex(c.ReleaseError,'ONLY_NEW_REVIEWED_SCHEMA_FILES_ALLOWED'): candidate(failed)
+            run('reset','-q','--hard',head)
+            # From the released commit, both pending migrations are new files: the declaration as signed passes.
+            contract=candidate(released)
+            self.assertEqual(sorted(contract['files']),[changed,other])
+            self.assertNotIn('carried',contract)
+            # An applied migration is still an edit from the released commit, so changing it is refused.
+            write(applied,'select 11;'); declare(applied,changed,other); commit('edits an applied migration')
+            with self.assertRaisesRegex(c.ReleaseError,'ONLY_NEW_REVIEWED_SCHEMA_FILES_ALLOWED'): candidate(released)
+
     def automatic_candidate(self):
         return c.make_candidate(dict(ctx(), approval_mode='automatic'), ['identity-api'],
             {'identity-api': {'image_uri': image('identity-api')}}, {'select': 'success'})

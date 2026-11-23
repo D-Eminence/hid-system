@@ -35,6 +35,7 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       has_changes: ${{ steps.matrix.outputs.has_changes }}
+      released_base: ${{ steps.matrix.outputs.released_base }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -297,9 +298,14 @@ jobs:
         id: candidate
         env:
           SELECTED_COMPONENTS: ${{ needs.select.outputs.matrix }}
+          # The schema change is compared with the select job's base, the commit of the
+          # last run that deployed (releasedBase), so a migration that a failed release
+          # left pending is still a new file and a reviewed change to it needs no carrier
+          # push. Without a released base it falls back to the push's before, as before.
+          RELEASED_BASE_SHA: ${{ needs.select.outputs.released_base }}
           EVENT_BASE_SHA: ${{ github.event.before }}
         run: |
-          export BASE_SHA="${EVENT_BASE_SHA:-$(git rev-parse HEAD^)}"
+          export BASE_SHA="${RELEASED_BASE_SHA:-${EVENT_BASE_SHA:-$(git rev-parse HEAD^)}}"
           node scripts/production-deployment.mjs candidate
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

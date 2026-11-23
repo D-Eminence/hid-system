@@ -11,7 +11,7 @@ import time
 import urllib.request
 from production_deployment_core import (ACCOUNT, REGION, CLUSTER, COMPONENTS, INDEX_KEY, REGISTER_FIELDS, AWS,
     GitHub, Lease, Store, ReleaseError, atomic_json, canonical, changed_paths, context, file_sha, git,
-    image, make_candidate, migration_files, notify, require, RUNTIME_GRANTS, schema_contract, sha, summarize,
+    image, make_candidate, migration_files, notify, require, require_additive_schema_change, schema_contract, sha, summarize,
     task_config_hash, task_payload, validate_candidate, validate_index)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -117,13 +117,7 @@ def candidate():
     contract = schema_contract(ROOT, paths, carry="database-migration" in records)
     if contract.get("changed") and not contract.get("carried"):
         require("database-migration" in records, "MIGRATION_IMAGE_REQUIRED")
-        base = os.environ["BASE_SHA"]
-        for name in contract["files"]:
-            # Changed applied files or RDS substitutions are outside this automatic additive path.
-            # The role bootstrap file is the one existing file a reviewed change may modify.
-            change = "M" if name == RUNTIME_GRANTS else "A"
-            require(git("diff","--diff-filter="+change,"--name-only",base,"HEAD","--",name,cwd=ROOT) == name,
-                    "ONLY_NEW_REVIEWED_SCHEMA_FILES_ALLOWED")
+        require_additive_schema_change(ROOT, os.environ["BASE_SHA"], contract)
     checks = {"select":"success","build":"success","verify-publisher":"success","publish":"success"}
     release = make_candidate(ctx, selected, records, checks, schema=contract)
     atomic_json(ROOT/"release/candidate.json",release)

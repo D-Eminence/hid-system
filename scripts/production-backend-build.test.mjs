@@ -8,7 +8,7 @@ import {fileURLToPath} from 'node:url';
 import {execFileSync} from 'node:child_process';
 import {selectComponents,componentConfig,components,assertScan,runtimePolicyPath,assertPublicationContext,assertAssessmentBinding,assertGatewayVex,gatewayVexPath,
   gatewayBoundFiles,gatewayBoundFileHashes,loadGatewayVex,componentsForPath,changedPaths,selectChanged,maxChangedPaths,
-  outsideTestInputs,releasedBase,releaseBranch,workflowPath} from './production-backend-build.mjs';
+  outsideTestInputs,releasedBase,releaseBranch,selectionOutputs,workflowPath} from './production-backend-build.mjs';
 
 test('publication accepts only the approved Novu backend branch and exact repository context',()=>{
   const env={GITHUB_REPOSITORY:'D-Eminence/hid-system',GITHUB_REPOSITORY_ID:'1317340803',
@@ -672,4 +672,21 @@ test('the select job reads the push base from the Actions API, not from the prev
   assert.ok(/permissions:\n\s+contents: read\n\s+actions: read\n/.test(select));
   assert.ok(select.includes('BASE_SHA: ${{ github.event.pull_request.base.sha }}\n'));
   assert.ok(!select.includes('github.event.before'));
+});
+test('the select job hands its push base to the candidate, and nothing otherwise',()=>{
+  const matrix=JSON.stringify({component:['ehr-api','database-migration']});
+  assert.equal(selectionOutputs(matrix,sha(1),pushEnv),`matrix=${matrix}\nhas_changes=true\nreleased_base=${sha(1)}\n`);
+  for(const [name,base,env] of [['no released base',null,pushEnv],['pull request base',sha(1),{...pushEnv,GITHUB_EVENT_NAME:'pull_request'}],
+    ['dispatch',sha(1),{...pushEnv,GITHUB_EVENT_NAME:'workflow_dispatch'}],['malformed',`${sha(1)}\nmatrix=x`,pushEnv],['zero',sha(0),pushEnv]])
+    assert.ok(selectionOutputs(matrix,base,env).endsWith('\nreleased_base=\n'),name);
+  assert.equal(selectionOutputs(JSON.stringify({component:[]}),sha(1),pushEnv).split('\n')[1],'has_changes=false');
+});
+test('the candidate compares the schema change with the released base before the push\'s before',()=>{
+  const text=readFileSync(join(repoRoot,'.github/workflows/production-backend-images.yml'),'utf8');
+  const select=text.slice(text.indexOf('\n  select:\n'),text.indexOf('\n  build:\n'));
+  assert.ok(select.includes('released_base: ${{ steps.matrix.outputs.released_base }}\n'));
+  const candidate=text.slice(text.indexOf('\n  candidate:\n'),text.indexOf('\n  deploy:\n'));
+  assert.ok(/needs: \[select, /.test(candidate));
+  assert.ok(candidate.includes('RELEASED_BASE_SHA: ${{ needs.select.outputs.released_base }}\n'));
+  assert.ok(candidate.includes('export BASE_SHA="${RELEASED_BASE_SHA:-${EVENT_BASE_SHA:-$(git rev-parse HEAD^)}}"\n'));
 });

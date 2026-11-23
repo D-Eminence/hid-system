@@ -485,9 +485,11 @@ def schema_contract(root, changed_paths, carry=False):
     metadata = pathlib.Path(root)/"config/production-schema-compatibility.json"
     if not affected:
         # A release that fails after its schema is reviewed leaves those migrations
-        # pending, and the next release diffs from the failed commit, so it would
-        # never declare them. Carry the reviewed declaration instead: migrate()
-        # still applies only when production's pending set equals its migrations.
+        # pending. The candidate diffs from the select job's released base (the last
+        # run that deployed), so they stay in its diff; but without a released base
+        # it diffs from the push's before, the failed commit, and would never declare
+        # them. Carry the reviewed declaration then: migrate() still applies only
+        # when production's pending set equals its migrations.
         if not carry or not metadata.exists(): return {"changed":False}
         try:
             contract = schema_contract(root, list(json.loads(metadata.read_text()).get("files",{})))
@@ -506,6 +508,15 @@ def schema_contract(root, changed_paths, carry=False):
     require(RUNTIME_GRANTS not in value["files"] or migration_files(value), "RUNTIME_GRANTS_NEED_A_MIGRATION")
     return {"changed":True,"contract_sha256":file_sha(metadata),"files":value["files"],
             "backward_compatible":True,"evidence":value["evidence"],"reviewed_by":value["reviewed_by"]}
+
+def require_additive_schema_change(root, base, contract):
+    # Changed applied files or RDS substitutions are outside this automatic additive path.
+    # The role bootstrap file is the one existing file a reviewed change may modify.
+    # Against the released base, a migration a failed release left pending is still new.
+    for name in contract["files"]:
+        change = "M" if name == RUNTIME_GRANTS else "A"
+        require(git("diff","--diff-filter="+change,"--name-only",base,"HEAD","--",name,cwd=root) == name,
+                "ONLY_NEW_REVIEWED_SCHEMA_FILES_ALLOWED")
 
 def changed_paths(root):
     base = os.environ.get("BASE_SHA","")

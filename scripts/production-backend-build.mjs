@@ -174,6 +174,15 @@ export function selectChanged(base, diff=gitDiff) {
 // not deploy (deployment switched off) is passed over the same way. Any API error,
 // unexpected answer, no qualifying run among the newest 30, or a base that is not
 // an ancestor of HEAD returns null, and a null base builds every component.
+// The select job also hands this base to the candidate step (released_base), which
+// compares the schema change with it: a migration that a failed release left pending
+// is then still a new file there, so a reviewed change to it needs no carrier push.
+// A pull request, a dispatch or a null base hands over nothing, and the candidate
+// falls back to the push's before.
+export function selectionOutputs(matrix, base, env) {
+  const released=env.GITHUB_EVENT_NAME==='push'&&/^[a-f0-9]{40}$/.test(base??'')&&!/^0+$/.test(base)?base:'';
+  return `matrix=${matrix}\nhas_changes=${JSON.parse(matrix).component.length>0}\nreleased_base=${released}\n`;
+}
 export const releaseBranch = 'staging-novu-ci-20261005';
 export const workflowPath = '.github/workflows/production-backend-images.yml';
 async function githubGet(suffix, env=process.env) {
@@ -255,7 +264,7 @@ async function main(){
     if(requested==='changed') console.error(`Selection base: ${base||'none, so every component is built'}`);
     const selected=requested==='changed'?selectChanged(base):selectComponents([],requested);
     const matrix=JSON.stringify({component:selected});
-    if(e.GITHUB_OUTPUT) writeFileSync(e.GITHUB_OUTPUT,`matrix=${matrix}\nhas_changes=${JSON.parse(matrix).component.length>0}\n`,{flag:'a'});
+    if(e.GITHUB_OUTPUT) writeFileSync(e.GITHUB_OUTPUT,selectionOutputs(matrix,base,e),{flag:'a'});
     console.log(matrix);return;
   }
   const config=componentConfig(c), source=context(), directory=e.BUILD_EVIDENCE_DIR??`build-evidence/${c}`;
