@@ -436,7 +436,7 @@ describe('Pharmacy per-item routes authorize the resource they act on (P12)', ()
         crossFacilityWork: false });
       // D17: to a member who may receive prescriptions the work list also says the late correction is served,
       // and D18 that "We can't complete this order" is.
-      expect(Object.keys(answer)).toEqual(['items', 'receives', 'routesHere', 'lateCorrection', 'cannotComplete',
+      expect(Object.keys(answer)).toEqual(['items', 'since', 'receives', 'routesHere', 'lateCorrection', 'cannotComplete',
         'crossFacilityOrders', 'crossFacilityWork']);
       expect(answer.lateCorrection).toBe(true);
       expect(answer.cannotComplete).toBe(true);
@@ -458,7 +458,7 @@ describe('Pharmacy per-item routes authorize the resource they act on (P12)', ()
     const nulls = await pharmacyHarness({ outcome: 'none', route_id: null }).service.listWorkItems(context);
     // D17's lateCorrection and D18's cannotComplete read nothing: a member who may receive prescriptions gets them
     // whatever the facts say.
-    expect(Object.keys(nulls)).toEqual(['items', 'lateCorrection', 'cannotComplete', 'crossFacilityOrders',
+    expect(Object.keys(nulls)).toEqual(['items', 'since', 'lateCorrection', 'cannotComplete', 'crossFacilityOrders',
       'crossFacilityWork']);
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     try {
@@ -466,7 +466,7 @@ describe('Pharmacy per-item routes authorize the resource they act on (P12)', ()
         databaseError('42883', 'function pharmacy.order_routes_here() does not exist'));
       const answer = await failing.service.listWorkItems(context);
       expect(answer.items).toHaveLength(1);
-      expect(Object.keys(answer)).toEqual(['items', 'lateCorrection', 'cannotComplete', 'crossFacilityOrders',
+      expect(Object.keys(answer)).toEqual(['items', 'since', 'lateCorrection', 'cannotComplete', 'crossFacilityOrders',
         'crossFacilityWork']);
       expect(failing.statements.map((statement) => statement.sql).slice(-3)).toEqual(['savepoint pharmacy_order_route_receives',
         RECEIVES, 'rollback to savepoint pharmacy_order_route_receives']);

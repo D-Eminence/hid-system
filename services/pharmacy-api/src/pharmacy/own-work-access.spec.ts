@@ -12,6 +12,7 @@ import { PharmacyOwnWorkPatientCards } from './own-work-patient-cards';
 import { PharmacyModule } from './pharmacy.module';
 import { PharmacyService, WORK_LIST_QUERY, WORK_LIST_QUERY_0133 } from './pharmacy.service';
 import { PRESCRIPTION_DETAILS_OFF } from './prescription-dispensing-details';
+import { workListSince } from './work-list-window';
 
 /*
  * This facility's own work for its pharmacy staff (0133; owner, 18 November
@@ -78,8 +79,11 @@ const dispensingRow = (workItemId: string) => ({ id: DISPENSING_ID, work_item_id
 const harness = (options: Options = {}) => {
   const rows = [row(1, ada), row(2, bisi), row(3, ada)];
   const statements: string[] = [];
+  /** The parameters each list query was sent, in order (Q123 A: the window's first day). */
+  const listValues: unknown[][] = [];
   const client = { query: jest.fn(async (sql: string, values: unknown[] = []) => {
     statements.push(sql);
+    if (sql === WORK_LIST_QUERY || sql === WORK_LIST_QUERY_0133) listValues.push(values);
     if (sql === WORK_LIST_QUERY) return { rows };
     if (sql === WORK_LIST_QUERY_0133) {
       if (options.listError) throw options.listError;
@@ -141,7 +145,7 @@ const harness = (options: Options = {}) => {
       { patientId?: string; resourceType: string; resourceId: string }, Record<string, unknown> | undefined];
     return { action, patientId: resource.patientId ?? null, resourceType: resource.resourceType, details };
   });
-  return { service, statements, identity, audited };
+  return { service, statements, identity, audited, listValues };
 };
 
 describe('own pharmacy work (0133)', () => {
@@ -347,11 +351,22 @@ describe('own pharmacy work (0133)', () => {
   it('falls back to today\'s list on a schema without 0133\'s reader (42883), after rolling back its savepoint', async () => {
     const noReader = Object.assign(new Error('function pharmacy.own_withdrawn_work_items does not exist'),
       { code: '42883' });
-    const { service, statements } = harness({ listError: noReader });
+    const { service, statements, listValues } = harness({ listError: noReader });
     const page = await service.listWorkItems(pharmacist);
     expect(page.items.map((item) => item.id)).toEqual([id(1), id(2), id(3)]);
     expect(statements.filter((sql) => /from pharmacy\.work_items w|savepoint pharmacy_work_list/.test(sql))).toEqual([
       'savepoint pharmacy_work_list', WORK_LIST_QUERY_0133, 'rollback to savepoint pharmacy_work_list', WORK_LIST_QUERY]);
+    // Both queries reach back to the same day (Q123 A), and the answer says which.
+    expect(listValues).toEqual([[page.since], [page.since]]);
+    expect(page.since).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it('sends 0133\'s list query the window\'s first day, and answers it (Q123 A)', async () => {
+    const { service, listValues } = harness();
+    const before = workListSince();
+    const page = await service.listWorkItems(pharmacist);
+    expect([before, workListSince()]).toContain(page.since);
+    expect(listValues).toEqual([[page.since]]);
   });
 
   it.each(['40001', '40P01', '42501', '57014'])('passes a %s of 0133\'s list query on: no fallback, no list', async (code) => {
@@ -364,10 +379,11 @@ describe('own pharmacy work (0133)', () => {
   });
 
   it('off, lists with today\'s query and no savepoint', async () => {
-    const { service, statements } = harness({ ownWork: false });
-    await service.listWorkItems(pharmacist);
+    const { service, statements, listValues } = harness({ ownWork: false });
+    const page = await service.listWorkItems(pharmacist);
     expect(statements.filter((sql) => /from pharmacy\.work_items w|savepoint pharmacy_work_list/.test(sql)))
       .toEqual([WORK_LIST_QUERY]);
+    expect(listValues).toEqual([[page.since]]);
   });
 
   it('reads and reverses an own dispensing on the own-work basis, asking about the dispensing', async () => {

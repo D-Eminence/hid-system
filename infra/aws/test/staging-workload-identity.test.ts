@@ -19,7 +19,7 @@ const expected: Readonly<Record<string, readonly string[]>> = {
 const tokenDirectory = '/var/run/hid/workload-tokens';
 function synth(environment: 'staging' | 'production' | 'development', mode?: 'economy' | 'fidelity' | 'sleep'): Assembly {
   return Template.fromStack(new HidRegionalStack(new App(), `WorkloadIdentity-${environment}-${mode ?? 'production'}`, {
-    configuration: environmentConfig(environment, mode),
+    configuration: environmentConfig(environment, { stagingMode: mode }),
   })).toJSON() as Assembly;
 }
 const economy = synth('staging', 'economy');
