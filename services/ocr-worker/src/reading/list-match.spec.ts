@@ -49,7 +49,7 @@ describe('the reading lists share one strict match', () => {
     expect(fuzzyDistance('vitamin b1', 'vitamin b2')).toBeNull();
     expect(fuzzyDistance('type 1 diabetes mellitus', 'type 2 diabetes mellitus')).toBeNull();
     expect(fuzzyDistance('chronic hepatitis b', 'chronic hepatitis c')).toBeNull();
-    expect(matchDrugName('Vitamin e')?.generic).toBe('vitamin e');
+    expect(matchDrugName('Vitamin c')?.generic).toBe('ascorbic acid');
     expect(matchDrugName('Vitamin f')).toBeNull();
     expect(matchDiagnosisName('Type 3 diabetes mellitus')).toBeNull();
     expect(matchDiagnosisName('Type 2 diabetes melitus')?.title).toBe('Type 2 diabetes mellitus');

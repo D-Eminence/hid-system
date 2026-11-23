@@ -802,24 +802,36 @@ Each claimed job runs, in order:
      `hardPagePromptVersion` is `-4` only when there is one, else `-3`, the
      text those reads were sent) (`imagePromptVersion` is set only when a page
      that is not a hard page was read from its picture).
-   - *Drug list* (`src/reading/drug-list.ts`). Generic names from the
-     Federal Ministry of Health, Nigeria, "Nigeria Essential Medicines List",
-     7th Edition, 2020 (the latest edition found on 2026-11-05; no 8th edition
-     was found), read from
-     https://extranet.who.int/cpcd/sites/default/files/public_file_repository/NGA_Nigeria-Essential-Medicine-List_2020.pdf
-     (WHO country planning cycle database entry
-     https://extranet.who.int/cpcd/health-legislation/nigeria-essential-medicine-list-7th-edition):
-     the main list, the primary health care lists, the patent and proprietary
-     medicine vendors list, the vitamin appendix, the restricted list and the
-     index; vaccines, sera, diagnostics, devices and disinfectants left out;
-     the list's misprints given in their standard spelling (listed in the file
-     header). Plus the list's own bracketed other names, a few marked British
-     names (frusemide, lignocaine, co-amoxiclav), and the brand table below.
-     Applied only on hard pages. The list never creates a drug: it only
-     checks, and respells, a name the model proposed. A medicine not on the
-     list (a newer or non-essential drug, an unlisted brand) was shown as
-     `[unreadable]` on a hard page until 2026-11-06; it is now shown as read
-     with "?" (*Clean reading*).
+   - *Drug list* (`src/reading/drug-list.ts`). Generic names, since
+     2026-11-23, from the medicine rows of
+     `docs/codes/drafts/hid-medicines-and-lab-tests.csv` (see its README for
+     the sources' details and licences): the Federal Ministry of Health and
+     Social Welfare, Nigeria, "Nigeria Essential Medicines List for Adults",
+     8th edition, 2024 (published on the Ministry's site in August 2025),
+     main list and restricted list (Appendix 2), read from
+     https://health.gov.ng/wp-content/uploads/2025/08/Final-NEML-Adult-8th-Edition.pdf;
+     plus the WHO Model List of Essential Medicines, 24th list, 2025
+     (CC BY-NC-SA 3.0 IGO), for the medicines the Nigeria list lacks. The
+     names are generated into the checked-in
+     `src/reading/drug-generics.generated.ts` by
+     `node scripts/generate-ocr-drug-list.mjs` (run at the repository root
+     after the CSV changes); the worker never reads the CSV, and
+     `drug-generics.spec.ts` fails when the generated file does not match it.
+     Every distinct medicine name of the CSV is listed (vaccines and
+     immunoglobulins included), in its INN spelling, lower case, the source's
+     misprints already corrected in the CSV; a fixed combination is listed as
+     written ("amoxicillin + clavulanic acid"), and the few names with a
+     comma or brackets are rewritten readably by the script ("charcoal,
+     activated" reads "activated charcoal"). Until 2026-11-23 the names were
+     typed by hand from the 7th edition (2020); its names that the new list
+     spells differently are kept as other names (chlorpheniramine, benzhexol,
+     sodium valproate, desferrioxamine, ...). Plus the lists' own bracketed
+     other names, a few marked British names (frusemide, lignocaine,
+     co-amoxiclav), and the brand table below. Applied only on hard pages.
+     The list never creates a drug: it only checks, and respells, a name the
+     model proposed. A medicine not on the list (a newer or non-essential
+     drug, an unlisted brand) was shown as `[unreadable]` on a hard page until
+     2026-11-06; it is now shown as read with "?" (*Clean reading*).
    - *Strict matching* (`src/reading/list-match.ts`, shared by the drug,
      diagnosis and lab test lists). Exact first (each list normalises case,
      spacing, the reading's "?" marks and punctuation; the drug list also
@@ -863,7 +875,10 @@ Each claimed job runs, in order:
      pharmacist's review is pending but does not gate use: every brand is
      shown `Brand? (generic)` (for example `Lonart? (artemether +
      lumefantrine)`) on a hard-page item, which is always `check_carefully`.
-     Only true brand names, never a manufacturer's name.
+     Only true brand names, never a manufacturer's name. A row whose generic
+     is not on the drug list is kept but not used (`drug-list.ts`
+     `BRANDS_WITH_UNLISTED_GENERIC`): since the 8th edition list (2026-11-23)
+     that is Humulin (`insulin`; the list names each insulin on its own).
    - *Diagnoses* (`src/reading/diagnosis-list.ts`). Two lists. (a)
      `ICD11_TITLES`: 134 titles of the ICD-11 for Mortality and Morbidity
      Statistics, reproduced verbatim, with their codes where they have one
@@ -1684,7 +1699,7 @@ written; the structured payload is unchanged.
 * `listVersion`: 16 hex characters, the start of the SHA-256 of a canonical
   JSON serialisation (object keys sorted at every level, arrays in order) of
   the reader's reference lists and tables (`list-version.ts` `READER_LISTS`):
-  the NAFDAC/curated brand rows (`brand-names.ts`), the NEML generics, drug
+  the NAFDAC/curated brand rows (`brand-names.ts`), the drug list generics, drug
   synonyms and unlisted look-alikes (`drug-list.ts`), the ICD-11 titles,
   diagnosis synonyms, ungrounded abbreviations and look-alikes
   (`diagnosis-list.ts`), the lab test names and look-alikes (`lab-list.ts`),
