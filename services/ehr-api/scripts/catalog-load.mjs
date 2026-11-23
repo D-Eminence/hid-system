@@ -6,7 +6,9 @@
 // A refusal (LoadRefusal) leaves nothing written and ends the command with
 // exit 2, as against a failure (exit 1). Its one line ends "nothing loaded";
 // a busy table also asks for a quieter time, worded as the migrations' own
-// busy refusals are.
+// busy refusals are. 0149's own refusals in the transaction (its triggers and
+// the version guard: SQLSTATE 55000, such as CATALOG_ID_CHANGED; a table
+// check: 23514) are refusals too, with the database's message.
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { approvalFor, seedProblems, sha256 } from './catalog-seed.mjs';
@@ -26,6 +28,14 @@ export function refusalLine(refusal) {
 
 /** The busy refusal: this loader's lock or the versions table stayed held for the loader's 5 seconds (55P03). */
 export const BUSY = 'ehr.catalog_versions or another catalogue load stayed busy for 5 seconds';
+
+/**
+ * The SQLSTATEs with which 0149 refuses a row or a change in the load's
+ * transaction: 55000 from its insert triggers (CATALOG_VERSION_SEALED,
+ * CATALOG_ID_RETIRED, CATALOG_ID_CHANGED) and the versions guard, and 23514
+ * from a table check. The transaction rolls back, so nothing is loaded.
+ */
+export const DATABASE_REFUSALS = ['55000', '23514'];
 
 function readJson(file, what) {
   let bytes;
@@ -86,7 +96,36 @@ const LAB_TESTS_INSERT = `insert into ehr.catalog_lab_tests (version_id, list_id
     from jsonb_to_recordset($2::jsonb) as item("listId" text, "codeSystem" text, code text, display text,
       "otherNames" jsonb, specimen text, category text, source text, withdrawn boolean)`;
 const INSERTS = { medicine: MEDICINES_INSERT, lab_test: LAB_TESTS_INSERT };
-// The active version's ids, to find those the new seed drops (Rahman's review of #319, point 4).
+/**
+ * The active version's ids that a seed drops (Rahman's review of #319,
+ * point 4): those it holds back (a row that would not load: the row needs
+ * fixing, not retiring) and those it neither holds nor retires.
+ */
+export function droppedIds(seed, activeIds) {
+  const kept = new Set([...seed.items, ...seed.retired].map((entry) => entry.listId));
+  const heldBack = new Set((seed.heldBack ?? []).map((entry) => entry.listId));
+  const dropped = activeIds.filter((id) => !kept.has(id));
+  return { heldBack: dropped.filter((id) => heldBack.has(id)), notRetired: dropped.filter((id) => !heldBack.has(id)) };
+}
+
+const some = (ids) => `${ids.slice(0, 20).join(', ')}${ids.length > 20 ? ' …' : ''}`;
+
+/** The refusal's words for dropped ids: a held-back one is fixed, never retired; any other is retired with a reason. */
+function droppedLine(seed, active, { heldBack, notRetired }) {
+  const parts = [];
+  if (heldBack.length === 1) {
+    parts.push(`${heldBack[0]} is in the live list but held back in this seed; fix the row, do not retire it`);
+  } else if (heldBack.length > 1) {
+    parts.push(`${some(heldBack)} are in the live list but held back in this seed; fix the rows, do not retire them`);
+  }
+  if (notRetired.length > 0) {
+    parts.push(`the active ${seed.kind} ${active.version} holds ${notRetired.length === 1 ? 'an id' : `${notRetired.length} ids`} `
+      + `this seed drops without retiring: ${some(notRetired)}; list each in the seed's retired ids with a reason`);
+  }
+  return parts.join('; ');
+}
+
+// The active version's ids, to find those the new seed drops.
 const activeIds = (table) => `select versions.version,
     array(select rows.list_id from ${table} rows where rows.version_id = versions.id order by rows.list_id) as ids
   from ehr.catalog_versions versions where versions.kind = $1 and versions.active`;
@@ -96,11 +135,13 @@ const ACTIVE_IDS = { medicine: activeIds('ehr.catalog_medicines'), lab_test: act
  * The load, in one transaction: this loader's advisory lock; SHARE ROW
  * EXCLUSIVE on ehr.catalog_versions (two loaders cannot both switch, while
  * searches go on reading); the refusals that need the database (no 0149, a
- * version already loaded, an id of the active version that the seed drops
- * without retiring it); the new retired ids; the version row (inactive, with
+ * version already loaded, an id of the active version that the seed drops:
+ * held back, or not retired); the new retired ids; the version row (inactive, with
  * the approvals file's sha256); its rows; then the old active version off
  * and the new one on. A lock still held after 5 seconds (55P03) is the busy
- * refusal. dryRun does all of it and rolls back. Returns the evidence line.
+ * refusal, and 0149's own refusals (DATABASE_REFUSALS) are refusals with the
+ * database's message. dryRun does all of it and rolls back. Returns the
+ * evidence line.
  */
 export async function loadSeed(client, { seed, fileSha256, approval, approvalsSha256, dryRun = false }) {
   try {
@@ -115,13 +156,8 @@ export async function loadSeed(client, { seed, fileSha256, approval, approvalsSh
       [seed.kind, seed.version]);
     if (loaded.rowCount > 0) throw new LoadRefusal(`${seed.kind} ${seed.version} is already loaded`);
     const active = (await client.query(ACTIVE_IDS[seed.kind], [seed.kind])).rows[0];
-    const kept = new Set([...seed.items, ...seed.retired].map((entry) => entry.listId));
-    const dropped = (active?.ids ?? []).filter((id) => !kept.has(id));
-    if (dropped.length > 0) {
-      throw new LoadRefusal(`the active ${seed.kind} ${active.version} holds ${dropped.length === 1 ? 'an id' : `${dropped.length} ids`} `
-        + `this seed drops without retiring: ${dropped.slice(0, 20).join(', ')}${dropped.length > 20 ? ' …' : ''}; `
-        + 'list each in the seed\'s retired ids with a reason');
-    }
+    const dropped = droppedIds(seed, active?.ids ?? []);
+    if (dropped.heldBack.length > 0 || dropped.notRetired.length > 0) throw new LoadRefusal(droppedLine(seed, active, dropped));
     const retired = await client.query(`insert into ehr.catalog_retired_codes (kind, list_id, reason)
         select $1, entry."listId", entry.reason from jsonb_to_recordset($2::jsonb) as entry("listId" text, reason text)
         on conflict (list_id) do nothing returning list_id`, [seed.kind, JSON.stringify(seed.retired)]);
@@ -143,6 +179,9 @@ export async function loadSeed(client, { seed, fileSha256, approval, approvalsSh
   } catch (error) {
     await client.query('rollback').catch(() => {});
     if (error?.code === '55P03') throw new LoadRefusal(BUSY, { busy: true });
+    if (DATABASE_REFUSALS.includes(error?.code)) {
+      throw new LoadRefusal(`the database refused the load: ${error.message} (${error.code})`);
+    }
     throw error;
   }
 }
