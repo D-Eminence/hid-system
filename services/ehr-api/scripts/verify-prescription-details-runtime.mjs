@@ -694,6 +694,50 @@ try {
   step('ORD-9: the doctor finds a diagnosis by a word or our other name, an ICD-10 code typed is named back, a Health ID '
     + 'and a member without the permission are refused; the status names the release');
 
+  // ── ORD-9 (0151): the doctor's recent diagnoses ──
+  // Written by ehr-api in each diagnosis save's transaction; read with no X-Purpose-Of-Use (no patient).
+  const recentGet = (who, query = '') => terminologyGet(who, `/diagnoses/recent${query}`);
+  const recentBefore = await recentGet(doctor);
+  assert.deepEqual(expectStatus(recentBefore, 200, 'recent diagnoses before any pick'), { items: [] },
+    'before any diagnosis is saved the recent list is empty');
+  assert.equal(recentBefore.headers.get('cache-control'), 'private, no-store', 'the recent list is never kept');
+  const saveDiagnosis = (code, display, key = freshKey('diagnosis')) => ehrCall(doctor, 'POST', `${enc}/diagnoses`,
+    { codeSystem: 'ICD-11', code, display, clinicalStatus: 'active', verificationStatus: 'provisional' }, { key });
+  const malariaKey = freshKey('diagnosis');
+  expectStatus(await saveDiagnosis('1F40', 'Malaria due to Plasmodium falciparum', malariaKey), 201, 'first diagnosis');
+  expectStatus(await saveDiagnosis('1A07', 'Typhoid fever'), 201, 'second diagnosis');
+  expectStatus(await saveDiagnosis('1F40', 'Malaria due to Plasmodium falciparum'), 201, 'the first again');
+  const replay = await saveDiagnosis('1F40', 'Malaria due to Plasmodium falciparum', malariaKey);
+  assert([200, 201].includes(replay.status), `a replayed save answers from its key: ${replay.status}`);
+  const recentAfter = expectStatus(await recentGet(doctor), 200, 'recent diagnoses after three picks');
+  assert.deepEqual(recentAfter.items.map(item => [item.codeSystem, item.code, item.display, item.useCount]), [
+    ['ICD-11', '1F40', 'Malaria due to Plasmodium falciparum', 2], ['ICD-11', '1A07', 'Typhoid fever', 1]],
+  'newest first, the same pick counted twice, the replay not counted');
+  assert.ok(recentAfter.items.every(item => !Number.isNaN(Date.parse(item.lastUsedAt))), 'each pick says when');
+  assert.deepEqual(expectStatus(await recentGet(doctor, '?limit=1'), 200, 'limit 1').items.map(item => item.code),
+    ['1F40'], 'limit 1 gives the newest pick');
+  const badLimit = await recentGet(doctor, '?limit=51');
+  assert.deepEqual([badLimit.status, badLimit.body?.code], [400, 'VALIDATION_FAILED'], 'limit 51 is refused');
+  const pharmacistRecent = await recentGet(ownPharmacist);
+  assert.equal(pharmacistRecent.status, 403, `a member who records no diagnosis is refused: ${pharmacistRecent.status}`);
+  const recentRows = await all(`select membership_id::text as membership_id, code from ehr.clinician_recent_diagnoses
+    order by code`);
+  assert.deepEqual(recentRows.map(row => row.code), ['1A07', '1F40'], 'two picks are held');
+  assert.equal(new Set(recentRows.map(row => row.membership_id)).size, 1, 'all for the doctor\'s one membership');
+  const recentColumns = await all(`select column_name from information_schema.columns
+    where table_schema = 'ehr' and table_name = 'clinician_recent_diagnoses' and column_name like '%patient%'`);
+  assert.deepEqual(recentColumns, [], 'the recent list holds no patient');
+  const recentAudit = await all(`select details from audit.events where action = 'ehr.terminology.recent-read'
+    and outcome = 'success' order by occurred_at, sequence_id`);
+  assert.deepEqual(recentAudit.map(row => row.details), [{ resultCount: 0 }, { resultCount: 2 }, { resultCount: 1 }],
+    'each read is audited with the count only');
+  assert.equal(Number((await one(`select count(*) from audit.events where action = 'ehr.terminology.recent-read'
+    and (details::text like '%1F40%' or details::text like '%Malaria%')`)).count), 0, 'no audit row holds a pick');
+  evidence.recentDiagnoses = { picks: ['1F40 x2', '1A07 x1'], replayCounted: false, limitOne: '1F40',
+    refused: ['limit 51', 'no ehr.diagnosis.write'], auditRows: recentAudit.length };
+  step('ORD-9: each diagnosis the doctor saves joins their recent list (newest first, counted, a replay not), read '
+    + 'with no purpose of use and never kept; audited with the count only; a member without the permission is refused');
+
   evidence.elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
   evidence.status = 'passed';
   console.log(JSON.stringify(evidence));

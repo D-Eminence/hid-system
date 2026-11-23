@@ -22,6 +22,14 @@ export interface TransactionOptions {
   isolationLevel?: 'READ COMMITTED' | 'REPEATABLE READ' | 'SERIALIZABLE';
 }
 
+/** Who a staff transaction runs as (withStaffTransaction): no patient, no purpose of use. */
+export interface StaffTransactionContext {
+  subject: string;
+  facilityId: string;
+  membershipId: string;
+  correlationId: string;
+}
+
 /** How many times a SERIALIZABLE transaction PostgreSQL cancels is run in all (as pharmacy-api). */
 export const SERIALIZABLE_ATTEMPTS = 12;
 
@@ -129,6 +137,37 @@ export class DatabaseService implements OnApplicationShutdown {
           context.purposeOfUse,
           OWN_FACILITY_WORK,
         ],
+      );
+      const result = await operation(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * A staff member's own work that reads no patient (ORD-9's recent
+   * diagnoses, 0151): the actor, facility and membership the guards
+   * established, and no purpose of use, as there is no patient.
+   */
+  async withStaffTransaction<Result>(
+    staff: StaffTransactionContext,
+    operation: (client: PoolClient) => Promise<Result>,
+  ): Promise<Result> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `select
+           set_config('app.actor_subject', $1, true),
+           set_config('app.facility_id', $2, true),
+           set_config('app.correlation_id', $3, true),
+           set_config('app.membership_id', $4, true)`,
+        [staff.subject, staff.facilityId, staff.correlationId, staff.membershipId],
       );
       const result = await operation(client);
       await client.query('COMMIT');

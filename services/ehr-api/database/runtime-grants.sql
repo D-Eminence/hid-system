@@ -1915,3 +1915,13 @@ revoke all on ehr.catalog_versions, ehr.catalog_medicines, ehr.catalog_lab_tests
 grant execute on function ehr.search_catalog_diagnoses(text, integer) to hid_ehr_runtime, hid_schema_test_runtime;
 revoke all on function ehr.search_catalog_diagnoses(text, integer) from public;
 revoke all on ehr.catalog_diagnoses from public;
+
+-- Recent diagnoses (0151, ORD-9 of the Akos EHR plan, second slice, first
+-- part; sizing note on hid-system#258, 23 November 2026), exactly as 0151
+-- grants them: the record and the read to the EHR runtime and the schema
+-- test runtime; no privilege on the table for any runtime (row-level
+-- security on, no policy: only the two functions, as its owner, use it).
+grant execute on function ehr.record_recent_diagnosis(text, text, text), ehr.recent_diagnoses(integer)
+  to hid_ehr_runtime, hid_schema_test_runtime;
+revoke all on function ehr.record_recent_diagnosis(text, text, text), ehr.recent_diagnoses(integer) from public;
+revoke all on ehr.clinician_recent_diagnoses from public;

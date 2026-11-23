@@ -62,6 +62,7 @@ interface Tables {
   revisions: Row[];
   vitals: Row[];
   diagnoses: Row[];
+  recent: Row[];
 }
 
 /**
@@ -70,9 +71,12 @@ interface Tables {
  * transaction ends without an error (all or nothing), transactions run one
  * at a time, and statements are answered as PostgreSQL would for the rows
  * the services read. Inserting a diagnosis with code 'FAIL' breaks a CHECK.
+ * ehr.record_recent_diagnosis (0151) adds to `recent`, or fails with the
+ * code given to failRecent.
  */
 function fakeDatabase() {
-  let tables: Tables = { keys: [], encounters: [], notes: [], revisions: [], vitals: [], diagnoses: [] };
+  let tables: Tables = { keys: [], encounters: [], notes: [], revisions: [], vitals: [], diagnoses: [], recent: [] };
+  let recentFailure: string | undefined;
   const counters: Record<string, number> = {};
   const nextId = (table: string) => {
     counters[table] = (counters[table] ?? 0) + 1;
@@ -81,6 +85,7 @@ function fakeDatabase() {
   };
   const audits: Row[] = [];
   const log: string[] = [];
+  const savepoints: string[] = [];
   let queue: Promise<unknown> = Promise.resolve();
 
   function client(work: Tables, pendingAudits: Row[], correlationId: string) {
@@ -191,6 +196,15 @@ function fakeDatabase() {
         if (/^select .* from ehr\.diagnoses where id = \$1 and patient_id = \$2 and facility_id = \$3$/.test(sql)) {
           return one(work.diagnoses.filter((row) => row.id === values[0]));
         }
+        if (/^(savepoint|release savepoint|rollback to savepoint) ehr_recent_diagnosis$/.test(sql)) {
+          savepoints.push(sql.replace(/ ehr_recent_diagnosis$/, ''));
+          return one([]);
+        }
+        if (sql === 'select ehr.record_recent_diagnosis($1, $2, $3)') {
+          if (recentFailure) throw Object.assign(new Error('recent diagnoses failed'), { code: recentFailure });
+          work.recent.push({ codeSystem: values[0], code: values[1], display: values[2] });
+          return one([{ record_recent_diagnosis: '' }]);
+        }
         throw new Error(`Unexpected statement in the fake database: ${sql.slice(0, 120)}`);
       }),
       pendingAudits,
@@ -227,10 +241,11 @@ function fakeDatabase() {
   const diagnoses = new DiagnosesService(repository);
   const consultations = new ConsultationsService(repository, encounters, notes, vitals, diagnoses);
   return {
-    consultations, encounters, notes, vitals, diagnoses, identity, database, audits, log,
+    consultations, encounters, notes, vitals, diagnoses, identity, database, audits, log, savepoints,
     tables: () => tables,
     seedEncounter: (row: Row) => { tables.encounters.push(row); },
     refuseConsent: () => { allowed = false; },
+    failRecent: (code: string) => { recentFailure = code; },
   };
 }
 
@@ -357,6 +372,41 @@ describe('EHR-C5 one-call consultation (service)', () => {
     expect(tables.keys.every((row) => row.state === 'completed' && row.key === KEY)).toBe(true);
   });
 
+  it('records each diagnosis in the member\'s recent diagnoses (0151), in the save\'s transaction, in a savepoint', async () => {
+    const db = fakeDatabase();
+    await db.consultations.create(contextFor('correlation-0001'), patientId, body(), KEY);
+    expect(db.tables().recent).toEqual([
+      { codeSystem: 'ICD-10', code: 'B50.9', display: 'Malaria (test)' },
+      { codeSystem: 'ICD-10', code: 'R50.9', display: 'Fever (test)' }]);
+    expect(db.savepoints).toEqual(
+      ['savepoint', 'release savepoint', 'savepoint', 'release savepoint']);
+    // A replay records nothing new (the replay test checks every table).
+    await db.consultations.create(contextFor('correlation-0002'), patientId, body(), KEY);
+    expect(db.tables().recent).toHaveLength(2);
+  });
+
+  it('saves the consultation when a pick cannot be recorded; a serialization failure still fails it whole', async () => {
+    for (const code of ['42883', '42501', '23514']) {
+      const db = fakeDatabase();
+      db.failRecent(code);
+      const saved = await db.consultations.create(contextFor('correlation-0001'), patientId, body(), KEY);
+      expect(saved.diagnoses).toHaveLength(2);
+      expect(db.tables().diagnoses).toHaveLength(2);
+      expect(db.tables().recent).toEqual([]);
+      expect(db.savepoints).toEqual(
+        ['savepoint', 'rollback to savepoint', 'savepoint', 'rollback to savepoint']);
+      expect(db.audits.map((row) => row.action)).toEqual(['ehr.encounter.create', 'ehr.note.create',
+        'ehr.vital.create', 'ehr.diagnosis.create', 'ehr.diagnosis.create']);
+    }
+    for (const code of ['40001', '40P01']) {
+      const db = fakeDatabase();
+      db.failRecent(code);
+      await expect(db.consultations.create(contextFor('correlation-0001'), patientId, body(), KEY)).rejects.toBeDefined();
+      expect(db.tables()).toEqual({ keys: [], encounters: [], notes: [], revisions: [], vitals: [], diagnoses: [],
+        recent: [] });
+    }
+  });
+
   it('writes exactly the audit rows the separate routes write', async () => {
     const together = fakeDatabase();
     await together.consultations.create(contextFor('correlation-0001'), patientId, body(), KEY);
@@ -384,7 +434,7 @@ describe('EHR-C5 one-call consultation (service)', () => {
     const failing = body({ diagnoses: [diagnosis(), diagnosis({ code: 'FAIL' })] });
     await expect(db.consultations.create(contextFor('correlation-0001'), patientId, failing, KEY))
       .rejects.toMatchObject({ status: 400, code: 'INVALID_CLINICAL_DATA' });
-    expect(db.tables()).toEqual({ keys: [], encounters: [], notes: [], revisions: [], vitals: [], diagnoses: [] });
+    expect(db.tables()).toEqual({ keys: [], encounters: [], notes: [], revisions: [], vitals: [], diagnoses: [], recent: [] });
     expect(db.audits).toEqual([]);
 
     // The key was not used up: the corrected request goes through with it.
@@ -511,7 +561,7 @@ describe('EHR-C5 one-call consultation (service)', () => {
     const yesterday = body({ visit: { ...body().visit, startedAt: '2026-11-17T09:30:00.000Z' } });
     await expect(db.consultations.create(contextFor('correlation-0001'), patientId, yesterday, KEY))
       .rejects.toMatchObject({ status: 400, code: 'REUSE_OPEN_VISIT_STARTED_AT_NOT_TODAY' });
-    expect(db.tables()).toEqual({ keys: [], encounters: [], notes: [], revisions: [], vitals: [], diagnoses: [] });
+    expect(db.tables()).toEqual({ keys: [], encounters: [], notes: [], revisions: [], vitals: [], diagnoses: [], recent: [] });
     expect(db.audits).toEqual([]);
     // A saved consultation started yesterday, retried today under a new key, is refused the same way.
     db.encounters.now = () => new Date('2026-11-17T10:00:00Z');

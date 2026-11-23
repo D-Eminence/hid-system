@@ -8,12 +8,15 @@ import { createValidationPipe } from '../../common/validation-pipe';
 import type { DatabaseService } from '../../database/database.service';
 import { EhrModule } from '../ehr.module';
 import { CATALOG_CACHE_CONTROL, CatalogController, TerminologyController } from './catalog.controller';
-import { SearchCatalogLabTestsQueryDto, SearchCatalogMedicinesQueryDto, SearchDiagnosesQueryDto } from './catalog.dto';
+import {
+  RecentDiagnosesQueryDto, SearchCatalogLabTestsQueryDto, SearchCatalogMedicinesQueryDto, SearchDiagnosesQueryDto,
+} from './catalog.dto';
 import { CatalogModule } from './catalog.module';
 import {
   CATALOG_SEARCHES_PER_WINDOW, CATALOG_SEARCH_WINDOW_MS, CatalogService, DIAGNOSES_SQL, LAB_TESTS_SQL, MEDICINES_SQL,
   STATUS_SQL, looksLikePersonIdentifier, medicineDisplay, typedIcd10,
 } from './catalog.service';
+import { RECENT_DIAGNOSES_SQL, RecentDiagnosesService, type RecentDiagnosesCaller } from './recent-diagnoses.service';
 
 // Fictional identifiers only. Medicine and test names are list facts, not patient data.
 const membershipA = '123e4567-e89b-42d3-a456-426614174004';
@@ -438,5 +441,109 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       expect(warn).toHaveBeenCalledTimes(code === '42883' || code === '42P01' ? 0 : 2);
       warn.mockRestore();
     });
+  });
+});
+
+describe('ORD-9 (0151): recent diagnoses', () => {
+  const facilityId = '123e4567-e89b-42d3-a456-426614174001';
+  const caller: RecentDiagnosesCaller = { subject: 'staff:test-doctor', accountId: '123e4567-e89b-42d3-a456-426614174002',
+    organizationId: '123e4567-e89b-42d3-a456-426614174003', facilityId, membershipId: membershipA,
+    correlationId: 'correlation-0151' };
+  const lastUsedAt = new Date('2026-11-23T10:42:00.000Z');
+
+  /** withStaffTransaction with one client; the audit row is written with that client. */
+  function fakeStaff(answer: readonly Record<string, unknown>[] | Error, auditFailure?: Error) {
+    const calls: { sql: string; values: unknown[] }[] = [];
+    const audits: { client: unknown; event: Record<string, unknown> }[] = [];
+    const client = { query: jest.fn(async (sql: string, values: unknown[] = []) => {
+      calls.push({ sql, values });
+      if (answer instanceof Error) throw answer;
+      return { rows: answer };
+    }) };
+    const database = {
+      withStaffTransaction: jest.fn(async (_staff: unknown, operation: (c: typeof client) => Promise<unknown>) =>
+        operation(client)),
+      withTransaction: jest.fn(async () => { throw new Error('recent diagnoses take no purpose of use'); }),
+    } as unknown as DatabaseService;
+    const audit = { recordWithClient: jest.fn(async (used: unknown, event: Record<string, unknown>) => {
+      if (auditFailure) throw auditFailure;
+      audits.push({ client: used, event });
+    }) };
+    return { service: new RecentDiagnosesService(database, audit as never), database, client, calls, audits };
+  }
+
+  it('GET ehr/terminology/diagnoses/recent: ehr.diagnosis.write, no purpose header, not kept, in the catalogue module', () => {
+    const handler = (TerminologyController.prototype as unknown as Record<string, object>).recentDiagnoses as object;
+    expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe('diagnoses/recent');
+    expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(RequestMethod.GET);
+    expect(Reflect.getMetadata(REQUIRED_PERMISSIONS, handler)).toEqual(['ehr.diagnosis.write']);
+    expect(Reflect.getMetadata(AUDIT_FAILURES_ONLY, handler)).toBe(true);
+    expect(Reflect.getMetadata(HEADERS_METADATA, handler)).toBeUndefined();
+    expect(Reflect.getMetadata('providers', CatalogModule)).toEqual([CatalogService, RecentDiagnosesService]);
+  });
+
+  it('the route reads the guards\' actor at this facility, sets no header and needs no X-Purpose-Of-Use', async () => {
+    const { service } = fakeStaff([]);
+    const list = jest.spyOn(service, 'list');
+    const controller = new TerminologyController(new CatalogService(fakeDatabase([]).database), service);
+    const setHeader = jest.fn();
+    const request = { correlationId: 'correlation-0151', facilityId, res: { setHeader }, header: () => undefined,
+      actor: { subject: caller.subject, accountId: caller.accountId,
+        facility: { membershipId: membershipA, organizationId: caller.organizationId } } } as unknown as HidRequest;
+    await expect(controller.recentDiagnoses(request, Object.assign(new RecentDiagnosesQueryDto(), { limit: 5 })))
+      .resolves.toEqual({ items: [] });
+    expect(list).toHaveBeenCalledWith(caller, 5);
+    expect(setHeader).not.toHaveBeenCalled();
+    expect(() => controller.recentDiagnoses({ ...request, actor: undefined } as unknown as HidRequest,
+      new RecentDiagnosesQueryDto())).toThrow('Request context was not established by security guards');
+  });
+
+  it('limit is 1-50, default 20', async () => {
+    await expect(validate(RecentDiagnosesQueryDto, {})).resolves.toMatchObject({ limit: 20 });
+    await expect(validate(RecentDiagnosesQueryDto, { limit: '50' })).resolves.toMatchObject({ limit: 50 });
+    for (const limit of ['0', '51', '2.5', 'ten']) {
+      await expect(validate(RecentDiagnosesQueryDto, { limit })).rejects.toMatchObject({ status: 400 });
+    }
+    await expect(validate(RecentDiagnosesQueryDto, { limit: null }, 'body')).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('answers the contract\'s shape, newest first as read, and audits the read with the count only, in its transaction', async () => {
+    const { service, database, client, calls, audits } = fakeStaff([
+      { code_system: 'ICD-11', code: '1F40', display: 'Malaria due to Plasmodium falciparum', last_used_at: lastUsedAt,
+        use_count: 14 },
+      { code_system: 'ICD-10', code: 'B50.9', display: 'Malaria (test)', last_used_at: lastUsedAt, use_count: 1 },
+    ]);
+    await expect(service.list(caller, 20)).resolves.toEqual({ items: [
+      { codeSystem: 'ICD-11', code: '1F40', display: 'Malaria due to Plasmodium falciparum',
+        lastUsedAt: '2026-11-23T10:42:00.000Z', useCount: 14 },
+      { codeSystem: 'ICD-10', code: 'B50.9', display: 'Malaria (test)', lastUsedAt: '2026-11-23T10:42:00.000Z',
+        useCount: 1 },
+    ] });
+    expect(database.withStaffTransaction).toHaveBeenCalledWith(caller, expect.any(Function));
+    expect(calls).toEqual([{ sql: RECENT_DIAGNOSES_SQL, values: [20] }]);
+    expect(audits).toEqual([{ client, event: {
+      correlationId: 'correlation-0151', actorType: 'staff', actorSubject: caller.subject, actorAccountId: caller.accountId,
+      actorMembershipId: membershipA, organizationId: caller.organizationId, facilityId,
+      action: 'ehr.terminology.recent-read', resourceType: 'recent-diagnoses', outcome: 'success',
+      details: { resultCount: 2 } } }]);
+    expect(JSON.stringify(audits)).not.toMatch(/1F40|B50|Malaria/);
+  });
+
+  it.each(['42883', '42P01', '57014', '42501'])('%s is 503 CATALOG_UNAVAILABLE; a schema without 0151 is not logged', async (code) => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const { service, audits } = fakeStaff(databaseError(code));
+    const problem = await problemOf(service.list(caller, 20));
+    expect([problem.getStatus(), problem.code]).toEqual([503, 'CATALOG_UNAVAILABLE']);
+    expect(audits).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(code === '42883' ? 0 : 1);
+    warn.mockRestore();
+  });
+
+  it('a read whose audit row cannot be written is refused (503), never answered unaudited', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const { service } = fakeStaff([], databaseError('53300'));
+    const problem = await problemOf(service.list(caller, 20));
+    expect([problem.getStatus(), problem.code]).toEqual([503, 'CATALOG_UNAVAILABLE']);
+    warn.mockRestore();
   });
 });

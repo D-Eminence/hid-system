@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
@@ -35,6 +35,8 @@ const COLUMNS = `
 
 @Injectable()
 export class DiagnosesService {
+  private readonly logger = new Logger(DiagnosesService.name);
+
   constructor(private readonly repository: ClinicalRepository) {}
 
   list(context: DataAccessContext, patientId: string, encounterId: string, query: TimelineQueryDto) {
@@ -106,10 +108,38 @@ export class DiagnosesService {
           ],
         );
         const row = this.single(result.rows[0]);
+        await this.recordRecent(client, context, row);
         return { value: row, id: row.id };
       },
       (id) => this.findById(client, context, patientId, id),
     );
+  }
+
+  /**
+   * ORD-9 (0151): the member's recent diagnoses, written in the save's own
+   * transaction (the route's and EHR-C5's consultation's) and never failing
+   * it. ehr.record_recent_diagnosis records only for a membership holding
+   * ehr.diagnosis.write at the session's facility, and nothing with no code;
+   * it holds no patient. It runs in a savepoint: a schema without 0151
+   * (42883) or any other failure is rolled back to it and the diagnosis
+   * saves as before. A serialization failure or deadlock is passed on, so
+   * the whole transaction is refused, never half-undone. An idempotent
+   * replay records nothing.
+   */
+  private async recordRecent(client: PoolClient, context: DataAccessContext, row: DiagnosisRow): Promise<void> {
+    await client.query('savepoint ehr_recent_diagnosis');
+    try {
+      await client.query('select ehr.record_recent_diagnosis($1, $2, $3)', [row.codeSystem, row.code, row.display]);
+      await client.query('release savepoint ehr_recent_diagnosis');
+    } catch (error) {
+      const code = sqlState(error);
+      if (code === '40001' || code === '40P01') throw error;
+      await client.query('rollback to savepoint ehr_recent_diagnosis');
+      if (code !== '42883') {
+        this.logger.warn({ message: 'A recent diagnosis could not be recorded', sqlState: code,
+          correlationId: context.correlationId });
+      }
+    }
   }
 
   update(
@@ -180,4 +210,9 @@ export class DiagnosesService {
     if (!row) throw new DomainProblem(404, 'DIAGNOSIS_NOT_FOUND', 'Diagnosis was not found');
     return row;
   }
+}
+
+function sqlState(error: unknown): string {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  return typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? code : 'unknown';
 }

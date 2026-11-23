@@ -1856,8 +1856,48 @@ file's seed in `docs/codes/catalog-approvals.json`.
 - **Measured** with the full release loaded on throwaway PostgreSQL 16: the
   load takes about 0.4 s; searches take 4–42 ms, the broadest two-letter `q`
   included.
-- **Not in this slice:** recent diagnoses, diagnoses by name only and
-  `codeStatus`, which alter `ehr.diagnoses` and need a lock plan.
+- **Not in this slice:** recent diagnoses (the next slice, below), and
+  diagnoses by name only and `codeStatus`, which alter `ehr.diagnoses` and
+  need a lock plan.
+
+### Second slice, first part: recent diagnoses (0151, draft, not live)
+
+Built on 23 Nov 2026 (lane D), on 0150 (#320), as the sizing note on
+hid-system#258 (14:18 UTC) set out. The number 0151 is provisional. No
+live table is altered.
+
+- **Database (0151):** `ehr.clinician_recent_diagnoses` (membership,
+  facility, code system, code, display, last used, count; key membership,
+  code system and code). It has no foreign key, so no live table is locked,
+  and no patient id. Row-level security is on with no policy and no grant:
+  only two SECURITY DEFINER functions use it.
+  - `ehr.record_recent_diagnosis(code system, code, display)` reads the
+    session's actor, membership and facility (as ehr-api sets them) and
+    records only for a membership holding `ehr.diagnosis.write` at that
+    facility (`auth.membership_has_permission`), and nothing with no code.
+    The same pick again updates its display, time and count. At most 200
+    per membership; the oldest drop off.
+  - `ehr.recent_diagnoses(limit)` gives the session's membership's picks at
+    its facility, newest first, and none without the permission. 22023
+    `RECENT_DIAGNOSES_INVALID` outside 1-50.
+  - EXECUTE on both to the EHR runtime and the schema test runtime only.
+- **Recording:** `DiagnosesService.createInTransaction` (the route's and
+  EHR-C5's consultation's) calls the record after the insert, in a
+  savepoint, so it never fails the save. A schema without 0151 (42883), or
+  any other failure, is rolled back to the savepoint and the diagnosis
+  saves as before. A serialization failure or deadlock still fails the
+  whole transaction. An idempotent replay records nothing.
+- **Route:** `GET /api/v1/ehr/terminology/diagnoses/recent?limit=` as
+  above. It takes `X-Facility-Id` and no purpose header, and needs
+  `ehr.diagnosis.write`. The answer is never kept (the global
+  `private, no-store`).
+  - The read and its audit row (`ehr.terminology.recent-read`, details
+    `{ resultCount }` only) commit in one transaction. A read whose audit
+    row cannot be written is refused.
+  - A schema without 0151, or any database failure, answers 503
+    `CATALOG_UNAVAILABLE`. The screen then shows the empty field as before.
+  - A refusal is audited by the interceptor, as for the search.
+- **Not in this slice:** diagnoses by name only and `codeStatus`.
 
 
 ### Target
