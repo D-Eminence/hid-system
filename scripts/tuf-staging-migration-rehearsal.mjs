@@ -3,7 +3,7 @@
 // This command can only create its own disposable Unix-socket PostgreSQL cluster.
 // It intentionally has no database URL, cloud, credential, or production mode.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -260,16 +260,27 @@ try {
   assert(!upgradePurposesBefore.some(row => ['direct-care', 'emergency', 'healthcare-operations'].includes(row.value.code)));
   // Owner Q113 A (18 November 2026): 0136 changes the role table only while no
   // real (non-sealed) staff are active, and stops, changing nothing, otherwise.
-  // This historical baseline keeps one synthetic admin membership at a real
-  // facility, so the release's dry run must stop at 0136 here, and leave every
-  // row as it was. Production has no real staff active (the owner's answer), so
-  // the rehearsal then ends that synthetic membership, as production stands,
-  // and goes on with the upgrade.
+  // Owner Q134 B (22 November 2026) raised lines 13, 14, 19, 20 and 21 to the
+  // counts production printed (admins: 9), so this baseline's one synthetic
+  // admin at a real facility is within them. The same membership also gets a
+  // receptionist role here, which line 1 (maximum 0) counts, so the release's
+  // dry run must still stop at 0136, name line 1 but not line 19, and leave
+  // every row as it was. The rehearsal then ends that synthetic membership and
+  // goes on with the upgrade.
+  await withClient('hid_upgrade', client => client.query(`begin;
+    set local session_replication_role = replica;
+    insert into auth.account_roles(id,account_id,role_code,scope_type,membership_id,facility_id,grant_reason)
+    values ('c4000000-0000-4000-8000-000000000136','b0000000-0000-4000-8000-000000000001','receptionist','facility',
+      'b6000000-0000-4000-8000-000000000001','b2000000-0000-4000-8000-000000000001','Synthetic 0136 guard role');
+    commit;`));
   migration('existing baseline stops at 0136 while real staff are active', 'apply-migrations.mjs', 'hid_upgrade',
     {}, 'failure', ['--dry-run']);
   const q113Stop = logs.at(-1);
-  assert.match(`${q113Stop.stdout}\n${q113Stop.stderr}`,
-    /0136 stopped, nothing was changed: real staff would be affected[^\n]*line 19 \(admin loses lab\.work-item\.read\) is now 1 \(1 staff logins\)/);
+  const q113Output = `${q113Stop.stdout}\n${q113Stop.stderr}`;
+  assert.match(q113Output,
+    /0136 stopped, nothing was changed: real staff would be affected[^\n]*line 1 \(receptionist gains ehr\.document\.write\) is now 1 \(1 staff logins\)/);
+  assert.doesNotMatch(q113Output.split('\n').find(line => line.includes('0136 stopped')) ?? '', /line 19 \(/,
+    'one admin is within the owner\'s Q134 B maximum for line 19');
   assert.deepEqual((await withClient('hid_upgrade', client => client.query(`select count(*)::integer as count
     from migration.schema_migrations where version like '0136_%'`))).rows[0], { count: 0 });
   await withClient('hid_upgrade', client => client.query(`begin;
@@ -592,6 +603,106 @@ try {
       live_commit: process.env.HID_REHEARSAL_LIVE_COMMIT ?? 'not named', live_schema: liveLast,
       live_verifiers: liveVerifiers, live_verifier_guards_changed: guardsChanged,
       dependencies_from_this_checkout: linked, points: results };
+
+    // The release's dry run on the live base (coordinator, #258, 20 November 2026, after Release A's production
+    // dry run stopped at 01:33 UTC). That dry run runs every pending file in one transaction, so once it holds an
+    // earlier file's locks a later file makes one NOWAIT attempt, and a request in flight at that instant stopped
+    // it. This branch's runner rolls back and runs the dry run again (dry-run-attempts.mjs). Here, on a copy of
+    // the live base with a real (unsealed) facility's staff: while 0136 is pending, its stop for active real staff
+    // (owner Q113 A) is not retried; with those staff ended, a reader of identity.consent_grants (the table that
+    // stopped production's dry run, read by identity-api on every chart opening) is in flight, and the dry run
+    // must retry and pass; and with that reader never leaving, it must stop after its bound with the file's own
+    // refusal. Each run must leave nothing applied.
+    const dryDb = 'hid_live_dry';
+    command('copy the live database for the dry runs', join(pgBindir, 'createdb'), ['-T', 'hid_live_base', dryDb]);
+    const pendingFiles = files.slice(liveFiles.length);
+    const appliedBeyondLive = async () => (await withClient(dryDb, (client) => client.query(
+      'select count(*)::integer as count from migration.schema_migrations where version > $1',
+      [liveFiles.at(-1)]))).rows[0].count;
+    const realStaff = ['admin', 'doctor', 'nurse', 'receptionist'];
+    await withClient(dryDb, (client) => client.query(`begin;
+      insert into identity.organizations (id, name, slug, active) values
+        ('fa000000-0000-4000-8000-0000000000a1', 'Fictional Clinic Group', 'fictional-clinic-group-live-dry', true);
+      insert into identity.facilities (id, organization_id, name, code, timezone, active, lifecycle_status) values
+        ('fa100000-0000-4000-8000-0000000000f1', 'fa000000-0000-4000-8000-0000000000a1', 'Fictional Clinic', 'FIC-LD1',
+         'Africa/Lagos', true, 'verified');
+      ${realStaff.map((role, index) => `
+      insert into auth.accounts (id, subject, email, status, password_hash, password_algorithm, token_version)
+      values ('fa200000-0000-4000-8000-00000000000${index + 1}', 'synthetic:live-dry:${role}', '${role}@live-dry.invalid',
+        'active', 'synthetic-hash', 'argon2id', 1);
+      insert into identity.staff (id, account_id, full_name, email, verification_status, default_role, active)
+      values ('fa400000-0000-4000-8000-00000000000${index + 1}', 'fa200000-0000-4000-8000-00000000000${index + 1}',
+        'Fictional ${role}', '${role}@live-dry.invalid', 'verified', '${role}', true);
+      insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
+        membership_role, app_role, is_primary, active)
+      values ('fa500000-0000-4000-8000-00000000000${index + 1}', 'fa400000-0000-4000-8000-00000000000${index + 1}',
+        'fa200000-0000-4000-8000-00000000000${index + 1}', 'fa000000-0000-4000-8000-0000000000a1',
+        'fa100000-0000-4000-8000-0000000000f1', '${role}', '${role}', true, true);
+      insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
+      values (gen_random_uuid(), 'fa200000-0000-4000-8000-00000000000${index + 1}', '${role}', 'facility',
+        'fa500000-0000-4000-8000-00000000000${index + 1}', 'fa100000-0000-4000-8000-0000000000f1', 'Synthetic real-facility role');`).join('')}
+      commit;`));
+    const liveDry = { pending: pendingFiles.length };
+    const dryOutput = () => { const entry = logs.at(-1); return `${entry.stdout}\n${entry.stderr}`; };
+    const attemptLines = (output) => output.split('\n').filter((line) => /^Dry run attempt \d+ of \d+: /.test(line));
+    if (pendingFiles.includes('0136_role_permission_changes.sql')) {
+      migration('live base dry run stops at 0136 while real staff are active', 'apply-migrations.mjs', dryDb,
+        {}, 'failure', ['--dry-run']);
+      const output = dryOutput();
+      assert.match(output, /Migration 0136_role_permission_changes\.sql: 0136 stopped, nothing was changed: real staff would be affected/);
+      assert.deepEqual(attemptLines(output), [], 'The stop for real staff is not a busy table, so it is not retried');
+      assert.equal(await appliedBeyondLive(), 0);
+      liveDry.real_staff_stop = 'stopped at 0136, not retried, nothing applied';
+    } else {
+      liveDry.real_staff_stop = 'not run: 0136 is not pending on this live base';
+    }
+    await withClient(dryDb, (client) => client.query(`begin;
+      set local session_replication_role = replica;
+      update identity.staff_facility_memberships set active = false where facility_id = 'fa100000-0000-4000-8000-0000000000f1';
+      commit;`));
+    // A reader in flight: its own psql process (a synchronous child would stall this one's event loop), holding
+    // ACCESS SHARE on identity.consent_grants for holdSeconds from its first statement.
+    const reader = async (holdSeconds) => {
+      const child = spawn(join(pgBindir, 'psql'), ['-X', '-q', '-d', dryDb, '-c',
+        `begin; select count(*) from identity.consent_grants; select pg_sleep(${holdSeconds}); commit;`],
+      { env: baseEnvironment, stdio: 'ignore' });
+      const exited = new Promise((done) => child.on('exit', done));
+      for (let tries = 0; ; tries += 1) {
+        const held = (await withClient(dryDb, (client) => client.query(`select pid from pg_locks
+          where locktype = 'relation' and relation = 'identity.consent_grants'::regclass and granted
+            and pid <> pg_backend_pid() and mode = 'AccessShareLock'`))).rows;
+        if (held.length) return { pid: held[0].pid, exited };
+        assert(tries < 100, 'The reader never took its lock');
+        await new Promise((done) => setTimeout(done, 50));
+      }
+    };
+    const briefReader = await reader(4);
+    migration('live base dry run with a reader in flight', 'apply-migrations.mjs', dryDb, {}, 0, ['--dry-run']);
+    const passed = dryOutput();
+    await briefReader.exited;
+    assert.match(passed, /Dry run succeeded; all changes were rolled back/);
+    assert.equal(await appliedBeyondLive(), 0);
+    liveDry.reader_in_flight = { reader: 'identity.consent_grants, 4 s', attempt_lines: attemptLines(passed),
+      result: 'passed, nothing applied' };
+    if (attemptLines(passed).length) {
+      // That reader stopped an attempt, so a reader that never leaves must stop the dry run after its bound (here
+      // three attempts, 100 ms apart: test-only bounds), with the file's own refusal as the runner's last words.
+      const longReader = await reader(120);
+      migration('live base dry run against a reader that never leaves', 'apply-migrations.mjs', dryDb,
+        { HID_TEST_DRY_RUN_ATTEMPTS: '3', HID_TEST_DRY_RUN_PAUSE_MS: '100' }, 'failure', ['--dry-run']);
+      const stopped = dryOutput();
+      await withClient(dryDb, (client) => client.query('select pg_terminate_backend($1)', [longReader.pid]));
+      await longReader.exited;
+      const lines = attemptLines(stopped);
+      assert.equal(lines.length, 3);
+      assert.match(lines.at(-1), /^Dry run attempt 3 of 3: \d{4}_[a-z0-9_]+\.sql was busy; no attempt left$/);
+      assert.match(stopped, /Migration failed: Migration (\d{4})_[a-z0-9_]+\.sql: \1: .*(so it does not wait|stayed busy for 5 seconds)(; nothing applied)?; run the release again at a quieter time/);
+      assert.equal(await appliedBeyondLive(), 0);
+      liveDry.bound = { attempts: 3, result: 'stopped with the file\'s own refusal, nothing applied' };
+    } else {
+      liveDry.bound = 'not run: no pending file locks identity.consent_grants against readers';
+    }
+    evidence.checks.live_base_dry_run = liveDry;
   }
   const before = await snapshot(database);
   const beforeIntegrity = await integrity(database);
