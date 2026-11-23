@@ -9450,11 +9450,13 @@ amendment on #258, for the owner to confirm at signing.
   `doctor` as above. SX-4 cannot add or remove them by name.
   - Two of 0086's commands also end them, because they count every role held:
     the facility administrator's "Change role" and support's self-service
-    administrator role (S12). For a counted member either one revokes every
-    role held, the narrow roles with it, and grants the requested role again.
-    Access is never widened, but the same role and licence no longer answer
-    "unchanged", and S12's audit row names the latest narrow role as
-    `previousRole`. Leaving them out there is a follow-up.
+    administrator role (S12). For a counted member "Change role" revokes
+    every role held, and S12 every role but `org_admin`, the narrow roles with
+    them, and each grants the requested role again. Access is never widened.
+    But the same role and licence no longer answer "unchanged": S12 then makes
+    the change, so it also signs the member out (as every S12 change does),
+    and its audit row names the latest narrow role as `previousRole`. Leaving
+    them out there is a follow-up.
 - **Undo:** mark both roles inactive (`auth.roles.active = false`); every
   member is back where 0136 left them from their next request.
 
