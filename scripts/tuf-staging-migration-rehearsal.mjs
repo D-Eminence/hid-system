@@ -344,11 +344,15 @@ try {
     'Migration 0104 must add exactly its declared records-processing purpose');
   });
   // Migration 0086 (P4b) adds exactly one role, org_admin_awaiting_review (a
-  // self-signed-up facility's administrator until support reviews it), and
+  // self-signed-up facility's administrator until support reviews it),
   // migration 0115 (open sign-up on outreach.) exactly two, outreach_organiser
-  // and outreach_volunteer; every role row that existed before the upgrade is
-  // unchanged.
-  const declaredRoles = ['org_admin_awaiting_review', 'outreach_organiser', 'outreach_volunteer'];
+  // and outreach_volunteer, and migration 0147 (Q137 B) exactly two, the narrow
+  // reading_starter and work_list_reader; every role row that existed before
+  // the upgrade is unchanged. (0147 gives its two to nobody here: this upgrade
+  // starts from 0028's rows, so 0136's counts are 0, 0 and 0, and the
+  // auth.account_roles comparison below holds.)
+  const declaredRoles = ['org_admin_awaiting_review', 'outreach_organiser', 'outreach_volunteer',
+    'reading_starter', 'work_list_reader'];
   await withClient('hid_upgrade', async client => {
     await client.query("set timezone = 'UTC'");
     const kept = (await client.query(`select to_jsonb(t)::text as value from auth.roles t
@@ -357,7 +361,7 @@ try {
       upgradeBefore['auth.roles'], 'Upgrade changed a historical auth.roles row');
     assert.deepEqual((await client.query(`select code, active from auth.roles where code = any($1::text[])
       order by code`, [declaredRoles])).rows, declaredRoles.map(code => ({ code, active: true })),
-    'Migrations 0086 and 0115 must add exactly their declared roles');
+    'Migrations 0086, 0115 and 0147 must add exactly their declared roles');
   });
   // Migrations 0105 (document scanning) and 0106 (the OCR worker) each seed
   // exactly one workload account and its platform role; every other row of
