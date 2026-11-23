@@ -520,7 +520,7 @@ try {
     assert(liveVerifiers.length > 0, 'The live tree runs no runtime verifier');
     // A live verifier's guard that checks the database's shape, not the live code: a later file changes that
     // shape on purpose. 0128 adds two columns to identity.list_my_access_requests, which the live consent service
-    // reads by name with select *. 0146 (ID-7) audits a desk registration's replay as its own row (replayed: true),
+    // reads by name with select *. 0145 (ID-7) audits a desk registration's replay as its own row (replayed: true),
     // so the live desk verifier's count of registration audit rows sees one more; the replay's answer is the same.
     // Such a verifier runs from a copy beside it with that one line set to the shape this branch leaves (the
     // replay rows are counted and set aside, at most one); the line, before and after, is in the evidence, and the
