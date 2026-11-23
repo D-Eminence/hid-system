@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0137",
-    "count": 138,
+    "last": "0144",
+    "count": 139,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -649,6 +649,10 @@
       {
         "name": "0137_qoreid_nin_check_once.sql",
         "sha256": "d77983a0d82bc3c2e016f9fda0990666aecc218ac9bed6f7e9901bc90bff3543"
+      },
+      {
+        "name": "0144_restore_work_list_reads_and_reading_start.sql",
+        "sha256": "c536e2c39fae47025a1a64bb850b52cef4cff7e49d6844f18f3ec7e24dc2becc"
       }
     ]
   },

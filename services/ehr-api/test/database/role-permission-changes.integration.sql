@@ -1,7 +1,8 @@
 \set ON_ERROR_STOP on
 -- 0136 (owner decisions Q103 A, Q111 A, Q112 A, Q113 A): the role table's
 -- changes, the staff counts DevOps runs before signing, the owner's maximums
--- and the stop, and the prepared undo. Rollback-only.
+-- and the stop, and the prepared undo. Rollback-only. It first takes away
+-- the five rows 0144 (Q134 B) gives back, so it sees 0136's own table.
 --   1. after 0001-0136: the twelve removed rows are gone, the eight added rows
 --      and the three new codes are there, the rows kept on purpose are there
 --      (doctors keep ocr.job.write, ocr.validation.write and
@@ -97,6 +98,17 @@ create function pg_temp.codes_present() returns integer language sql as $$
   select count(*)::integer from auth.permissions
    where code in ('ocr.job.start', 'ocr.job.read-own', 'ehr.document.read-own') and active;
 $$;
+
+-- 0144 (owner decision Q134 B) gives admins and doctors back the two work
+-- lists and doctors ocr.job.start. This suite proves 0136's own table, so for
+-- its own transaction, which is rolled back, it first takes those five rows
+-- away again; work-list-reads-restore.integration.sql proves the table after
+-- 0144.
+delete from auth.role_permissions
+ where (role_code, permission_code) in (
+   ('admin', 'lab.work-item.read'), ('admin', 'pharmacy.work-item.read'),
+   ('doctor', 'lab.work-item.read'), ('doctor', 'pharmacy.work-item.read'),
+   ('doctor', 'ocr.job.start'));
 
 -- 1. The role table after 0001-0136.
 select pg_temp.expect('1a the twelve removed rows are gone', '0', pg_temp.removed_present()::text);
