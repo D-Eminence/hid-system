@@ -1901,3 +1901,26 @@ grant execute on function identity.patient_nin_link_precheck(uuid, char, text, c
 revoke all on function identity.patient_nin_link_precheck(uuid, char, text, char),
   identity.link_patient_nin(uuid, uuid, char, bytea, text, char, text, boolean, text, char) from public;
 revoke all on identity.patient_nin_links from public;
+
+-- Adding or removing one staff role (0139, SX-4, owner decision Q129 A),
+-- exactly as 0139 grants them: the administrator's and support's commands
+-- and the two licence reads, to the Identity runtime alone. The helpers they
+-- call run only inside them, as their owner.
+grant execute on function
+  identity.add_facility_staff_role(uuid,bigint,text,text,text,text,text,text,character),
+  identity.remove_facility_staff_role(uuid,bigint,text,text),
+  identity.admin_add_facility_staff_role(uuid,uuid,bigint,text,text,text,text,text,text,character),
+  identity.admin_remove_facility_staff_role(uuid,uuid,bigint,text,text,text,character),
+  identity.list_facility_staff_licences(),
+  identity.admin_list_facility_staff_licences(uuid) to hid_identity_runtime;
+revoke all on function
+  identity.add_facility_staff_role(uuid,bigint,text,text,text,text,text,text,character),
+  identity.remove_facility_staff_role(uuid,bigint,text,text),
+  identity.admin_add_facility_staff_role(uuid,uuid,bigint,text,text,text,text,text,text,character),
+  identity.admin_remove_facility_staff_role(uuid,uuid,bigint,text,text,text,character),
+  identity.list_facility_staff_licences(),
+  identity.admin_list_facility_staff_licences(uuid),
+  identity.staff_role_change_roles(uuid),
+  identity.staff_role_change_member(uuid,uuid,uuid,boolean),
+  identity.staff_role_change_apply(identity.staff_facility_memberships,bigint,text,text,text,text,text,text,uuid,uuid,text),
+  identity.staff_role_licences(uuid) from public;
