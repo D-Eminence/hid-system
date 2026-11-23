@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import type { PoolClient } from 'pg';
 import { DatabaseService } from '../database/database.service';
 import type {
   AuthorizationDecision,
@@ -20,7 +21,12 @@ interface PatientRow {
   gender: string | null;
   row_version: string;
   nin_verified?: boolean;
+  record_kind?: string | null;
 }
+
+/** 0145 (ID-7): the record kind is derived, read through identity.patient_record_kind where 0145 is applied. */
+export const RECORD_KIND_PRESENT_SQL = `select to_regprocedure('identity.patient_record_kind(uuid)') is not null as present`;
+export const RECORD_KIND_SQL = 'select identity.patient_record_kind($1::uuid) as record_kind';
 
 interface GrantRow {
   id: string;
@@ -31,7 +37,19 @@ interface GrantRow {
 
 @Injectable()
 export class PostgresIdentityProvider implements IdentityProvider {
+  /** Once 0145 is seen it stays (a migration is never undone); before that, each read asks again. */
+  private recordKindPresent = false;
+
   constructor(private readonly database: DatabaseService) {}
+
+  /** The record kind where 0145 is applied; undefined (no field) on an older schema. */
+  private async recordKind(client: PoolClient, patientId: string): Promise<string | undefined> {
+    if (!this.recordKindPresent) {
+      if ((await client.query<{ present: boolean }>(RECORD_KIND_PRESENT_SQL)).rows[0]?.present !== true) return undefined;
+      this.recordKindPresent = true;
+    }
+    return (await client.query<{ record_kind: string }>(RECORD_KIND_SQL, [patientId])).rows[0]?.record_kind;
+  }
 
   async lookupExactHid(hid: string, context: DataAccessContext): Promise<IdentityPatient | null> {
     return this.database.withTransaction(context, async (client) => {
@@ -46,7 +64,9 @@ export class PostgresIdentityProvider implements IdentityProvider {
         [hid],
       );
       const row = result.rows[0];
-      return row ? this.patient(row) : null;
+      if (!row) return null;
+      const recordKind = await this.recordKind(client, row.id);
+      return this.patient(recordKind === undefined ? row : { ...row, record_kind: recordKind });
     }, { readOnly: true });
   }
 
@@ -54,7 +74,10 @@ export class PostgresIdentityProvider implements IdentityProvider {
     return this.database.withTransaction(context,async client=>{
       const row=(await client.query<PatientRow>(`select id::text,hid_code,first_name,last_name,full_name,
         dob::text,gender,row_version::text from identity.patients where id=$1 and status='active' limit 1`,[patientId])).rows[0];
-      return row?this.patient(row):null;
+      if(!row)return null;
+      // 0145 (ID-7): the staff profile carries the record kind too (Ola's #302 item 10).
+      const recordKind=await this.recordKind(client,row.id);
+      return this.patient(recordKind===undefined?row:{...row,record_kind:recordKind});
     },{readOnly:true});
   }
 
@@ -163,6 +186,7 @@ export class PostgresIdentityProvider implements IdentityProvider {
       gender: row.gender,
       rowVersion: Number(row.row_version),
       ...(row.nin_verified === undefined ? {} : { ninVerified: row.nin_verified === true }),
+      ...(row.record_kind === undefined ? {} : { recordKind: row.record_kind === 'unknown' ? 'unknown' as const : 'standard' as const }),
     };
   }
 }

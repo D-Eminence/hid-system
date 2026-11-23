@@ -30,7 +30,7 @@
 --      changes none of these counts: it adds a trigger on ehr.prescriptions
 --      that fires after D8's (prescriptions_pharmacy_change_after_dispensing)
 --      and reads D14's claims, a table of its own and a reader; no policy,
---      and no body that names ehr.prescriptions (S7 stays eight);
+--      and no body that names ehr.prescriptions (S7 is unchanged by it);
 --   2. the send: the prescriber's activated prescription becomes a work item
 --      accepted by the prescriber with the fixed reason, one event, one
 --      outbox event with pharmacy-api's own four payload keys (what the event
@@ -475,10 +475,13 @@ begin
     raise exception 'own facility work: the own-work policies are not 0133''s 44 on the work items and their chain and 0144''s two on the pharmacist acceptances';
   end if;
   -- S7: the owner-run SECURITY DEFINER functions that read ehr.prescriptions
-  -- (each sees D5's rows in a pharmacist's session) are exactly these eight
-  -- (0144 added pharmacy.validate_work_item_acceptance, the acceptance's
-  -- trigger function); case 8 shows each gives the pharmacist nothing more
-  -- (the two validators in cases 3 and 5, and 0144's in its own suite,
+  -- (each sees D5's rows in a pharmacist's session) are exactly these ten
+  -- (0143's ehr.list_my_orders lists only the caller's own orders; 0145's
+  -- identity.decide_unknown_patient only tests that a record has none, and
+  -- only the Identity runtime may run it; 0144 added
+  -- pharmacy.validate_work_item_acceptance, the acceptance's trigger
+  -- function); case 8 shows each gives the pharmacist nothing more (the two
+  -- validators in cases 3 and 5, and 0144's in its own suite,
   -- pharmacy-work-item-acceptance, too). A new one must be
   -- added here, and to case 8, by whoever writes it. The check matches a
   -- definer's own text only: an invoker helper that such a definer calls
@@ -489,8 +492,10 @@ begin
   if (select string_agg(proc.oid::regprocedure::text, ' ' order by proc.oid::regprocedure::text) from pg_proc proc
        where proc.prosecdef and proc.prosrc ~* 'ehr\.prescriptions'
          and proc.proowner = (select proowner from pg_proc where oid = 'pharmacy.validate_dispensing()'::regprocedure))
-     is distinct from 'ehr.patient_list_order_routes() ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,'
+     is distinct from 'ehr.list_my_orders(text[],boolean,date,timestamp with time zone,text,uuid,integer) '
+       || 'ehr.patient_list_order_routes() ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,'
        || 'character) ehr.send_prescription_to_own_pharmacy(uuid,bigint) ehr.withdraw_own_pharmacy_send(uuid) '
+       || 'identity.decide_unknown_patient(uuid,text,bigint,text,text,text) '
        || 'identity.demo_story_install(text) pharmacy.validate_dispensing() pharmacy.validate_work_item() '
        || 'pharmacy.validate_work_item_acceptance()' then
     raise exception 'own facility work: the owner-run definer functions that read ehr.prescriptions changed: %',
@@ -2211,7 +2216,16 @@ select pg_temp.expect('PH: the withdrawal refuses', pg_temp.try(format(
 -- (The list is the patient's own: a staff session is refused.)
 select pg_temp.expect('PH: the patient''s own route list answers nothing for a staff session',
   pg_temp.rows_of('select * from ehr.patient_list_order_routes()'), '42501 PATIENT_SESSION_REQUIRED');
--- 0144's acceptance trigger function (the eighth) runs only on an insert
+-- 0143: "Ordered by me" lists only orders this membership created; PH created none.
+select pg_temp.expect('PH: my orders lists none of the hospital''s prescriptions', pg_temp.rows_of(
+  'select * from ehr.list_my_orders(array[''prescription''], false, current_date - 30, null, null, null, 50) where order_id is not null'),
+  'rows=0');
+-- 0145: the unknown record's decision is the Identity runtime's alone.
+select pg_temp.expect('PH: the unknown record''s decision is not the EHR runtime''s', pg_temp.try(format(
+  'select * from identity.decide_unknown_patient(%L, %L, 1, %L, %L, %L)', pg_temp.rx(4), 'cancel',
+  'Own work probe reason', 'own-work-unknown-probe', repeat('a', 64))),
+  '42501 permission denied for function decide_unknown_patient');
+-- 0144's acceptance trigger function (the tenth) runs only on an insert
 -- into pharmacy.work_item_acceptances, which the EHR runtime may not make.
 select pg_temp.expect('PH: the EHR runtime may not write a pharmacist acceptance',
   left(pg_temp.try(format($s$insert into pharmacy.work_item_acceptances (work_item_id, patient_id, facility_id,

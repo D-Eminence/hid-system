@@ -213,8 +213,10 @@ begin
     'as granted public=false');
   -- 1g. No 0148 body names ehr.prescriptions or the sends table, so 0133's
   -- S7 list (the owner-run definers whose text names ehr.prescriptions,
-  -- each of which sees D5's rows in a pharmacist's session) stays the eight
-  -- 0133's suite pins (0144's acceptance trigger function the eighth).
+  -- each of which sees D5's rows in a pharmacist's session) stays the ten
+  -- 0133's suite pins on Release B (0143's ehr.list_my_orders, 0144's
+  -- acceptance trigger function and 0145's identity.decide_unknown_patient
+  -- among them).
   perform pg_temp.expect('1g no 0148 body names ehr.prescriptions or the sends table; 0133''s S7 list unchanged',
     (select count(*) from pg_proc proc
       where proc.oid in ('pharmacy.work_item_changes_after_dispensing(uuid[])'::regprocedure,
@@ -222,8 +224,10 @@ begin
         and (proc.prosrc ~* 'ehr\.prescriptions' or proc.prosrc ~* 'own_prescription_sends' or proc.prosrc ~ '0148'))
     || ' | ' || (select string_agg(proc.oid::regprocedure::text, ' ' order by proc.oid::regprocedure::text) from pg_proc proc
                   where proc.prosecdef and proc.prosrc ~* 'ehr\.prescriptions' and proc.proowner = validator_owner),
-    '0 | ehr.patient_list_order_routes() ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,'
+    '0 | ehr.list_my_orders(text[],boolean,date,timestamp with time zone,text,uuid,integer) '
+    || 'ehr.patient_list_order_routes() ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,'
     || 'character) ehr.send_prescription_to_own_pharmacy(uuid,bigint) ehr.withdraw_own_pharmacy_send(uuid) '
+    || 'identity.decide_unknown_patient(uuid,text,bigint,text,text,text) '
     || 'identity.demo_story_install(text) pharmacy.validate_dispensing() pharmacy.validate_work_item() '
     || 'pharmacy.validate_work_item_acceptance()');
   -- 1h. ehr.prescriptions' columns, in order: the trigger fingerprints the

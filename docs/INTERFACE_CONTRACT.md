@@ -674,6 +674,55 @@ check goes on and its answer is kept for the retry. 503 `NIN_CHECK_UNAVAILABLE`
 means nothing was sent. A client shows the message and offers to try again
 after `retryAfterSeconds`; it never retries on its own.
 
+A NIN QoreID has no record of (owner Q117) gets one answer on this route,
+`POST /api/v1/identity/patient-enrollments` and the registration desk (`POST
+/api/v1/identity/nin/resolve`, section Q108), with one exception on this route
+(below): 422 `NIN_NOT_VERIFIED`, "This NIN could not be verified. Check the
+number and try again." It is QoreID's `404` ("not found") on any of the three,
+fresh or reused from 0137's store (which keeps it 24 hours for every path),
+and, on sign-up and the desk, which ask with the NIN alone, QoreID's "no
+record" (fresh or reused). It replaces the 502 `QOREID_PROVIDER_REJECTED` the
+three answered for QoreID's `404`; sign-up already answered its "no record"
+422 `NIN_NOT_VERIFIED`, now with this text, and the desk answered it 422
+`NIN_VERIFICATION_FAILED`. QoreID's "incomplete" (its check is not finished;
+0137 keeps it 5 minutes) gets the same 422 and sentence on sign-up and the
+desk. That is the implementer's choice, to be confirmed by the owner: before
+Q117 sign-up answered it 422 `NIN_NOT_VERIFIED` with the old text ("The NIN
+could not be verified") and the desk 422 `NIN_VERIFICATION_FAILED`; this route
+answers it 200 `state: "incomplete"`, as before. A 4xx `detail` reaches the
+client as written, so a client shows this sentence.
+This route's answer to QoreID's "not verified" for the profile's name and date
+of birth is unchanged (200 `state: "not_verified"`, or 409
+`PATIENT_NIN_DETAILS_MISMATCH` for a profile without a date of birth), as is
+the desk's "does not match" (422 `NIN_VERIFICATION_FAILED`, its own text).
+The exception: until #276 changes it, a check on this route that reuses a "no
+record" a sign-up or the desk stored for the NIN (asked with the NIN alone;
+kept 24 hours, an "incomplete" 5 minutes) answers it as it answers its own
+(200 `state: "not_verified"` or `"incomplete"`, or 409
+`PATIENT_NIN_DETAILS_MISMATCH`), not 422 `NIN_NOT_VERIFIED` (section Q108,
+"What #276 settled, and what is left for it"). This route records
+the same evidence for a `404` as before (`provider_error`,
+`unexpected_response`). Other QoreID refusals keep their answers (an
+account-level 4xx: 502 `QOREID_PROVIDER_REJECTED`; an answer HID cannot use:
+502 `QOREID_PROVIDER_RESPONSE_INVALID`).
+
+How long 0137 keeps a NIN's record (owner Q115, for someone not on a Health
+ID): 90 days from the first check, and each later use (the desk, sign-up or
+this route) keeps it at least 30 days from that use; it ends at whichever is
+later. The 90 days are for a first check that matched: a record whose first
+check did not match (this route's, or the desk's) is kept 24 hours, until a
+later use (section Q108). As built at #276's adf5e14a, 0137 holds this as
+one rule, `identity.qoreid_nin_record_used` (granted to no role): the
+record's end becomes the later of itself and now plus 30 days, never
+shorter, for a live record under the caller's key version of a NIN not
+erased, its answer, completeness and source unchanged. `begin` applies it to
+every stored record it answers, on every path, whether or not the caller's
+details then match the record, so a sign-up's, this route's and the desk's
+uses each count, and none of them makes a keep call of its own.
+`identity.keep_qoreid_nin_record(lookup, key version)`
+(`NinCheckOnce.keepRecord`) applies the same rule to a use made without a
+check; no path calls it.
+
 `GET /api/v1/ehr/patients/:patientId/emergency-records` requires current workforce
 permissions, emergency purpose and a freshly checked break-glass grant authorizing
 the `read_records` action for the exact facility and patient. With 0117 it also answers `allergies` (recorded and
@@ -6266,8 +6315,9 @@ Rules:
   `bloodPressure`, true when the correction set either half of the pair).
 - Blood pressure is one measure and is always the systolic and diastolic
   pair from the same reading; it is never mixed across readings.
-- Vitals of a visit entered in error are left out. (A single vital entered
-  in error waits for EHR-C8b, migration 0142.)
+- Vitals of a visit entered in error are left out, and so is a single
+  reading marked entered in error (EHR-C8b, migration 0142): the next newest
+  reading is used.
 - Values are JSON numbers (the per-visit vitals list still returns numeric
   columns as strings, unchanged).
 
@@ -6423,8 +6473,9 @@ Kept in memory in each Identity process (no table, no secret, no setting).
 - A `503` from the NIN service trips it at once.
 - Three other failures (a `5xx`, a bad answer, a network error) within 5
   minutes trip it.
-- A NIN that does not match (`422 NIN_VERIFICATION_FAILED`) is an answer, not
-  a failure, and does not count. Nor does a `4xx`.
+- A NIN that does not match (`422 NIN_VERIFICATION_FAILED`), or that the NIN
+  service has no record of (`422 NIN_NOT_VERIFIED` since Q117, section Q108),
+  is an answer, not a failure, and does not count. Nor does a `4xx`.
 - While tripped, `POST identity/nin/resolve` answers `503` with code
   `NIN_PROVIDER_UNAVAILABLE` and detail "The NIN service is not answering
   right now. Please try again in a minute." without calling the service. The
@@ -6469,6 +6520,560 @@ window, retry, recovery, log event; one check at a time while retrying, with
 two desks at once; checks switched off do not trip it; the audit row says
 whether the NIN was sent; capabilities; no answer contains the word the
 owner ruled out). `nin-deferred-staging.spec.ts` exact bodies updated.
+
+## Q108. Desk NIN check through QoreID (owner "Q108 A", no migration)
+
+`POST /api/v1/identity/nin/resolve` can now check the NIN with QoreID, the
+same check app. patient enrollment makes. No Terraform change: it is chosen
+from settings production already has.
+
+### When the desk uses QoreID
+
+- `NIN_PROVIDER_MODE=deferred` (staging) and `NIN_PROVIDER_MODE=test` are
+  unchanged.
+- `NIN_PROVIDER_MODE=unavailable` with `QOREID_ENABLED=true`: the desk uses
+  QoreID. Before every check Identity reads QoreID's switch, the same gate as
+  patient enrollment: `QOREID_ENABLED`, `QOREID_NIN_ONLY_ENROLLMENT_ENABLED`
+  and the admin integration control for QoreID NIN checks
+  (`platform.integration_runtime_provider('qoreid','patient_nin')`), never a
+  cached answer. While the switch is off the desk gets today's answer: `503`
+  `NIN_PROVIDER_UNAVAILABLE`, "NIN verification is not configured", nothing
+  sent, the breaker not touched, audited with `provider: "qoreid"` and
+  `providerCalled: false`.
+- `NIN_PROVIDER_MODE=unavailable` with `QOREID_ENABLED=false`: NIN checks stay
+  off, as before.
+
+Pausing QoreID NIN checks in the admin console pauses the desk check, app.
+patient enrollment and the patient's own NIN check together (they share the
+`patient_nin` control).
+
+### The sealed demo and QA tenants (0098, 0123)
+
+The seals' signed rules say a demo account "never causes a QoreID call" (0098
+G6), a QA account "consumes no QoreID quota" (0123 G6q) and "facility
+registration needs a QoreID NIN check, refused for QA" (0123 D9). Both seals
+relied on QoreID's quota (`platform.consume_qoreid_quota`) refusing their
+accounts, and the desk's QoreID check takes no quota (Q109). So, after the
+switch check and before anything else is read or sent, Identity asks the seals
+whether the desk's facility or its staff account is a member of the sealed
+demo or QA tenant (`identity.sealed_demo_facility`,
+`identity.sealed_qa_facility`, `identity.sealed_demo_ids('account')` and
+`identity.sealed_qa_ids('account')`, which 0098 and 0123 grant Identity's
+runtime). For a sealed desk NIN checks are off, as they were before Q108:
+
+| The seal | Desk answer | `identity.nin.verify` audit |
+| --- | --- | --- |
+| the facility or the account is the demo's or QA's | `503 NIN_PROVIDER_UNAVAILABLE`, "NIN verification is not configured" | `failure`, `providerCalled: false`, `sealedTenant: true` |
+| it cannot be read | `503 NIN_PROVIDER_UNAVAILABLE`, "NIN checks cannot be started right now. Please try again in a minute." (it fails closed) | `failure`, `providerCalled: false` |
+| neither | the check goes on as below | |
+
+Nothing is sent to QoreID, the holder read (a NIN on a Health ID, below) and
+0137's guard and its stored answers are never reached, so a sealed desk can
+neither pay for a check nor compare its details with a real person's stored
+record, and the breaker is not touched. `registration-capabilities` says NIN
+checks are off at such a desk (below). The test provider
+(`NIN_PROVIDER_MODE=test`), which sends nothing anywhere, does not ask the
+seals. Proved on PostgreSQL, as Identity's runtime role, by
+`services/ehr-api/test/database/desk-nin-holder.integration.sql` (2a-2g).
+
+### The check
+
+Only the NIN is sent (QoreID's NIN-only check). Identity compares the record
+QoreID returns with the name and date of birth the desk entered (letter case
+and spacing ignored, first and last name in that order):
+
+| QoreID's answer | Desk answer | Audit `ninCheck` |
+| --- | --- | --- |
+| the record matches | the case is recorded with `verification_provider = 'qoreid'`, QoreID's reference and the time; `ninStatus: "verified"` ("NIN Verified") | `match` (`identity.nin.verify`, `success`, written before the case; and on `identity.nin.resolve`) |
+| QoreID has no record of the NIN: its "no record", or its "not found" (`404`); or its check is not finished ("incomplete") | `422 NIN_NOT_VERIFIED`, "This NIN could not be verified. Check the number and try again." (owner Q117: the same code and text as sign-up and the profile; for "incomplete" the implementer's choice, to be confirmed by the owner, and the profile answers it 200 `state: "incomplete"`); QoreID's answer, never counted as a failure | `no_match` (`identity.nin.verify`, `denied`) |
+| the name or date of birth differs | `422 NIN_VERIFICATION_FAILED`, "The name or date of birth does not match the NIN record. Check the spelling and the date of birth." | `name_mismatch` (`identity.nin.verify`, `denied`) |
+| QoreID fails (5xx, timeout, network, bad answer) | QoreID's own `5xx` problem (its timeout, `504 QOREID_TIMEOUT`, with `retryAfterSeconds: 60`, as the guard's 504), which the browser gets as the gateway's `503 UPSTREAM_UNAVAILABLE` ("What the website gets", below); counts toward the breaker | `provider_error` (`identity.nin.verify`, `failure`, `providerCalled: true`) |
+| (0137) the guard refuses or reuses an answer | see "One QoreID check per NIN" below | |
+
+QoreID's `404` was `502 QOREID_PROVIDER_REJECTED` here, and its "no record"
+(and "incomplete") `422 NIN_VERIFICATION_FAILED`, "The NIN could not be
+verified", before Q117.
+The desk's `no_match` from any NIN provider (the test provider's included) is
+now `422 NIN_NOT_VERIFIED` with the owner's text; only a record whose name or
+date of birth is not the desk's is `422 NIN_VERIFICATION_FAILED`.
+
+A record is any the QoreID adapter can read a name and a date of birth from
+(a real date from 1800, not in the future): a record born before 1900 is
+QoreID's answer like any other and, since the desk's own date of birth is from
+1900, is answered "does not match" (and counts as an answer for the breaker),
+never `502`.
+
+The case keeps the desk's spelling of the name (it equals the record's but
+for letter case and spacing) and the desk's sex, or the record's when the desk
+gave none and the record's is known and not "unknown". The case keeps nothing
+else from the record but QoreID's reference; the desk's answers, audit rows
+and logs never name the record's details. QoreID's answer itself is kept by
+0137's guard, encrypted, as on every path (docs/QOREID_VERIFICATION_CONTRACT.md,
+"One QoreID check per NIN"): the NIN-only record (name, date of birth, sex,
+and the middle name, phone, home address and photo when QoreID sends them) for
+as long as 0137 keeps a record (90 days from this first check, Q110 and Q115)
+when it matched the desk's details, and 24 hours when it did not (probably
+someone else's NIN, as a profile check keeps a record it did not match), each
+until a later use keeps it longer (below); "no record" and QoreID's `404` for
+24 hours.
+
+### A stored record the desk uses is kept by 0137's begin (Q115)
+
+Owner Q115 (it changes Q110's 90 days from each match): a stored NIN record
+for someone not on a Health ID is kept 90 days from the first check (when that
+check matched; one that did not is kept 24 hours, below), and each later use
+(the desk, sign-up or the profile) keeps it at least 30 days from that use; it
+ends at whichever is later, the first check plus 90 days or the last use plus
+30 days. 0137 (#276, Rahman's, as built at adf5e14a) holds that as one rule,
+`identity.qoreid_nin_record_used(lookup, key version)`, granted to no role:
+the record's end becomes the later of its current end and now plus 30 days (it
+never shortens a keep, changes nothing but the end, and keeps only a live
+record, complete or not, under the caller's key version, for a NIN whose login
+was not deleted). `begin_qoreid_nin_check` applies it to every stored record
+it answers, whichever path asks. The first check's 90 days are 0137's own
+(`finish_qoreid_nin_check`).
+
+The desk's part: none of its own. The desk gets a stored record only from the
+guard's `begin` (`verifyNinRecord`, path `desk`), which has kept it by that
+rule before the desk compares its name and date of birth, so every desk check
+answered from a stored record (0137's outcome `record`, complete or not,
+whichever path stored it: a desk or profile check whose details did not match
+it, a sign-up, an earlier desk check) is a use of it, kept 30 days from that
+use. That holds whether the desk's details then match the record or not: a
+"does not match" answered from a stored record is a use too (the owner
+question below). A record whose first check did not match (a desk typo, or a
+profile mismatch) is kept 24 hours; a later use within them keeps it 30 days
+from that use, not until 90 days after the first check (an open owner
+question, "What #276 settled, and what is left for it", below). A fresh
+answer is the record's first check (90 days when it matched, 24 hours when it
+did not). The desk makes no keep call of its own:
+`NinCheckOnce.keepRecord` (0137's `identity.keep_qoreid_nin_record(lookup,
+key version)`, the same rule for a use made without `begin`) would only
+repeat what `begin` did, so the desk's earlier call after a match, its
+`identity.nin.verify` row's `recordKept` and its
+`identity.nin.record_keep_failed` log are removed. Nothing is sent to QoreID.
+
+Any other stored answer keeps 0137's own time, which for anything but a record
+is at most 7 days (`finish_qoreid_nin_check` refuses longer): "no record",
+QoreID's "not found", and an answer HID cannot use (one the desk compares for
+its readable name and date of birth is not a record, so its use keeps nothing
+longer). A record that lacks something a sign-up needs (no recognised sex, a
+photo or home address HID cannot read) but whose name, date of birth and
+QoreID reference can be read is kept as an incomplete record, as long as a
+record, whichever path got it (a sign-up's own such answer included), so its
+uses keep it like any other. 0137's own suite
+(`services/ehr-api/test/database/qoreid-nin-check-once.integration.sql`)
+proves the rule, `begin`'s use of it and `keep_qoreid_nin_record` on
+PostgreSQL; the desk's earlier take-over of the row (`DeskNinRecordKeep`, the
+key version `desk-keep-matched-record`, and
+`desk-nin-record-keep.integration.sql`) is removed.
+
+### A NIN already on a Health ID (Q110)
+
+Owner Q110: once a NIN is on a Health ID, its checked answer stays with the
+record, and the record is the answer: a NIN already verified on a Health ID
+is never sent to QoreID from the desk, however long ago it was checked (0137's
+stored answer may have ended). Before the NIN service is asked (after the
+switch check and the seals, so not while NIN checks are off or at a sealed
+desk), Identity reads the active
+patient who holds this NIN verified and not revoked. A revoked NIN, or a
+patient who is not active, is not a holder: such a NIN goes to the NIN service
+as any other.
+
+| The holder's record | Desk answer | `identity.nin.verify` audit |
+| --- | --- | --- |
+| the name and date of birth the desk entered are the record's (letter case and spacing ignored, first and last name in that order) | the case is `resolved_existing_identity` for that patient, with the identifier's own `verification_provider`, `verification_reference` and time | `success`, `ninCheck: "match"`, `providerCalled: false`, `healthIdRecord: true` |
+| any other name or date of birth (the names the other way round, or a record without a date of birth, included) | `422 NIN_VERIFICATION_FAILED`, "The name or date of birth does not match the NIN record. Check the spelling and the date of birth.": the same code and text as a QoreID record that does not match | `denied`, `ninCheck: "name_mismatch"`, `providerCalled: false`, `healthIdRecord: true` |
+| its check's evidence cannot be read (0011 requires it, so this should not happen) | `503 NIN_PROVIDER_UNAVAILABLE`, "NIN checks cannot be started right now. Please try again in a minute." | `failure`, `providerCalled: false` |
+
+In every row nothing is sent to the NIN service, QoreID is not paid, 0137's
+guard is not asked and nothing is kept there, and the breaker is neither asked
+nor touched (the record answers while the breaker is tripped). A "does not
+match" answer writes no case and names nothing from the record. If the patient
+or the NIN changes between this read and the case being written, nothing is
+written: `409 NIN_CHECK_IN_PROGRESS`, "The record for this NIN changed while
+it was being checked. Please wait a minute, then try again.", with
+`retryAfterSeconds: 60`, and the retry decides again. No NIN check is running
+then: the code is 0137's only because the website's handling of it (wait
+`retryAfterSeconds`, then retry with the same `Idempotency-Key`) is what this
+needs; the text says what happened.
+
+### One QoreID check per NIN (0137, Q109)
+
+The desk's check goes through 0137's once-per-NIN guard (`NinCheckOnce`;
+docs/QOREID_VERIFICATION_CONTRACT.md, "One QoreID check per NIN") as
+`verifyNinRecord(nin, { correlationId: <this request's>, path: 'desk' })`:
+the same gate and guard as sign-up's `verifyNin`, but any record QoreID
+returned for the NIN will do, complete or not, because the desk compares only
+the name and date of birth. A record kept as incomplete (no recognised sex, a
+photo or a home address HID cannot read; a sign-up cannot enrol from it) by
+any path, or an older answer kept as unusable with a readable name and date of
+birth by a sign-up or a desk check (which ask with the NIN alone; a profile
+check's is not reused here, see below), is compared, not paid for again, and
+such a record checked at the desk is answered, not refused with `502`. The
+desk keeps one it gets from QoreID as an incomplete record, as every path does
+(as long as a record; 24 hours when it is not the desk's patient), so later
+desk and profile checks of that NIN reuse it, and a sign-up refuses it from
+storage (`502 QOREID_PROVIDER_RESPONSE_INVALID`, as the first time) without
+QoreID being paid again (0137's `record_source` `nin_only`, #276 at
+c780b095). A stored record is compared with the desk's name and date of
+birth as a fresh one is, so correcting a name or a date of birth after "does
+not match" is not charged again. The guard writes its own audit row
+(`identity.qoreid.nin-check`, `path: "desk"`, the same `correlationId` as the
+desk's `identity.nin.verify` row) saying whether QoreID was called or a stored
+answer reused; never the NIN or its HMAC.
+
+While a NIN's answer is kept or its check is running, QoreID is asked once
+for it whichever path asks (sign-up, the profile, the desk) and the stored
+answer is reused, except in these cases today. Each is a second charge for
+the same NIN, and each is 0137's rule (#276, Rahman's), not changed here:
+
+- A sign-up of a NIN whose kept record is an incomplete one a profile check
+  got (asked with the name and date of birth, which may come back without
+  what the NIN-only check returns) takes the NIN over, asks QoreID again and
+  keeps the NIN-only answer. An incomplete record from a desk check or a
+  sign-up (`nin_only`) is answered to a sign-up from storage.
+- 0137 keeps a profile check's "no record" and an answer HID cannot use for
+  the question it was asked with, and reuses them only for a check that asks
+  the same question (`begin_qoreid_nin_check`: the row's `question_hmac` null
+  or equal to the caller's). A profile check asks with the patient's name and
+  date of birth; the desk and a sign-up ask with the NIN alone. So within the
+  24 hours 0137 keeps a profile check's "no record", a desk check or a sign-up
+  of the same NIN asks QoreID again and is charged again, and so does a
+  profile check with other details (`nin-double-charge.spec.ts`: the
+  profile's "no record", then a sign-up, 2 charges). QoreID's `404` is about
+  the NIN, so 0137 keeps it for every question whichever path got it (#276 at
+  c780b095): the profile's `404`, then the desk and a sign-up, 1 charge,
+  each answered `422 NIN_NOT_VERIFIED` (`qoreid-nin-desk-once.spec.ts`). An
+  answer a desk check or a sign-up got answers every question, a profile
+  check's included.
+- When `NIN_KEY_VERSION` changes, no answer kept under the old version is
+  reused (0137 reuses only a row kept under the caller's key version): the
+  next check of each such NIN, by any path, asks QoreID again, a record
+  included, and keeps the new answer under the new version
+  (`nin-double-charge.spec.ts`: "an answer stored under another NIN key
+  version is not reused").
+
+The guard's answers, as the desk gives them:
+
+| The guard | Desk answer | `identity.nin.verify` audit | Breaker |
+| --- | --- | --- | --- |
+| a stored record | compared as a fresh one: the case, or `422` name mismatch (either way `begin` kept the record by 0137's Q115 rule as it answered, above) | as for a fresh answer, with `storedAnswer: true` | not counted: the retry place is freed, but the breaker is neither closed nor its failures cleared (QoreID was not asked) |
+| a stored "no record" or "incomplete", or a stored QoreID "not found" (`404`) from any path | `422 NIN_NOT_VERIFIED`, "This NIN could not be verified. Check the number and try again." (Q117; for "incomplete" the implementer's choice, to be confirmed by the owner) | `denied`, `ninCheck: "no_match"`, `storedAnswer: true` | not counted; the retry place is freed |
+| another check of this NIN is still running when this request's wait ends | `409 NIN_CHECK_IN_PROGRESS`, "We are still checking this NIN. Please wait a minute, then try again.", `retryAfterSeconds: 60` | `failure`, `providerCalled: false` | not counted; the retry place is freed |
+| the NIN is held after a check QoreID may have charged | `409 NIN_CHECK_HELD`, "We could not finish checking this NIN. Please try again in 5 minutes." (or "... in 6 hours."), `retryAfterSeconds`: the time left | `failure`, `providerCalled: false` | not counted; the retry place is freed |
+| this request's wait (`QOREID_TIMEOUT_MS`) ended before QoreID answered | `504 QOREID_TIMEOUT`, `retryAfterSeconds: 60`; the check goes on and its answer is kept for the retry | `failure`, `providerCalled: true`, `ninCheck: "provider_error"` | the wait counts as one failure, as a timeout; when the check later answers, that answer is recorded as a success; when it later fails, it is not counted again |
+| its store could not be read (`NIN_CHECK_UNAVAILABLE`) | `503 NIN_PROVIDER_UNAVAILABLE`, "NIN checks cannot be started right now. Please try again in a minute." | `failure`, `providerCalled: false` | not counted |
+| its NIN keys are missing | `503 NIN_PROTECTION_UNAVAILABLE` | `failure`, `providerCalled: false` | not counted |
+| a stored answer HID cannot use (one without a readable name and date of birth) | `502 QOREID_PROVIDER_RESPONSE_INVALID`, as the first time | `failure`, `providerCalled: true`, `ninCheck: "provider_error"`, `storedAnswer: true` | not counted; the retry place is freed |
+| the guard's own audit write or another part of HID failed (not QoreID) | the error as raised (the audit's `503`, or `500`) | `failure`, `providerCalled: true` (no `ninCheck`) | not counted; if this request's own QoreID check ended, how it ended is counted (an answer as a success); if it is still running, it is counted when it ends |
+
+`providerCalled` says whether the desk's check was handed to the NIN service
+(for QoreID, to the guard); `storedAnswer: true` says the guard answered from
+an answer it kept, so nothing was sent for this request; whether QoreID itself
+was called is the guard's row's `qoreidCalled`. A `5xx` problem's `detail` is
+replaced by the problem filter ("The service could not complete the
+request."); Identity sends its `code` and `retryAfterSeconds`, but the gateway
+answers every identity `502`, `503` and `504` itself, so for those they never
+reach the browser ("What the website gets", below). Every `504
+QOREID_TIMEOUT` the desk answers carries `retryAfterSeconds: 60`: the guard's
+(this request's wait ended, the check goes on) and QoreID's own (its token
+request timed out at `QOREID_TIMEOUT_MS`, which starts before the guard's
+wait and so ends first; or the check at its deadline). After QoreID's own
+timeout nothing is kept for the retry when the NIN was not sent (the retry
+checks it again) and 0137's hold answers it when it was.
+
+How long a desk request takes, after a few database reads (the replay,
+QoreID's switch, the seals, a Health ID's record, the gate): about
+`QOREID_TIMEOUT_MS` when it sends its own check, and up to
+`QOREID_TIMEOUT_MS` + 3 s when it waits for another check of the same NIN that
+answers (0137's guard fixes that wait when the request starts). In the worst
+case the other check ends without sending anything (its token request timed
+out, QoreID's `401` after the one replay, its `429`) just before that wait
+ends; this request then sends its own check and waits for it too: up to
+2 × `QOREID_TIMEOUT_MS` + 3 s. Recording the answer adds milliseconds. When
+0137's write fails at once, its tries add about 4.2 s of pauses (it tries
+again after 0.2, 1 and 3 s): 2 × `QOREID_TIMEOUT_MS` + about 7 s in all (on
+the desk-once fixture, with `QOREID_TIMEOUT_MS` at 1 s and every write failing
+at once: 9.2 s). When the database cannot hand out a connection, each of the
+four tries can wait out the pool's 5 s connection timeout before it fails, so
+recording can take about 24 s, and the guard's audit write up to 5 s more; no
+`QOREID_TIMEOUT_MS` keeps such a request inside 30 s. These figures leave out
+the desk's own reads (above) and writes (the case and its `identity.nin.verify`
+audit row).
+
+| `QOREID_TIMEOUT_MS` | up to, waiting for another check that answers | worst case | worst case, every write failing at once |
+| --- | --- | --- | --- |
+| 5 s (infra/aws/src/hid-regional-stack.ts) | about 8 s | 13 s | about 17 s |
+| 11 s (the code default, owner Q118) | about 14 s | 25 s | about 29 s |
+| 12 s (#271's default, before Q118) | about 15 s | 27 s | about 31 s |
+| 20 s (the highest the environment allows) | about 23 s | 43 s | about 47 s |
+
+The website's timer for this request must allow 30 s (health#272 does), and
+the gateway's read timeout for `/api/v1/identity/` is 30 s
+(`proxy_read_timeout 30s` in `gateway/nginx.conf.template`, not changed for
+that location). With writes that fail at once, only a `QOREID_TIMEOUT_MS` of
+11 s or less keeps the worst case inside 30 s, with less than a second to
+spare; at 12 s that worst case passes 30 s, and at 20 s the worst case passes
+it even when every write succeeds. So QoreID waits 11 s by default (owner
+Q118, the code's default; no setting needs applying), so that even in that
+worst case a match's answer reaches the website inside 30 s. Where
+`QOREID_TIMEOUT_MS` is set it should be 11 s or less: every AWS environment
+(staging and production) sets 5 s in `infra/aws/src/hid-regional-stack.ts`,
+so the 11 s default applies only where it is unset (local runs, CI). A
+request that runs past 30 s gets the gateway's `503 UPSTREAM_UNAVAILABLE`
+(below), the same answer the website gets for the desk's own `504
+QOREID_TIMEOUT`. Nothing more is charged; the server still finishes and, on a
+match, writes the case. A request the website stopped waiting for is answered
+from storage on its retry with the same `Idempotency-Key` (the case, or the
+stored answer); a new submission with a new key after a match is `409
+NIN_REGISTRATION_IN_PROGRESS`, the receptionist's own case.
+
+What the website gets. The public gateway answers every identity `502`, `503`
+and `504` itself (`gateway/nginx.conf.template`: `error_page 502 503 504 =
+@upstream_unavailable` for the whole server; `gateway/proxy-headers.conf`,
+included in `location ^~ /api/v1/identity/`, sets `proxy_intercept_errors
+on`). The browser receives `503` `{code: "UPSTREAM_UNAVAILABLE"}`, "A required
+platform service is temporarily unavailable.", with no `retryAfterSeconds`.
+That includes the desk's `504 QOREID_TIMEOUT`, its `503
+NIN_PROVIDER_UNAVAILABLE` (the guard's `NIN_CHECK_UNAVAILABLE` among them)
+and `503 NIN_PROTECTION_UNAVAILABLE`, and `502
+QOREID_PROVIDER_RESPONSE_INVALID`. A request that runs past the gateway's read
+timeout gets the same `503`. The desk's own codes and `retryAfterSeconds` for
+these answers reach only internal callers and the audit and log. Every `4xx`
+passes through as the desk wrote it: `409 NIN_CHECK_IN_PROGRESS` and `409
+NIN_CHECK_HELD` with `retryAfterSeconds`, `400` and `422`. So on `503
+UPSTREAM_UNAVAILABLE` the desk screen shows its general message and lets the
+receptionist try again with the same `Idempotency-Key` (the guard and the
+stored answer mean a retry after QoreID answered is not charged again). On a
+`409` with `retryAfterSeconds` it shows the message and offers to try again
+after that time, with the same `Idempotency-Key`. It never retries on its own.
+
+### Details refused before any check
+
+A date of birth in the future or before 1900, or a first or last name with a
+control character (a tab, a line break), is refused before anything is sent
+or charged: `400 NIN_DETAILS_INVALID`, "Check the name and the date of birth.
+The date of birth cannot be in the future or before 1900.", audited with
+`providerCalled: false`, the breaker not touched. This is the answer the
+website gets: the request body check only refuses a malformed body (`400
+VALIDATION_FAILED` with `errors`: a blank or over-100-character name, a date
+that is not a real `YYYY-MM-DD` date, an NIN that is not 11 digits).
+
+### One check per desk request
+
+0137's guard (above) is what keeps one desk request from being paid for
+twice, and more: it is per NIN, not per request. The review build's own
+per-request claim (a keyed row of `auth.otp_rate_limits` per facility,
+account, `Idempotency-Key` and body, with its stored "could not be verified"
+or "does not match" answer for 24 hours) is removed: every case it covered
+the guard covers with no second QoreID call, and it no longer writes those
+rows.
+
+- The same request twice at once (a double click), or two desks with the
+  same NIN: the second waits for the first's answer and reuses it, or gets
+  `409 NIN_CHECK_IN_PROGRESS` when that answer does not come within its wait.
+- A resend of a request answered "could not be verified" (`422
+  NIN_NOT_VERIFIED`): the stored "no record" or `404`, the same `422`, for as
+  long as 0137 keeps it.
+- A resend after "does not match", with the same body or a corrected name or
+  date of birth (a new body, under the same key or a new one): the stored
+  record, compared again, for as long as 0137 keeps it (24 hours after a
+  record that did not match, and each such resend is a use that keeps it 30
+  days from then: Q115, above). A corrected request is no longer a new charge,
+  and its use keeps the record, so it is not paid for again soon after
+  either.
+- A resend of a request that matched: the case it created (as before).
+- A NIN already in an active registration case (pending approval or review)
+  at any facility: `409 NIN_REGISTRATION_IN_PROGRESS`, known only when the
+  case is written, after the check (Identity cannot read another facility's
+  cases). Each desk check answered from the stored record is a use that
+  keeps it (Q115, above: 30 days from that use, never less than 90 days from
+  a first check that matched), so while the next check comes within that time
+  it is answered from storage; after a longer gap with no use in between, one
+  new charge starts a new record (90 days from that check). A pending case is
+  not a Health ID (Q110).
+- A resend after a check that may have been charged without an answer HID
+  could keep: `409 NIN_CHECK_HELD` until the hold ends; after a check that
+  sent nothing (switched off, the switch or the guard's store unreadable, the
+  connection refused before sending): a new check at once.
+- QoreID's "incomplete" answer is kept only as long as 0137's short hold, as
+  for every path (its check is not finished and may change). The desk answers
+  it `422 NIN_NOT_VERIFIED`, the Q117 sentence (the implementer's choice, to
+  be confirmed by the owner), and a resend within those 5 minutes gets the
+  same answer from storage; after them the next check asks QoreID again (one
+  more charge).
+
+The desk's `identity.nin.verify` rows no longer carry `replay: true`; a
+reused answer is marked `storedAnswer: true` there, and is the guard's row
+with `source: "stored"`.
+
+### No request limits (Q109)
+
+The owner wants no per-staff, per-facility or Health ID-wide limit on desk
+NIN checks (18 November 2026). The review build's limits (20 per staff
+account per hour, 100 per day, 300 per facility per day, `429
+NIN_CHECK_LIMIT_REACHED`, and `503 NIN_CHECK_LIMIT_UNAVAILABLE` when they
+could not be read) are removed; the desk never answers either code. What
+stops a NIN being paid for twice is the check itself, not a count. There is no
+limit or hold of any other kind either: no count per staff account, per NIN,
+per facility or across Health ID, and no answer is held because of how often
+a NIN was checked or how often its details did not match. `409
+NIN_CHECK_HELD` means only 0137's hold after a check QoreID may have charged
+(below).
+
+### The breaker with QoreID
+
+As ID-0: a `503` from QoreID trips it at once; three other failures within 5
+minutes trip it; while tripped no check is sent (`503
+NIN_PROVIDER_UNAVAILABLE`, "The NIN service is not answering right now.
+Please try again in a minute."); after 60 seconds one check is let through:
+its success closes it, its failure trips it again. It counts only what QoreID
+did for a request that asked it (D4):
+
+| What happened | Breaker |
+| --- | --- |
+| QoreID answered: a record (complete or not, a date of birth before 1900 included), "no record", "incomplete", or its `404` "not found" | success: closes it and clears the failures |
+| QoreID failed: a `5xx`, a timeout at its own deadline, a network failure (before or after sending), its `401`, a `4xx` other than `404` and `429` (such as an account-level `403`, answered `502 QOREID_PROVIDER_REJECTED`), or an answer HID cannot use (no readable name and date of birth) | one failure; a `503` (QoreID's `5xx`, a network failure, its `401`) trips it at once |
+| QoreID's `429` (rate limited) | not counted |
+| the desk's wait ran out while QoreID had not answered (`504 QOREID_TIMEOUT`, the check still running) | one failure, so a QoreID that hangs trips it after three waits within 5 minutes, not at `QOREID_NIN_ANSWER_CEILING_MS`; when that check later answers, the answer is recorded as a success; when it later fails, it is not counted again |
+| an answer the guard kept (any outcome, `404` included) | not counted, and the breaker is neither closed nor its failures cleared; the retry place is freed |
+| the guard refused before sending (`409 NIN_CHECK_IN_PROGRESS`, `409 NIN_CHECK_HELD`), or its store or keys were unavailable | not counted; the retry place is freed |
+| an error of HID's own code or database (the guard's audit write, its store), not QoreID's | not counted; how this request's own QoreID check ended, if it was sent, is counted as above (now, or when it ends); the retry place is freed meanwhile |
+| QoreID switched off, or its switch unreadable | not counted (found during the check, the retry place is freed) |
+| a NIN on a Health ID, answered from the record; details refused before any check | the breaker is not asked |
+
+A switch that cannot be read, before the check or when it is read again just
+before sending, answers `503 NIN_PROVIDER_UNAVAILABLE`, "NIN checks cannot be
+started right now. Please try again in a minute.", audited with
+`providerCalled: false`.
+
+### What #276 settled, and what is left for it
+
+This branch keeps 0137's files as #276 has them (merged at adf5e14a). There
+#276 made these changes the desk asked for; each is proved in
+`nin-double-charge.spec.ts`, and the last also in 0137's PostgreSQL suite:
+
+- Each stored record says which check it came from (`record_source`
+  `nin_only` or `profile`). A sign-up after the desk kept an incomplete
+  NIN-only record is answered `502 QOREID_PROVIDER_RESPONSE_INVALID` from
+  storage, with no second charge and the row left as it was ("For #276
+  (1)"); only an incomplete profile record is taken over.
+- QoreID's `404` is kept with no question, so a profile check's `404`
+  answers a sign-up and the desk from storage ("For #276 (2)"), each now
+  `422 NIN_NOT_VERIFIED` (Q117).
+- Q115 as one rule (adf5e14a): `identity.qoreid_nin_record_used` keeps a
+  stored record at least 30 days from each use, never shorter, and `begin`
+  applies it to every stored record it answers, so a sign-up's and a profile
+  check's use of a stored record count as the desk's does, and a record kept
+  90 days from its first check is not shortened by a use.
+  `identity.keep_qoreid_nin_record(lookup, key version)`
+  (`NinCheckOnce.keepRecord`) applies the same rule to a use made without
+  `begin`; it replaces c780b095's keep of 90 days from a match. The desk no
+  longer calls it: its use is counted by `begin` (above, "A stored record the
+  desk uses is kept by 0137's begin"), so no path on this branch calls it.
+
+Left for #276 (Rahman's) or the owner, not changed here:
+
+- A profile check's "no record" stays bound to its question (it may depend
+  on the details sent): a desk check or a sign-up after it is a second
+  charge until the owner or Rahman decides otherwise.
+- Q117 on the profile: a profile check that reuses a NIN-only "no record"
+  (a sign-up's or the desk's, which answers every question) is answered as
+  QoreID's "not verified" for the profile's details (`200 state:
+  "not_verified"` or `"incomplete"`, or `409 PATIENT_NIN_DETAILS_MISMATCH`),
+  not `422 NIN_NOT_VERIFIED`: 0137's `begin` still answers only the outcome,
+  completeness, answer and end of a stored row, not whether a stored "no
+  record" was asked with the NIN alone, so the profile cannot tell it from
+  its own. For the owner's one 422 there, `begin` needs to return which
+  question a stored "no record" answered (or its source).
+- Owner question (Q115): a record first kept 24 hours because its details did
+  not match (at the desk or on the profile) is, as built, kept 30 days from
+  its next use, and that use need not match: `begin` counts every stored
+  record it answers, so the same wrong details sent again within the 24 hours
+  keep someone else's record 30 days. Should a later match instead run the
+  record until 90 days after its first check (0137 would need the first
+  check's time, which only `finish_qoreid_nin_check` should set), and should a
+  use whose details do not match count as a use at all? Either is 0137's
+  change, not the desk's.
+
+### `GET /api/v1/identity/registration-capabilities` with QoreID
+
+- QoreID's switch on: `"nin": { "enabled": true, "state": "live", "available": <breaker> }`.
+- QoreID's switch off, or a desk of the sealed demo or QA tenant: `"nin": { "enabled": false, "state": "unavailable", "available": false }` (as today).
+- The switch or the seal cannot be read: `"nin": { "enabled": true, "state": "live", "available": false }`.
+
+`withoutNin` and `newPatientRegistrationRequiresNin` are unchanged here
+(Release A's lane turns `withoutNin` on).
+
+### Tests
+
+`services/identity-api/src/identity/qoreid-nin-desk.spec.ts` (choosing the
+check; match, case and spacing, no match, name and date-of-birth mismatch, a
+record born before 1900 answered "does not match", bad records, QoreID
+failures, QoreID's own 504 with `retryAfterSeconds`; the switch off,
+unreadable, and switched off during the check, or unreadable just before
+sending; no request limits (Q109: 25 checks by one account, and 400 by 40
+accounts at one facility, are never refused for volume; no hold or count is
+read or written); a desk of the sealed demo or QA tenant ("not configured"
+before anything is read or sent, "cannot be started" when the seal cannot be
+read, capabilities off; the seal read word for word in the database suite); a
+NIN already on a Health ID (the record is the answer: matched, or "does not
+match" for other details or no date of birth, never the NIN service, even with
+the breaker tripped; evidence that cannot be read; a patient changed before
+the write, with its own text; not read while switched off); any record will
+do (no recognised sex), and stored answers said to be stored; no keep call
+of the desk's own for a stored record (0137's `begin` counts the use) and no
+other way to 0137;
+QoreID's "no record", fresh or stored, and its `404`, fresh or kept, through
+the real `verifyNinRecord`, answered `422 NIN_NOT_VERIFIED` with the owner's
+sentence (Q117) and audited `no_match`; no claim or stored answer
+of the desk's own (every resend goes to the guard); details refused before any
+check, over HTTP with the same validation pipe and problem filter as `main.ts`
+(`400 NIN_DETAILS_INVALID`, and `VALIDATION_FAILED` only for a malformed
+body); the breaker (D4: a stored answer neither counts nor closes it; each 504
+wait counts once and a late answer closes it, a late failure is not counted
+again; QoreID's "no record" and `404` are answers; the guard's audit write failing is HID's own
+and only what QoreID did counts); the audit rows; capabilities; no NIN in an
+audit row or log line; 0137's answers as the desk's). The QoreID adapter is
+mocked: no test calls QoreID.
+`services/identity-api/src/identity/qoreid-nin-desk-once.spec.ts` drives the
+real desk service and providers, 0137's guard, the real profile check
+(`QoreIdVerificationService`) and the real QoreID adapter against a fake
+QoreID that bills every NIN request (two desks at once; the same request
+twice at once; a resend after "could not be verified"; a corrected name; a
+typo, the corrected request two hours later and another desk and the profile
+29 days after that, one charge, the record kept 30 days from the corrected
+request (Q115, 0137's `begin`); a record used at the desk on days 10, 80 and
+109, its 90 days from the first check unchanged by day 10's use and kept 30
+days from day 80's and day 109's, one charge and no keep call of the desk's
+own; a record another check kept 24 hours, used by the desk and reused 29
+days later; a stored record a "does not match" request used, kept 30 days
+from that use, and a stored "no record" left as it was; QoreID's `404` at
+the desk, at sign-up and on the profile, each `422 NIN_NOT_VERIFIED` with the other two
+answered the same from storage,
+one charge, and the profile's evidence as before; QoreID's "no record" at the
+desk and at sign-up, fresh and from storage; "does not match" still its own
+answer (Q117); a desk of the
+sealed demo or QA tenant, no charge and 0137's stored answers never reached; a
+sign-up or the profile and the desk, one after the other and at once; a
+record without a recognised sex or with a line break in its address, kept by
+the profile or met at the desk, one charge; a record the desk did not match
+kept 24 hours, a matched one 90 days; a NIN on a Health ID after the stored
+answer ended, no charge, and other details "does not match" from the record
+with no charge and nothing kept; slow answers whose three waits open the
+breaker and whose answers close it; a hang that opens it after three waits;
+QoreID's 404, fresh or stored, late behind a desk wait (its answer closes the
+breaker the waits opened) or followed by the guard's audit write failing,
+never counted; the guard's audit write failing, never counted; records born
+before 1900, "does not match" and never counted; a stored answer that does not
+close a retrying breaker; forty "does not match" answers for one NIN by one
+account, each answered, none held; a timeout and the retry with the same
+`Idempotency-Key`; QoreID's token request hanging, `504` with
+`retryAfterSeconds` and nothing charged or kept; held, in progress, store
+unreachable; every NIN request sent under the guard's lease; no NIN in an
+audit row or log line). `services/identity-api/src/config/env-example-qoreid.spec.ts`
+keeps `.env.example`'s QoreID waits at the code defaults.
 
 ## SX-10. Registration-case list for the desk and approvers (Akos wave 1, no migration)
 
@@ -10246,3 +10851,1257 @@ primary). Pick QA Hospital when signing in. Written only where 0123 installed
 the sealed QA tenant (Amazon RDS: production and staging); on every other
 database (CI, acceptance, rehearsals) nothing is written. No API change.
 
+
+## ID-6. Verify a NIN later and link it (Release B, migration 0138; not live until signed)
+
+Akos P0-1. Owner decisions applied: Q109 (no limit per staff member or
+facility), Q115 (the keep rule, through 0137's guard), Q117 (the words when a
+NIN cannot be verified), Q110 (a NIN a Health ID holds is never sent again)
+and Q100 B (404 `PATIENT_NOT_FOUND`). The planned contract's "ID-6" is the
+spec; this section is what is built.
+
+A patient registered without a NIN (ID-2, 0130) gets a NIN checked with QoreID
+at this facility's desk and attached to their record. On success ID-0's rule
+reads `ninStatus: "verified"` (a verified, unrevoked `nin` row). Names, date of
+birth, Health ID, the assurance state and who has access do not change.
+
+### `POST /api/v1/identity/patients/:patientId/nin`
+
+- `:patientId` is the patient's UUID. The NIN goes only in the body.
+- Permission `identity.registration.write` (front desk, approvers, doctors,
+  nurses, clinicians), `X-Facility-Id`, `Idempotency-Key` required.
+- Only this facility's own patients (0131's `identity.own_facility_basis`). A
+  consent grant does not allow it. Linking a NIN never creates or extends an
+  own-facility basis.
+
+Body, exactly these fields:
+
+```json
+{ "nin": "<11-digit-NIN>", "purpose": "healthcare-operations" }
+```
+
+`nin` is 11 digits once spaces (and hyphens) are removed.
+
+The order of checks. A NIN that is not this patient's never says whether anyone
+else holds it, and nothing is charged for a refusal the database gives first:
+
+1. The patient: active, this side of the seals, this facility's own patient
+   (else 404 or 403).
+2. The patient's own verified NIN: the same NIN answers `already_linked` (no
+   QoreID call); another answers 409 `PATIENT_ALREADY_HAS_NIN`.
+2a. The legacy NIN crosswalk (0057), kept as the patient's own check keeps it
+   (0058, 0092). Until the legacy records' NIN inventory is complete (no
+   legacy run `running` or `staged`, and every legacy run's NIN dispositions
+   attested: `identity.legacy_nin_crosswalk_ready()`), the answer is 409
+   `NIN_LINK_TRY_LATER`. A patient promoted from the legacy system whose
+   earlier records attest a different NIN gets 409 `PATIENT_ALREADY_HAS_NIN`
+   ("This patient's earlier records hold a different NIN. Ask Health ID
+   support to review it."): a different NIN goes to governed review and never
+   replaces the attested one. Both are answered before QoreID is asked. If the
+   crosswalk changes between that check and the link, the link (step 5) gives
+   the same answer after QoreID's match.
+3. The NIN check, with the name and date of birth on the patient's record:
+   the desk's check (deferred or switched off, the sealed tenants, Q110's
+   record, the NIN service behind ID-0's breaker, 0137's guard as path
+   `desk`). The record's names are compared in the record's order and then the
+   other way round; the second comparison is answered from what the first
+   kept, never charged again. "No record" and "does not match" give one
+   answer, 422 `NIN_VERIFICATION_FAILED`.
+4. Only after a match: a NIN another record holds answers 409
+   `NIN_ON_ANOTHER_RECORD`. Nothing changes and the other record is never
+   named. Under Q110 this is a NIN a Health ID holds whose record matched.
+   It is also a NIN the legacy crosswalk attests for another patient, so a
+   migrated patient's NIN never goes on a duplicate record. The attested NIN
+   itself links to its own patient.
+5. The link, in one transaction (`identity.link_patient_nin`): the checks
+   again under the NIN's and the patient's locks, the evidence
+   (`identity.patient_nin_links`), the verified `nin` identifier (source
+   `hid-desk-nin-link`) and the patient's `row_version` + 1.
+
+Answer `200`:
+
+```json
+{ "patientId": "uuid", "outcome": "nin_linked", "ninStatus": "verified",
+  "message": "NIN Verified. It is now on this patient's record.", "replayed": false }
+```
+
+- `outcome` is `nin_linked` or `already_linked` ("NIN Verified. It is already
+  on this patient's record.").
+- The same key with the same body replays a link with `replayed: true`. The
+  same key with another body is 409 `IDEMPOTENCY_KEY_REUSED`.
+- The answer never carries the NIN, its last 4 digits or anything from the NIN
+  record.
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | "Enter the 11-digit NIN." (also another purpose or an extra field) |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED` | existing |
+| 403 | `PERMISSION_DENIED` | existing |
+| 403 | `NIN_LINK_NOT_PERMITTED` | "You can add a NIN only for this facility's own patients." |
+| 404 | `PATIENT_NOT_FOUND` | "No such patient." (unknown, inactive, merged, or across the seals) |
+| 409 | `PATIENT_ALREADY_HAS_NIN` | "This patient already has a verified NIN.", or for a migrated patient whose earlier records hold another NIN, "This patient's earlier records hold a different NIN. Ask Health ID support to review it." |
+| 409 | `NIN_ON_ANOTHER_RECORD` | "This NIN is already on another patient record. Ask an approver to review the two records." |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | "This request key was already used for a different request." |
+| 409 | `NIN_LINK_TRY_LATER` | "A NIN cannot be added until the earlier records' NIN check is complete. Please try again later." (the legacy records' NIN inventory is not complete; no QoreID call at the precheck. Not a 503: the gateway replaces an upstream 503's body.) |
+| 409 | `NIN_CHECK_IN_PROGRESS`, `NIN_CHECK_HELD` | as 0137, with `retryAfterSeconds` |
+| 422 | `NIN_VERIFICATION_FAILED` | "This NIN could not be verified. Check the number and try again." (Q117; an answer, not a breaker failure) |
+| 502 | `QOREID_PROVIDER_RESPONSE_INVALID` | as 0137 |
+| 503 | `NIN_PROVIDER_UNAVAILABLE` | NIN checks off here, a sealed tenant's desk, or the breaker open (nothing sent) |
+| 503 | `NIN_PROVIDER_DEFERRED` | staging with NIN checks deferred |
+| 504 | `QOREID_TIMEOUT` | as 0137 |
+
+Audit: one `identity.patient.nin-link` row for each answer and each refusal:
+the patient (none for `PATIENT_NOT_FOUND`), `outcome` (`nin_linked`,
+`already_linked`) or `refusal` (`not_found`, `not_permitted`,
+`already_has_nin`, `no_record`, `details_mismatch`, `on_another_record` with
+`otherPatientId`, `key_reused`, `source_nin_differs`, `legacy_records_pending`),
+and `qoreidCalled`. A replayed answer writes `outcome` `replayed` with
+`replayed: true`, so the patient's access log still shows the link once. Never
+the NIN or its HMAC. The desk's NIN check writes its own `identity.nin.verify` and
+`identity.qoreid.nin-check` rows as for registration.
+
+The patient's access log (`GET /api/v1/identity/me/access-log`) gains the
+action `nin_added` with `facilityName` ("NIN added at <facility>") for each
+link; an `already_linked` answer or a replay adds nothing.
+
+A desk link leaves the patient's assurance state as it is: the desk confirms
+the person in front of it against the record, while the assurance state is
+about the patient's own login. The patient can still raise it: after a desk
+link, the patient's own NIN check finds their verified row for that NIN
+(0092's `bound_exact`) and moves them to `NIN_VERIFIED` as today.
+
+Screen notes: show "Verify NIN" on a patient whose `ninStatus` is
+`not_verified`, to staff with `identity.registration.write`, for this
+facility's own patients, while `registration-capabilities` answers
+`nin.available: true`. Show the Q117 words exactly on 422; on 409
+`NIN_CHECK_*` or 504 offer to try again after `retryAfterSeconds`, never
+automatically. Never echo the NIN after sending it.
+
+## SX-4. Add or remove one role for a staff member (Release B, migration 0139; not live until signed)
+
+Akos N-2a and N-2c. Owner decision Q129 A (19 November 2026): facility
+administrators add and remove roles for their own staff; at governed
+facilities (QA Hospital included) Health ID support does it, with a licence
+check. The planned contract's "SX-4" is the spec; this section is what is
+built.
+
+One membership may hold several roles (`auth.account_roles`). Today's
+`POST /identity/facility-staff/:membershipId/role` replaces them with one
+role and is unchanged. SX-4 adds two narrower commands beside it, for the
+facility administrator and for support. Membership ids are UUIDs; no Health
+ID or NIN appears in these routes.
+
+### The facility administrator
+
+Both routes need a staff session at the `X-Facility-ID` facility with
+`workforce.manage`, at a self-signed-up facility that support has reviewed
+(403 `STAFF_MANAGEMENT_NOT_AVAILABLE` at governed and legacy facilities, 409
+`FACILITY_REVIEW_PENDING` before review), the Origin and CSRF checks of every
+cookie POST, and the password re-entered.
+
+**`POST /api/v1/identity/facility-staff/:membershipId/roles/add`**
+
+Headers: `Idempotency-Key` (required, 16-128 URL-safe characters). Body,
+exactly these fields:
+
+```json
+{ "role": "nurse", "licenceBody": "NMCN", "licenceNumber": "NMCN-12345",
+  "attested": true, "reason": "Also covers night triage", "currentPassword": "…", "expectedVersion": 4 }
+```
+
+| Field | Rule |
+|---|---|
+| `role` | `doctor`, `nurse`, `lab`, `pharmacist` or `receptionist`, and one of the facility's invitable roles (`inviteOptions.roles` of `GET /identity/facility-staff`). |
+| `licenceBody`, `licenceNumber` | The role's own licence: MDCN (doctor), NMCN (nurse), MLSCN (lab), PCN (pharmacist), with a number of 3-100 characters. The front desk sends neither. Today's invitation rule. |
+| `attested` | `true`: the administrator vouches for the licence. |
+| `reason` | 8-500 characters. |
+| `currentPassword` | 1-256 characters. |
+| `expectedVersion` | The member's `version` from `GET /identity/facility-staff`. |
+
+- Closed while staff invitations are closed (423 `STAFF_INVITATIONS_UNAVAILABLE`),
+  as today's role change is.
+- Refused 403 `STAFF_RECENT_RECOVERY_HOLD` if the administrator's account was
+  recovered with a verification code in the last 24 hours.
+- `201` for a new grant. The same `Idempotency-Key` with the same request
+  answers `200` with `replayed: true` and changes nothing; with another
+  request, 409 `IDEMPOTENCY_KEY_REUSED`. The password is not part of the
+  request compared.
+
+**`POST /api/v1/identity/facility-staff/:membershipId/roles/remove`**
+
+```json
+{ "role": "lab", "reason": "Moved to the ward full time", "currentPassword": "…", "expectedVersion": 5 }
+```
+
+- No licence fields and no `Idempotency-Key`. Not closed with staff
+  invitations, and allowed during the recovery hold (as removing a member).
+- `200`. A retry after success answers 409 `FACILITY_STAFF_ROLE_NOT_HELD`
+  (before any version check); the screen reloads the list.
+
+### Health ID support
+
+**`POST /api/v1/admin/facilities/:facilityId/staff/:membershipId/roles/add`**
+and **`.../roles/remove`**: `platform.facility-staff.manage` (new; given to
+every platform role that holds `platform.principal.manage`: today
+`platform_admin` and `platform_super_admin`), facility optional (a standalone
+platform administrator works).
+
+- Headers: `If-Match: "<version>"` (the member's version; a weak tag or no
+  quotes are accepted too) and `Idempotency-Key`, both required: 428
+  `IF_MATCH_REQUIRED` and 400 `IDEMPOTENCY_KEY_REQUIRED`.
+- Bodies as the administrator's, with no `currentPassword` and no
+  `expectedVersion`. Add also needs `verificationMethod` for a licensed role:
+  `regulator_register`, `in_person`, `officer_match`, `cac_registered_contact`
+  or `other`. The front desk sends none.
+- Any facility. The roles allowed are those of the organisation's recorded
+  kinds (a hospital or clinic: all five; a laboratory: `lab` and
+  `receptionist`; a pharmacy: `pharmacist` and `receptionist`; none
+  recorded: a hospital). None at an outreach group's facility.
+- Support may change a governed facility's administrator's membership (never
+  the administrator roles themselves). At a self-signed-up facility the
+  administrator's role is changed with
+  `POST /api/v1/admin/self-service-facilities/:applicationId/administrator-role`
+  (which keeps the facility's record of it and signs the administrator out),
+  so these routes answer 409 `FACILITY_STAFF_ADMINISTRATOR` for that
+  membership. Before review that route answers 404 (support's review sets the
+  administrator's role), so the detail says which applies. A self-signed-up
+  facility still under review has no other member. Its own account and
+  platform accounts are refused.
+- QA Hospital's seal (0123) holds: a membership of the QA facility belongs
+  to one of the QA tenant's fictional accounts.
+- Add answers `201`, or `200` with `replayed: true`; remove answers `200`,
+  and a replay `200` with `replayed: true`.
+
+### Answers
+
+```json
+{ "membershipId": "uuid", "version": 6, "roles": ["doctor", "nurse"], "replayed": false }
+```
+
+`roles` is every active role of the membership, sorted. A remove (and its
+replay) also carries `grantsRevoked`: how many of the member's own-facility
+and break-glass grants it revoked (see below), usually `0`.
+
+### What happens
+
+- **Add** grants the one role. For a licensed role it records one licence
+  attestation tied to that grant: the administrator's (`facility_attestation`)
+  or support's, whose method is how support checked the licence.
+- **Remove** revokes the one role ("Role removed by the facility
+  administrator" or "Role removed by Health ID support"). Other roles are
+  untouched. A member always keeps one role: 409 `FACILITY_STAFF_LAST_ROLE`.
+  To end someone's access, use `POST /identity/facility-staff/:membershipId/end`.
+- The membership's version goes up by one.
+- **Grants the roles left no longer allow are revoked now.** A remove revokes
+  the member's unexpired, active grants here that no role still held allows:
+  own-facility openings (ID-4, 0131) when no role left has
+  `identity.patient.open-own-facility` (doctor, nurse, clinician), and
+  break-glass grants when none has `identity.break-glass.write`. So a doctor
+  who is also a pharmacist and loses doctor cannot keep reading a chart they
+  opened as a doctor. Status `revoked`, by the caller, with the remove's
+  reason, and one `identity.consent-grant.close` audit row each with the
+  patient (the patient's access log shows "access ended" for the
+  administrator's). Grants the patient approved, or gave with the PIN, stay.
+  Such a revocation is not the patient's, so it does not set off ID-4's
+  24-hour refusal: the facility's other clinicians still open the patient as
+  before (0139 replaces 0131's opener so that only the patient's own
+  revocation refuses; this also covers 0086's end of a membership).
+- An open or a break-glass activation by the member waits for a remove in
+  flight on their membership and is then answered under the roles left, so no
+  grant is made after the remove has read the member's grants.
+- Other permissions are read on every request, so the rest of the change
+  applies from the member's next request; nobody is signed out. Sign-in sites
+  follow section 53's gate (adding `lab` to a hospital doctor also admits
+  them on `lab.`).
+- A remove closes the member's open records-processing requests that can no
+  longer be used (pending, `healthcare-operations`, and the member no longer
+  holds `ocr.job.write` here): status `expired`, one
+  `identity.access-request.close` audit row each, as 0136 did.
+- **The session's `roles`.** The staff session lists the membership's two role
+  columns as `roles`, not every grant, and the first is the role a patient
+  sees on an access request and a PIN-use notice. An add leaves them as they
+  are. A remove of the role either column names moves that column to the
+  first role still held, alphabetically. In the rare case that the first
+  column names the role removed and every role left would collide with an
+  ended membership of the same person here, the remove is refused: 409
+  `FACILITY_STAFF_ROLE_COLUMN_CONFLICT` (remove the person from the facility
+  and invite them again). Access, `modules` and the sign-in gate all read the
+  grants. Listing every role in the session is a follow-up.
+
+### Audit
+
+- The administrator: one `identity.facility-staff.role-add` or
+  `identity.facility-staff.role-remove` row at the facility for each success
+  (written by the database: the membership, role, licence body, roles before
+  and after, closed requests, revoked grants, and the reason) and each refusal (outcome
+  `denied`: the membership, role, reason and code), besides the request row
+  every route writes.
+- Support: `admin.facility-staff.role-add.request` or
+  `admin.facility-staff.role-remove.request` for every request, and one
+  `admin.facility-staff.role-add` or `.role-remove` row for each success, in
+  the command's transaction (the facility, membership, role, licence body,
+  method, roles before and after, closed requests, revoked grants, and the
+  reason).
+- Each grant a remove revokes: one `identity.consent-grant.close` row with the
+  patient and facility, written by the database. The administrator's is a
+  staff row; support's is a system row (a platform row may not name a
+  patient), and support's own row above names the change.
+- No row ever holds a licence number or the password.
+
+### Reads
+
+In `GET /identity/facility-staff` and support's `GET /admin/facilities/:facilityId/staff`,
+each member gains `licences`, one per active licensed role:
+
+```json
+"licences": [{ "role": "nurse", "body": "NMCN", "numberHint": "2345", "vouchedBy": "Ada Obi",
+  "vouchedAt": "2026-11-20T09:00:00.000Z", "method": "facility_attestation" }]
+```
+
+- `numberHint` is the last 4 letters or digits, for support too.
+- A licensed role with no attestation (a role granted before attestations)
+  has `numberHint`, `vouchedBy`, `vouchedAt` and `method` null.
+- `licence` stays as it was for older screens.
+- On a database without 0139, `licences` is absent.
+
+### Errors
+
+| HTTP | Code | Detail |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | One or more request fields are invalid. |
+| 400 | `STAFF_INVITATION_INVALID` | The licence does not match the role |
+| 400 | `STAFF_INVITATION_ROLE_NOT_ALLOWED` | This facility cannot invite that role |
+| 400 | `FACILITY_STAFF_REASON_INVALID` | Enter a reason of 8 to 500 characters |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED` | (header missing) Idempotency-Key must contain 16 to 128 URL-safe characters |
+| 403 | `PERMISSION_DENIED` | Staff management is not permitted |
+| 403 | `STAFF_MANAGEMENT_NOT_AVAILABLE` | Staff management is not available at this facility |
+| 403 | `STAFF_REAUTHENTICATION_FAILED` | (today's) |
+| 403 | `STAFF_RECENT_RECOVERY_HOLD` | (today's; add only) |
+| 404 | `FACILITY_STAFF_NOT_FOUND` | Staff member was not found |
+| 404 | `ADMIN_FACILITY_NOT_FOUND` | Facility was not found (support) |
+| 409 | `FACILITY_REVIEW_PENDING` | (today's) |
+| 409 | `FACILITY_STAFF_SELF` | You cannot change your own membership |
+| 409 | `FACILITY_STAFF_ADMINISTRATOR` | (today's) on the administrator's routes; on support's, a self-signed-up facility's administrator: This is a self-signed-up facility's administrator. Before review, set their role in the facility's review; after review, change it with the facility's administrator role |
+| 409 | `FACILITY_STAFF_ALREADY_ENDED` | This person no longer works at the facility |
+| 409 | `FACILITY_STAFF_PLATFORM_ACCOUNT` | This account's access is managed by Health ID |
+| 409 | `FACILITY_STAFF_ROLE_ALREADY_HELD` | This person already has that role |
+| 409 | `FACILITY_STAFF_ROLE_NOT_HELD` | This person does not have that role |
+| 409 | `FACILITY_STAFF_LAST_ROLE` | This is the person's only role. To stop their access, remove them from the facility |
+| 409 | `FACILITY_STAFF_ROLE_COLUMN_CONFLICT` | This role cannot be removed here. To change this person's roles, remove them from the facility and invite them again |
+| 409 | `VERSION_CONFLICT` | This changed meanwhile; reload before retrying |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | This request was already used for a different change. Please reload and try again |
+| 423 | `STAFF_INVITATIONS_UNAVAILABLE` | Staff invitations are not open (the administrator's add) |
+| 428 | `IF_MATCH_REQUIRED` | Reload the staff list and try again (support) |
+| 503 | `STAFF_MANAGEMENT_UNAVAILABLE` | Staff management is temporarily unavailable |
+
+### Database (0139)
+
+`identity.add_facility_staff_role`, `identity.remove_facility_staff_role`,
+`identity.admin_add_facility_staff_role`,
+`identity.admin_remove_facility_staff_role`,
+`identity.list_facility_staff_licences()` and
+`identity.admin_list_facility_staff_licences(uuid)`: SECURITY DEFINER,
+EXECUTE to the Identity runtime only. The idempotency keys are kept in
+`auth.admin_command_idempotency` under the operations
+`identity.facility-staff.role-add`, `admin.facility-staff.role-add` and
+`admin.facility-staff.role-remove`. `identity.staff_licence_attestations`
+accepts support's methods (with no attesting membership, review or
+invitation) and a new attestation text, `platform-staff-role-v1`.
+
+## SX-8. Keep the open patient across a reload (Release B, migration 0140; not live until signed)
+
+Akos P1-2. The owner's default "Open patient remembered for 8 hours" applies.
+The planned contract's "SX-8" is the spec; this section is what is built. It
+follows section 56 (0129): the same per-sign-in row, read only through a live
+session of the sign-in.
+
+Health IDs stay out of page addresses and the app stores nothing on the
+device, so only the server can remember which patient a staff sign-in had
+open: for one sign-in, at one facility, for at most 8 hours (the staff
+sign-in's own longest life). The row grants nothing. Every chart read still
+carries `X-Facility-ID` and goes through `authorization/check`, which sends
+the patient's "Your records were opened" notice as today.
+
+### Setting
+
+`STAFF_OPEN_PATIENT_ENABLED` (Identity; `true` or `false`, default `false`;
+any other value refuses to boot). In AWS it is `HID_STAFF_OPEN_PATIENT_ENABLED`
+at synth time (identity-api only). While it is `false`:
+
+- `POST /auth/open-patient` and `POST /auth/open-patient/clear` answer a plain
+  404 before any guard (as an Identity without the routes);
+- `GET /auth/session` never carries `openPatient`;
+- a move to another facility clears nothing.
+
+With it `true`, Identity starts only on a definite answer that
+`auth.session_open_patient`, the runtime's SELECT, INSERT, UPDATE and DELETE on
+it, and its EXECUTE on `auth.session_open_patient_target_exists(uuid)` are all
+there, so a deploy made before 0140 rolls back. A start-up read that fails is
+tried 5 times, 2 seconds apart; with still no answer Identity refuses to start
+as well (unlike 0129's check, which leaves an unreachable database to
+`GET /health/ready`).
+
+### `POST /api/v1/auth/open-patient`
+
+A staff session of an Identity sign-in at its `X-Facility-ID` facility, with
+the Origin and CSRF checks of every cookie POST. No permission beyond the
+membership. Body, exactly these fields:
+
+```json
+{ "patientId": "uuid", "purpose": "direct-care" }
+```
+
+- `patientId`: the canonical UUID the chart's routes use.
+- `purpose`: `direct-care`, or `emergency` for a patient opened through
+  break-glass.
+
+`200`:
+
+```json
+{ "openPatient": { "state": "kept", "patientId": "uuid", "expiresAt": "2026-11-20T17:00:00.000Z" } }
+```
+
+- Before storing anything, Identity runs the decision of
+  `POST /identity/authorization/check` for `read_records`, at this facility,
+  with this purpose, for this member, in its no-notice form (`precheck`: no
+  second "Your records were opened" notice, no access-history entry; an
+  `identity.authorization.precheck` audit row).
+- A refused and an unknown patient get the same 403 status and body, and
+  nothing is stored for either. The timing can differ: Identity first asks 0140's
+  `auth.session_open_patient_target_exists`: a UUID that is no patient gets no
+  access check (so no `identity.authorization.precheck` row, whose patient key
+  admits only a real patient), so its answer can come back a little faster.
+  Its denied `auth.open-patient.set` row names the id in
+  `details.requestedPatientId`, not as the row's patient. The caller must
+  already hold the UUID, and every attempt leaves a denied audit row.
+- A new set replaces the old one (one row per sign-in).
+- `expiresAt` is the earlier of the set time plus 8 hours and the sign-in's
+  own end.
+
+### `POST /api/v1/auth/open-patient/clear`
+
+The same caller; the body is `{}` and is not read. `200 { "openPatient": null }`.
+Safe to repeat.
+
+### On `GET /api/v1/auth/session`
+
+`openPatient` is added beside `actor` and `facilitySelection`.
+`POST /auth/refresh` and the service-session routes never carry it.
+
+```json
+{ "openPatient": { "state": "restored", "patientId": "uuid", "purpose": "direct-care",
+    "expiresAt": "2026-11-20T17:00:00.000Z", "card": { "fullName": "Amaka Okafor", "sex": "female",
+    "dateOfBirth": "1990-05-01", "healthIdLast4": "AA22", "ninStatus": "verified" } } }
+```
+
+The card has a 0132 search card's fields, with no full Health ID and no
+`matchRef`. It is shown only after the access check allows the patient, and it
+is read as the member at the reported facility with the stored purpose, only
+while `identity.has_active_consent_grant` allows it for `read_records`: the
+access check's own test, so the card and the decision agree (0131's
+own-facility opening holds such a grant). Row-level security alone would not
+be enough: 0011's registration read shows every unsealed patient to a member
+with `identity.registration.write` or `.approve`, doctors, clinicians and
+nurses among them.
+
+| `state` | When |
+|---|---|
+| `restored` | A patient is stored for this sign-in at the facility being reported, it is under 8 hours old, and the access check (`precheck`, `read_records`, the stored purpose) still allows it. |
+| `ended` | The access check no longer allows it (the grant ended or was revoked, a deny directive applies), or the patient is no longer active. No card; the row read is cleared. |
+| `expired` | 8 hours have passed. No check, no card; the row read is cleared. |
+| `unavailable` | The row, the check, the card or the audit row could not be read or written. No card. The session read still answers `200`. |
+| (absent) | Nothing is stored; it was kept at a different facility (the row stays); the setting is off; or the caller is a patient, an account-only outreach session or an OIDC bearer caller. |
+
+An `ended` or `expired` read clears only the version it read, so a set from
+another tab in between is kept. Since there is one open patient per sign-in,
+the patient opened last in any tab is the one restored.
+
+### What clears it
+
+- The user's clear, or a new set.
+- `POST /auth/facility` to a different facility: the row kept at any other
+  facility is deleted in the transaction that stores 0129's choice (`keep`,
+  `ask`), or, with 0129 `off`, in one transaction with the move's
+  `auth.facility.select` audit row (a failure answers 503
+  `DEPENDENCY_UNAVAILABLE` and the move is not recorded). The delete runs
+  under a savepoint: a missing 0140 table or grant (42P01, 42501) clears
+  nothing, logs `auth.open_patient.unavailable` with operation
+  `clear_elsewhere`, and never rolls back the move (nothing could have been
+  stored without the table).
+- An `ended` or `expired` read.
+- Sign-out, sign-out everywhere or the sign-in ending: the row is read only
+  through a live staff session of the sign-in, so it is never read again. It
+  is not deleted at sign-out (see Open points).
+
+### Errors
+
+| HTTP | Code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | A missing, extra (`hid`, `healthId`, `matchRef`, `nin`, any other) or non-UUID field. |
+| 400 | `FACILITY_REQUIRED` | No valid `X-Facility-ID`. |
+| 400 | `PURPOSE_OF_USE_REQUIRED` | "Choose why you are opening this record." (`purpose` missing, or not `direct-care` or `emergency`.) |
+| 401 | `AUTHENTICATION_REQUIRED` | "Please sign in again." (Also when the sign-in ended between the check and the store.) |
+| 403 | `PATIENT_SCOPE_DENIED` | A patient session. |
+| 403 | `FACILITY_ACCESS_DENIED` | "You are not working at this facility." (Also 0140's guard refusing the row: the membership or facility ended after the request was authorized.) |
+| 403 | `OPEN_PATIENT_NOT_ALLOWED` | "You don't have access to this patient's records now. Ask for their Access PIN or send an access request." |
+| 404 | (plain) | The setting is off, or the caller has no Identity sign-in (an OIDC bearer caller). |
+| 503 | `DEPENDENCY_UNAVAILABLE` | "Something went wrong on our side. Please try again." |
+
+### Audit
+
+- `auth.open-patient.set`: the patient and purpose, outcome `success` (in the
+  store's transaction, with `expiresAt`), `denied` (`not_allowed`,
+  `facility_access_denied`) or `failure`. For a UUID that is no patient the
+  row has no patient and carries `requestedPatientId` and `patientFound: false`
+  in its details.
+- `auth.open-patient.clear`: the patient when a row was cleared, and
+  `cleared` true or false.
+- `auth.open-patient.restore`: each session read that checks a stored patient,
+  naming the patient, with the state. A card is never sent without its row.
+- The patient's access history is unchanged: restoring is not an opening.
+- The service logs one event, `auth.open_patient.unavailable`, with only the
+  operation that failed (`read`, `check`, `store`, `clear`, `clear_elsewhere`,
+  `audit`), and `auth.open_patient.startup_check_unavailable` with the
+  attempt number for each failed start-up read.
+
+### Database (0140)
+
+`auth.session_open_patient`: one row per sign-in family (`family_id`, the id of
+the sign-in's first session, as 0129's), with `account_id`, `facility_id`,
+`membership_id`, `patient_id`, `purpose` (`direct-care` or `emergency`),
+`set_at`, `expires_at` (after `set_at`, at most 8 hours later) and
+`row_version`. Five ON DELETE RESTRICT keys (the sign-in, the account, the
+facility, the patient, and the membership by its id, facility and account). No
+row-level security, as 0129's table: access by grant only, SELECT, INSERT,
+UPDATE and DELETE to the Identity runtime. The guard
+`auth.guard_session_open_patient_change()` admits a row only for a live staff
+sign-in of an active account at its current token version, and an active,
+unheld membership of that account at that facility (0129's admission), else
+23514 `SESSION_OPEN_PATIENT_INVALID`; an update cannot move a row to another
+sign-in or account (55000 `SESSION_OPEN_PATIENT_IMMUTABLE`). The patient is the
+access check's: the guard reads patients only through row-level security.
+Sign-out deletes nothing: the row stays, unread, until a sweep (see Open
+points). `auth.session_open_patient_target_exists(uuid)` (SQL, STABLE,
+SECURITY DEFINER owned by `identity.patients`' owner, EXECUTE to the Identity
+runtime only) answers whether a patient row with that id exists, whatever its
+status; it is never sent to the caller.
+
+Old services on this schema never read or write the table.
+
+### Screen notes
+
+- After the chart opens (after any read the access check allowed), call
+  `POST /auth/open-patient`; when the patient is closed, call `.../clear`.
+- On reload, read `GET /auth/session`: `restored` reopens that patient's chart
+  with the card as its header while the chart loads; `ended` shows "Your
+  access to this patient has ended", then Find patient; `expired` or no field
+  opens Home; `unavailable` opens Home and says nothing.
+- On `restored`, use the returned `purpose` for every chart read.
+  `direct-care` reopens the normal chart. `emergency` reopens the read-only
+  break-glass view, with no write controls, never the direct-care chart (its
+  reads would be refused). An emergency restore lasts only as long as the
+  break-glass grant: once it ends, the next session read answers `ended`.
+- A 404 from either route means "not served": keep today's behaviour (a reload
+  opens Home) and show no "restore" control.
+- Never put the patient id in the address.
+
+### Open points
+
+- Rows of signed-out or ended sign-ins stay (unreadable) until the next set
+  for that sign-in, which cannot come. A sweep deleting rows past their
+  `expires_at` can follow if the owner wants the table kept small; nothing
+  reads them meanwhile.
+
+## EHR-C6. Consultation drafts saved on the server (Release B, migration 0141; not live until signed)
+
+Akos N-5 and the auto-save part of P1-13. Owner decision Q126 A (19 November
+2026): author only; deleted 7 days after the last save. The planned
+contract's "EHR-C6" is the spec; this section is what is built.
+
+A draft is the unfinished consultation form, saved while the clinician types.
+It is not part of the patient's record: no version history, no clinical
+check, never in the chart, the patient's own record, chat, the record
+evidence, Migrate or OCR. Drafts can be deleted.
+
+All routes: `X-Facility-Id`, `X-Purpose-Of-Use: direct-care`, permission
+`ehr.note.write`. UUIDs only; no Health ID. GET, POST and PATCH only.
+
+| Method and path | Consent |
+|---|---|
+| `POST /api/v1/ehr/patients/:patientId/consultation-drafts` (`Idempotency-Key`) | `write_records` |
+| `GET /api/v1/ehr/patients/:patientId/consultation-drafts` | `read_records` |
+| `GET /api/v1/ehr/patients/:patientId/consultation-drafts/:draftId` | `read_records` |
+| `PATCH /api/v1/ehr/patients/:patientId/consultation-drafts/:draftId` | `write_records` |
+| `POST /api/v1/ehr/patients/:patientId/consultation-drafts/:draftId/discard` | none (authorship only) |
+| `GET /api/v1/ehr/my-consultation-drafts` | per patient (below) |
+
+Consent is checked by ehr-api and again by the database (row-level security),
+as for notes: once the patient's grant ends, the draft is hidden from list,
+read and save at once (404 below). Discard still works.
+
+**Create** body: `{ "encounterId"?: uuid, "formVersion": 1-1000, "content": { … } }`.
+`encounterId` is optional: any visit of this patient here that was not
+entered in error, as for notes (open, completed or cancelled); another is 404
+`CLINICAL_RESOURCE_NOT_FOUND`, one entered in error 409
+`VISIT_ENTERED_IN_ERROR`. `content` is a JSON object of at most 20 levels and
+262,144 bytes, never read. It is stored as a JSON object (jsonb): key order is
+not kept, and the size is measured as stored, on the JSON text the database
+keeps (a space after each colon and comma); `sizeBytes` is that size. A NUL
+character or an unpaired surrogate anywhere in it is 400 `VALIDATION_FAILED`
+on `content`. Any other field, or `null`, is 400. `201` (and the same on a
+replay):
+
+```json
+{ "draftId": "uuid", "encounterId": "uuid", "formVersion": 1, "rowVersion": 1,
+  "sizeBytes": 1834, "createdAt": "…", "savedAt": "…", "expiresAt": "…" }
+```
+
+`expiresAt` is `savedAt` + 7 days. One draft per author per visit, and one per
+author per patient with no visit: a second is 409
+`CONSULTATION_DRAFT_EXISTS`, and the problem carries the existing `draftId`.
+The author's own draft for that visit that has expired but is not yet removed
+is cleared first (audited as `.expire`) and the create goes through, unless a
+legal hold keeps it (then 409 with no `draftId`).
+
+**Save** (`PATCH`): `{ "expectedRowVersion", "formVersion", "content" }`,
+replacing the whole content; `200` with the create answer's shape and the new
+`rowVersion`, `savedAt` and `expiresAt`. No reason is asked. Another version
+is 409 `CONSULTATION_DRAFT_CHANGED`; a retry of a save that already went
+through (same content and form version, stored `rowVersion` one higher)
+answers the stored draft. At most 60 saves per member per minute (429,
+counted per ehr-api task).
+
+**List for this patient**: `{ "items": [draft without content] }`, newest
+save first, at most 20. **Read one**: the draft with `content`. **Discard**:
+`204`, safe to repeat; the database deletes the author's own draft (expired
+or not) and audits it.
+
+**My drafts** (all patients, this facility):
+
+```json
+{ "items": [ { "draftId": "uuid", "encounterId": null, "savedAt": "…", "expiresAt": "…",
+    "patient": { "patientId": "uuid", "fullName": "…", "sex": "female", "dateOfBirth": "1990-05-01",
+                 "healthIdLast4": "AA22" } } ],
+  "hiddenCount": 1 }
+```
+
+A draft for a patient the author can no longer read for direct care is not
+listed; it is counted in `hiddenCount` (and still deleted on time). At most
+50, newest save first.
+
+Drafts are deleted 7 days after the last save, except while a legal hold
+(0096) names the patient or the author (owner decision Q138 A, 23 November
+2026): a hold overrides lifecycle deletion
+(DATABASE.md), so the draft is kept, unreadable once expired, until the hold
+is released.
+
+Another member's draft, an expired one, a discarded one and one whose
+patient's grant has ended all answer 404 `CONSULTATION_DRAFT_NOT_FOUND`: the
+database shows the author only their own unexpired drafts of patients they
+may read now. A read or save refused so is audited as other clinical reads
+are (`failure`, reason `not_found`).
+
+Audit (never the content): `ehr.consultation-draft.create`, `.update`,
+`.read` and `.list`, naming the patient, with `sizeBytes` as stored;
+`.discard` by the database (`success`, or `failure` with reason `not_found`
+when nothing was deleted, naming the patient only if it exists);
+`my-consultation-drafts` writes one `.list` row and one `.list.shown` row per
+patient shown (the database); `.expire` per draft by the sweeper (system
+actor, the run's correlation id) or by a create that clears the author's own
+expired draft (the author as actor).
+
+## MY-1. "Ordered by me" (Release B, migration 0143; not live until signed)
+
+Akos P1-4. The planned contract's "MY-1" is the spec; this section is what is
+built. One list of the lab requests and prescriptions this member ordered at
+this facility (`created_by_membership_id` is the session's membership), so
+doctors stop using the lab and pharmacy work queues.
+
+### `GET /api/v1/ehr/my-orders`
+
+`X-Facility-Id`, `X-Purpose-Of-Use: direct-care`. No single permission: lab
+rows need `ehr.lab-request.read` and prescription rows
+`ehr.prescription.read`; `kind=all` lists what the member may read; neither,
+or a kind asked without its permission, is 403 `PERMISSION_DENIED`. No patient
+in the path or query. `Cache-Control: no-store`.
+
+| Parameter | Values | Default |
+|---|---|---|
+| `kind` | `all`, `lab`, `prescription` | `all` |
+| `state` | `open` (draft, active, on hold) or `all` | `all` |
+| `since` | `YYYY-MM-DD` (a Lagos day), today or earlier, at most 2 years back | 90 days ago |
+| `limit` | 1-50 | 25 |
+| `cursor` | from the last answer | none |
+
+The reach: open orders of any age, plus ended ones (completed or cancelled)
+created on or after `since` (Q123 A). Orders entered in error are never
+listed. Newest first. A cursor is valid only for the member, facility and
+filters it was issued with. It carries the first page's `since`: a later page
+sent without `since` uses it (so "Load more" after Lagos midnight still
+works), and one sent with a different `since` is 400 `INVALID_CURSOR`.
+
+```json
+{ "items": [
+    { "kind": "lab_request", "orderId": "uuid", "encounterId": "uuid",
+      "patient": { "patientId": "uuid", "fullName": "Amaka Okafor", "sex": "female",
+                   "dateOfBirth": "1990-05-01", "healthIdLast4": "AA22" },
+      "display": "Full blood count", "status": "active", "priority": "urgent",
+      "createdAt": "…", "updatedAt": "…",
+      "ownProgress": { "status": "results_ready", "receivedAt": "…", "collectedAt": "…", "lastResultAt": "…" },
+      "orderRoute": null } ],
+  "hiddenCount": 2, "hiddenCountComplete": true, "since": "2026-08-22", "nextCursor": null }
+```
+
+- `display`: the stored test or medicine name. `priority`: the lab request's;
+  a prescription's 0125 priority when set, else `null`.
+- `ownProgress`: ORD-3's shapes and statuses, asked once per patient and kind
+  on the page (audited by ORD-3 as today), at most 6 calls at once and all
+  within 4 seconds; whatever has not answered by then is `unknown`.
+- `orderRoute`: the order's route summary (sections 21-24), `null` when it
+  was read and there is none, and left out when it could not be read.
+- `patient`: the waiting-list card (EHR-C7); never a full Health ID.
+- **Access ended:** a row is listed only while the member may read that
+  patient's records now for direct care (a consent grant, 0131's own-facility
+  opening included; never break-glass). Other matching orders are counted in
+  `hiddenCount` and never shown. An empty page still carries `hiddenCount`.
+- **The count:** worked out on the first page and carried by the cursor to
+  later pages. It counts over at most the newest 20,000 matching orders and
+  asks about at most 1,000 more patients (newest order first); past either,
+  `hiddenCountComplete` is `false` and `hiddenCount` is a lower bound ("at
+  least N").
+- **Bounded pages:** a page stops after 1,000 patients asked or 5,000 orders
+  read, whichever comes first, so a page may hold fewer rows than `limit`, or
+  none, while `nextCursor` is set. Keep loading while `nextCursor` is not
+  null; never treat a short page as the end.
+
+Audit (by the database): one `ehr.my-orders.list` row (kinds, open only,
+since, count, `hiddenCount` and `hiddenCountComplete` on the first page,
+`hasMore`, patients asked, patient ids shown) and one
+`ehr.my-orders.list.shown` row per patient shown, on every read.
+
+### Errors
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | One or more request fields are invalid. (also content with a NUL character or an unpaired surrogate) |
+| 400 | `CONSULTATION_DRAFT_TOO_LARGE` | This draft is too large to save (limit 256 KB). Remove pasted text or split the note. |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED`, `PURPOSE_OF_USE_REQUIRED` | as today |
+| 403 | `CONSENT_REQUIRED`, `PERMISSION_DENIED` | as today |
+| 404 | `CONSULTATION_DRAFT_NOT_FOUND` | This draft was not found. It may have been finished, discarded or kept for more than 7 days. |
+| 404 | `CLINICAL_RESOURCE_NOT_FOUND` | as today (the visit) |
+| 409 | `CONSULTATION_DRAFT_EXISTS` | You already have a saved draft for this visit. Open it to carry on. (with `draftId`) |
+| 409 | `CONSULTATION_DRAFT_CHANGED` | This draft was saved from another tab or device. Reload it before you carry on. |
+| 409 | `VISIT_ENTERED_IN_ERROR`, `IDEMPOTENCY_KEY_REUSED` | as today |
+| 409 | `REQUEST_IN_PROGRESS` | An operation with this Idempotency-Key is already in progress (create) |
+| 409 | `IDEMPOTENCY_RESULT_UNAVAILABLE` | The prior operation result is unavailable (a create replayed after its draft was discarded or expired) |
+| 429 | `CONSULTATION_DRAFT_SAVE_LIMITED` | Saving too often. Your draft will save again in a few seconds. |
+| 503 | `CONSULTATION_DRAFTS_UNAVAILABLE` | Drafts cannot be saved right now. Keep this page open and try again. (also on a database without 0141) |
+
+### Database (0141)
+
+- `ehr.consultation_drafts`, under forced row-level security. The author's
+  policies (select, insert, update) call `ehr.is_consultation_draft_author`
+  (SECURITY DEFINER): the session's own account, membership and facility, an
+  active membership with `ehr.note.write`; reads and saves also need an
+  unexpired draft. They check the patient's consent too
+  (`ehr.context_allows`): read needs `read_records`, insert and update
+  `write_records`. The EHR runtime has no DELETE; the owner may read and
+  delete, for 0141's functions only.
+- A guard sets the times, the size and the version, and refuses a move to
+  another patient, author or visit.
+- Content is stored as jsonb (key order not kept; size measured as stored),
+  protected as note bodies are, by row-level security and the database's
+  encryption at rest (no application-level encryption in ehr-api).
+- SECURITY DEFINER, EHR runtime: `ehr.list_my_consultation_drafts()`,
+  `ehr.sweep_consultation_drafts(batch)` (ehr-api runs it every 10 minutes),
+  `ehr.discard_consultation_draft(draft, patient)` and
+  `ehr.expire_my_consultation_draft(patient, visit)`. The sweeper and the
+  on-demand expiry skip drafts under a legal hold through
+  `ehr.consultation_draft_held(patient, account)`, which is
+  `platform.legal_holds`' owner's (its policy alone reads the holds) and run
+  only by 0141's own functions.
+
+## EHR-C8b. Vitals marked entered in error (Release B, migration 0142; not live until signed)
+
+Akos P1-14 and the QA question "mark the QA test vitals record entered in
+error". The planned contract's "EHR-C8b" is the spec; this section is what is
+built. One vitals reading can be withdrawn for good, without entering the
+whole visit in error (EHR-C8a). It cannot be undone: to fix a mistake, record
+the vitals again.
+
+### `PATCH /api/v1/ehr/patients/:patientId/encounters/:encounterId/vitals/:vitalId`
+
+`X-Facility-Id`, `X-Purpose-Of-Use: direct-care`, permission `ehr.vital.write`
+and the patient's `write_records` consent, as a correction. UUIDs only. No
+Idempotency-Key: the row version protects it. Body, exactly these fields:
+
+```json
+{ "expectedRowVersion": 2, "status": "entered_in_error", "changeReason": "Recorded on the wrong patient" }
+```
+
+- `expectedRowVersion`: whole number, 1 or more (the reading's `rowVersion`).
+- `status`: only `entered_in_error`.
+- `changeReason`: required, trimmed, 3 to 500 characters.
+
+The reading is locked (`FOR UPDATE`) before the checks. `200`: the reading as
+`GET .../vitals/:vitalId` answers it, with `status: "entered_in_error"`,
+`statusChangedAt` and the new `rowVersion`.
+
+Audit: `ehr.vital.update`, naming the patient and the reading, with
+`enteredInError: true`; never the typed reason or the values. The reason, who
+and when, and the prior row are kept in `ehr.record_versions` (0004's version
+trigger). A refusal is audited as today: a reading of another visit, patient
+or facility (or none) writes a `failure` row with `reason: not_found`, as a
+correction does, and answers 404 `VITAL_NOT_FOUND`.
+
+### `status` on every vitals answer
+
+Every answer that returns a reading (the list, the read, a create and its
+replay, the one-call consultation's vitals, this PATCH) carries `status`
+(`recorded` or `entered_in_error`) and `statusChangedAt` (null while
+recorded). A correction answers the correction, as today: it can only be made
+on a recorded reading.
+
+| Read | Readings entered in error |
+|---|---|
+| `GET .../encounters/:encounterId/vitals` | Left out by default. `?includeEnteredInError=true` lists them with their status (`true` or `false` only; a cursor is valid only for the choice it was issued with). |
+| `GET .../vitals/:vitalId` | Still answered, with `status`. |
+| `GET .../vitals/:vitalId/corrections` | Still answered, as today (no `status`: read it on `GET .../vitals/:vitalId`). |
+| `GET /ehr/patients/:patientId/vitals/latest` (EHR-C3) and the chart summary (EHR-C4) | Left out: the next newest reading is used. |
+| The patient's own record and patient chat; staff record evidence and staff chat | Left out (and their search chunks drop out at the next refresh). The patient's own read policy leaves them out in the database too. |
+| `POST .../vitals/:vitalId/corrections` | Refused: 409 `VITAL_ENTERED_IN_ERROR`. |
+
+On a database without 0142 every reading reads as `recorded`, and the PATCH
+answers 503 `VITALS_STATUS_UNAVAILABLE`.
+
+### Errors
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | One or more request fields are invalid. (another status, a reason under 3 or over 500 characters or of only spaces, an unknown field) |
+| 400 | `CHANGE_REASON_REQUIRED` | Please say why you are changing this. (no `changeReason`) |
+| 400 | `PURPOSE_OF_USE_REQUIRED` | as today |
+| 403 | `CONSENT_REQUIRED`, `PERMISSION_DENIED` | as today |
+| 404 | `VITAL_NOT_FOUND` | These vitals were not found. |
+| 409 | `VITAL_ALREADY_ENTERED_IN_ERROR` | These vitals are already marked as entered in error. |
+| 409 | `VITAL_ENTERED_IN_ERROR` | These vitals were marked as entered in error. Record new vitals instead. (on a correction) |
+| 412 | `VERSION_CONFLICT` | Someone else changed these vitals. Reload them and try again. (also on a correction) |
+| 503 | `VITALS_STATUS_UNAVAILABLE` | This cannot be done right now. Please try again. |
+
+### Database (0142)
+
+- `ehr.vitals.status` (`recorded`, the default and every existing row, or
+  `entered_in_error`) and `status_changed_at` (null exactly while recorded).
+- `ehr.guard_vital_status()`, before `vitals_versioned`: a new reading is
+  recorded (else 23514 `VITAL_STATUS_INVALID`); the one change is recorded to
+  entered in error, changing nothing else, with the time set by the guard;
+  after it the row never changes again (55000 `VITAL_ENTERED_IN_ERROR`), so it
+  cannot be undone or corrected. Rows still cannot be deleted.
+- `vitals_patient_self_read` (0067) gains `status = 'recorded'`.
+- `vitals_entered_in_error_hidden`, a restrictive read policy: a reading
+  entered in error is seen only by a session that sets `app.vitals_status`
+  to `0142`, which this release's ehr-api does in every staff transaction.
+  An older ehr-api image on this schema (during the rolling deploy, or after
+  a rollback) never sees one: it drops out of that image's latest vitals,
+  chart summary, lists, reads, staff chat and evidence, and that image's
+  correction of it answers not found instead of failing.
+- No index is added: every reader tests the status through `to_jsonb` (so it
+  also runs on a schema without 0142), which no partial index could serve.
+  Latest vitals use today's indexes.
+- No grant change. Old ehr-api images keep working: they never name the
+  columns and write only recorded readings.
+- Rollout: this release's ehr-api before 0142 (it runs on a schema without
+  it) or right after it. An older image's staff record evidence hashes each
+  vitals row as a whole, which gains the two columns, so an older image that
+  refreshes vitals evidence on the new schema embeds those chunks again (and
+  this image, which leaves both columns out, once more).
+
+### Screen notes
+
+- Offer "Entered in error" on each vitals row of a visit. Ask for the reason
+  (required), send `expectedRowVersion`, then read the list and "Latest
+  vitals" again.
+- History may show withdrawn readings struck through, labelled "Entered in
+  error", with `includeEnteredInError=true`.
+- On `VITAL_ALREADY_ENTERED_IN_ERROR`, treat it as done. On
+  `VERSION_CONFLICT`, reload and ask again.
+
+## VIT-1. Soft "abnormal" vitals warnings (Release B, no migration)
+
+Akos P1-11. The planned contract's "VIT-1" is the spec; this section is what
+is built. It needs EHR-C8b (readings entered in error get no warnings and are
+not in latest vitals). Warnings come from a fixed adult table in ehr-api
+(`vitals/usual-ranges.ts`), version `2026-11-adult-1`, worked out each time
+and never stored. They never block a save. `approvedBy` stays `null` until
+Health ID's named clinical lead signs the table off (owner decision Q124 A).
+
+### New hard rule
+
+On a vitals create, the one-call consultation's vitals, and a correction:
+the diastolic must be lower than the systolic, else 400
+`BLOOD_PRESSURE_ORDER_INVALID` "The lower blood pressure number (diastolic)
+must be less than the upper one (systolic). Check the reading." Rows already
+stored are not touched. The hard limits of today (`VALIDATION_FAILED`,
+`BLOOD_PRESSURE_INCOMPLETE`) are unchanged and checked first.
+
+The rule is checked only for a new write, after the `Idempotency-Key` is
+looked up: a retry of a create, a correction or a consultation that an older
+image saved (when a diastolic equal to the systolic was allowed) replays the
+saved answer instead of answering 400.
+
+### `GET /api/v1/ehr/vitals/usual-ranges`
+
+`ehr.vital.read`, `X-Facility-Id`; no patient, no consent check, no patient
+audit; `Cache-Control: private, max-age=3600`.
+
+```json
+{ "version": "2026-11-adult-1", "appliesTo": "adults (18 and over)", "approvedBy": null,
+  "ranges": [ { "measure": "pulseBpm", "level": "far_outside_usual", "atOrBelow": 40 }, … ] }
+```
+
+Each band names its bounds: `from` and `to`, `atOrBelow` and `atOrAbove`
+(inclusive), or `below` and `above` (exclusive). Where bands overlap, the most
+serious level applies (`check_entry`, then `far_outside_usual`, then
+`outside_usual`).
+
+| Measure | `outside_usual` | `far_outside_usual` | `check_entry` |
+|---|---|---|---|
+| Breathing rate | 9-11, 21-24 | 8 or below, 25 or above | 61 or above |
+| Oxygen % | 92 up to (not including) 96 | below 92 | below 50 |
+| Systolic | 91-100, 180-219 | 90 or below, 220 or above | above 300 |
+| Diastolic | 40 or below, 110 or above | | above 200 |
+| Pulse | 41-50, 111-130 | 40 or below, 131 or above | above 250 |
+| Temperature °C | 38.1-39.0 | 35.0 or below, 39.1 or above | below 30, above 44 |
+| Height, weight | none | none | none |
+
+For the clinical lead's sign-off (Ola's review of #297): NEWS2 also scores
+35.1-36.0 °C, which this draft table leaves without an `outside_usual` band
+(35.4 °C gives no warning, and the low-temperature message says "Usual for
+adults: 35.1 to 38"). Either add that band (and make 36.1 the usual low), or
+keep the table and record why (for example, axillary or infrared readings run
+low). The table is the agreed draft until then.
+
+### Warnings on answers
+
+The vitals create answer (`201`, and its replay) and the correction answer
+gain `warnings` and `usualRangesVersion`. A correction's warnings are for the
+values after it (its values over the reading's own). A replay of either, once
+the reading is marked entered in error, carries `warnings: []`:
+
+```json
+{ "warnings": [
+    { "measure": "pulseBpm", "value": 135, "level": "far_outside_usual",
+      "code": "VITAL_FAR_OUTSIDE_USUAL_RANGE",
+      "message": "Pulse is very high: 135 a minute. Usual for adults: 51 to 110." } ],
+  "usualRangesVersion": "2026-11-adult-1" }
+```
+
+`warnings` is `[]` when nothing is outside the usual range. Codes:
+`VITAL_OUTSIDE_USUAL_RANGE`, `VITAL_FAR_OUTSIDE_USUAL_RANGE`,
+`VITAL_CHECK_ENTRY` ("Check this entry: a temperature of 45 °C is very
+unlikely."). `GET /ehr/patients/:patientId/vitals/latest` gains
+`usualRangesVersion`, and each measure gains `warning` (the same object, or
+`null`; for `bloodPressure`, the more serious of the two halves; `null` for
+height and weight). The chart summary (EHR-C4) and the one-call consultation
+answer are unchanged. Warnings are worked out for every patient from the
+adult table; the screen shows them only for patients 18 and over. Nothing is
+stored and no audit field changes.
+
+| 400 | `VALIDATION_FAILED` | One or more request fields are invalid. (bad `kind`, `state`, `since`, `limit`, or a day after today, by the service's clock or the database's) |
+| 400 | `MY_ORDERS_SINCE_TOO_OLD` | You can look back up to 2 years. Choose a later date. |
+| 400 | `INVALID_CURSOR` | Pagination cursor is invalid |
+| 400 | `PURPOSE_OF_USE_REQUIRED` | as today |
+| 403 | `PERMISSION_DENIED` | as today |
+| 503 | `MY_ORDERS_UNAVAILABLE` | Your orders cannot be listed right now. Please try again. (also on a database without 0143) |
+
+### Database (0143)
+
+- `ehr.list_my_orders(kinds, open_only, since, cursor…, limit)`, SECURITY
+  DEFINER, EXECUTE for the EHR runtime only. It checks the session (an
+  active, unheld membership here, direct care, the per-kind read permission),
+  walks the member's orders newest first, asking the session's own rule once
+  per patient (`ehr.context_allows(patient, facility, 'read_records')`), until
+  the page is full or its bounds are reached, and says where the next page
+  resumes; on the first page it counts the rest (bounded); it returns the
+  cards and writes the audit rows.
+- Indexes on `(facility_id, created_by_membership_id, created_at desc, id
+  desc)` for `ehr.prescriptions` and `ehr.lab_requests`.
+- `prescriptions_scan_my_orders` and `lab_requests_scan_my_orders`: the
+  tables' owner may read them only while the function runs (its walk, count,
+  audit rows and cards), so it can count orders of patients the member can
+  no longer read. The function writes an owner-only marker for its own
+  transaction (`ehr.my_orders_scans`) just before its walk and deletes it
+  just before it returns (0130's marker pattern); the cards are read under
+  it, so a consent that ends during the call never drops a row the audit
+  names as shown. Every other owner-run function and trigger that reads
+  these tables sees exactly what it saw before 0143 (0133's own-pharmacy send
+  and withdrawal included, in the suite), and the owner without a session
+  sees nothing. Each policy asks the marker once per statement, and is named
+  to sort after the tables' other read policies, which PostgreSQL asks in
+  reverse name order: inside the function, 0005's consent test is never
+  asked per row (a post-check holds the order). No `hid_` role but the owner
+  is a member of either table's owner (a post-check). The runtime roles' own
+  reads of these tables are unchanged.
+
+### Screen notes
+
+- Tabs All, Lab, Prescriptions, and "Open only" (`state=open`). Show the
+  name, sex, date of birth, `•••• healthIdLast4`, the test or medicine,
+  status, priority and ORD-3's progress words.
+- "Showing the last 90 days and everything still open", with "Look further
+  back" (sets `since`).
+- When `hiddenCount` is above 0: "N more orders are for patients whose records
+  you can no longer open." When `hiddenCountComplete` is `false`: "At least N
+  more orders …".
+- A row opens the visit's order by `patientId`, `encounterId` and `orderId`,
+  through the usual consent check.
+
+## ID-7. Unknown patient record (Release B, migration 0145; not live until signed)
+
+Akos P0-4 and P0-1. The planned contract's "ID-7" is the spec; this section is
+what is built, and lists where it differs. Owner decisions applied: Q100 B (404
+`PATIENT_NOT_FOUND`), Q109 (no daily limit) and Q127 A (the record stays a merge
+source while unknown; the merge itself is ID-8, Release C). The open point on
+the sealed QA facility is built as recommended: it may make unknown records,
+and each is a sealed QA patient. A sealed demo facility is refused.
+
+A record for a person who cannot say who they are. It is a real patient with
+a Health ID, so visits, vitals, notes, orders and lab and pharmacy work attach
+to it as usual. It is marked `recordKind: "unknown"`, has no login, no NIN and
+no phone, and is found only at the facility that made it.
+
+### What 0145 changes
+
+- **Differs from the plan:** `identity.patients` gains no column. The record
+  (the facility that made it, the label `U-0001` and up per facility, the
+  reason, the status, the encrypted arrival note, who identified it, the held
+  details and candidates, the approver's decision) is on a new owner-only
+  table, `identity.unknown_patients`. Only this migration's functions read or
+  write it.
+- The record kind is derived: `unknown` while the record is open, in review or
+  cancelled (or merged, ID-8), `standard` once identified or confirmed
+  separate. `dateOfBirthEstimated` is true while it is unknown and has a date
+  of birth. `identity.patient_record_kind(patientId)` answers the kind for the
+  Identity runtime. So no identity table is locked against its readers when
+  0145 is applied.
+- An unknown record never has a login: a trigger on `identity.patients`
+  refuses an account on it (`PATIENT_RECORD_UNKNOWN`).
+- 0131's `identity.own_facility_basis` gains `created_here`: made as unknown
+  at this facility, not cancelled or merged. It lasts after identify and
+  confirm-separate, so doctors keep the PIN-free opening and ID-6 can add the
+  NIN afterwards.
+- 0132's `identity.staff_patient_search` adds `record_kind` to its answer. An
+  unknown record is never found by search everywhere or by emergency search;
+  at its facility a Health ID alone finds it (the wristband).
+- A NIN is never attached to a record that is still unknown (a trigger on
+  `identity.patient_identifiers`). ID-6's route answers such a record 409
+  `PATIENT_NOT_IDENTIFIED` ("Identify this patient before adding a NIN.")
+  before QoreID is asked.
+- Placeholder names ("Unknown", the label) fill `first_name` and `last_name`
+  while the record is unknown; screens show `displayName`, never those.
+
+### Routes
+
+All under `/api/v1/identity/unknown-patients`, with `X-Facility-Id`. POST
+bodies carry `purpose: "healthcare-operations"`; GETs send
+`X-Purpose-Of-Use: healthcare-operations` (else 400
+`PURPOSE_OF_USE_REQUIRED`). Every POST needs `Idempotency-Key`; the same key
+with the same body replays the answer with `replayed: true`, with another body
+409 `IDEMPOTENCY_KEY_REUSED`. Each route sees only this facility's unknown
+records: another facility's record, or a missing one, answers 404
+`PATIENT_NOT_FOUND`, with the reason (`no_such_patient`, `other_facility`,
+`not_unknown_record`) in the audit row. GETs answer `Cache-Control: no-store`.
+
+| Route | Permission |
+|---|---|
+| `POST /` (make one) | `identity.registration.write` |
+| `GET /?status=open\|all&limit=1..100&cursor=` | `identity.registration.write` |
+| `GET /:patientId` | `identity.registration.write` |
+| `POST /:patientId/identify` | `identity.registration.write` |
+| `GET /:patientId/review` | `identity.registration.approve`, not the member who identified it |
+| `POST /:patientId/confirm-separate` | `identity.registration.approve`, not the member who identified it |
+| `POST /:patientId/cancel` | `identity.registration.approve` |
+
+**Make one.** Body exactly as the plan: `gender` (required; `female`, `male`,
+`intersex`, `other`, `unknown`), `estimatedAgeYears` (optional, 0-120, stored
+as 1 July of this Lagos year minus the age, with `dateOfBirthEstimated: true`),
+`unknownReason` (`unconscious`, `confused`, `unaccompanied_child`,
+`cannot_communicate`, `other`), `arrivalNote` (optional, 1-1000 characters,
+encrypted; never in a list, log or audit row). Answer `201` (`200` on a
+replay):
+
+```json
+{ "patientId": "uuid", "recordKind": "unknown", "label": "U-0007",
+  "displayName": "Unknown patient U-0007", "sex": "male", "dateOfBirth": "1991-07-01",
+  "dateOfBirthEstimated": true, "ninStatus": "not_verified", "status": "open",
+  "createdAt": "2026-11-19T14:05:00.000Z", "openDays": 0, "overdue": false, "version": 1,
+  "hid": "HID-...", "replayed": false }
+```
+
+`hid` is in this answer only, for the wristband. No duplicate check runs at
+creation. At 20 records in one Lagos day at one facility, Identity logs
+`identity.unknown_patient.facility_daily_high` with the facility id and the
+count only.
+
+**List.** Newest first, default `status=open`, default `limit` 25, `nextCursor`
+for the next page. Cards: `patientId`, `recordKind`, `label`, `displayName`,
+`sex`, `dateOfBirth`, `dateOfBirthEstimated`, `healthIdLast4`,
+`unknownReason`, `ninStatus`, `status` (`open`, `sent_for_review`,
+`identified`, `cancelled`; `merged` is kept for ID-8), `createdAt`,
+`openDays`, `overdue` (open or in review for more than 30 days) and `version`.
+Never the arrival note.
+
+**Read one.** The card plus `arrivalNote` (or `null`).
+
+**Identify.** ID-2's fields (`firstName`, `lastName`, `dateOfBirth`,
+optional `gender`, and `phone`, `addressLine`, `city`, `stateCode`, `lga`
+together, required unless the person is under 18 on today's Lagos date) plus
+`expectedVersion`. A `gender` left out keeps the sex recorded when the record
+was made. ID-2's possible-duplicate rule runs (the same date of birth and last
+name or swapped names, the same phone; among active standard patients the
+facility's seal allows, identified unknown records' held phones, and open
+registrations without a NIN and other unknown records in review, at
+facilities of the same seal only: a QA record never counts a real one, or the
+reverse). Answer `200`, the card plus:
+
+- `outcome: "identified"`, "Patient identified. Their NIN is not verified
+  yet.": no candidate; the record is now `standard`, with the given names and
+  date of birth, and search finds it as any ID-2 patient.
+- `outcome: "sent_for_review"`, "This may be someone who is already
+  registered. An approver will review it.": the details are held and the
+  record stays unknown and hidden. The caller never sees a candidate.
+
+**Differs from the plan (the clinical owner's recommendation, Ola on #302):**
+the phone and address are kept, encrypted, on the unknown record's row (with
+the phone's lookup hash), facility-held and unverified as ID-2 keeps a desk's
+contact, never copied to the patient's own contact (the sign-in and
+enrolment match key). So an identified patient is not found by phone search
+until someone records the phone through the usual patient routes. That
+contact is covered:
+
+- an NDPA erasure or account deletion erases it (0114's eraser, replaced in
+  0145);
+- a cancel nulls it, with the held details;
+- ID-2's registration counts an identified record's held phone as a phone
+  match, and a record in review whose held details match as an open
+  registration.
+
+Moving it into ID-2's contact tables comes with ID-8.
+
+**Review (the approver).** `GET /:patientId/review`, for a record in review,
+by an approver who did not identify it. Answer `200`:
+
+```json
+{ "patientId": "uuid", "label": "U-0007", "status": "sent_for_review", "version": 3,
+  "identifiedAt": "2026-11-20T08:00:00.000Z",
+  "heldDetails": { "firstName": "Ada", "lastName": "Obi", "dateOfBirth": "1990-05-01", "sex": "female" },
+  "openRegistrationCount": 1,
+  "candidates": [ { "position": 1, "fullName": "Ada Obi", "dateOfBirth": "1990-05-01", "sex": "female",
+    "healthIdLast4": "4K2M", "matchReasons": ["date_of_birth", "first_name", "last_name"], "active": true } ] }
+```
+
+Each candidate is shown as it is now, never with its patient id or full
+Health ID, and only if the facility's seal allows it. The database writes
+`identity.unknown-patient.review` and one `identity.unknown-patient.review.shown`
+per candidate, naming that candidate. Not in review: 409
+`UNKNOWN_PATIENT_NOT_IN_REVIEW`; the member who identified it: 403
+`UNKNOWN_PATIENT_SECOND_PERSON_REQUIRED` ("Another approver must review this.
+You identified this patient.").
+
+**Confirm separate.** `{ "expectedVersion": 3, "reason": "8-500 characters",
+"purpose": "healthcare-operations" }`. Only for a record in review; read the
+review first. The held details are applied (a sex not held keeps the one
+recorded at creation) and the record becomes `standard` (status
+`identified`).
+`outcome: "identified"`, "Confirmed as a separate patient."
+
+**Cancel.** The same body. Only while open or in review and nothing clinical
+is attached (no visit that is not cancelled or entered in error; no note,
+vitals, prescription, lab request, diagnosis, allergy or document). The
+patient becomes `inactive`; an open waiting-list entry for it is closed as
+`cancelled` (its own `ehr.visit-queue.update` audit row); the held details and
+contact are nulled. `outcome: "cancelled"`, "Unknown patient record
+cancelled."
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | "Check the highlighted fields." |
+| 400 | `PHONE_REQUIRED` | "Enter the patient's phone number and address. Only a child can be identified without them." |
+| 400 | `PURPOSE_OF_USE_REQUIRED`, `IDEMPOTENCY_KEY_REQUIRED` | existing |
+| 403 | `PERMISSION_DENIED` | "You do not have permission to do this." |
+| 403 | `UNKNOWN_PATIENT_NOT_AVAILABLE` | "Unknown patient records cannot be made at this facility." (a sealed demo facility) |
+| 403 | `UNKNOWN_PATIENT_SECOND_PERSON_REQUIRED` | "Another approver must confirm this. You identified this patient." |
+| 404 | `PATIENT_NOT_FOUND` | "No such patient." |
+| 409 | `UNKNOWN_PATIENT_ALREADY_IDENTIFIED` | "This patient has already been identified." |
+| 409 | `UNKNOWN_PATIENT_NOT_IN_REVIEW` | "This record is not waiting for review." |
+| 409 | `UNKNOWN_PATIENT_HAS_RECORDS` | "This record already has clinical records, so it cannot be cancelled. Merge it into the right record instead." |
+| 409 | `UNKNOWN_PATIENT_CANCELLED` | "This record was cancelled." (not in the plan) |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | existing |
+| 412 | `VERSION_CONFLICT` | "Someone else changed this record. Reload it and try again." |
+| 503 | `UNKNOWN_PATIENT_UNAVAILABLE` | "Unknown patient records are not available right now." (a database without 0145) |
+
+Audit: the database writes one row per success and per not-found
+(`identity.unknown-patient.create`, `.list` plus one `.list.shown` per card,
+`.read`, `.identify` with candidate counts and ids, `.review` plus one
+`.review.shown` per candidate, `.confirm-separate`, `.cancel`), and one per
+replay of create, identify and the decisions (`replayed: true`, since a
+replay answers the card again). An identify replayed after the record was
+cancelled answers 409 `UNKNOWN_PATIENT_CANCELLED`, as a fresh identify does.
+Identity writes a `denied` row with the
+refusal's code for every other refusal. No row holds a name, date of birth,
+phone, Health ID or the arrival note.
+
+### Elsewhere
+
+- **Own facility (0131):** at the facility that made it, doctors, nurses and
+  clinicians open the record with `POST /api/v1/identity/own-facility-access`
+  and no PIN, before and after it is identified. Another facility has no
+  basis and uses break-glass.
+- **Search, `patient-lookup`, the staff patient profile (staff chat) and the
+  waiting list** gain `recordKind` (`standard` or `unknown`); Identity reads it
+  through `identity.patient_record_kind` where 0145 is applied. The
+  waiting-list cards (EHR-C7) also gain
+  `dateOfBirthEstimated`; ehr-api reads both from
+  `ehr.visit_queue_record_kinds` where 0145 is applied, and leaves them out
+  where it is not.
+- **ID-2 (0130's registration, replaced in 0145):** a record that is still
+  unknown is never a candidate. A stated Health ID that is this facility's
+  unknown record answers 409 `PATIENT_RECORD_UNKNOWN` ("This Health ID belongs
+  to an unknown patient record at this facility. Identify that record
+  instead."). At another facility it is not a candidate, since that facility
+  can neither identify nor link it before ID-8, but it sends the case to an
+  approver (`review_required`, duplicate kind `stated_health_id`, no
+  candidate), and the audit row keeps the record's patient id
+  (`statedUnknownRecordPatientId`) for ID-8. A sealed QA or demo record never
+  counts. No
+  registration case can resolve to a record that is still unknown (a trigger);
+  the approver's link answers 409 `PATIENT_RECORD_UNKNOWN` ("This record is not
+  identified yet, so it cannot be linked. Identify it first."). A replay of a
+  registration is audited (`replayed: true`). Accepted exception: a replay of
+  the approver's ID-2 decision answers the case again without an audit row;
+  only the same approver with the same key and body can make it.
+- **ID-6's NIN link:** another facility asking about this facility's unknown
+  record gets the usual 403 `NIN_LINK_NOT_PERMITTED` first, as for any patient
+  that is not its own.
+- **Cancel's check** reads the clinical tables as their owner, through
+  policies that open only while `identity.decide_unknown_patient` holds its
+  marker (0130's pattern), so no other owner-run function reads more than
+  before.
+
+### Decided (the clinical owner's recommendations, Ola on #302)
+
+- **The daily `identity.unknown_patient.overdue` log line:** built in the next
+  migration after Release B (a small owner definer and a sweeper, like
+  `outreach-retention.sweeper.ts`), live within 30 days of go-live, before it
+  could first fire. Until then `overdue` is on every card; nothing is closed
+  automatically.
+- **`PatientRegistered`: decided, not emitted**, at creation or at
+  identification. Its only consumer addresses the patient, and an unknown or
+  just-identified record has no one to notify. Revisit only if a real
+  consumer appears (for example ID-8's merge).
+
+Screen notes: as the plan. Show `displayName` and the label, "Estimated age"
+when `dateOfBirthEstimated`, and "NIN Not Verified". On `sent_for_review`
+show the message and nobody else's details. After `identified`, offer
+"Verify NIN" (ID-6). Never show `firstName`/`lastName` of a record whose
+`recordKind` is `unknown`.
