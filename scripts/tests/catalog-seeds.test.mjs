@@ -324,20 +324,22 @@ test('the loader refuses a malformed approvals file, an unreadable seed and a mi
 
 /** A stand-in pg client: answers the loader's statements from a fixed active version, and records them. */
 class StandInClient {
-  constructor({ active = null, busyOn = null } = {}) { this.active = active; this.busyOn = busyOn; this.statements = [] }
+  constructor({ active = null, busyOn = null, ready = true } = {}) {
+    this.active = active; this.busyOn = busyOn; this.ready = ready; this.statements = []
+  }
   async query(sql, params = []) {
     this.statements.push({ sql, params })
     if (this.busyOn && sql.includes(this.busyOn)) {
       throw Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' })
     }
-    if (sql.includes('to_regclass')) return { rows: [{ ready: true }], rowCount: 1 }
+    if (sql.includes('to_regclass')) return { rows: [{ ready: this.ready }], rowCount: 1 }
     if (sql.startsWith('select 1 from ehr.catalog_versions')) return { rows: [], rowCount: 0 }
     if (sql.includes('versions.active')) return { rows: this.active ? [this.active] : [], rowCount: this.active ? 1 : 0 }
     if (sql.includes('insert into ehr.catalog_retired_codes')) {
       const rows = JSON.parse(params[1]).map((entry) => ({ list_id: entry.listId }))
       return { rows, rowCount: rows.length }
     }
-    if (/insert into ehr\.catalog_(medicines|lab_tests)/.test(sql)) return { rows: [], rowCount: JSON.parse(params[1]).length }
+    if (/insert into ehr\.catalog_(medicines|lab_tests|diagnoses)/.test(sql)) return { rows: [], rowCount: JSON.parse(params[1]).length }
     if (sql.includes('set active = false')) return { rows: this.active ? [{ version: this.active.version }] : [], rowCount: 1 }
     return { rows: [], rowCount: 0 }
   }
@@ -366,6 +368,31 @@ test('dropped ids: an id of the active version missing from the seed is refused 
   assert.match(version.sql, /approval_reference,\s+approvals_sha256, approved_at/)
   assert.equal(version.params[5], 'b'.repeat(64), 'the version records the approvals file\'s sha256')
   assert.equal(client.statements.at(-1).sql, 'commit')
+})
+
+test('an ICD-11 release (0150) loads into ehr.catalog_diagnoses, needs 0150, and has no dropped-id check', async () => {
+  const seed = { format: SEED_FORMAT, kind: 'diagnosis', version: '2026-01',
+    attribution: ['Synthetic notice: ICD-11, World Health Organization, CC BY-ND 3.0 IGO.'], retired: [], items: [
+      { code: '1F40', title: 'Malaria due to Plasmodium falciparum', otherNames: ['falciparum malaria'], chapter: '01', residual: false },
+      { code: 'RA01', title: 'COVID-19', otherNames: [], chapter: '25', residual: false }] }
+  assert.deepEqual(seedProblems(seed), [])
+  const approval = { approvalReference: 'Synthetic sign-off reference', approvedAt: '2026-12-01T09:00:00+01:00' }
+  // The active release holds a code the new one leaves out: a WHO release may drop a code, so it still loads.
+  const client = new StandInClient({ active: { version: '2025-01', ids: ['1F41'] } })
+  const outcome = await loadSeed(client, { seed, fileSha256: 'a'.repeat(64), approval, approvalsSha256: 'b'.repeat(64) })
+  assert.deepEqual(outcome, { status: 'loaded', kind: 'diagnosis', version: '2026-01', fileSha256: 'a'.repeat(64),
+    approvalsSha256: 'b'.repeat(64), items: 2, newRetiredIds: [], replaced: '2025-01', heldBack: 0 })
+  assert.deepEqual(client.statements.find(({ sql }) => sql.includes('to_regclass')).params, ['diagnosis'])
+  assert.ok(!client.statements.some(({ sql }) => sql.includes('versions.active')), 'no dropped-id query for a diagnosis list')
+  const rows = client.statements.find(({ sql }) => sql.includes('insert into ehr.catalog_diagnoses'))
+  assert.deepEqual(JSON.parse(rows.params[1]).map((item) => item.code), ['1F40', 'RA01'])
+  assert.equal(client.statements.at(-1).sql, 'commit')
+  // A schema without 0150 is refused, nothing written.
+  const without = new StandInClient({ ready: false })
+  await assert.rejects(loadSeed(without, { seed, fileSha256: 'a'.repeat(64), approval, approvalsSha256: 'b'.repeat(64) }),
+    (error) => error instanceof LoadRefusal && refusalLine(error)
+      === 'load-catalog: this schema has no catalogue tables for diagnosis (0150 is not applied); nothing loaded')
+  assert.deepEqual(without.writes(), [])
 })
 
 test('a busy lock is the house busy refusal (exit 2), not a raw lock timeout', async () => {

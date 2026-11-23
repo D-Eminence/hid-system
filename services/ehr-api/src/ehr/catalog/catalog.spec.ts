@@ -442,6 +442,21 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       expect(calls).toEqual([]);
     });
 
+    // Rahman's review of #320, nit 6: admit() counts code points for the diagnosis search too, as char_length does.
+    it('counts q in code points: one astral character is too short, two are searched, over 100 is VALIDATION_FAILED',
+      async () => {
+        const { database, calls } = fakeDatabase([]);
+        const service = new CatalogService(database);
+        for (const q of ['\u{1F600}', '\u{1D538}']) {
+          const problem = await problemOf(service.searchDiagnoses(membershipA, diagnoses(q)));
+          expect([problem.getStatus(), problem.code]).toEqual([400, 'CATALOG_SEARCH_TEXT_TOO_SHORT']);
+        }
+        const tooLong = await problemOf(service.searchDiagnoses(membershipA, diagnoses('\u2764\uFE0F'.repeat(51))));
+        expect([tooLong.getStatus(), tooLong.code]).toEqual([400, 'VALIDATION_FAILED']);
+        await service.searchDiagnoses(membershipA, diagnoses('a\u{1D538}'));
+        expect(calls.map((call) => call.values[0])).toEqual(['a\u{1D538}']);
+      });
+
     it.each(['42883', '42P01', '57014', '08006'])('%s is 503 CATALOG_UNAVAILABLE in words true today, and q is never logged',
       async (code) => {
         const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
