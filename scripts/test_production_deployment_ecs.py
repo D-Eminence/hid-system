@@ -60,11 +60,11 @@ class BackendControllerTests(unittest.TestCase):
 
     def execute(self, failure=False, alert_failure=False, loss=False, components=('identity-api',), waves=None,
                 events=None, pending_before=0, output=None, catalog=None, catalog_failure=None, migration_failure=None,
-                seed_files=None, catalog_aws=None):
+                seed_files=None, catalog_aws=None, lease=None, rollback_failure=None):
         baseline=index(); state={n:brow.copy() for n,brow in baseline['backend'].items()}
         real_ecs=b.ECS
         physical=lambda:{n:{k:r[k] for k in ('image_uri','task_definition','config_sha256')} for n,r in state.items()}
-        objects={c.INDEX_KEY:copy.deepcopy(baseline)}; calls=[]; lease=FakeLease()
+        objects={c.INDEX_KEY:copy.deepcopy(baseline)}; calls=[]; lease=FakeLease() if lease is None else lease
         events=[] if events is None else events
         class FakeStore:
             def __init__(self,*args): pass
@@ -110,6 +110,9 @@ class BackendControllerTests(unittest.TestCase):
             def update_all(self,targets):
                 events.append(('update_all',list(targets)))
                 if waves is not None: waves.append(list(targets))
+                # The restore of the prior revisions fails: the rollback cannot be confirmed.
+                if rollback_failure and targets and not any(arn.endswith(':2') for arn in targets.values()):
+                    raise c.ReleaseError(rollback_failure)
                 for name,arn in targets.items(): self.update(name,arn)
             def definition(self,arn): return {'containerDefinitions':[{'name':'database-migration','image':image('database-migration')}]}
         candidate=c.make_candidate(ctx(),list(components),{n:{'image_uri':image(n,'b'), 'publication_sha256':'d'*64} for n in components},{'select':'success'})
@@ -127,7 +130,7 @@ class BackendControllerTests(unittest.TestCase):
                 gh.return_value.assert_approval.return_value={'reviewer_ids':[9]}
                 if catalog is None: os.environ.pop('CATALOG_LOAD',None)
                 if alert_failure: notify.side_effect=c.ReleaseError('SNS_DENIED')
-                if failure or alert_failure or catalog_failure or migration_failure:
+                if failure or alert_failure or catalog_failure or migration_failure or rollback_failure:
                     with self.assertRaises(c.ReleaseError): b.deploy()
                 else: b.deploy()
         return baseline,state,objects,calls,lease
@@ -612,19 +615,27 @@ class CatalogPhaseTests(unittest.TestCase):
 
     def seeds(self, *kinds): return {kind:self.SEEDS[kind] for kind in kinds}
 
-    def loader_aws(self, exit_code, lines):
+    def loader_aws(self, exit_code, lines, log_error=None, on_stopped=None):
+        """A stand-in for the loader's tasks and logs. log_error: the error each log read raises (throttling, say);
+        on_stopped: called when the task is seen stopped (to lose the lease then, say). aws.seen holds a copy of
+        the ECS's catalog_checks at each log read, once aws.ecs is set."""
         starts=[]; reads=[]
         class AWS:
+            ecs=None; seen=[]
             def call(self,service,operation,args,**kwargs):
                 if operation=='run-task':
                     starts.append(args); return {'tasks':[{'taskArn':'arn:task/'+str(len(starts))}]}
-                if operation=='describe-tasks': return {'tasks':[{'lastStatus':'STOPPED','containers':[{'exitCode':exit_code}]}]}
+                if operation=='describe-tasks':
+                    if on_stopped: on_stopped()
+                    return {'tasks':[{'lastStatus':'STOPPED','containers':[{'exitCode':exit_code}]}]}
                 if operation=='get-log-events':
                     reads.append(args)
+                    if self.ecs is not None: self.seen.append(copy.deepcopy(self.ecs.catalog_checks))
+                    if log_error: raise c.ReleaseError(log_error)
                     kind='medicine' if starts[-1]['overrides']['containerOverrides'][0]['command'][-1].endswith('hid-medicines.json') else 'lab_test'
                     return {'events':[{'message':line.replace('KIND',kind)} for line in lines]}
                 raise AssertionError(operation)
-        aws=AWS(); aws.reads=reads
+        aws=AWS(); aws.reads=reads; aws.seen=[]
         return aws,starts
 
     @contextlib.contextmanager
@@ -699,7 +710,9 @@ class CatalogPhaseTests(unittest.TestCase):
     def test_a_load_without_its_evidence_line_is_still_named_as_loaded(self):
         for lines in ([],['{"status":"loaded",broken}'],['{"status":"loaded","kind":"KIND"}'],
                       ['{"status":"loaded","kind":"KIND","version":"2026.1","fileSha256":"x","approvalsSha256":"'+'f'*64+'","items":1,"replaced":null}'],
-                      ['{"status":"loaded","kind":"other","version":"2026.1","fileSha256":"'+'e'*64+'","approvalsSha256":"'+'f'*64+'","items":1,"replaced":null}']):
+                      ['{"status":"loaded","kind":"other","version":"2026.1","fileSha256":"'+'e'*64+'","approvalsSha256":"'+'f'*64+'","items":1,"replaced":null}'],
+                      # Every field but "replaced" (round 3 of #319, point 3): missing, never a KeyError.
+                      ['{"status":"loaded","kind":"KIND","version":"2026.1","fileSha256":"'+'e'*64+'","approvalsSha256":"'+'f'*64+'","items":1}']):
             with self.subTest(lines=lines):
                 aws,starts=self.loader_aws(0,lines); ecs=b.ECS(aws,FakeLease()); output=io.StringIO()
                 with self.clock(),contextlib.redirect_stdout(output),self.assertRaisesRegex(c.ReleaseError,'^CATALOG_LOAD_EVIDENCE_MISSING$'):
@@ -736,6 +749,92 @@ class CatalogPhaseTests(unittest.TestCase):
             baseline,state,objects,calls,lease=self.execute(components=self.RELEASE,catalog='medicine,lab_test',catalog_aws=aws)
         self.assertEqual([(k['kind'],k['status'],k['file_sha256'],k['items']) for k in self.receipt(objects)['catalog_checks']],
             [('medicine','loaded','e'*64,145),('lab_test','loaded','e'*64,145)])
+
+    def test_the_evidence_line_must_carry_every_field_the_receipt_records(self):
+        line={'status':'loaded','kind':'medicine','version':'2026.1','fileSha256':'e'*64,'approvalsSha256':'f'*64,'items':1,'replaced':None}
+        self.assertEqual(b.catalog_outcome(json.dumps(line),'medicine'),{'kind':'medicine','status':'loaded','version':'2026.1',
+            'file_sha256':'e'*64,'approvals_sha256':'f'*64,'items':1,'replaced':None})
+        self.assertEqual(b.catalog_outcome(json.dumps({**line,'replaced':'2025.9'}),'medicine')['replaced'],'2025.9')
+        for field in ('status','kind','version','fileSha256','approvalsSha256','items','replaced'):
+            with self.subTest(missing=field):
+                self.assertIsNone(b.catalog_outcome(json.dumps({k:v for k,v in line.items() if k!=field}),'medicine'))
+
+    def test_a_load_is_named_as_loaded_before_its_log_is_read(self):
+        loaded=json.dumps({'status':'loaded','kind':'KIND','version':'2026.1','fileSha256':'e'*64,'approvalsSha256':'f'*64,
+            'items':145,'newRetiredIds':[],'replaced':None,'heldBack':13},separators=(',',':'))
+        aws,starts=self.loader_aws(0,[loaded]); ecs=b.ECS(aws,FakeLease()); aws.ecs=ecs
+        with self.clock(): ecs.load_catalog('arn:migration:2',index()['migration_network'],'release',self.seeds('medicine'))
+        self.assertEqual(aws.seen,[[{'kind':'medicine','status':'loaded','version':'2026.1','file_sha256':'1'*64,
+            'evidence':'evidence pending'}]],'named as loaded as soon as the task exited 0')
+        self.assertEqual(ecs.catalog_checks,[{'kind':'medicine','status':'loaded','version':'2026.1','file_sha256':'e'*64,
+            'approvals_sha256':'f'*64,'items':145,'replaced':None}],'then the loader\'s own figures')
+
+    def test_a_load_whose_log_cannot_be_read_is_still_named_as_loaded(self):
+        unreadable={'kind':'medicine','status':'loaded','version':'2026.1','file_sha256':'1'*64,'evidence':'evidence unreadable'}
+        printed={'release_id':'release','catalog_load':'loaded','kind':'medicine','version':'2026.1','file_sha256':'1'*64,
+            'evidence':'evidence unreadable'}
+        # get-log-events throttled (the CLI's own retries spent): the error stands, the seed is named as loaded.
+        aws,starts=self.loader_aws(0,[],log_error='AWS_ThrottlingException'); ecs=b.ECS(aws,FakeLease()); output=io.StringIO()
+        with self.clock(),contextlib.redirect_stdout(output),self.assertRaisesRegex(c.ReleaseError,'^AWS_ThrottlingException$'):
+            ecs.load_catalog('arn:migration:2',index()['migration_network'],'release',self.seeds('medicine','lab_test'))
+        self.assertEqual(ecs.catalog_checks,[unreadable]); self.assertEqual(json.loads(output.getvalue()),printed)
+        self.assertEqual(len(starts),1,'the lab tests are not loaded after it')
+        # The lease check before the log read fails (the lease lost once the task has stopped): the same.
+        lease=FakeLease(); lost=lambda:setattr(lease,'assert_owned',lambda:c.require(False,'LEASE_LOST'))
+        aws,starts=self.loader_aws(0,[],on_stopped=lost); ecs=b.ECS(aws,lease); output=io.StringIO()
+        with self.clock(),contextlib.redirect_stdout(output),self.assertRaisesRegex(c.ReleaseError,'^LEASE_LOST$'):
+            ecs.load_catalog('arn:migration:2',index()['migration_network'],'release',self.seeds('medicine'))
+        self.assertEqual(ecs.catalog_checks,[unreadable]); self.assertEqual(json.loads(output.getvalue()),printed)
+        self.assertEqual(aws.reads,[],'the log was never read')
+
+    def test_through_the_release_an_unreadable_log_still_names_the_seed_and_the_next_step(self):
+        aws,starts=self.loader_aws(0,[],log_error='AWS_ThrottlingException'); events=[]; output=io.StringIO()
+        with self.clock():
+            baseline,state,objects,calls,lease=self.execute(components=self.RELEASE,events=events,catalog='medicine',
+                catalog_aws=aws,catalog_failure='expected',output=output)
+        failed=self.receipt(objects,'failed.json')
+        self.assertEqual(failed['error_code'],'AWS_ThrottlingException')
+        self.assertEqual(failed['catalog_checks'],[{'kind':'medicine','status':'loaded','version':'2026.1',
+            'file_sha256':SEED_SHA['hid-medicines.json'],'evidence':'evidence unreadable'}])
+        self.assertEqual(state,baseline['backend']); self.assertEqual(calls,[]); self.assertTrue(lease.released)
+        lines=[json.loads(l) for l in output.getvalue().splitlines() if l.startswith('{')]
+        self.assertIn({'release_id':self.receipt(objects,'started.json')['candidate']['release_id'],
+            'catalog_loaded_before_failure':[{'kind':'medicine','version':'2026.1'}],
+            'next':'dispatch the release again with catalog_load none'},lines)
+
+    RECONCILE_FIRST=('reconcile this release first (it ended unreconciled and keeps the deployment lease), '
+                     'then dispatch the release again with catalog_load none')
+
+    def test_an_unreconciled_release_after_a_load_says_to_reconcile_first(self):
+        def next_steps(output):
+            return [l['next'] for l in (json.loads(x) for x in output.getvalue().splitlines() if x.startswith('{'))
+                    if 'catalog_loaded_before_failure' in l]
+        # The lease lost while the services roll out, after the medicines loaded: nothing restored, no failed receipt.
+        output=io.StringIO()
+        baseline,state,objects,calls,lease=self.execute(components=self.RELEASE,catalog='medicine',failure=True,loss=True,output=output)
+        self.assertFalse(lease.released); self.assertFalse(any(k.endswith('/failed.json') for k in objects))
+        self.assertEqual(next_steps(output),[self.RECONCILE_FIRST])
+        # A rollback that cannot be confirmed (the restore of the prior revisions fails): the same step.
+        output=io.StringIO()
+        baseline,state,objects,calls,lease=self.execute(components=self.RELEASE,catalog='medicine',failure=True,
+            rollback_failure='ECS_HEALTH_TIMEOUT',output=output)
+        self.assertFalse(lease.released); self.assertFalse(any(k.endswith('/failed.json') for k in objects))
+        self.assertEqual(next_steps(output),[self.RECONCILE_FIRST])
+        # The lease lost after the loader's task stopped, before its log was read: named as loaded, reconcile first.
+        lease=FakeLease(); lost=lambda:setattr(lease,'assert_owned',lambda:c.require(False,'LEASE_LOST'))
+        aws,starts=self.loader_aws(0,[],on_stopped=lost); output=io.StringIO()
+        with self.clock():
+            baseline,state,objects,calls,lease=self.execute(components=self.RELEASE,catalog='medicine',catalog_aws=aws,
+                catalog_failure='expected',lease=lease,output=output)
+        self.assertFalse(lease.released); self.assertFalse(any(k.endswith('/failed.json') for k in objects))
+        lines=[json.loads(l) for l in output.getvalue().splitlines() if l.startswith('{')]
+        self.assertIn({'release_id':self.receipt(objects,'started.json')['candidate']['release_id'],'catalog_load':'loaded',
+            'kind':'medicine','version':'2026.1','file_sha256':SEED_SHA['hid-medicines.json'],'evidence':'evidence unreadable'},lines)
+        self.assertEqual(next_steps(output),[self.RECONCILE_FIRST])
+        # Reconciled (restored and recorded), the step is the plain one.
+        output=io.StringIO()
+        baseline,state,objects,calls,lease=self.execute(components=self.RELEASE,catalog='medicine',failure=True,output=output)
+        self.assertTrue(lease.released); self.assertEqual(next_steps(output),['dispatch the release again with catalog_load none'])
 
     def test_the_seeds_asked_for_are_read_from_the_checkout_before_the_release_starts(self):
         with tempfile.TemporaryDirectory() as folder:

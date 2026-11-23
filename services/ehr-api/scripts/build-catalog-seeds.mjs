@@ -6,12 +6,19 @@
 // (docs/codes/catalog-approvals.json), and what the lead signs with it: what
 // was held back and why, how each Wave 0 code stands (kept ones included),
 // every brand name added (brand -> generic) and every one left out, with why.
+// The report opens with the record of Ola's brand decision (brandDecision:
+// the 21 confirmed brands Ola checked as clinical owner on 23 Nov 2026; a
+// brand pending a pharmacist's review stays out until a pharmacist confirms
+// it).
 //
 //   node scripts/build-catalog-seeds.mjs --csv <combined list> --retired <retired ids JSON>
 //     --wave-zero <hid-lab-codes.json> --version 2026.1 --out <directory> [--check]
 //     [--brands <brand-names.ts>] [--with-atc [--approvals <catalog-approvals.json>]]
 //
 // The retired ids file maps each retired id to why ({"MED-01375": "..."}).
+// A list the builder cannot make into seeds (an id gap with no reason, a
+// retired id that is still a row, or one whose row it holds back: "fix the
+// row, do not retire it") stops it with one plain line, exit 2, nothing built.
 // --brands defaults to ocr-worker's brand-names.ts, read with Node's own
 // TypeScript type stripping (on by default from Node 22.18: an older Node is
 // refused first, exit 2). Only its confirmed rows (CONFIRMED_BRAND_REVIEWS;
@@ -23,7 +30,8 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { buildSeeds, parseCsv, seedProblems, seedText, sha256, typeStrippingProblem, withAtcProblem } from './catalog-seed.mjs';
+import { BRAND_DECISION, buildSeeds, parseCsv, seedProblems, seedText, sha256, typeStrippingProblem, withAtcProblem }
+  from './catalog-seed.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const option = (name) => {
@@ -59,11 +67,17 @@ const brands = brandsModule.BRAND_ROWS.map((row) => ({ brand: row.brand, generic
 const rows = parseCsv(readFileSync(required('csv'), 'utf8'));
 const retired = JSON.parse(readFileSync(required('retired'), 'utf8'));
 const waveZero = JSON.parse(readFileSync(required('wave-zero'), 'utf8')).codes;
-const seeds = buildSeeds(rows, { version, retired, waveZero, withAtc, brands });
+let seeds;
+try {
+  seeds = buildSeeds(rows, { version, retired, waveZero, withAtc, brands });
+} catch (error) {
+  stop(`${error.message}; nothing built`);
+}
 const out = required('out');
 const check = process.argv.includes('--check');
 let failed = false;
-const summary = {};
+// The record of Ola's brand decision first, so the lead signs with it in view.
+const summary = { brandDecision: BRAND_DECISION };
 for (const [kind, file] of [['medicine', 'hid-medicines.json'], ['lab_test', 'hid-lab-tests.json']]) {
   const seed = seeds[kind];
   const problems = seedProblems(seed, { waveZero });

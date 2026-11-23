@@ -1594,17 +1594,19 @@ signs a version (Q124 A) and the governed loader (a later slice) loads it.
 ### Second slice: the seed files and the governed loader (draft, not live)
 
 Built on 23 Nov 2026 (lane D), stacked on the first slice; Rahman's review
-of hid-system#319 built in. No migration and no route: three scripts in
-`services/ehr-api/scripts`, the approvals file, and an opt-in phase of the
-deploy tool. Nothing is loaded until the clinical lead signs a file.
+of hid-system#319 built in (three rounds). No migration and no route: three
+scripts in `services/ehr-api/scripts`, the approvals file, and an opt-in
+phase of the deploy tool. Nothing is loaded until the clinical lead signs a
+file.
 
 - **Seed files:** `catalog:build-seeds` turns the combined list (#312) into
   `hid-medicines.json` and `hid-lab-tests.json` (format
   `hid-catalog-seed/1`). The bytes are stable, so the sha256 the lead signs
   is reproducible, and `--check` fails on any drift. The builder prints what
-  the lead signs with each file: what was held back and why, how every Wave 0
-  code stands (kept ones included), every brand added (brand -> generic, on
-  how many items) and every brand left out, with why. It reads
+  the lead signs with each file, opening with the record of Ola's brand
+  decision (`brandDecision`, below): what was held back and why, how every
+  Wave 0 code stands (kept ones included), every brand added (brand ->
+  generic, on how many items) and every brand left out, with why. It reads
   `brand-names.ts` with Node's own TypeScript type stripping, so it needs
   Node 22.18 or later; on an older Node it stops first with a plain line
   naming the version it needs (exit 2, nothing built).
@@ -1613,7 +1615,12 @@ deploy tool. Nothing is loaded until the clinical lead signs a file.
     guessed. The seed lists its held-back rows, so the lead signs with them
     in view.
   - Every gap in the ids must be a retired id with a reason, and no retired
-    id may still be a row.
+    id may still be a row. A retired id whose row the builder holds back
+    stops it with "MED-00002 is held back in this seed and also listed as
+    retired; fix the row, do not retire it; nothing built" (exit 2, one
+    line): retired, the row would be gone for good, though it only needs
+    fixing. Any other list the builder cannot make into seeds also stops it
+    with one plain line, exit 2.
   - **ATC codes:** `atcCode` is `null` in the seed unless the builder is run
     with `--with-atc`, which it refuses until a medicine sign-off of that
     version records the WHOCC terms answer (`licences.whoccAtc`).
@@ -1632,6 +1639,17 @@ deploy tool. Nothing is loaded until the clinical lead signs a file.
     (pending pharmacist review, or no medicine with exactly that generic
     name). When a pharmacist confirms a pending brand, it comes in with the
     next version the lead signs.
+  - **Ola's check of the confirmed brands (23 Nov 2026):** the 21
+    coordinator-curated brands now in the medicine seed (valium, phenergan,
+    flagyl, amoxil, augmentin, septrin, rocephin, zinnat, coartem, fansidar,
+    daraprim, panadol, norvasc, adalat, lasix, plasil, glucophage, ventolin,
+    postinor, buscopan, voltaren) were checked by Ola as clinical owner and
+    are confirmed. Brands pending a pharmacist's review stay out until a
+    pharmacist confirms them. The rule above is unchanged, and so is the
+    medicine seed built from #312's list (sha256
+    `d6a08fe25ed63ab05ad8dfb7bddf6de022d1504188c787f73c514e50e09d3419`);
+    the builder's report opens with this record (`brandDecision`), so the
+    lead signs with it in view.
   - **Wave 0:** the lab-test seed reports each Wave 0 HID-LAB code as kept,
     renamed, recoded, held back (a row of that name with no code) or
     missing. An HID-LAB item whose code is not in
@@ -1652,7 +1670,11 @@ deploy tool. Nothing is loaded until the clinical lead signs a file.
   - before it connects: `--approvals` under `NODE_ENV=production` (only the
     deployed approvals file signs a load); a seed, approvals or Wave 0 file
     that cannot be read or is not JSON; a seed that breaks 0149's rules or
-    Wave 0's; a file whose sha256 is not signed for its kind and version;
+    Wave 0's; a seed that holds back an id and also lists it as retired
+    ("MED-00002 is held back in this seed and also listed as retired; fix
+    the row, do not retire it"; the load refuses it again before its first
+    statement, so nothing is retired); a file whose sha256
+    is not signed for its kind and version;
     a medicine sign-off without `licences.nigeriaEml8`, or a file with ATC
     codes whose sign-off lacks `licences.whoccAtc`;
   - in its transaction: a schema without 0149; a version already loaded;
@@ -1669,10 +1691,19 @@ deploy tool. Nothing is loaded until the clinical lead signs a file.
     (23514), for example "the database refused the load:
     CATALOG_ID_CHANGED: MED-00001 (55000); nothing loaded".
 
-  Anything else (no database, a dropped connection) is a failure: exit 1,
-  also one line ending "nothing loaded". So the database refuses a retired,
-  changed or reused id on its own, and the whole load rolls back. In one
-  transaction it takes its advisory lock and
+  Anything else is a failure: exit 1, also one line ending "nothing
+  loaded", never a stack trace. That covers an error before it connects (a
+  `DATABASE_HOST` that makes no address: "DATABASE_HOST does not make a
+  database address: Invalid URL (ERR_INVALID_URL)"; a bad TLS setting), no
+  database, and a connection dropped mid-load (a terminated backend, a
+  failover): the loader listens for the client's `error` event, so a drop
+  is never an unhandled one, and a load cut off before its commit leaves
+  nothing ("terminating connection due to administrator command (57P01);
+  nothing loaded"). Only a drop at the moment of the commit leaves it
+  unknown whether the version committed; asking for it again settles it
+  (it loads, or is refused as already loaded). So the database refuses a
+  retired, changed or reused id on its own, and the whole load rolls back.
+  In one transaction it takes its advisory lock and
   SHARE ROW EXCLUSIVE on the versions, records the new retired ids, inserts
   the version (with `approvals_sha256`, the approvals file's own sha256) and
   its rows, then turns the old version off and the new one on. `--dry-run`
@@ -1711,10 +1742,18 @@ deploy tool. Nothing is loaded until the clinical lead signs a file.
     file's sha256, items, the version replaced). Each seed is its own
     transaction: if the lab tests are refused after the medicines loaded,
     the medicines stay loaded and the failed receipt names them.
-  - A task that exits 0 has loaded its seed. If its evidence line is missing
-    or malformed, the failed receipt still names the seed as loaded (kind,
-    version, the file's sha256, "evidence line missing"), and the release
-    fails with `CATALOG_LOAD_EVIDENCE_MISSING`.
+  - A task that exits 0 has loaded its seed, so the tool names it as loaded
+    at once (kind, version, the file's sha256, "evidence pending"), before
+    it reads the task's log. The evidence line then replaces that entry; it
+    must carry every field the receipt records (`replaced` too, `null` when
+    nothing was replaced). If the line is missing or malformed, the entry
+    says "evidence line missing" and the release fails with
+    `CATALOG_LOAD_EVIDENCE_MISSING`. If the log cannot be read (CloudWatch
+    throttling, or the lease check before the read), the entry says
+    "evidence unreadable" and the release fails with that error (for
+    example `AWS_ThrottlingException`). Either way the tool prints a line
+    naming the seed as loaded, and the failed receipt, when the release can
+    write one, names it.
   - **After a failure that follows a successful load** (a later seed
     refused, the evidence line missing, or the services failing after the
     catalogue phase), the operator dispatches the release again with
@@ -1722,8 +1761,13 @@ deploy tool. Nothing is loaded until the clinical lead signs a file.
     asking to load it again is refused ("medicine 2026.1 is already
     loaded"), so a re-dispatch that asks again cannot finish. The deploy
     tool prints this step with the failure
-    (`"next": "dispatch the release again with catalog_load none"`). A seed
-    that did not load is asked for on its own once its cause is fixed.
+    (`"next": "dispatch the release again with catalog_load none"`). When
+    the release ends unreconciled (the lease lost, or a rollback that could
+    not be confirmed: no failed receipt, and the lease stays held), the step
+    says to reconcile first: "reconcile this release first (it ended
+    unreconciled and keeps the deployment lease), then dispatch the release
+    again with catalog_load none". A seed that did not load is asked for on
+    its own once its cause is fixed.
   - Not asked, the release runs exactly as before.
 - **Before the first real load:**
   - #312's open points: the Wave 0 codes, the 13 uncoded tests and the four
@@ -1765,6 +1809,21 @@ deploy tool. Nothing is loaded until the clinical lead signs a file.
     (MED-01624) without retiring it are each refused with exit 2, nothing
     written. With MED-01624 retired with a reason, that version loads,
     replaces 2026.1 (kept) and records MED-01624 as retired.
+  - Round 3 (same list, same seeds: medicine `d6a08fe2…`, lab tests
+    `847040fb…`): the loader's backend terminated with
+    `pg_terminate_backend` three times, while it waited on its advisory
+    lock, on the versions table's lock and at the insert of the retired ids
+    (another session holding each): each time exit 1 and the one line
+    "terminating connection due to administrator command (57P01); nothing
+    loaded", no 2026.2 row, nothing retired, no session left; the same
+    2026.2 then loads. Round 2's loader, terminated the same way, ended with
+    a 21-line "Unhandled 'error' event" trace.
+  - A 2026.2 that holds back MED-00002 and also lists it as retired is
+    refused (exit 2, before it connects), and MED-00002 is not retired.
+    Round 2's loader loaded that file and retired MED-00002 for good. The
+    builder, given MED-00002 in the retired ids while the list holds its row
+    back, stops with one line (exit 2) and writes nothing. A `DATABASE_HOST`
+    of "db host" ends with one line (exit 1).
 
 ### Target
 
