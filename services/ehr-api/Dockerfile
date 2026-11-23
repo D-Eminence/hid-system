@@ -34,8 +34,10 @@ COPY --chown=65532:65532 services/ehr-api/database ./services/ehr-api/database
 COPY --chown=65532:65532 services/ehr-api/scripts ./services/ehr-api/scripts
 # ORD-7's governed catalogue load (scripts/load-catalog.mjs, run by the deploy tool's opt-in catalogue phase with
 # this image) reads /app/docs/codes: the sign-off (catalog-approvals.json), the Wave 0 codes (hid-lab-codes.json)
-# and, once the clinical lead signs them, the seed files (hid-medicines.json, hid-lab-tests.json).
-COPY --chown=65532:65532 docs/codes ./docs/codes
+# and the signed seed files (hid-medicines.json, hid-lab-tests.json). Only these four, by name: nothing else under
+# docs/codes (drafts never ship). The seed files are committed once the clinical lead signs them; until then their
+# one-name pattern ("[n]") copies nothing, and the loader refuses a seed it cannot read.
+COPY --chown=65532:65532 docs/codes/catalog-approvals.json docs/codes/hid-lab-codes.json docs/codes/hid-medicines.jso[n] docs/codes/hid-lab-tests.jso[n] ./docs/codes/
 WORKDIR /app/services/ehr-api
 USER 65532:65532
 CMD ["scripts/apply-migrations.mjs"]

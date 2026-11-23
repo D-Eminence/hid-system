@@ -5,15 +5,17 @@
 // difference. Prints each file's sha256, the number the clinical lead signs
 // (docs/codes/catalog-approvals.json), and what the lead signs with it: what
 // was held back and why, how each Wave 0 code stands (kept ones included),
-// and every brand name that did not map to a medicine.
+// every brand name added (brand -> generic) and every one left out, with why.
 //
 //   node scripts/build-catalog-seeds.mjs --csv <combined list> --retired <retired ids JSON>
 //     --wave-zero <hid-lab-codes.json> --version 2026.1 --out <directory> [--check]
 //     [--brands <brand-names.ts>] [--with-atc [--approvals <catalog-approvals.json>]]
 //
 // The retired ids file maps each retired id to why ({"MED-01375": "..."}).
-// --brands defaults to ocr-worker's brand-names.ts (read with Node 22's own
-// TypeScript type stripping); its active rows become other names by
+// --brands defaults to ocr-worker's brand-names.ts, read with Node's own
+// TypeScript type stripping (on by default from Node 22.18: an older Node is
+// refused first, exit 2). Only its confirmed rows (CONFIRMED_BRAND_REVIEWS;
+// a row pending a pharmacist's review is left out) become other names, by
 // catalog-seed.mjs's addBrandNames rule.
 // atcCode is null unless --with-atc is given, which is refused (exit 2) until
 // the approvals file (default docs/codes/catalog-approvals.json) records the
@@ -21,7 +23,7 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { buildSeeds, parseCsv, seedProblems, seedText, sha256, withAtcProblem } from './catalog-seed.mjs';
+import { buildSeeds, parseCsv, seedProblems, seedText, sha256, typeStrippingProblem, withAtcProblem } from './catalog-seed.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const option = (name) => {
@@ -30,6 +32,9 @@ const option = (name) => {
 };
 const stop = (message) => { console.error(message); process.exit(2); };
 const required = (name) => option(name) || stop(`--${name} is required`);
+
+const nodeProblem = typeStrippingProblem(process.versions.node);
+if (nodeProblem) stop(nodeProblem);
 
 const version = required('version');
 const withAtc = process.argv.includes('--with-atc');
@@ -46,8 +51,10 @@ if (withAtc) {
 }
 const brandsModule = await import(pathToFileURL(option('brands') ?? join(repository,
   'services/ocr-worker/src/reading/brand-names.ts')).href);
-const brands = brandsModule.BRAND_ROWS.filter(brandsModule.isActiveBrandRow)
-  .map(({ brand, generic }) => ({ brand, generic }));
+// Every row, with its review status and whether the file uses it: addBrandNames adds the confirmed ones and
+// reports the rest.
+const brands = brandsModule.BRAND_ROWS.map((row) => ({ brand: row.brand, generic: row.generic, reviewedBy: row.reviewed_by,
+  active: brandsModule.isActiveBrandRow(row) }));
 
 const rows = parseCsv(readFileSync(required('csv'), 'utf8'));
 const retired = JSON.parse(readFileSync(required('retired'), 'utf8'));
@@ -75,7 +82,12 @@ for (const [kind, file] of [['medicine', 'hid-medicines.json'], ['lab_test', 'hi
     retired: seed.retired.length };
   if (kind === 'medicine') {
     summary[file].atcCodes = seed.items.filter((item) => item.atcCode !== null).length;
-    summary[file].brands = { added: seeds.brands.added, onItems: seeds.brands.items, notMapped: seeds.brands.notMapped };
+    // Every brand added (brand -> generic, on how many items) and every brand left out, with why.
+    summary[file].brands = {
+      added: seeds.brands.added.map(({ brand, generic, items }) => `${brand} -> ${generic} (${items} item${items === 1 ? '' : 's'})`),
+      onItems: seeds.brands.items,
+      leftOut: seeds.brands.leftOut.map(({ brand, generic, why }) => `${brand} -> ${generic}: ${why}`),
+    };
   } else {
     // Every Wave 0 code, kept ones included, by how it stands ("EUCR as LAB-0113").
     const stand = (entry) => `${entry.code}${entry.listId ? ` as ${entry.listId}` : ''}`

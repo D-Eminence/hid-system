@@ -1283,7 +1283,9 @@ default 10. Optional `doseForm` is one of section 46's values (`tablet`,
 Optional `route` is a plain word up to 100 characters. Each word of `q` must
 start a word of the generic name, another name or a brand name. Other names
 and brands come from `ocr-worker/src/reading/drug-list.ts` and
-`brand-names.ts`, and an item is always shown under its generic name. Names
+`brand-names.ts` (its confirmed rows only: a brand still pending a
+pharmacist's review is left out; second slice), and an item is always shown
+under its generic name. Names
 that start with `q` come first, then the rest in A to Z order. Withdrawn
 items are never offered.
 
@@ -1540,7 +1542,7 @@ signs a version (Q124 A) and the governed loader (a later slice) loads it.
     words count, each cut to 40 characters;
     `q` never reaches the query parser as typed, so brackets or operators
     answer nothing, never an error. Brand names come with the seed files
-    (they are other names; second slice).
+    (they are other names, the confirmed brands only; second slice).
   - The order: names that start with `q` first, then by name in the "C"
     collation, then strength and the list id, so it is the same on every
     load.
@@ -1601,7 +1603,11 @@ deploy tool. Nothing is loaded until the clinical lead signs a file.
   `hid-catalog-seed/1`). The bytes are stable, so the sha256 the lead signs
   is reproducible, and `--check` fails on any drift. The builder prints what
   the lead signs with each file: what was held back and why, how every Wave 0
-  code stands (kept ones included), and every brand that did not map.
+  code stands (kept ones included), every brand added (brand -> generic, on
+  how many items) and every brand left out, with why. It reads
+  `brand-names.ts` with Node's own TypeScript type stripping, so it needs
+  Node 22.18 or later; on an older Node it stops first with a plain line
+  naming the version it needs (exit 2, nothing built).
   - A row the database would refuse is **held back** with why (for example
     a strength over 80 characters, or a test with no code), never cut or
     guessed. The seed lists its held-back rows, so the lead signs with them
@@ -1611,14 +1617,21 @@ deploy tool. Nothing is loaded until the clinical lead signs a file.
   - **ATC codes:** `atcCode` is `null` in the seed unless the builder is run
     with `--with-atc`, which it refuses until a medicine sign-off of that
     version records the WHOCC terms answer (`licences.whoccAtc`).
-  - **Brand names:** the active rows of `ocr-worker`'s `brand-names.ts` are
-    added to `otherNames`, so they are signed with the file, only where the
-    brand's generic (compared without case, white space collapsed) is the
-    generic name of exactly one medicine in the seed. A combination counts
-    only when written as the seed writes it ("amoxicillin + clavulanic
-    acid"). The brand then goes on every item (strength and form) of that
-    medicine. Nothing is guessed: each brand that does not map is listed,
-    with its generic, in the builder's report for the clinical lead.
+  - **Brand names:** only the confirmed rows of `ocr-worker`'s
+    `brand-names.ts` go into `otherNames`, so they are signed with the file
+    (Ola's clinical decision, round 2 of #319). The file has two review
+    statuses: `coordinator-curated` (the brands curated before the table,
+    which the file keeps active) is the confirmed one; a row still
+    `pending-pharmacist`, or of any other status, is left out. A confirmed
+    brand is added only where its generic (compared without case, white
+    space collapsed) is the generic name of exactly one medicine in the
+    seed. A combination counts only when written as the seed writes it
+    ("amoxicillin + clavulanic acid"). The brand then goes on every item
+    (strength and form) of that medicine. Nothing is guessed: the builder's
+    report lists every brand added and every brand left out with why
+    (pending pharmacist review, or no medicine with exactly that generic
+    name). When a pharmacist confirms a pending brand, it comes in with the
+    next version the lead signs.
   - **Wave 0:** the lab-test seed reports each Wave 0 HID-LAB code as kept,
     renamed, recoded, held back (a row of that name with no code) or
     missing. An HID-LAB item whose code is not in
@@ -1644,39 +1657,73 @@ deploy tool. Nothing is loaded until the clinical lead signs a file.
     codes whose sign-off lacks `licences.whoccAtc`;
   - in its transaction: a schema without 0149; a version already loaded;
     an id of the active version that the new seed drops without listing it
-    in its retired ids with a reason;
+    in its retired ids with a reason; an id of the active version that the
+    new seed holds back ("MED-00002 is in the live list but held back in
+    this seed; fix the row, do not retire it");
   - a lock still busy after 5 seconds: "ehr.catalog_versions or another
     catalogue load stayed busy for 5 seconds; nothing loaded; run the
-    release again at a quieter time".
+    release again at a quieter time";
+  - 0149's own refusals, with the database's message: its insert triggers
+    and the versions guard (SQLSTATE 55000: `CATALOG_ID_CHANGED`,
+    `CATALOG_ID_RETIRED`, `CATALOG_VERSION_SEALED`) and its table checks
+    (23514), for example "the database refused the load:
+    CATALOG_ID_CHANGED: MED-00001 (55000); nothing loaded".
 
-  The database refuses a retired, changed or reused id on its own, and the
-  whole load rolls back. In one transaction it takes its advisory lock and
+  Anything else (no database, a dropped connection) is a failure: exit 1,
+  also one line ending "nothing loaded". So the database refuses a retired,
+  changed or reused id on its own, and the whole load rolls back. In one
+  transaction it takes its advisory lock and
   SHARE ROW EXCLUSIVE on the versions, records the new retired ids, inserts
   the version (with `approvals_sha256`, the approvals file's own sha256) and
   its rows, then turns the old version off and the new one on. `--dry-run`
   rolls back. It prints one line: what loaded, the seed's and the approvals
   file's sha256, and what it replaced.
 - **Where it runs in production:** only in the migration image, which
-  carries `docs/codes` (the approvals file, the Wave 0 codes and the signed
-  seed files) at `/app/docs/codes`, where the loader looks. A change under
-  `docs/codes/` rebuilds the migration image. The deploy tool
-  (`scripts/production_deployment.py`) has an opt-in catalogue phase:
+  carries exactly the files the loader reads, by name, at `/app/docs/codes`
+  where the loader looks: the approvals file, the Wave 0 codes
+  (`hid-lab-codes.json`) and the two signed seed files. Nothing else under
+  `docs/codes` ships (drafts never do); until the seed files are committed,
+  their one-name pattern (`hid-medicines.jso[n]`) copies nothing.
+  `verify-container-platform.mjs` checks that the image carries exactly
+  those four and that no stage copies any other file from `docs/`, and a
+  change to one of the four runs the build and verify gate as well as the
+  staging preparation tests. A change under `docs/codes/` rebuilds the
+  migration image. The deploy tool (`scripts/production_deployment.py`)
+  has an opt-in catalogue phase:
   - It runs only when the release asks for it: a dispatch of "Production
     backend candidates" with `catalog_load` set to `medicine`, `lab_test`
     or both (`CATALOG_LOAD`; a push always deploys with `none`), in a
     release that carries the migration image. Any other value, a rollback,
-    or a release without the migration image is refused before it starts.
+    or a release without the migration image is refused before it starts,
+    and so is a seed missing from the checkout (`CATALOG_SEED_MISSING`):
+    the deploy job checks out the commit the image was built from, and the
+    tool reads each asked seed's version and sha256 there.
   - It runs after the migration phase has succeeded (after the apply and the
     final plan, or after a plan that found nothing pending), before any
     service is updated: one Fargate task per seed on the migration task
     definition the release registered, its command
     `scripts/load-catalog.mjs --seed /app/docs/codes/<file>`.
-  - A refusal (exit 2) stops the release (`CATALOG_LOAD_REFUSED`) and prints
-    the loader's own line; any other failure stops it too. The receipt
-    records each load (`catalog_checks`: kind, version, the seed's and the
-    approvals file's sha256, items, the version replaced). Each seed is its
-    own transaction: if the lab tests are refused after the medicines
-    loaded, the medicines stay loaded and the failed receipt names them.
+  - A refusal (exit 2) stops the release (`CATALOG_LOAD_REFUSED`), and any
+    other non-zero exit stops it too (`CATALOG_LOAD_FAILED`); either way the
+    tool prints the loader's last line (its refusal or failure line, or
+    whatever it printed last). The receipt records each load
+    (`catalog_checks`: kind, `loaded`, version, the seed's and the approvals
+    file's sha256, items, the version replaced). Each seed is its own
+    transaction: if the lab tests are refused after the medicines loaded,
+    the medicines stay loaded and the failed receipt names them.
+  - A task that exits 0 has loaded its seed. If its evidence line is missing
+    or malformed, the failed receipt still names the seed as loaded (kind,
+    version, the file's sha256, "evidence line missing"), and the release
+    fails with `CATALOG_LOAD_EVIDENCE_MISSING`.
+  - **After a failure that follows a successful load** (a later seed
+    refused, the evidence line missing, or the services failing after the
+    catalogue phase), the operator dispatches the release again with
+    `catalog_load` set to `none`. The loaded version stays loaded, and
+    asking to load it again is refused ("medicine 2026.1 is already
+    loaded"), so a re-dispatch that asks again cannot finish. The deploy
+    tool prints this step with the failure
+    (`"next": "dispatch the release again with catalog_load none"`). A seed
+    that did not load is asked for on its own once its cause is fixed.
   - Not asked, the release runs exactly as before.
 - **Before the first real load:**
   - #312's open points: the Wave 0 codes, the 13 uncoded tests and the four
@@ -1695,14 +1742,22 @@ deploy tool. Nothing is loaded until the clinical lead signs a file.
   list as of 23 Nov and a synthetic approvals file recording both licence
   answers:
   - 1,616 medicines (4 held back, 4 retired) and 145 tests (13 held back)
-    load. 80 of the 86 brands map, onto 238 items; 6 are listed as not
-    mapped. Wave 0: WIDAL and EUCR kept (as LAB-0145 and LAB-0113), 9
-    recoded to LOINC, MP-SMEAR and HIV-SCREEN missing.
+    load. Of the 86 brands, the 23 confirmed ones are considered: 21 are
+    added, onto 97 items, and ampiclox and piriton are left out (no
+    medicine with exactly their generic name); the 63 pending a
+    pharmacist's review are left out. Wave 0: WIDAL and EUCR kept (as
+    LAB-0145 and LAB-0113), 9 recoded to LOINC, MP-SMEAR and HIV-SCREEN
+    missing.
   - As the EHR runtime, every medicine name and other name typed exactly
-    (1,914) finds its item, and so does every lab-test name and other name
+    (1,713) finds its item, and so does every lab-test name and other name
     of two or more characters (529; "K" and "E" are under the search's
     2-character minimum). `panadol` finds the 8 paracetamol items and
-    `augmentin` the 7 amoxicillin + clavulanic acid items.
+    `augmentin` the 7 amoxicillin + clavulanic acid items; `lonart`,
+    `ciprotab` and `clavulin` (pending) find nothing.
+  - A 2026.2 that gives MED-00001 a strength is refused by 0149 ("the
+    database refused the load: CATALOG_ID_CHANGED: MED-00001 (55000)"), and
+    one that holds back MED-00002, live in 2026.1, is refused with "fix the
+    row, do not retire it"; both exit 2, nothing written.
   - An unsigned file, `--approvals` under production, a malformed approvals
     file, a sign-off without the Nigeria EML confirmation, an ATC file
     without the WHOCC answer, a second load of a version, a held lock
@@ -1875,7 +1930,7 @@ facility, newest first. `limit` is 1-50, default 20.
 | 403 | existing permission refusal; `CONSENT_REQUIRED` on create as today | — |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | existing |
 | 429 | `CATALOG_SEARCH_LIMITED` | "Too many searches. Please wait a minute and try again." (shared with ORD-7's limit) |
-| 503 | `CATALOG_UNAVAILABLE` | "Diagnosis search is not available right now. Try again in a minute." (ORD-7's code; a name alone is not accepted until diagnoses by name only ship) |
+| 503 | `CATALOG_UNAVAILABLE` | "Diagnosis search is not available right now." (ORD-7's code; the same words for a schema without the diagnosis list and for any database failure, so no advice: trying again does not help while the list's migration is not there, and a name alone is not accepted until diagnoses by name only ship) |
 
 ### Screen notes
 
@@ -1928,7 +1983,10 @@ file's seed in `docs/codes/catalog-approvals.json`.
   lists, a release that is or has been live takes no new entry (55000
   `CATALOG_VERSION_SEALED`): only a release still loading takes entries.
   Instead of the planned `ehr.terminology_icd11`, the list shares ORD-7's
-  versions, loader and sign-off.
+  versions, loader and sign-off. The loader takes 0150's refusals as it
+  takes 0149's: a sealed release (55000) or a table check (23514) ends the
+  load as a refusal (exit 2) with the database's message, and nothing is
+  loaded.
 - **The seed** `docs/codes/drafts/icd11-mms-2026-01.json` is built by
   `catalog:build-icd11-seed` from WHO's `SimpleTabulation-ICD-11-MMS-en.zip`
   (2026-01, sha256 `f1356588…`). That is the file
@@ -1955,20 +2013,25 @@ file's seed in `docs/codes/catalog-approvals.json`.
     entries.
   - The entry whose code `q` is comes first: `q` upper-cased and trimmed,
     with or without its dot ("9A03.0" or "9a030"), and found even without
-    the dot. So a parent code such as 9A03 comes before its child codes,
-    whose titles are shorter. Then entries whose title or one of our other
-    names starts with `q`, then shorter titles. With the 2026-01 release
-    loaded, each of its 17,255 codes searched by itself comes first, with
-    its dot and without it. Typed without its dot, a code whose six
-    characters have a Health ID's shape (582 codes, such as `2B6B2Y`) is
-    refused as a Health ID would be; with its dot (`2B6B.2Y`) it is found.
+    the dot. A code copied with punctuation around it is still that code:
+    characters that are neither letters, digits nor dots are taken off both
+    ends, then full stops off the end, before its shape is tested ("NB91.",
+    "NB91,", "(NB91)"). So a parent code such as 9A03 comes before its
+    child codes, whose titles are shorter. Then entries whose title or one
+    of our other names starts with `q`, then shorter titles. With the
+    2026-01 release loaded, each of its 17,255 codes searched by itself
+    comes first: as written, with a full stop after it, in brackets, and
+    without its dot. Typed without its dot, a code whose six characters
+    have a Health ID's shape (582 codes, such as `2B6B2Y`) is refused as a
+    Health ID would be; with its dot (`2B6B.2Y`) it is found.
   - `matchedName` is our other name when it is what matched, or when it
     starts with `q` and the title does not. So `q=falciparum` gives 1F40
     first, named "falciparum malaria", as the example above.
   - `typedIcd10` is filled for a `q` shaped like an ICD-10 code.
   - A schema without 0150, or any database failure, answers 503
-    `CATALOG_UNAVAILABLE` "Diagnosis search is not available right now. Try
-    again in a minute." The catalogue status fills
+    `CATALOG_UNAVAILABLE` "Diagnosis search is not available right now."
+    It gives no advice, so it is true in every case: trying again does not
+    help while 0150 is not there. The catalogue status fills
     `diagnoses: { available, release, fileSha256 }`.
 - **Measured** with the full release loaded on throwaway PostgreSQL 16
   (median of 25 calls inside the server, as the EHR runtime): the load

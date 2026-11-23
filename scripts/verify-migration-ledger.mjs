@@ -160,7 +160,7 @@ const acceptedMigrations = new Map([
   ['0145_unknown_patient_record.sql', 'e27367ace883df85dfc4630043ffeb3e43144615b3603f187532ce2b6420bcb2'],
   ['0146_document_guard_without_ocr_schema_lookup.sql', 'b50d4250743c171709828dc59c7839c594ff729b4f64d14124c2909dbd830612'],
   ['0149_catalog_medicines_and_lab_tests.sql', 'a92d10f221ab1cfadc1eca18c55fc6e7ef56d79e0280fc5f0bbc29633976eac9'],
-  ['0150_catalog_diagnoses.sql', '6f88730fcd1d521faa02fe956da8b85ddc15dc61066628c88a178f43271ab8d3'],
+  ['0150_catalog_diagnoses.sql', '8678a95a37c5108a80891d9ac6196d6b1019567dc32451827e26daae4bb443c2'],
   ['0151_clinician_recent_diagnoses.sql', '5bed5f0bb3bf53d9cc06703f67e47845a6147dd4229ab1844aec47914dd7c764'],
 ])
 

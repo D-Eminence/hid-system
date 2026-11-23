@@ -2,11 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { posix } from 'node:path'
+import { join, posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  CONFIG_READERS, MAX_CHANGED_PATHS, REHEARSAL_PACKAGES, REHEARSAL_SCRIPTS, REHEARSAL_SERVICES, REPOSITORY_ROOT, SELECT_EVERYTHING,
-  WORKSPACE_SELECTIONS, classifyPath, selectLocalGates, verificationScripts, workflowOutputs,
+  CONFIG_READERS, MAX_CHANGED_PATHS, MIGRATION_IMAGE_CODES, REHEARSAL_PACKAGES, REHEARSAL_SCRIPTS, REHEARSAL_SERVICES, REPOSITORY_ROOT,
+  SELECT_EVERYTHING, WORKSPACE_SELECTIONS, classifyPath, selectLocalGates, verificationScripts, workflowOutputs,
 } from '../scripts/select-local-gates.mjs'
 import { GATES, resolveGates } from '../scripts/run-workspace-gates.mjs'
 import { LOCAL_GATE_AUDITS, parseWorkflow, verifyLocalGateWorkflow } from '../scripts/verify-publication-workflow.mjs'
@@ -78,7 +78,7 @@ test('documentation runs only the secret scan and the whitespace check', () => {
 })
 
 test('documents and scripts read by the staging preparation tests run those tests only', () => {
-  for (const path of ['docs/INTERFACE_CONTRACT.md', 'docs/codes/hid-lab-codes.json', 'scripts/tests/staging-capacity.test.mjs',
+  for (const path of ['docs/INTERFACE_CONTRACT.md', 'docs/codes/drafts/hid-medicines-and-lab-tests.csv', 'scripts/tests/staging-capacity.test.mjs',
     'scripts/production_deployment.py', 'scripts/staging-provider-secret.py', 'scripts/production-backend-build.mjs']) {
     const plan = pr([path])
     assert.deepEqual(ran(plan), { 'tuf-client': false, 'upstream-reference': false, workspace: ['secret-readiness', 'diff-check'],
@@ -86,6 +86,22 @@ test('documents and scripts read by the staging preparation tests run those test
     assert.equal(plan.jobs['workspace-test'].install, 'staging-preparation')
     assert.deepEqual(plan.jobs['workspace-test'].skipped.map(s => s.gate), ['test'])
   }
+})
+
+test('the catalogue files the EHR migration image carries also run the build and verify gate', () => {
+  for (const path of MIGRATION_IMAGE_CODES) {
+    const plan = pr([path])
+    assert.deepEqual(ran(plan), { 'tuf-client': false, 'upstream-reference': false, workspace: ['build', 'verify', 'diff-check'],
+      'workspace-test': ['staging-preparation', 'diff-check'], 'migration-rehearsal': false }, path)
+    assert.equal(classifyPath(path).rule, 'catalogue files the EHR migration image carries')
+  }
+  // The list is the one the Dockerfile copies from docs/ (a seed file may be named "hid-medicines.jso[n]").
+  const dockerfile = readFileSync(join(REPOSITORY_ROOT, 'services/ehr-api/Dockerfile'), 'utf8')
+  const copied = dockerfile.split('\n').filter(line => /^COPY\s/.test(line)).flatMap(line => line.split(/\s+/).slice(1, -1))
+    .filter(word => word.startsWith('docs/')).map(word => word.replace(/\[([^\]])\]$/, '$1'))
+  assert.deepEqual(copied, [...MIGRATION_IMAGE_CODES])
+  // Any other docs/codes file never ships: the staging preparation tests only.
+  assert.deepEqual(classifyPath('docs/codes/drafts/hid-medicines-and-lab-tests.csv').effects, ['staging-preparation'])
 })
 
 test('code outside the database roles builds, verifies and tests everything but skips the rehearsal and Go jobs', () => {
