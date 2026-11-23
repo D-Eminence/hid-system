@@ -548,10 +548,22 @@ try {
       'hid_live_base');
     migration('live runtime roles and grants by the live bootstrap',
       join(liveService, 'scripts/bootstrap-database-roles.mjs'), 'hid_live_base');
-    const points = ['0132', '0135'];
+    // The points after which the live images' verifiers run: HID_REHEARSAL_LIVE_POINTS (comma-separated 4-digit
+    // numbers, each one of this branch's files after the live schema), else Release A's 0132 and 0135 while those
+    // are still pending, else every pending file (a later release, for example Release B on Release A's images).
+    const pending = files.slice(liveFiles.length).map((name) => name.slice(0, 4));
+    const requestedPoints = (process.env.HID_REHEARSAL_LIVE_POINTS ?? '').split(',').map((point) => point.trim())
+      .filter(Boolean);
+    for (const point of requestedPoints) {
+      assert(/^\d{4}$/.test(point) && pending.includes(point),
+        `HID_REHEARSAL_LIVE_POINTS names ${point}, which is not one of this branch's files after the live schema`);
+    }
+    const points = requestedPoints.length > 0 ? requestedPoints
+      : ['0132', '0135'].every((point) => pending.includes(point)) ? ['0132', '0135'] : pending;
     const results = [];
-    for (const [index, last] of points.entries()) {
-      const db = `hid_live_${'abcdefgh'[index]}`;
+    for (const last of new Set(points)) {
+      // Letters only: url() accepts hid_[a-z_]+. The point's own digits as letters (0138 -> hid_live_abdi).
+      const db = `hid_live_${last.replace(/\d/g, (digit) => 'abcdefghij'[Number(digit)])}`;
       command(`copy the live database for ${last}`, join(pgBindir, 'createdb'), ['-T', 'hid_live_base', db]);
       const subset = join(temporary, `migrations-through-${last}`);
       await mkdir(subset);
