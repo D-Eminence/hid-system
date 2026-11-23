@@ -1598,7 +1598,28 @@ no requested test is open. Pharmacy work is open while it has no dispensing;
 a reversed dispensing counts as done, because a work item takes one dispensing
 only and cannot be dispensed again. Earlier backends answered the 200 oldest items
 the member could read whatever their state, so a busy facility stopped seeing
-new work. The answer's shape and audit rows are unchanged.
+new work. The open-first order changed no field of the answer and no audit row.
+
+How far back the lists reach (owner decision Q123 A). Both lists answer open
+work of any age, and done work received (`acceptedAt`) on or after `since`:
+the Lagos calendar day (Africa/Lagos, UTC+1, no daylight saving) 90 days
+before today, from 00:00 Lagos time (23:00 UTC the evening before). The
+backend works the day out from its clock and the database turns it into that
+midnight, so the session's time zone plays no part. The window applies before
+the 200 cap and the order above, so older done work no longer fills the list;
+the cap, the order and the audit rows are unchanged. The answer carries
+`since` (`"YYYY-MM-DD"`) beside `items`, so a screen can say how far back it
+shows. There is no way to ask either list for older done work: a done item
+stays readable by its id (`GET /api/v1/lab/work-items/{id}`,
+`GET /api/v1/pharmacy/work-items/{id}`). A pharmacy item withdrawn on a change
+(ORD-2) counts as done work, so it too leaves the list 90 days after it was
+received. The day an item was received decides, not the day its work was
+finished: an item received before `since` leaves the list as soon as it is
+done (dispensed, its last result released, or withdrawn), and done work is
+ordered by the day it was received, so in a facility with more than 200 items
+in reach a done item received long ago may already be past the cap. Earlier
+backends send no `since` and apply no window, so clients treat `since` as
+optional.
 
 Each Lab work-list item also carries `openWork` (boolean): true while the work
 item is open by the rule above, false once every test it asks for has a
@@ -1617,12 +1638,19 @@ on a shared 2.1 GHz Xeon as the restricted Lab login with lab-api's 15-second
 statement limit: 1,041-1,050 work items 8.8-12.1 s, 1,541 work items 11.1 s,
 2,041 work items over the limit (the oldest-200 list: 4.7-5.7 s, 6.2 s and
 8.6 s). So a laboratory with more than roughly 1,800 to 2,000 work items gets
-an error instead of the list, and fewer on a slower database server. Raising
+an error instead of the list, and fewer on a slower database server. The
+90-day window (Q123 A) does not lift this ceiling: whether an older item is
+still open is worked out as for any other, so every work item is still read
+(1,052 work items, the same database, alternating: 9.4-10.1 s without the
+window, 9.4-9.7 s with it). Raising
 that ceiling needs a migration (for example one row of open or done state per
 work item, kept by the database), which is a separate owner decision.
 `services/ehr-api/scripts/lab-work-list-runtime-checks.mjs` (run by
-`test-patient-evidence-runtime.mjs`) checks 1,050 work items within the
-limit and counts the checks.
+`test-patient-evidence-runtime.mjs`) checks 1,052 work items within the
+limit and counts the checks, and checks the window with a fixed day: open
+work older than it stays, done work 1 ms before its Lagos midnight is left
+out, done work at that midnight is listed, and the rows are the same under
+the session time zone `Pacific/Kiritimati` (UTC+14).
 
 ### Clinical information on Lab work items
 
@@ -8793,8 +8821,10 @@ other on it.
   An item already dispensed never carries either. `GET /pharmacy/work-items`
   leaves out an item sent elsewhere: it is the outside pharmacy's work now.
   It lists a `changed` item, marked, with the done work (newest first),
-  never in the open work at the top, because it can never be dispensed.
-  `GET /pharmacy/work-items/:id` answers both, marked. Without 0133's reader
+  never in the open work at the top, because it can never be dispensed; as
+  done work, it is listed only while received within the list's 90 days
+  (Q123 A, "Work list order"). `GET /pharmacy/work-items/:id` answers both,
+  marked. Without 0133's reader
   (42883) the list answers as before.
 
 ### EHR API: `pharmacyHandoff`
