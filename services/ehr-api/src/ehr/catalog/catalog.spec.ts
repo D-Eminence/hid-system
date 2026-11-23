@@ -12,7 +12,7 @@ import { SearchCatalogLabTestsQueryDto, SearchCatalogMedicinesQueryDto, SearchDi
 import { CatalogModule } from './catalog.module';
 import {
   CATALOG_SEARCHES_PER_WINDOW, CATALOG_SEARCH_WINDOW_MS, CatalogService, DIAGNOSES_SQL, LAB_TESTS_SQL, MEDICINES_SQL,
-  STATUS_SQL, looksLikePersonIdentifier, medicineDisplay, typedIcd10,
+  STATUS_SQL, diagnosisSearchUnavailable, looksLikePersonIdentifier, medicineDisplay, typedIcd10,
 } from './catalog.service';
 
 // Fictional identifiers only. Medicine and test names are list facts, not patient data.
@@ -401,10 +401,22 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       expect([problem.code, problem.message]).toEqual(['CATALOG_SEARCH_TEXT_NOT_ALLOWED',
         'Search by diagnosis name or code. Do not type a Health ID or NIN here.']);
       expect(calls).toEqual([]);
-      const failed = await problemOf(new CatalogService(fakeDatabase(databaseError('42883')).database)
-        .searchDiagnoses(membershipA, diagnoses('malaria')));
-      expect([failed.getStatus(), failed.code]).toEqual([503, 'CATALOG_UNAVAILABLE']);
     });
+
+    it.each(['42883', '42P01', '57014', '08006'])('%s is 503 CATALOG_UNAVAILABLE in words true today, and q is never logged',
+      async (code) => {
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        const failed = await problemOf(new CatalogService(fakeDatabase(databaseError(code)).database)
+          .searchDiagnoses(membershipA, diagnoses('malaria')));
+        // A name alone is not accepted yet (clinical.dto.ts still requires the code), so no "type it instead".
+        expect([failed.getStatus(), failed.code, failed.message]).toEqual([503, 'CATALOG_UNAVAILABLE',
+          'Diagnosis search is not available right now. Try again in a minute.']);
+        expect(failed.message).not.toMatch(/type|instead/i);
+        expect(diagnosisSearchUnavailable().message).toBe(failed.message);
+        expect(warn.mock.calls.map((call) => String(call[0])).join('\n')).not.toMatch(/malaria/);
+        expect(warn).toHaveBeenCalledTimes(code === '42883' || code === '42P01' ? 0 : 1);
+        warn.mockRestore();
+      });
 
     it('the status names the loaded ICD-11 release and its notice', async () => {
       const icd = 'ICD-11 notice';

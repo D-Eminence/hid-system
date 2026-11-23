@@ -1661,7 +1661,8 @@ Extension codes (X...) and blocks without a code are left out.
 Each word of `q` must start a word of the title or of one of our own other
 names. Those come from `DIAGNOSIS_SYNONYMS` in the same file (HTN, DM,
 "MP+", typhoid...), are kept apart from WHO's words, and contain no ICD-10
-content. Exact title starts come first, then shorter titles.
+content. A code typed exactly comes first, then exact title starts, then
+shorter titles.
 
 Example for `q=falciparum`:
 
@@ -1777,7 +1778,7 @@ facility, newest first. `limit` is 1-50, default 20.
 | 403 | existing permission refusal; `CONSENT_REQUIRED` on create as today | — |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | existing |
 | 429 | `CATALOG_SEARCH_LIMITED` | "Too many searches. Please wait a minute and try again." (shared with ORD-7's limit) |
-| 503 | `TERMINOLOGY_UNAVAILABLE` | "Diagnosis search is not available right now. You can type the diagnosis instead." |
+| 503 | `CATALOG_UNAVAILABLE` | "Diagnosis search is not available right now. Try again in a minute." (ORD-7's code; a name alone is not accepted until diagnoses by name only ship) |
 
 ### Screen notes
 
@@ -1845,17 +1846,29 @@ file's seed in `docs/codes/catalog-approvals.json`.
   with ORD-7's rules for `q` (6 words, never raw `to_tsquery`, no Health ID
   or NIN shapes, never logged) and its 429 and cache.
   - The code matches too, whole or in parts ("1F40", "1f40.z").
-  - Entries whose title or one of our other names starts with `q` come
-    first, then shorter titles. `matchedName` is our other name when it is
-    what matched, or when it starts with `q` and the title does not. So
-    `q=falciparum` gives 1F40 first, named "falciparum malaria", as the
-    example above.
+  - The entry whose code `q` is comes first: `q` upper-cased and trimmed,
+    with or without its dot ("9A03.0" or "9a030"), and found even without
+    the dot. So a parent code such as 9A03 comes before its child codes,
+    whose titles are shorter. Then entries whose title or one of our other
+    names starts with `q`, then shorter titles. With the 2026-01 release
+    loaded, each of its 17,255 codes searched by itself comes first, with
+    its dot and without it. Typed without its dot, a code whose six
+    characters have a Health ID's shape (582 codes, such as `2B6B2Y`) is
+    refused as a Health ID would be; with its dot (`2B6B.2Y`) it is found.
+  - `matchedName` is our other name when it is what matched, or when it
+    starts with `q` and the title does not. So `q=falciparum` gives 1F40
+    first, named "falciparum malaria", as the example above.
   - `typedIcd10` is filled for a `q` shaped like an ICD-10 code.
-  - A schema without 0150 answers 503 `CATALOG_UNAVAILABLE`. The catalogue
-    status fills `diagnoses: { available, release, fileSha256 }`.
-- **Measured** with the full release loaded on throwaway PostgreSQL 16: the
-  load takes about 0.4 s; searches take 4–42 ms, the broadest two-letter `q`
-  included.
+  - A schema without 0150, or any database failure, answers 503
+    `CATALOG_UNAVAILABLE` "Diagnosis search is not available right now. Try
+    again in a minute." The catalogue status fills
+    `diagnoses: { available, release, fileSha256 }`.
+- **Measured** with the full release loaded on throwaway PostgreSQL 16
+  (median of 7 calls through `psql`): the load takes about 0.4 s. A word or
+  a code takes 1–2 ms (`falciparum`, `9A03`, `1f40.z`). Two-letter `q` take
+  longest: `di` (2,974 entries match) about 24 ms, and the broadest, `of`
+  (6,715), about 60 ms at limit 10 or 25, with single calls up to about
+  110 ms.
 - **Not in this slice:** recent diagnoses, diagnoses by name only and
   `codeStatus`, which alter `ehr.diagnoses` and need a lock plan.
 

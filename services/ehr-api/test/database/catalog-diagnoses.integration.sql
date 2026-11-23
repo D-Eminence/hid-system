@@ -8,6 +8,8 @@
 --      of the title, our other name (named when it starts q and the title
 --      does not), the code, two words; entries starting with q first, then
 --      shorter titles; limit and more; an inactive release never offered;
+--      a code typed exactly first, though its child codes have shorter
+--      titles, with or without its dot (Rahman, #320 finding 3);
 --   3. refusals: q of 1 or 101 characters, limit 0 or 26 (22023
 --      CATALOG_SEARCH_INVALID); brackets and operators answer nothing; an
 --      extension code, a bad chapter and a second active release are
@@ -89,6 +91,24 @@ select pg_temp.expect('2i the answer carries the release', '2026-01 Malaria due 
   (select format('%s %s', list_version, title) from ehr.search_catalog_diagnoses('1F40', 1)));
 select pg_temp.expect('2j the status counts what is offered', 'diagnosis t 2026-01 7',
   (select format('%s %s %s %s', kind, available, list_version, offered) from ehr.catalog_status() where kind = 'diagnosis'));
+
+-- Parents whose child codes have shorter titles (the real release's order put 9A03 last of its family).
+insert into ehr.catalog_diagnoses (version_id, code, title, chapter) values
+  ('c1500000-0000-4000-8000-000000000001', '9A03', 'Acquired malposition of eyelid', '09'),
+  ('c1500000-0000-4000-8000-000000000001', '9A03.0', 'Blepharoptosis', '09'),
+  ('c1500000-0000-4000-8000-000000000001', '9A03.3', 'Eyelid retraction', '09'),
+  ('c1500000-0000-4000-8000-000000000001', '9A03.4', 'Lagophthalmos', '09'),
+  ('c1500000-0000-4000-8000-000000000001', '1A36', 'Amoebiasis', '01'),
+  ('c1500000-0000-4000-8000-000000000001', '1A36.1', 'Extraintestinal infections due to Entamoeba', '01'),
+  ('c1500000-0000-4000-8000-000000000001', '1A36.10', 'Amoebic liver abscess', '01'),
+  ('c1500000-0000-4000-8000-000000000001', '1A36.11', 'Amoebic lung abscess', '01');
+select pg_temp.expect('2k a code typed exactly comes first, then shorter titles; in any case and at limit 1',
+  '9A03 9A03.4 9A03.0 9A03.3 more=false|9A03 9A03.4 9A03.0 9A03.3 more=false|9A03 more=true',
+  pg_temp.found('9A03', 10) || '|' || pg_temp.found(' 9a03 ', 10) || '|' || pg_temp.found('9A03', 1));
+select pg_temp.expect('2l a code with its dot comes first; without its dot it is found, first',
+  '1A36.1 1A36 1A36.11 1A36.10 more=false|1A36.1 more=false|9A03.0 more=false',
+  pg_temp.found('1A36.1', 10) || '|' || pg_temp.found('1a361', 10) || '|' || pg_temp.found('9A030', 10));
+select pg_temp.expect('2m a word of five letters is not taken for a code', '1A07 more=false', pg_temp.found('typho', 10));
 
 -- 3. Refusals.
 select pg_temp.expect('3a q of 1 or 101 characters, limit 0 or 26', '22023 CATALOG_SEARCH_INVALID|22023 CATALOG_SEARCH_INVALID|'

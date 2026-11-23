@@ -29,6 +29,26 @@ test('a file\'s own busy refusals are retried, in each wording the files use', (
     databaseError('55P03', `0128: identity.outbox_events stayed busy for 5 seconds; ${tail}`))), true);
 });
 
+/** A migration file's own 55P03 refusals, as the server raises them: its quoted parts joined, '' read as '. */
+async function busyRefusalsOf(file) {
+  const sql = await readFile(path.join(scripts, '../database/migrations', file), 'utf8');
+  return [...sql.matchAll(/errcode = '55P03',\s*message = ((?:'(?:[^']|'')*'\s*(?:\|\|\s*)?)+);/g)]
+    .map(([, literals]) => [...literals.matchAll(/'((?:[^']|'')*)'/g)].map(([, part]) => part.replaceAll("''", "'")).join(''));
+}
+
+test('0150\'s two busy refusals, read from the file, are retried (Rahman, #320 finding 1)', async () => {
+  const file = '0150_catalog_diagnoses.sql';
+  const refusals = await busyRefusalsOf(file);
+  assert.deepEqual(refusals, [
+    `0150: ehr.catalog_versions (a catalogue search or load) is busy and this transaction already holds an earlier `
+      + `migration's locks, so it does not wait; nothing applied; ${tail}`,
+    `0150: ehr.catalog_versions (a catalogue search or load) stayed busy for 5 seconds; nothing applied; ${tail}`,
+  ]);
+  for (const message of refusals) {
+    assert.equal(isBusyRefusal(new MigrationFileError(file, databaseError('55P03', message))), true, message);
+  }
+});
+
 test('anything else is not retried', () => {
   const file = '0131_own_facility_patient_access.sql';
   for (const error of [

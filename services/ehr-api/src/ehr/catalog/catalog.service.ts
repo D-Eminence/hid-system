@@ -204,6 +204,15 @@ export function catalogUnavailable(): DomainProblem {
   return new DomainProblem(503, 'CATALOG_UNAVAILABLE', 'The list cannot be searched right now. You can type the name instead.');
 }
 
+/**
+ * ORD-9's 503, the catalogue's code with words that are true today: a
+ * diagnosis still needs its code (clinical.dto.ts), so typing a name
+ * instead is not offered until diagnoses by name only ship.
+ */
+export function diagnosisSearchUnavailable(): DomainProblem {
+  return new DomainProblem(503, 'CATALOG_UNAVAILABLE', 'Diagnosis search is not available right now. Try again in a minute.');
+}
+
 export function catalogNotAvailable(): DomainProblem {
   return new DomainProblem(404, 'CATALOG_NOT_AVAILABLE', 'The medicine and lab-test lists are not available yet.');
 }
@@ -314,7 +323,7 @@ export class CatalogService {
    */
   async searchDiagnoses(membershipKey: string, query: SearchCatalogLabTestsQueryDto): Promise<TerminologyDiagnosisAnswer> {
     const q = this.admit(membershipKey, query.q, 'diagnoses');
-    const rows = await this.search<DiagnosisRow>(DIAGNOSES_SQL, [q, query.limit]);
+    const rows = await this.search<DiagnosisRow>(DIAGNOSES_SQL, [q, query.limit], diagnosisSearchUnavailable);
     return {
       release: rows[0] ? `ICD-11 MMS ${rows[0].list_version}` : null,
       more: rows.some((row) => row.more),
@@ -350,8 +359,13 @@ export class CatalogService {
     return new DomainProblem(429, 'CATALOG_SEARCH_LIMITED', 'Too many searches. Please wait a minute and try again.');
   }
 
-  /** Any database failure is 503 CATALOG_UNAVAILABLE, on which the screens fall back to typing; q is never logged. */
-  private async search<Row extends QueryResultRow>(sql: string, values: readonly unknown[]): Promise<Row[]> {
+  /**
+   * Any database failure is 503 CATALOG_UNAVAILABLE (for medicines and lab
+   * tests the screens fall back to typing; for diagnoses to their built-in
+   * list); q is never logged.
+   */
+  private async search<Row extends QueryResultRow>(sql: string, values: readonly unknown[],
+    unavailable: () => DomainProblem = catalogUnavailable): Promise<Row[]> {
     try {
       return (await this.database.query<Row>(sql, values)).rows;
     } catch (error) {
@@ -359,7 +373,7 @@ export class CatalogService {
       if (code !== '42883' && code !== '42P01') {
         this.logger.warn(`Catalogue search failed (${typeof code === 'string' ? code : 'no database code'})`);
       }
-      throw catalogUnavailable();
+      throw unavailable();
     }
   }
 }
