@@ -139,19 +139,19 @@ class SchemaBaseTests(unittest.TestCase):
         self.assertEqual(sorted(contract['files']), sorted([M2, M3, M4, c.RUNTIME_GRANTS]))
         self.assertEqual(contract['from_earlier_pushes'], sorted([M2, M3, M4, c.RUNTIME_GRANTS]))
         self.assertNotIn('carried', contract)
-        # #313 edits 0003 in place: an earlier push added it and the candidate cannot see whether
-        # production committed it, so the push that edits it is refused before approval.
+        # #313 edits the pending 0003 in place and re-signs: that push ships itself, no carrier. Production
+        # never committed 0003, so its pending set is exactly the re-signed declaration and the release applies it.
         h.write(M3, 'select raised_maximums;'); h.declare(M2, M3, M4, c.RUNTIME_GRANTS)
         edit = h.commit('#313 edits the pending 0003 and re-signs')
-        with self.assertRaisesRegex(c.ReleaseError, 'MIGRATION_FROM_AN_EARLIER_PUSH_EDITED'): h.candidate(retry, h.released)
-        # The next push of any kind (#308 had no database change) declares the re-signed set; production
-        # never committed 0003, so its pending set is exactly the declaration and the release applies it.
-        h.write(CODE, 'v2')
-        h.commit('#308')
-        contract = h.candidate(edit, h.released)
+        contract = h.candidate(retry, h.released)
         self.assertEqual(c.migration_files(contract), [M2, M3, M4])
+        self.assertEqual(contract['from_earlier_pushes'], sorted([M2, M4, c.RUNTIME_GRANTS]))
         self.assertEqual(h.deploy(contract), [['--plan'], ['--dry-run'], ['apply'], ['--plan']])
         self.assertEqual(set(h.applied), {'0001_applied.sql', '0002_second.sql', '0003_third.sql', '0004_fourth.sql'})
+        self.assertEqual(h.applied['0003_third.sql'], c.file_sha(h.root/M3))
+        # #308 followed with code only: #313 deployed and is the released base, so nothing is pending.
+        h.write(CODE, 'v2'); h.commit('#308')
+        self.assertEqual(h.candidate(edit, edit), {'changed': False})
 
     def test_b_after_a_release_that_failed_production_decides_what_is_declared(self):
         for committed in (True, False):
@@ -198,12 +198,29 @@ class SchemaBaseTests(unittest.TestCase):
         self.assertEqual(h.deploy(contract)[0], ['--plan'])
         self.assertIn('0003_third.sql', h.applied)
 
-    def test_d_a_push_that_edits_a_migration_an_earlier_push_added_is_refused_before_approval(self):
+    def test_d_an_edit_of_a_pending_migration_passes_the_candidate_and_production_decides(self):
+        for committed in (False, True):
+            with self.subTest(failed_release_committed_0002=committed):
+                h = self.history()
+                failed = self.failed_release_adding(h, M2)
+                old = c.file_sha(h.root/M2)
+                if committed: h.commit_applied(M2)
+                h.write(M2, 'select 22;'); h.declare(M2); h.commit('H edits the pending 0002 and re-signs')
+                contract = h.candidate(failed, h.released)
+                self.assertEqual(contract['files'], {M2: c.file_sha(h.root/M2)})
+                if committed:
+                    # The failed release committed the old bytes: the plan step refuses before any change.
+                    self.assertEqual(h.applied['0002_second.sql'], old)
+                    applied = dict(h.applied)
+                    with self.assertRaisesRegex(c.ReleaseError, 'MIGRATION_FAILED'): h.deploy(contract)
+                    self.assertEqual(h.applied, applied)
+                else:
+                    h.deploy(contract)
+                    self.assertEqual(h.applied['0002_second.sql'], c.file_sha(h.root/M2))
+                # Without a released base the push's before is the only base, as before: the edit is refused.
+                with self.assertRaisesRegex(c.ReleaseError, 'ONLY_NEW_REVIEWED_SCHEMA_FILES_ALLOWED'): h.candidate(failed)
         h = self.history()
         failed = self.failed_release_adding(h, M2)
-        h.write(M2, 'select 22;'); h.declare(M2); h.commit('H edits 0002')
-        with self.assertRaisesRegex(c.ReleaseError, 'MIGRATION_FROM_AN_EARLIER_PUSH_EDITED'): h.candidate(failed, h.released)
-        with self.assertRaisesRegex(c.ReleaseError, 'ONLY_NEW_REVIEWED_SCHEMA_FILES_ALLOWED'): h.candidate(failed)
         # An edit of a released migration is not new since R either.
         h.at(failed); h.write(M1, 'select 11;'); h.write(M3, 'select 3;'); h.declare(M1, M3); h.commit('H edits 0001')
         with self.assertRaisesRegex(c.ReleaseError, 'ONLY_NEW_REVIEWED_SCHEMA_FILES_ALLOWED'): h.candidate(failed, h.released)
@@ -237,31 +254,28 @@ class SchemaBaseTests(unittest.TestCase):
         h.commit('H empties the declaration')
         self.assertEqual(h.candidate(failed, h.released), {'changed': False})
 
-    def test_f_a_partial_apply_then_an_in_place_fix_is_refused_before_approval(self):
+    def test_f_a_partial_apply_then_an_in_place_fix_ships_itself(self):
         h = self.history()
         failed = self.failed_release_adding(h, M2, M3)
         h.commit_applied(M2)                              # 0002 committed, 0003 failed and rolled back
-        old = c.file_sha(h.root/M3)
-        h.write(M3, 'select fixed;'); h.declare(M3); edit = h.commit('H fixes 0003 in place')
-        with self.assertRaisesRegex(c.ReleaseError, 'MIGRATION_FROM_AN_EARLIER_PUSH_EDITED'): h.candidate(failed, h.released)
-        # Unchanged 0003 (a busy lock, a timeout): the next push declares only what is pending, {0003}.
+        # The fix edits 0003 in place and declares only what is pending, {0003}: it passes and ships.
+        h.write(M3, 'select fixed;'); h.declare(M3); h.commit('H fixes 0003 in place')
+        contract = h.candidate(failed, h.released)
+        self.assertEqual(contract['files'], {M3: c.file_sha(h.root/M3)})
+        applied = dict(h.applied)
+        h.deploy(contract)
+        self.assertEqual(h.applied['0003_third.sql'], c.file_sha(h.root/M3))
+        # Declaring the committed 0002 as well passes the candidate but not production's pending check.
+        h.applied = dict(applied)
+        h.at(failed); h.write(M3, 'select fixed;'); h.declare(M2, M3); h.commit('H declares 0002 again')
+        with self.assertRaisesRegex(c.ReleaseError, 'UNREVIEWED_PENDING_MIGRATIONS'): h.deploy(h.candidate(failed, h.released))
+        self.assertEqual(h.applied, applied)
+        # Unchanged 0003 (a busy lock, a timeout): the next push of any kind declares only {0003}.
         h.at(failed); h.declare(M3); h.write(CODE, 'v2'); h.commit('H declares the pending 0003')
         contract = h.candidate(failed, h.released)
         self.assertEqual(list(contract['files']), [M3])
-        applied = dict(h.applied)
         h.deploy(contract)
         self.assertEqual(set(h.applied), {'0001_applied.sql', '0002_second.sql', '0003_third.sql'})
-        # With the fix: after the refused push, the next push declares the fixed 0003. Production applies it
-        # only because it never committed 0003; had it committed the old bytes, its plan refuses first.
-        h.applied = applied
-        h.at(edit); h.write(CODE, 'v2'); h.commit('the next push')
-        contract = h.candidate(edit, h.released)
-        self.assertEqual(contract['files'], {M3: c.file_sha(h.root/M3)})
-        h.applied['0003_third.sql'] = old
-        with self.assertRaisesRegex(c.ReleaseError, 'MIGRATION_FAILED'): h.deploy(contract)
-        del h.applied['0003_third.sql']
-        h.deploy(contract)
-        self.assertEqual(h.applied['0003_third.sql'], c.file_sha(h.root/M3))
 
     def test_the_released_base_must_be_a_known_ancestor(self):
         h = self.history()

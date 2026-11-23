@@ -540,18 +540,16 @@ def require_additive_schema_change(root, base, contract, released_base=None):
     # Changed applied files or RDS substitutions are outside this automatic additive path.
     # Every declared migration is a new file since R (B when there is none), so one that
     # was released is never edited; runtime-grants.sql is the one existing file a reviewed
-    # change may modify.
+    # change may modify. A migration an earlier push added and a failed release left
+    # pending may be edited and re-signed by the push that fixes it (Release A's #313),
+    # so that push ships itself, with no carrier: if a failed release had committed the
+    # old bytes, the deploy's plan step (apply-migrations.mjs, checksum mismatch) refuses
+    # it before any change, and production's pending set must still equal the
+    # declaration's exact names and sha256s.
     for name in contract["files"]:
         change = "M" if name == RUNTIME_GRANTS else "A"
         require(git("diff","--diff-filter="+change,"--name-only",released_base or base,"HEAD","--",name,cwd=root) == name,
                 "ONLY_NEW_REVIEWED_SCHEMA_FILES_ALLOWED")
-        # A migration this push changed is new in this push too. One an earlier push added
-        # may already be applied (a failed release can commit some files before it fails,
-        # and a dispatch is not a released base), so editing it is refused here, before
-        # approval, not only by the runner's checksum check inside the deploy.
-        if name != RUNTIME_GRANTS and git("diff","--name-only",base,"HEAD","--",name,cwd=root):
-            require(git("diff","--diff-filter=A","--name-only",base,"HEAD","--",name,cwd=root) == name,
-                    "MIGRATION_FROM_AN_EARLIER_PUSH_EDITED")
 
 def changed_paths(root):
     base = os.environ.get("BASE_SHA","")
