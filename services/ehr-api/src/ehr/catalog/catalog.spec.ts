@@ -457,15 +457,17 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
         expect(calls.map((call) => call.values[0])).toEqual(['a\u{1D538}']);
       });
 
-    it.each(['42883', '42P01', '57014', '08006'])('%s is 503 CATALOG_UNAVAILABLE in words true today, and q is never logged',
+    it.each(['42883', '42P01', '57014', '08006'])('%s is 503 CATALOG_UNAVAILABLE in words true in every case; q is never logged',
       async (code) => {
         const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
         const failed = await problemOf(new CatalogService(fakeDatabase(databaseError(code)).database)
           .searchDiagnoses(membershipA, diagnoses('malaria')));
-        // A name alone is not accepted yet (clinical.dto.ts still requires the code), so no "type it instead".
+        // The same words for a schema without 0150 (42883, 42P01) as for a passing failure, so no advice: trying again
+        // does not help while 0150 is not there, and a name alone is not accepted yet (clinical.dto.ts still requires
+        // the code), so no "type it instead" either.
         expect([failed.getStatus(), failed.code, failed.message]).toEqual([503, 'CATALOG_UNAVAILABLE',
-          'Diagnosis search is not available right now. Try again in a minute.']);
-        expect(failed.message).not.toMatch(/type|instead/i);
+          'Diagnosis search is not available right now.']);
+        expect(failed.message).not.toMatch(/try|again|minute|type|instead/i);
         expect(diagnosisSearchUnavailable().message).toBe(failed.message);
         expect(warn.mock.calls.map((call) => String(call[0])).join('\n')).not.toMatch(/malaria/);
         expect(warn).toHaveBeenCalledTimes(code === '42883' || code === '42P01' ? 0 : 1);

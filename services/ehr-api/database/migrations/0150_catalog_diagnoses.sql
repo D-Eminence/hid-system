@@ -43,9 +43,13 @@
 --    active release's entries where every word of q starts a word of the
 --    code and title or of one other name, each split as q is, with 0149's
 --    query rules (the first 6 words of q, each cut to 40 characters; q
---    never reaches to_tsquery as typed). The entry whose code q is (upper-cased, with or
---    without its dot: "9A03.0" or "9a030") first, found even without the
---    dot; then entries whose title or one of our other names starts with q
+--    never reaches to_tsquery as typed). The entry whose code q is
+--    (upper-cased, with or without its dot: "9A03.0" or "9a030") first,
+--    found even without the dot, and as copied with punctuation around it:
+--    characters that are neither letters, digits nor dots are taken off
+--    both ends, then full stops off the end, before the code's shape is
+--    tested ("NB91.", "NB91,", "(NB91)" are NB91); then entries whose
+--    title or one of our other names starts with q
 --    (LIKE's %, _ and \ escaped), then shorter titles, then the title in the
 --    "C" collation and the code. At most limit (1-25) and whether more
 --    matched. matched_name is our other name when it is what matched, or
@@ -232,6 +236,7 @@ declare
   trimmed text := btrim(requested_q);
   query tsquery;
   starts text;
+  code_text text;
   typed_code text;
 begin
   if trimmed is null or length(trimmed) < 2 or length(trimmed) > 100
@@ -244,11 +249,13 @@ begin
   end if;
   -- "Starts with q" for the order: q with LIKE's %, _ and \ escaped.
   starts := replace(replace(replace(lower(trimmed), '\', '\\'), '%', '\%'), '_', '\_') || '%';
-  -- q as a code, upper-cased: as typed when it has the code's shape with its dot, or with the dot put back
-  -- after the fourth character ("9a030" is 9A03.0). That entry comes first, and is found even without the dot.
-  typed_code := case when upper(trimmed) ~ '^[0-9A-Z]{4}(\.[0-9A-Z]{1,2}){0,2}$' then upper(trimmed)
-                     when upper(trimmed) ~ '^[0-9A-Z]{5,6}$'
-                       then left(upper(trimmed), 4) || '.' || substr(upper(trimmed), 5) end;
+  -- q as a code, upper-cased, as copied: characters that are neither letters, digits nor dots taken off both ends,
+  -- then full stops off the end ("NB91.", "NB91,", "(NB91)" are NB91). Then as it is when it has the code's shape
+  -- with its dot, or with the dot put back after the fourth character ("9a030" is 9A03.0). That entry comes first,
+  -- and is found even without the dot.
+  code_text := rtrim(regexp_replace(upper(trimmed), '^[^[:alnum:].]+|[^[:alnum:].]+$', '', 'g'), '.');
+  typed_code := case when code_text ~ '^[0-9A-Z]{4}(\.[0-9A-Z]{1,2}){0,2}$' then code_text
+                     when code_text ~ '^[0-9A-Z]{5,6}$' then left(code_text, 4) || '.' || substr(code_text, 5) end;
   return query
     with found as (
       select diagnosis.code, diagnosis.title, version_row.version as version_label,
@@ -328,7 +335,7 @@ $$;
 comment on table ehr.catalog_diagnoses is
   '0150 (ORD-9): the coded entries of an ICD-11 MMS release, one row per entry per version, WHO''s titles verbatim (ICD-11, World Health Organization, CC BY-ND 3.0 IGO) and our own other names apart; no extension codes, no blocks. Loaded by ORD-7''s governed loader. No patient data.';
 comment on function ehr.search_catalog_diagnoses(text, integer) is
-  '0150 (ORD-9): the active ICD-11 release''s entries whose code and title or one other name has a word starting with each word of q; the entry whose code q is (with or without its dot) first, then names starting with q, then shorter titles, then A to Z; at most limit (1-25) and whether more matched. 22023 CATALOG_SEARCH_INVALID for q outside 2-100 characters or a limit outside 1-25.';
+  '0150 (ORD-9): the active ICD-11 release''s entries whose code and title or one other name has a word starting with each word of q; the entry whose code q is (with or without its dot, and with punctuation around it left out) first, then names starting with q, then shorter titles, then A to Z; at most limit (1-25) and whether more matched. 22023 CATALOG_SEARCH_INVALID for q outside 2-100 characters or a limit outside 1-25.';
 comment on function ehr.catalog_status() is
   '0149 (ORD-7), 0150 (ORD-9): per kind (diagnosis, lab_test, medicine): whether an active version exists, its label, when it was approved, how many rows it offers, the notices its sources require and the sha256 of its seed file.';
 

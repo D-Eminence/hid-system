@@ -1875,7 +1875,7 @@ facility, newest first. `limit` is 1-50, default 20.
 | 403 | existing permission refusal; `CONSENT_REQUIRED` on create as today | — |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | existing |
 | 429 | `CATALOG_SEARCH_LIMITED` | "Too many searches. Please wait a minute and try again." (shared with ORD-7's limit) |
-| 503 | `CATALOG_UNAVAILABLE` | "Diagnosis search is not available right now. Try again in a minute." (ORD-7's code; a name alone is not accepted until diagnoses by name only ship) |
+| 503 | `CATALOG_UNAVAILABLE` | "Diagnosis search is not available right now." (ORD-7's code; the same words for a schema without the diagnosis list and for any database failure, so no advice: trying again does not help while the list's migration is not there, and a name alone is not accepted until diagnoses by name only ship) |
 
 ### Screen notes
 
@@ -1955,20 +1955,25 @@ file's seed in `docs/codes/catalog-approvals.json`.
     entries.
   - The entry whose code `q` is comes first: `q` upper-cased and trimmed,
     with or without its dot ("9A03.0" or "9a030"), and found even without
-    the dot. So a parent code such as 9A03 comes before its child codes,
-    whose titles are shorter. Then entries whose title or one of our other
-    names starts with `q`, then shorter titles. With the 2026-01 release
-    loaded, each of its 17,255 codes searched by itself comes first, with
-    its dot and without it. Typed without its dot, a code whose six
-    characters have a Health ID's shape (582 codes, such as `2B6B2Y`) is
-    refused as a Health ID would be; with its dot (`2B6B.2Y`) it is found.
+    the dot. A code copied with punctuation around it is still that code:
+    characters that are neither letters, digits nor dots are taken off both
+    ends, then full stops off the end, before its shape is tested ("NB91.",
+    "NB91,", "(NB91)"). So a parent code such as 9A03 comes before its
+    child codes, whose titles are shorter. Then entries whose title or one
+    of our other names starts with `q`, then shorter titles. With the
+    2026-01 release loaded, each of its 17,255 codes searched by itself
+    comes first: as written, with a full stop after it, in brackets, and
+    without its dot. Typed without its dot, a code whose six characters
+    have a Health ID's shape (582 codes, such as `2B6B2Y`) is refused as a
+    Health ID would be; with its dot (`2B6B.2Y`) it is found.
   - `matchedName` is our other name when it is what matched, or when it
     starts with `q` and the title does not. So `q=falciparum` gives 1F40
     first, named "falciparum malaria", as the example above.
   - `typedIcd10` is filled for a `q` shaped like an ICD-10 code.
   - A schema without 0150, or any database failure, answers 503
-    `CATALOG_UNAVAILABLE` "Diagnosis search is not available right now. Try
-    again in a minute." The catalogue status fills
+    `CATALOG_UNAVAILABLE` "Diagnosis search is not available right now."
+    It gives no advice, so it is true in every case: trying again does not
+    help while 0150 is not there. The catalogue status fills
     `diagnoses: { available, release, fileSha256 }`.
 - **Measured** with the full release loaded on throwaway PostgreSQL 16
   (median of 25 calls inside the server, as the EHR runtime): the load

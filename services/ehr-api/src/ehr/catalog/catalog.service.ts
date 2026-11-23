@@ -217,12 +217,14 @@ export function catalogUnavailable(): DomainProblem {
 }
 
 /**
- * ORD-9's 503, the catalogue's code with words that are true today: a
- * diagnosis still needs its code (clinical.dto.ts), so typing a name
- * instead is not offered until diagnoses by name only ship.
+ * ORD-9's 503, the catalogue's code with words that are true in every case,
+ * a schema without 0150 included, so they give no advice: trying again in a
+ * minute does not help while 0150 is not there, and a diagnosis still needs
+ * its code (clinical.dto.ts), so typing a name instead is not offered until
+ * diagnoses by name only ship.
  */
 export function diagnosisSearchUnavailable(): DomainProblem {
-  return new DomainProblem(503, 'CATALOG_UNAVAILABLE', 'Diagnosis search is not available right now. Try again in a minute.');
+  return new DomainProblem(503, 'CATALOG_UNAVAILABLE', 'Diagnosis search is not available right now.');
 }
 
 export function catalogNotAvailable(): DomainProblem {

@@ -11,8 +11,10 @@
 --      code, two words; entries starting with q first, then shorter
 --      titles; limit and more; an inactive release never offered; a code
 --      typed exactly first, though its child codes have shorter titles,
---      with or without its dot (Rahman, #320 finding 3); titles and our
---      other names split as q is: COVID-19, T-cell/histiocyte,
+--      with or without its dot (Rahman, #320 finding 3), and copied with
+--      punctuation around it: NB91., NB91,, (NB91), 9A03. (Ola, round 2),
+--      while a word with the same punctuation is searched as before; titles
+--      and our other names split as q is: COVID-19, T-cell/histiocyte,
 --      glucose-6-phosphate and HIV/TB, as typed (Rahman, #318 finding 1);
 --   3. refusals: q of 1 or 101 characters, limit 0 or 26 (22023
 --      CATALOG_SEARCH_INVALID); brackets and operators answer nothing; an
@@ -90,7 +92,11 @@ insert into ehr.catalog_diagnoses (version_id, code, title, chapter) values
   ('c1500000-0000-4000-8000-000000000001', '1A36', 'Amoebiasis', '01'),
   ('c1500000-0000-4000-8000-000000000001', '1A36.1', 'Extraintestinal infections due to Entamoeba', '01'),
   ('c1500000-0000-4000-8000-000000000001', '1A36.10', 'Amoebic liver abscess', '01'),
-  ('c1500000-0000-4000-8000-000000000001', '1A36.11', 'Amoebic lung abscess', '01');
+  ('c1500000-0000-4000-8000-000000000001', '1A36.11', 'Amoebic lung abscess', '01'),
+  ('c1500000-0000-4000-8000-000000000001', 'NB91', 'Injury of intra-abdominal organs', '22'),
+  ('c1500000-0000-4000-8000-000000000001', 'NB91.0', 'Injury of spleen', '22'),
+  ('c1500000-0000-4000-8000-000000000001', 'NB91.1', 'Injury of liver', '22'),
+  ('c1500000-0000-4000-8000-000000000001', 'NB91.8', 'Injury of colon', '22');
 -- Titles the default parser split differently from q (Rahman, #318 finding 1), and one of our other names with a
 -- slash.
 insert into ehr.catalog_diagnoses (version_id, code, title, other_names, chapter) values
@@ -121,7 +127,7 @@ select pg_temp.expect('2h limit and more', '1F4Z more=true', pg_temp.found('mala
 select pg_temp.expect('2i the answer carries the release', '2026-01 Malaria due to Plasmodium falciparum',
   (select format('%s %s', list_version, title) from ehr.search_catalog_diagnoses('1F40', 1)));
 select pg_temp.expect('2j the status counts what is offered, and the live release is sealed',
-  'diagnosis t 2026-01 21 sealed=true|2025-01 sealed=false',
+  'diagnosis t 2026-01 25 sealed=true|2025-01 sealed=false',
   (select format('%s %s %s %s', kind, available, list_version, offered) from ehr.catalog_status() where kind = 'diagnosis')
   || ' sealed=' || (select sealed::text from ehr.catalog_versions where id = 'c1500000-0000-4000-8000-000000000001')
   || '|' || (select version || ' sealed=' || sealed from ehr.catalog_versions
@@ -133,6 +139,18 @@ select pg_temp.expect('2l a code with its dot comes first; without its dot it is
   '1A36.1 1A36 1A36.11 1A36.10 more=false|1A36.1 more=false|9A03.0 more=false',
   pg_temp.found('1A36.1', 10) || '|' || pg_temp.found('1a361', 10) || '|' || pg_temp.found('9A030', 10));
 select pg_temp.expect('2m a word of five letters is not taken for a code', '1A07 more=false', pg_temp.found('typho', 10));
+-- A parent code copied with punctuation around it (Ola, round 2): characters that are neither letters, digits nor
+-- dots off both ends, then full stops off the end, before the code's shape is tested. Before, NB91 came last of its
+-- family (its title is the longest) and 9A03 after its children.
+select pg_temp.expect('2q a parent code copied with a full stop, a comma, brackets or spaces comes first',
+  'NB91 NB91.8 NB91.1 NB91.0 more=false|NB91 NB91.8 NB91.1 NB91.0 more=false|NB91 NB91.8 NB91.1 NB91.0 more=false|'
+  || '9A03 9A03.4 9A03.0 9A03.3 more=false|9A03 9A03.4 9A03.0 9A03.3 more=false',
+  pg_temp.found('NB91.', 10) || '|' || pg_temp.found('NB91,', 10) || '|' || pg_temp.found('(NB91)', 10) || '|'
+  || pg_temp.found('9A03.', 10) || '|' || pg_temp.found(' 9A03 ', 10));
+select pg_temp.expect('2r a word with the same punctuation is searched as a word, as before, never as a code',
+  '1A07 more=false|1A07 more=false|1F4Z KA64.20 1F40 1F40.Z more=false|1F4Z 1F40 1F40.Z KA64.20 more=false',
+  pg_temp.found('typho.', 10) || '|' || pg_temp.found('(typho)', 10) || '|' || pg_temp.found('malaria.', 10) || '|'
+  || pg_temp.found('malaria', 10));
 select pg_temp.expect('2n COVID-19 as typed: the titles starting with it first; with a space it is found too',
   'RA01 RA01.0 RA02 more=false|RA01 RA02 RA01.0 more=false',
   pg_temp.found('COVID-19', 10) || '|' || pg_temp.found('covid 19', 10));
