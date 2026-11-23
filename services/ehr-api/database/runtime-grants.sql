@@ -1891,3 +1891,17 @@ revoke all on pharmacy.own_prescription_sends, pharmacy.prescription_item_claims
 -- The sealed QA tenant's pharmacist and lab scientist at QA Hospital (0134):
 -- its install is the owner's alone.
 revoke all on function identity.sealed_qa_hospital_work_staff_install() from public;
+
+-- The national medicine and lab-test lists (0149, ORD-7 of the Akos EHR
+-- plan, first slice; design note on hid-system#258, 23 November 2026),
+-- exactly as 0149 grants them: the two searches and the status to the EHR
+-- runtime and the schema test runtime; no privilege on the tables or on the
+-- query helper for any runtime.
+grant execute on function ehr.search_catalog_medicines(text, integer, text, text),
+  ehr.search_catalog_lab_tests(text, integer),
+  ehr.catalog_status() to hid_ehr_runtime, hid_schema_test_runtime;
+revoke all on function ehr.search_catalog_medicines(text, integer, text, text),
+  ehr.search_catalog_lab_tests(text, integer),
+  ehr.catalog_status(),
+  ehr.catalog_search_query(text) from public;
+revoke all on ehr.catalog_versions, ehr.catalog_medicines, ehr.catalog_lab_tests from public;

@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0137",
-    "count": 138,
+    "last": "0149",
+    "count": 139,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -649,6 +649,10 @@
       {
         "name": "0137_qoreid_nin_check_once.sql",
         "sha256": "d77983a0d82bc3c2e016f9fda0990666aecc218ac9bed6f7e9901bc90bff3543"
+      },
+      {
+        "name": "0149_catalog_medicines_and_lab_tests.sql",
+        "sha256": "07525cf7dbddda3df13c3bb1914e5eea06bdf32a38ef688a9c75e82317bfa4ba"
       }
     ]
   },

@@ -30,6 +30,8 @@ import { HealthProfileService } from './health-profile/health-profile.service';
 import { ConsultationsModule } from './consultation/consultations.module';
 // EHR-C7 (0135): the waiting list.
 import { VisitQueueModule } from './worklist/visit-queue.module';
+// ORD-7 (0149): the medicine and lab-test lists.
+import { CatalogModule } from './catalog/catalog.module';
 
 @Module({
   imports: [
@@ -47,6 +49,8 @@ import { VisitQueueModule } from './worklist/visit-queue.module';
     ConsultationsModule,
     // EHR-C7 (0135): the waiting list.
     VisitQueueModule,
+    // ORD-7 (0149): the medicine and lab-test lists.
+    CatalogModule,
   ],
   controllers: [PatientRecordsController,StaffPatientChatController,HealthProfileController],
   providers: [StaffChatScopeService,StaffEvidenceService,StaffChatHistoryService,PatientRecordsService, ImportedAttachmentService, BedrockAiService, ClaudeAiService, PatientAttachmentTextService,PatientEvidenceService, PatientChatService, PatientChatHistoryService, PatientChatSourceService,

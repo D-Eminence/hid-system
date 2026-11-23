@@ -1490,6 +1490,63 @@ together, like section 46's setting.
 - ORD-2 (0133) and order routes for the name-only send paths.
 - SX-1 fixture for the new permission.
 
+### First slice: the lists and their search (0149, draft, not live)
+
+Built on 23 Nov 2026 (lane D) as the design note on hid-system#258 set
+out. The number 0149 is provisional and is given in merge order after
+Release B. Nothing is loaded: the lists stay empty until the clinical lead
+signs a version (Q124 A) and the governed loader (a later slice) loads it.
+
+- **Built:** `ehr.catalog_versions`, `ehr.catalog_medicines` and
+  `ehr.catalog_lab_tests`, the two searches and the status, as above.
+  `GET .../catalog/status`, `.../catalog/medicines` and
+  `.../catalog/lab-tests` work as the tables above say, with these
+  choices:
+  - The fixed codes are the combined list's ids (hid-system#312):
+    `MED-nnnnn` under `HID-MED`, and each test's LOINC or HID-LAB code.
+  - `display` is the generic name with a capital first letter, then the
+    strength, then the list's form words in lower case ("Amoxicillin 500
+    mg capsule"). `genericName` is the list's INN as written (lower case).
+  - `source` is the list's own value: `nigeria-eml-8`, `who-eml-24` or
+    `hid-common-tests` (#312).
+  - `atcCode` is always `null` until the WHOCC terms are settled, though
+    the table can hold the code.
+  - `attribution` is read from the active versions: each loaded version
+    records the notices its sources require (at most 5). A list that is
+    not available shows none.
+  - A list is `available` only when its active version offers at least one
+    item. `approvedAt` is the Lagos day of the sign-off.
+  - `listVersion` is `null` when nothing matched.
+  - A search matches when each word of `q` starts a word of the generic
+    name or of one other name. Words are split at anything that is not a
+    letter or digit, so "co-amox" finds co-amoxiclav and "E/U/Cr" finds
+    electrolytes. Brand names come with the loader (they are other names).
+- **Refusals:** `q` missing or under 2 characters gives
+  `CATALOG_SEARCH_TEXT_TOO_SHORT`. `q` over 100 characters, a bad `limit`,
+  `doseForm` or `route`, or a parameter given twice or unknown gives
+  `VALIDATION_FAILED`. `q` containing `HID-` and Health ID characters, a
+  six-character word of the Health ID alphabet mixing letters and digits,
+  or a run of 11 or more digits (spaces and hyphens ignored) gives
+  `CATALOG_SEARCH_TEXT_NOT_ALLOWED`, before any search.
+- **429:** 300 searches per 5 minutes per membership, counted in each
+  ehr-api instance, not across instances. Refused texts do not count.
+- **On a schema without 0149:** the status answers 404
+  `CATALOG_NOT_AVAILABLE` ("The medicine and lab-test lists are not
+  available yet."), so screens keep their built-in lists; the searches
+  answer 503 `CATALOG_UNAVAILABLE`. Any other database failure is 503
+  `CATALOG_UNAVAILABLE`, logged with its SQLSTATE only.
+- **Caching and audit:** `Cache-Control: private, max-age=60` is set only
+  on an answer; a refusal keeps `private, no-store`. Only refusals are
+  audited (the method and route, never `q`).
+- **Not in this slice:** facility items and `ehr.catalog.facility-item.write`,
+  lab requests by name only (`labTestNameOnly` stays `false`), the
+  loader and seed files, `ehr.duplicate_class_rules`, and the screens.
+- **Checks:** the database suite `catalog-search` (30 cases), the ehr-api
+  spec (64 tests), and three steps in
+  `verify-prescription-details-runtime.mjs`: before a list, with a list
+  loaded by owner SQL (the doctor and the pharmacist search), and the
+  refusals and the audit rows.
+
 ### Target
 
 Release B (0144).

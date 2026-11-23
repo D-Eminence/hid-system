@@ -569,6 +569,95 @@ try {
     readerHoldsConsentAtItsFacility: true };
   step('route-backed work carries no details, on the list and by id, though its reader holds consent');
 
+  // ── ORD-7 (0149), first slice: the national lists' status and search ──
+  // No X-Purpose-Of-Use (the lists hold no patient), so these calls send none.
+  const catalogGet = (who, path) => http(ehr, 'GET', `/ehr/catalog${path}`, { cookie: who.cookie, facility: who.facilityId });
+  const notLoaded = { available: false, version: null, approvedAt: null };
+  const statusBefore = await catalogGet(doctor, '/status');
+  assert.deepEqual(expectStatus(statusBefore, 200, 'catalogue status before a list is loaded'), {
+    medicines: notLoaded, labTests: notLoaded, diagnoses: { available: false, release: null },
+    labTestNameOnly: false, diagnosisNameOnly: false, classDuplicateCheck: false, attribution: [] },
+  'before a signed list is loaded nothing is available');
+  assert.equal(statusBefore.headers.get('cache-control'), 'private, max-age=60',
+    'the catalogue answers may be kept a minute by this user\'s browser (the route header wins over the global no-store)');
+  assert.deepEqual(expectStatus(await catalogGet(doctor, '/medicines?q=amox'), 200, 'medicine search before a list'),
+    { listVersion: null, more: false, items: [] }, 'a search before a list is loaded answers nothing');
+  step('ORD-7: before a signed list is loaded the status says not available and a search answers nothing, '
+    + 'with no purpose of use, kept a minute by the browser');
+
+  // A list loaded as the governed loader of a later slice will (owner SQL: no route loads a list). Synthetic rows.
+  const loincNotice = 'Synthetic notice: this material contains content from LOINC (http://loinc.org).';
+  const [medicineVersion, labVersion] = [randomUUID(), randomUUID()];
+  await owner.query(`insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference, approved_at,
+      active, attribution) values
+    ($1, 'medicine', '2026.1', repeat('a', 64), 'synthetic sign-off reference', '2026-12-01T09:00:00+01:00', true, '{}'),
+    ($2, 'lab_test', '2026.1', repeat('b', 64), 'synthetic sign-off reference', '2026-12-01T09:00:00+01:00', true, $3)`,
+  [medicineVersion, labVersion, [loincNotice]]);
+  await owner.query(`insert into ehr.catalog_medicines (version_id, list_id, generic_name, other_names, strength,
+      dose_form, dose_form_text, routes, atc_code, common_adult_dose, source) values
+    ($1, 'MED-00001', 'amoxicillin', 'Amoxil', '500 mg', 'capsule', 'Capsule', '{oral}', 'J01CA04',
+     'Synthetic hint: 500 mg every 8 hours', 'nigeria-eml-8'),
+    ($1, 'MED-00002', 'amoxicillin + clavulanic acid', 'co-amoxiclav', '625 mg', 'tablet', 'Tablet', '{oral}', null,
+     null, 'nigeria-eml-8'),
+    ($1, 'MED-00003', 'paracetamol', 'acetaminophen', '500 mg', 'tablet', 'Tablet', '{oral}', null, null, 'who-eml-24')`,
+  [medicineVersion]);
+  await owner.query(`insert into ehr.catalog_lab_tests (version_id, list_id, code_system, code, display, other_names,
+      specimen, category, source) values ($1, 'LAB-0001', 'LOINC', '57021-8', 'Full blood count', 'FBC; CBC',
+      'Blood (EDTA)', 'haematology', 'hid-common-tests')`, [labVersion]);
+  const loaded = { available: true, version: '2026.1', approvedAt: '2026-12-01' };
+  assert.deepEqual(expectStatus(await catalogGet(ownPharmacist, '/status'), 200, 'catalogue status after a list'),
+    { medicines: loaded, labTests: loaded, diagnoses: { available: false, release: null }, labTestNameOnly: false,
+      diagnosisNameOnly: false, classDuplicateCheck: false, attribution: [loincNotice] },
+  'a loaded list is available with its version, its sign-off day (Lagos) and its sources\' notices');
+  const firstAmox = expectStatus(await catalogGet(doctor, '/medicines?q=Amox&limit=1'), 200, 'doctor searches medicines');
+  assert.deepEqual(firstAmox, { listVersion: '2026.1', more: true, items: [{ codeSystem: 'HID-MED', code: 'MED-00001',
+    display: 'Amoxicillin 500 mg capsule', genericName: 'amoxicillin', strength: '500 mg', doseForm: 'capsule',
+    doseFormText: 'Capsule', routes: ['oral'], atcCode: null, commonAdultDose: 'Synthetic hint: 500 mg every 8 hours',
+    matchedName: null, scope: 'national', source: 'nigeria-eml-8' }] },
+  'the prescriber finds a medicine by the start of its name; no ATC code until its terms are settled');
+  const coAmox = expectStatus(await catalogGet(ownPharmacist, '/medicines?q=co-amox&doseForm=tablet&route=Oral'), 200,
+    'pharmacist searches medicines');
+  assert.deepEqual(coAmox.items.map(item => [item.code, item.matchedName]), [['MED-00002', 'co-amoxiclav']],
+    'the pharmacist finds a medicine by another name, with the dose form and route filters');
+  const fbc = expectStatus(await catalogGet(doctor, '/lab-tests?q=fbc'), 200, 'doctor searches lab tests');
+  assert.deepEqual(fbc, { listVersion: '2026.1', more: false, items: [{ codeSystem: 'LOINC', code: '57021-8',
+    display: 'Full blood count', otherNames: ['FBC', 'CBC'], specimen: 'Blood (EDTA)', category: 'haematology',
+    matchedName: 'FBC', scope: 'national' }] }, 'the requester finds a lab test by its short name');
+  step('ORD-7: a loaded list is available; the prescriber and the pharmacist find medicines and the requester lab '
+    + 'tests by the start of a name or another name');
+
+  const refused = async (who, path, status, code, label) => {
+    const response = await catalogGet(who, path);
+    assert.equal(response.status, status, `${label}: ${response.status} ${JSON.stringify(response.body)}`);
+    assert.equal(response.body?.code, code, `${label}: ${JSON.stringify(response.body)}`);
+    assert.equal(response.headers.get('cache-control'), 'private, no-store', `${label}: a refusal is never kept`);
+  };
+  await refused(doctor, '/medicines?q=a', 400, 'CATALOG_SEARCH_TEXT_TOO_SHORT', 'q of 1 letter');
+  await refused(doctor, `/medicines?q=${encodeURIComponent(patient.hid)}`, 400, 'CATALOG_SEARCH_TEXT_NOT_ALLOWED',
+    'a Health ID as q');
+  await refused(doctor, '/lab-tests?q=123%204567%208901', 400, 'CATALOG_SEARCH_TEXT_NOT_ALLOWED', 'an 11-digit NIN as q');
+  await refused(doctor, '/medicines?q=amox&doseForm=pessary', 400, 'VALIDATION_FAILED', 'an unknown dose form');
+  await refused(pharmacistWithoutConsent, '/lab-tests?q=fbc', 403, 'PERMISSION_DENIED',
+    'a pharmacist with no lab permission searches lab tests');
+  const asPatient = await http(ehr, 'GET', '/ehr/catalog/status', { cookie: patientSession.cookie,
+    facility: hospital.facilityId });
+  assert([401, 403].includes(asPatient.status), `a patient's session is refused: ${asPatient.status}`);
+  const catalogAudit = await all(`select outcome, action, details::text as details, coalesce(resource_id, '') as resource_id
+    from audit.events where action like '%catalog%' or details->>'route' like '%catalog%'`);
+  assert.equal(catalogAudit.filter(row => row.outcome === 'success').length, 0, 'a search that answers writes no audit row');
+  assert(catalogAudit.length >= 5, `the refusals are audited: ${catalogAudit.length} rows`);
+  assert.equal(Number((await one(`select count(*) from audit.events where details::text ilike '%amox%'
+    or details::text ilike '%fbc%'`)).count), 0, 'no audit row anywhere holds a search text');
+  const audited = JSON.stringify(catalogAudit);
+  for (const typed of ['amox', 'Amox', 'fbc', patient.hid, '12345678901', '4567 8901', '4567%208901']) {
+    assert(!audited.includes(typed), `the search text ${typed} reached an audit row`);
+  }
+  evidence.catalog = { before: 'not available, empty search', loaded: { medicines: 3, labTests: 1 },
+    searched: ['doctor: medicines, lab tests', 'pharmacist: medicines'], refused: ['short', 'Health ID', 'NIN',
+      'dose form', 'no permission', 'patient'], auditRows: { success: 0, refusals: catalogAudit.length, searchText: 0 } };
+  step('ORD-7: short text, a Health ID, a NIN, an unknown form, a missing permission and a patient are refused and '
+    + 'never kept; only refusals are audited, never with the search text');
+
   evidence.elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
   evidence.status = 'passed';
   console.log(JSON.stringify(evidence));
