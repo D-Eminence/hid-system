@@ -1373,7 +1373,6 @@ MED-01371,medicine,tadalafil,,20 mg,tablet,Tablet,oral,,,ATC,G04BE08,,nigeria-em
 MED-01372,medicine,ephedrine,,30 mg/mL (hydrochloride),injection,Injection (1 mL ampoule),injection,,,ATC,C01CA26,,who-eml-24,1.2,specialist,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),
 MED-01373,medicine,codeine,,30 mg (phosphate),tablet,Tablet,oral,,,ATC,R05DA04,,who-eml-24,2.2,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),
 MED-01374,medicine,penicillamine,,250 mg,tablet,Solid oral dosage form,oral,,,ATC,M01CC01,,who-eml-24,4.2,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),
-MED-01375,medicine,prussian blue,potassium ferric hexacyanoferrate(II),,other,Powder for oral administration,oral,,,,,,who-eml-24,4.2,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),strength to confirm at review
 MED-01376,medicine,sodium nitrite,,30 mg/mL,injection,Injection (10 mL ampoule),injection,,,ATC,V03AB08,,who-eml-24,4.2,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),
 MED-01377,medicine,sodium thiosulfate,,250 mg/mL,injection,Injection (50 mL ampoule),injection,,,ATC,V03AB06,,who-eml-24,4.2,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),
 MED-01378,medicine,lamotrigine,,25 mg,tablet,Tablet,oral,,,ATC,N03AX09,,who-eml-24,5.1.1,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),
@@ -1419,9 +1418,7 @@ MED-01417,medicine,raltegravir,,100 mg,liquid,"Granules for oral suspension, sac
 MED-01418,medicine,raltegravir,,25 mg,tablet,Tablet (chewable),oral,,,ATC,J05AJ01,,who-eml-24,6.4.2.4,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),
 MED-01419,medicine,raltegravir,,400 mg,tablet,Tablet,oral,,,ATC,J05AJ01,,who-eml-24,6.4.2.4,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),
 MED-01420,medicine,abacavir + dolutegravir + lamivudine,,60 mg (as sulfate) + 5 mg + 30 mg,tablet,Tablet (dispersible),oral,,,,,,who-eml-24,6.4.2.5,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),for children
-MED-01421,medicine,dolutegravir + lamivudine + tenofovir,,50 mg + 300 mg + 300 mg (tenofovir disoproxil fumarate),tablet,Tablet,oral,,,,,,who-eml-24,6.4.2.5,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),
 MED-01422,medicine,efavirenz + emtricitabine + tenofovir,,600 mg + 200 mg + 300 mg (tenofovir disoproxil fumarate),tablet,Tablet,oral,,,ATC,J05AR06,,who-eml-24,6.4.2.5,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),
-MED-01423,medicine,efavirenz + lamivudine + tenofovir,,400 mg + 300 mg + 300 mg (tenofovir disoproxil fumarate),tablet,Tablet,oral,,,,,,who-eml-24,6.4.2.5,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),
 MED-01424,medicine,emtricitabine + tenofovir,,200 mg + 300 mg (tenofovir disoproxil fumarate),tablet,Tablet,oral,,,ATC,J05AR03,,who-eml-24,6.4.2.5,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),
 MED-01425,medicine,valganciclovir,,450 mg (as hydrochloride),tablet,Tablet,oral,,,ATC,J05AB14,,who-eml-24,6.4.3,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),
 MED-01426,medicine,oseltamivir,,30 mg (as phosphate),capsule,Capsule,oral,,,ATC,J05AH02,,who-eml-24,6.4.3,specialist,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),
@@ -1616,7 +1613,6 @@ MED-01614,medicine,budesonide + formoterol,,200 micrograms + 6 micrograms per ac
 MED-01615,medicine,tiotropium,,18 micrograms,inhaler,Powder for inhalation in capsule,inhalation,,,ATC,R03BB04,,who-eml-24,25.1,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),
 MED-01616,medicine,tiotropium,,1.25 micrograms per actuation,inhaler,"Solution for inhalation, soft mist inhaler",inhalation,,,ATC,R03BB04,,who-eml-24,25.1,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),
 MED-01617,medicine,tiotropium,,2.5 micrograms per actuation,inhaler,"Solution for inhalation, soft mist inhaler",inhalation,,,ATC,R03BB04,,who-eml-24,25.1,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),
-MED-01618,medicine,"sodium lactate, compound solution",,,injection,Injectable solution,injection,,,,,,who-eml-24,26.2,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),strength to confirm at review
 MED-01619,medicine,calcium,,500 mg (elemental),tablet,Tablet,oral,,,,,,who-eml-24,27,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),
 MED-01620,medicine,multiple micronutrient powder,,12.5 mg iron + 5 mg zinc + 300 micrograms vitamin A,other,Powder in sachet,oral,,,,,,who-eml-24,27,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),for children
 MED-01621,medicine,nicotinamide,,50 mg,tablet,Tablet,oral,,,ATC,A11HA01,,who-eml-24,27,main,draft: awaiting clinical sign-off (Q124 A); owner chose to use (22 Nov 2026),
