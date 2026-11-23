@@ -426,11 +426,17 @@ test('every production Dockerfile COPY source selects the component that copies 
   for(const c of components){
     const {dockerfile,target}=componentConfig(c);
     for(const source of imageInputs(dockerfile,target)){
-      const files=trackedFiles(source);
+      // A one-name pattern ("docs/codes/hid-medicines.jso[n]", an ORD-7 seed file not yet signed) is that one path,
+      // copied once it is committed: the path selects the component whether or not it is tracked yet.
+      const name=source.replace(/\[([^\]\\])\]$/,'$1');
+      if(name!==source&&!trackedFiles(name).length){
+        assert.ok(selectComponents([name]).includes(c),`${name} is copied into ${c} once committed but does not select it`);checked++;continue;
+      }
+      const files=trackedFiles(name);
       assert.ok(files.length,`${c}: ${source} is not tracked`);
       // A directory source also stands for any file added under it later.
-      const isFile=files.length===1&&files[0]===source;
-      for(const p of [isFile?source:`${source}/new-file`,...files]){
+      const isFile=files.length===1&&files[0]===name;
+      for(const p of [isFile?name:`${name}/new-file`,...files]){
         assert.ok(selectComponents([p]).includes(c),`${p} is copied into ${c} but does not select it`);checked++;
       }
     }
@@ -441,6 +447,10 @@ test('the image input parser sees the inputs that the selector map relies on',()
   const migration=imageInputs('services/ehr-api/Dockerfile','migration');
   for(const p of ['scripts/local-environment.mjs','services/ehr-api/database','services/ehr-api/scripts','services/ehr-api/package.json',
     'packages/api-client','packages/server-telemetry/src','services/ehr-api/Dockerfile']) assert.ok(migration.has(p),p);
+  // ORD-7: exactly the four catalogue files, by name (the seed files by their one-name pattern until signed).
+  assert.deepEqual([...migration].filter(p=>p.startsWith('docs/')),['docs/codes/catalog-approvals.json','docs/codes/hid-lab-codes.json',
+    'docs/codes/hid-medicines.jso[n]','docs/codes/hid-lab-tests.jso[n]']);
+  assert.deepEqual([...imageInputs('services/ehr-api/Dockerfile','runtime')].filter(p=>p.startsWith('docs/')),[]);
   assert.ok(!migration.has('services/ehr-api/src'));
   assert.ok(imageInputs('services/ehr-api/Dockerfile','runtime').has('services/ehr-api/src'));
   assert.ok(imageInputs('services/identity-api/Dockerfile','runtime').has('services/workload-token-agent/src'));

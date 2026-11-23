@@ -36,7 +36,6 @@ export const SHA256 = /^[0-9a-f]{64}$/;
 export const ICD11_CODE = /^(?!X)[0-9A-Z]{4}(\.[0-9A-Z]{1,2}){0,2}$/;
 export const ICD11_CHAPTER = /^([0-9]{2}|[A-Z])$/;
 
-/** The notices the seeds carry, shown on the screens' About page (planned contract, "attribution"). */
 /**
  * The licence answers a sign-off records (Q124 A; Rahman's review of #319,
  * point 3), each a reference (8-500 characters) to where the owner's answer
@@ -53,6 +52,7 @@ export const LICENCES = {
   whoccAtc: 'the WHOCC terms answer for ATC codes',
 };
 
+/** The notices the seeds carry, shown on the screens' About page (planned contract, "attribution"). */
 export const LOINC_NOTICE = 'This material contains content from LOINC (http://loinc.org). LOINC is copyright Regenstrief '
   + 'Institute, Inc. and the Logical Observation Identifiers Names and Codes (LOINC) Committee and is available at no cost '
   + 'under the license at http://loinc.org/license. LOINC is a registered United States trademark of Regenstrief Institute, Inc.';
@@ -61,6 +61,19 @@ export const WHO_EML_NOTICE = 'WHO Model List of Essential Medicines, 24th list.
 
 export function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+/**
+ * The seed builder reads ocr-worker's brand-names.ts with Node's own
+ * TypeScript type stripping, which is on by default from Node 22.18 (and
+ * from 23.6 on Node 23). Returns why `version` (process.versions.node) cannot
+ * run the builder, or null.
+ */
+export function typeStrippingProblem(version) {
+  const [major, minor] = String(version).split('.').map(Number);
+  const enough = major > 23 || (major === 23 && minor >= 6) || (major === 22 && minor >= 18);
+  return enough ? null : `the seed builder reads services/ocr-worker/src/reading/brand-names.ts with Node's own TypeScript `
+    + `type stripping, which needs Node 22.18 or later; this is Node ${version}; nothing built`;
 }
 
 /** RFC 4180 CSV: quoted fields may hold commas, quotes ("") and line breaks. The first row names the columns. */
@@ -220,38 +233,71 @@ function idGaps(items, prefix, width) {
 const sameName = (name) => name.toLowerCase().replace(/\s+/g, ' ').trim();
 
 /**
- * The brand names (ocr-worker's brand-names.ts, its active rows) added to the
- * other names of the medicine they stand for, so they are signed with the
- * file (planned contract: "Brand names come with the loader"). Ola's
- * clinical rule (review of #319, point 6): a brand is added only where its
- * generic, compared case-insensitively with white space collapsed, is the
- * generic name of exactly one medicine in the seed (a combination counts
- * only when written as the seed writes it, "amoxicillin + clavulanic acid");
- * it then goes on every item (strength and form) of that medicine. Nothing
- * is guessed: every brand that does not map is reported with its generic.
+ * The review statuses of brand-names.ts (its reviewed_by column) whose rows
+ * may go into a seed. Ola's clinical decision (#319, round 2): only confirmed
+ * brands. The file has two statuses: 'coordinator-curated' (the brands
+ * curated before the table, which the file keeps active) and
+ * 'pending-pharmacist' (added from the NAFDAC Greenbook; a pharmacist's
+ * review is pending). A pending row, or a row of any other status, is left
+ * out and reported.
+ */
+export const CONFIRMED_BRAND_REVIEWS = Object.freeze(['coordinator-curated']);
+
+/** Why a brand row may not go into a seed whatever its generic, or null. */
+function brandRowProblem(row) {
+  if (row.reviewedBy === 'pending-pharmacist') return 'pending pharmacist review';
+  if (!CONFIRMED_BRAND_REVIEWS.includes(row.reviewedBy)) return `review status ${JSON.stringify(row.reviewedBy ?? null)} is not confirmed`;
+  if (row.active !== true) return 'not an active row of brand-names.ts';
+  return null;
+}
+
+/**
+ * The brand names (ocr-worker's brand-names.ts) added to the other names of
+ * the medicine they stand for, so they are signed with the file (planned
+ * contract: "Brand names come with the loader"). Each row is { brand,
+ * generic, reviewedBy (its reviewed_by), active (isActiveBrandRow) }.
+ * Ola's clinical rules: only a confirmed row (CONFIRMED_BRAND_REVIEWS, and
+ * active) is added (#319, round 2), and only where its generic, compared
+ * case-insensitively with white space collapsed, is the generic name of
+ * exactly one medicine in the seed (review of #319, point 6; a combination
+ * counts only when written as the seed writes it, "amoxicillin + clavulanic
+ * acid"); it then goes on every item (strength and form) of that medicine.
+ * Nothing is guessed. Returns the items and the report the clinical lead
+ * signs with: every brand added (brand, generic, items) and every brand left
+ * out with why (pending pharmacist review, another status, no exact generic).
  */
 export function addBrandNames(medicines, brands) {
   const byGeneric = new Map();
   for (const item of medicines) {
     const key = sameName(item.genericName);
-    byGeneric.set(key, new Set([...(byGeneric.get(key) ?? []), item.genericName]));
+    byGeneric.set(key, [...(byGeneric.get(key) ?? []), item]);
   }
-  const added = new Map();
-  const notMapped = [];
-  for (const { brand, generic } of brands) {
-    const names = byGeneric.get(sameName(generic)) ?? new Set();
-    if (names.size === 1) added.set(sameName(generic), [...(added.get(sameName(generic)) ?? []), brand]);
-    else notMapped.push({ brand, generic, why: names.size === 0 ? 'no medicine in the seed has this generic name'
-      : `${names.size} medicines in the seed have this generic name` });
+  const toAdd = new Map();
+  const added = [];
+  const leftOut = [];
+  for (const row of brands) {
+    const { brand, generic } = row;
+    const problem = brandRowProblem(row);
+    if (problem) { leftOut.push({ brand, generic, why: problem }); continue; }
+    const key = sameName(generic);
+    const matching = byGeneric.get(key) ?? [];
+    const names = new Set(matching.map((item) => item.genericName));
+    if (names.size !== 1) {
+      leftOut.push({ brand, generic, why: names.size === 0 ? 'no medicine in the seed has this generic name'
+        : `${names.size} medicines in the seed have this generic name` });
+      continue;
+    }
+    toAdd.set(key, [...(toAdd.get(key) ?? []), brand]);
+    added.push({ brand, generic, items: matching.length });
   }
   const items = medicines.map((item) => {
-    const extra = (added.get(sameName(item.genericName)) ?? [])
+    const extra = (toAdd.get(sameName(item.genericName)) ?? [])
       .filter((brand) => !item.otherNames.some((name) => sameName(name) === sameName(brand)));
     const unique = [...new Set(extra)].sort();
     return unique.length === 0 ? item : { ...item, otherNames: [...item.otherNames, ...unique] };
   });
   const branded = items.filter((item, index) => item !== medicines[index]).length;
-  return { items, brands: { added: [...added.values()].flat().length, items: branded, notMapped } };
+  return { items, brands: { added, items: branded, leftOut } };
 }
 
 /**
@@ -266,8 +312,9 @@ export function addBrandNames(medicines, brands) {
  *   signer sees it.
  * - `withAtc` writes the list's ATC codes; without it every atcCode is null
  *   (the builder allows it only once the WHOCC answer is recorded).
- * - `brands` is brand-names.ts's active rows ({ brand, generic }), added as
- *   other names by addBrandNames's rule.
+ * - `brands` is brand-names.ts's rows ({ brand, generic, reviewedBy,
+ *   active }); the confirmed ones become other names by addBrandNames's
+ *   rule, and the report lists every brand added and every one left out.
  * A row that would not load is held back, with why, never cut or guessed.
  */
 export function buildSeeds(rows, { version, retired = {}, waveZero = [], withAtc = false, brands = [] }) {

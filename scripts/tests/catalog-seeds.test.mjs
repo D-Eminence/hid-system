@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
 import { pathToFileURL } from 'node:url'
-import { BUSY, LoadRefusal, loadSeed, prepareLoad, refusalLine } from '../../services/ehr-api/scripts/catalog-load.mjs'
+import { BUSY, DATABASE_REFUSALS, LoadRefusal, droppedIds, loadSeed, prepareLoad, refusalLine } from '../../services/ehr-api/scripts/catalog-load.mjs'
 import {
-  APPROVALS_FORMAT, LOINC_NOTICE, SEED_FORMAT, WHO_EML_NOTICE, addBrandNames, approvalFor, buildSeeds, parseCsv,
-  seedProblems, seedText, sha256, withAtcProblem,
+  APPROVALS_FORMAT, CONFIRMED_BRAND_REVIEWS, LOINC_NOTICE, SEED_FORMAT, WHO_EML_NOTICE, addBrandNames, approvalFor, buildSeeds,
+  parseCsv, seedProblems, seedText, sha256, typeStrippingProblem, withAtcProblem,
 } from '../../services/ehr-api/scripts/catalog-seed.mjs'
 
 // ORD-7's seed files (services/ehr-api/scripts/catalog-seed.mjs): the
@@ -203,39 +203,123 @@ test('licences: a medicine sign-off records the Nigeria EML 8th edition confirma
   assert.match(withAtcProblem({}, '2026.1'), /--with-atc needs/)
 })
 
+// A brand row as the builder passes it: brand-names.ts's brand and generic, its reviewed_by, and isActiveBrandRow.
+const confirmed = (brand, generic) => ({ brand, generic, reviewedBy: 'coordinator-curated', active: true })
+const pending = (brand, generic) => ({ brand, generic, reviewedBy: 'pending-pharmacist', active: true })
+
 test('brand names: added only where the brand\'s generic is exactly one medicine\'s name; the rest are reported', () => {
   const item = (listId, genericName, otherNames = []) => ({ listId, genericName, otherNames })
   const medicines = [item('MED-00001', 'paracetamol'), item('MED-00002', 'paracetamol'),
     item('MED-00003', 'amoxicillin + clavulanic acid'), item('MED-00004', 'metronidazole', ['Flagyl']),
     item('MED-00005', 'chlorphenamine')]
   const { items, brands } = addBrandNames(medicines, [
-    { brand: 'panadol', generic: 'paracetamol' }, { brand: 'augmentin', generic: 'Amoxicillin  +  Clavulanic acid' },
-    { brand: 'clavulin', generic: 'amoxicillin + clavulanic acid' }, { brand: 'flagyl', generic: 'metronidazole' },
-    { brand: 'piriton', generic: 'chlorpheniramine' }, { brand: 'ampiclox', generic: 'ampicillin + cloxacillin' },
-    { brand: 'coamox', generic: 'amoxicillin and clavulanic acid' }])
-  assert.deepEqual(items.map((entry) => entry.otherNames), [['panadol'], ['panadol'], ['augmentin', 'clavulin'], ['Flagyl'], []])
-  assert.deepEqual(brands.notMapped.map((entry) => [entry.brand, entry.generic]), [['piriton', 'chlorpheniramine'],
+    confirmed('panadol', 'paracetamol'), confirmed('augmentin', 'Amoxicillin  +  Clavulanic acid'),
+    confirmed('flagyl', 'metronidazole'), confirmed('piriton', 'chlorpheniramine'),
+    confirmed('ampiclox', 'ampicillin + cloxacillin'), confirmed('coamox', 'amoxicillin and clavulanic acid')])
+  assert.deepEqual(items.map((entry) => entry.otherNames), [['panadol'], ['panadol'], ['augmentin'], ['Flagyl'], []])
+  assert.deepEqual(brands.added, [{ brand: 'panadol', generic: 'paracetamol', items: 2 },
+    { brand: 'augmentin', generic: 'Amoxicillin  +  Clavulanic acid', items: 1 }, { brand: 'flagyl', generic: 'metronidazole', items: 1 }])
+  assert.deepEqual(brands.leftOut.map((entry) => [entry.brand, entry.generic]), [['piriton', 'chlorpheniramine'],
     ['ampiclox', 'ampicillin + cloxacillin'], ['coamox', 'amoxicillin and clavulanic acid']], 'never guessed')
+  assert.ok(brands.leftOut.every((entry) => entry.why === 'no medicine in the seed has this generic name'))
   assert.equal(brands.items, 3)
   // Two medicines whose names differ only in case or spacing: the brand is not guessed onto either.
-  const twice = addBrandNames([item('MED-00001', 'paracetamol'), item('MED-00002', 'Paracetamol')],
-    [{ brand: 'panadol', generic: 'paracetamol' }])
+  const twice = addBrandNames([item('MED-00001', 'paracetamol'), item('MED-00002', 'Paracetamol')], [confirmed('panadol', 'paracetamol')])
   assert.deepEqual(twice.items.map((entry) => entry.otherNames), [[], []])
-  assert.match(twice.brands.notMapped[0].why, /2 medicines/)
+  assert.match(twice.brands.leftOut[0].why, /2 medicines/)
   // Through the builder: on the items that load, signed with the file.
-  const { medicine: seed, brands: report } = build(FIXTURE, { brands: [{ brand: 'panadol', generic: 'paracetamol' },
-    { brand: 'epilim', generic: 'sodium valproate' }] })
+  const { medicine: seed, brands: report } = build(FIXTURE, { brands: [confirmed('panadol', 'paracetamol'),
+    confirmed('epilim', 'sodium valproate')] })
   assert.deepEqual(seed.items.find((entry) => entry.listId === 'MED-00002').otherNames, ['panadol'])
-  assert.deepEqual(report.notMapped, [{ brand: 'epilim', generic: 'sodium valproate', why: 'no medicine in the seed has this generic name' }])
+  assert.deepEqual(report.leftOut, [{ brand: 'epilim', generic: 'sodium valproate', why: 'no medicine in the seed has this generic name' }])
 })
 
-test('brand-names.ts: its active rows are read as the builder reads them', async () => {
+test('brand names: only a confirmed row goes into the seed; one pending a pharmacist, or of any other status, is left out with why', () => {
+  assert.deepEqual(CONFIRMED_BRAND_REVIEWS, ['coordinator-curated'])
+  const item = (listId, genericName) => ({ listId, genericName, otherNames: [] })
+  const medicines = [item('MED-00001', 'artemether + lumefantrine'), item('MED-00002', 'paracetamol'), item('MED-00003', 'ciprofloxacin')]
+  const { items, brands } = addBrandNames(medicines, [
+    confirmed('coartem', 'artemether + lumefantrine'), pending('lonart', 'artemether + lumefantrine'),
+    pending('ciprotab', 'ciprofloxacin'), { brand: 'calpol', generic: 'paracetamol', reviewedBy: 'pharmacist-confirmed?', active: true },
+    { brand: 'emzor', generic: 'paracetamol', active: true }, { ...confirmed('panadol', 'paracetamol'), active: false }])
+  assert.deepEqual(items.map((entry) => entry.otherNames), [['coartem'], [], []], 'a pending brand never reaches a prescriber\'s search')
+  assert.deepEqual(brands.added, [{ brand: 'coartem', generic: 'artemether + lumefantrine', items: 1 }])
+  assert.deepEqual(brands.leftOut, [
+    { brand: 'lonart', generic: 'artemether + lumefantrine', why: 'pending pharmacist review' },
+    { brand: 'ciprotab', generic: 'ciprofloxacin', why: 'pending pharmacist review' },
+    { brand: 'calpol', generic: 'paracetamol', why: 'review status "pharmacist-confirmed?" is not confirmed' },
+    { brand: 'emzor', generic: 'paracetamol', why: 'review status null is not confirmed' },
+    { brand: 'panadol', generic: 'paracetamol', why: 'not an active row of brand-names.ts' }])
+  assert.equal(brands.items, 1)
+})
+
+test('brand-names.ts: every row has one of the two review statuses the rule knows; augmentin and panadol are confirmed', async () => {
   const module = await import(pathToFileURL(resolve(repository, 'services/ocr-worker/src/reading/brand-names.ts')).href)
-  const rows = module.BRAND_ROWS.filter(module.isActiveBrandRow)
-  assert.ok(rows.length > 20)
+  const statuses = new Set(module.BRAND_ROWS.map((row) => row.reviewed_by))
+  assert.deepEqual([...statuses].sort(), ['coordinator-curated', 'pending-pharmacist'])
+  const rows = module.BRAND_ROWS.map((row) => ({ brand: row.brand, generic: row.generic, reviewedBy: row.reviewed_by,
+    active: module.isActiveBrandRow(row) }))
   assert.ok(rows.every((row) => typeof row.brand === 'string' && typeof row.generic === 'string'))
-  assert.equal(rows.find((row) => row.brand === 'augmentin').generic, 'amoxicillin + clavulanic acid')
-  assert.equal(rows.find((row) => row.brand === 'panadol').generic, 'paracetamol')
+  for (const brand of ['augmentin', 'panadol']) {
+    assert.equal(rows.find((row) => row.brand === brand).reviewedBy, 'coordinator-curated', brand)
+    assert.equal(rows.find((row) => row.brand === brand).active, true, brand)
+  }
+  assert.ok(rows.some((row) => row.reviewedBy === 'pending-pharmacist'))
+})
+
+// The builder (build-catalog-seeds.mjs) end to end, on a tiny list, a brands module standing in for brand-names.ts.
+const builderScript = resolve(repository, 'services/ehr-api/scripts/build-catalog-seeds.mjs')
+function builderFolder() {
+  const folder = mkdtempSync(join(tmpdir(), 'catalog-build-'))
+  writeFileSync(join(folder, 'list.csv'), FIXTURE)
+  writeFileSync(join(folder, 'retired.json'), JSON.stringify(RETIRED))
+  writeFileSync(join(folder, 'wave-zero.json'), JSON.stringify({ codes: WAVE_ZERO }))
+  writeFileSync(join(folder, 'brands.mjs'), `export const BRAND_ROWS = ${JSON.stringify([
+    { brand: 'panadol', generic: 'paracetamol', strength_forms: '', source: 'coordinator-curated 2026-11', reviewed_by: 'coordinator-curated' },
+    { brand: 'amoxil', generic: 'amoxicillin', strength_forms: '', source: 'coordinator-curated 2026-11', reviewed_by: 'coordinator-curated' },
+    { brand: 'epilim', generic: 'sodium valproate', strength_forms: '', source: 'coordinator-curated 2026-11', reviewed_by: 'coordinator-curated' },
+    { brand: 'calpol', generic: 'paracetamol', strength_forms: '', source: 'NAFDAC Greenbook (synthetic)', reviewed_by: 'pending-pharmacist' }])};
+export const isActiveBrandRow = () => true;\n`)
+  return folder
+}
+const runBuilder = (folder, nodeArgs = []) => spawnSync(process.execPath, [...nodeArgs, builderScript, '--csv', join(folder, 'list.csv'),
+  '--retired', join(folder, 'retired.json'), '--wave-zero', join(folder, 'wave-zero.json'), '--version', '2026.1',
+  '--out', folder, '--brands', join(folder, 'brands.mjs')], { encoding: 'utf8', env: { PATH: process.env.PATH } })
+
+test('the builder reports every brand added (brand -> generic) and every brand left out, with why', () => {
+  const folder = builderFolder()
+  try {
+    const result = runBuilder(folder)
+    assert.equal(result.status, 0, result.stderr)
+    const report = JSON.parse(result.stdout)['hid-medicines.json'].brands
+    assert.deepEqual(report, { added: ['panadol -> paracetamol (1 item)', 'amoxil -> amoxicillin (1 item)'], onItems: 1,
+      leftOut: ['epilim -> sodium valproate: no medicine in the seed has this generic name',
+        'calpol -> paracetamol: pending pharmacist review'] }, 'amoxil is already an other name of MED-00001')
+    const seed = JSON.parse(readFileSync(join(folder, 'hid-medicines.json'), 'utf8'))
+    assert.deepEqual(seed.items.find((entry) => entry.listId === 'MED-00002').otherNames, ['panadol'])
+    assert.ok(!seed.items.some((entry) => entry.otherNames.includes('calpol')))
+    assert.equal(runBuilder(folder).status, 0)
+    const check = spawnSync(process.execPath, [builderScript, '--csv', join(folder, 'list.csv'), '--retired', join(folder, 'retired.json'),
+      '--wave-zero', join(folder, 'wave-zero.json'), '--version', '2026.1', '--out', folder, '--brands', join(folder, 'brands.mjs'),
+      '--check'], { encoding: 'utf8', env: { PATH: process.env.PATH } })
+    assert.equal(check.status, 0, check.stderr)
+  } finally { rmSync(folder, { recursive: true, force: true }) }
+})
+
+test('the builder needs Node 22.18 (type stripping) and says so plainly before it reads anything', () => {
+  for (const version of ['22.17.1', '22.0.0', '20.19.4', '23.5.0', '18.20.8']) {
+    assert.match(typeStrippingProblem(version), new RegExp(`needs Node 22\\.18 or later; this is Node ${version.replaceAll('.', '\\.')}; nothing built$`))
+  }
+  for (const version of ['22.18.0', '22.22.0', '23.6.0', '24.11.1', '25.0.0']) assert.equal(typeStrippingProblem(version), null, version)
+  const folder = builderFolder()
+  try {
+    const result = runBuilder(folder, ['--import', 'data:text/javascript,Object.defineProperty(process.versions,"node",{value:"22.17.1"})'])
+    assert.equal(result.status, 2)
+    assert.equal(result.stderr.trim(), 'the seed builder reads services/ocr-worker/src/reading/brand-names.ts with Node\'s own '
+      + 'TypeScript type stripping, which needs Node 22.18 or later; this is Node 22.17.1; nothing built')
+    assert.equal(result.stdout, '')
+    assert.ok(!existsSync(join(folder, 'hid-medicines.json')), 'nothing built')
+  } finally { rmSync(folder, { recursive: true, force: true }) }
 })
 
 test('docs/codes/catalog-approvals.json is well formed, and every entry it holds could be loaded', () => {
@@ -324,14 +408,15 @@ test('the loader refuses a malformed approvals file, an unreadable seed and a mi
 
 /** A stand-in pg client: answers the loader's statements from a fixed active version, and records them. */
 class StandInClient {
-  constructor({ active = null, busyOn = null, ready = true } = {}) {
-    this.active = active; this.busyOn = busyOn; this.ready = ready; this.statements = []
+  constructor({ active = null, busyOn = null, failOn = null, ready = true } = {}) {
+    this.active = active; this.busyOn = busyOn; this.failOn = failOn; this.ready = ready; this.statements = []
   }
   async query(sql, params = []) {
     this.statements.push({ sql, params })
     if (this.busyOn && sql.includes(this.busyOn)) {
       throw Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' })
     }
+    if (this.failOn && sql.includes(this.failOn.sql)) throw this.failOn.error
     if (sql.includes('to_regclass')) return { rows: [{ ready: this.ready }], rowCount: 1 }
     if (sql.startsWith('select 1 from ehr.catalog_versions')) return { rows: [], rowCount: 0 }
     if (sql.includes('versions.active')) return { rows: this.active ? [this.active] : [], rowCount: this.active ? 1 : 0 }
@@ -405,4 +490,69 @@ test('a busy lock is the house busy refusal (exit 2), not a raw lock timeout', a
         + 'ehr.catalog_versions or another catalogue load stayed busy for 5 seconds; nothing loaded; run the release again at a quieter time')
     assert.deepEqual(client.writes(), [])
   }
+})
+
+test('dropped ids: an id of the live list that this seed holds back is to be fixed, never retired', async () => {
+  // MED-00004 is live in 2026.1; the new seed holds it back (its strength is over 80 characters).
+  const seed = build(FIXTURE, { version: '2026.2' }).medicine
+  assert.deepEqual(seed.heldBack.map((entry) => entry.listId), ['MED-00004'])
+  const approval = { approvalReference: 'Synthetic sign-off reference', approvedAt: '2026-12-02T09:00:00+01:00' }
+  const load = (active) => loadSeed(new StandInClient({ active }), { seed, fileSha256: 'a'.repeat(64), approval,
+    approvalsSha256: 'b'.repeat(64) })
+  const line = (error) => error instanceof LoadRefusal && refusalLine(error)
+  let refused
+  await assert.rejects(load({ version: '2026.1', ids: ['MED-00001', 'MED-00002', 'MED-00004', 'MED-00005'] }),
+    (error) => { refused = line(error); return true })
+  assert.equal(refused, 'load-catalog: MED-00004 is in the live list but held back in this seed; fix the row, do not retire it; '
+    + 'nothing loaded')
+  // Held back and dropped outright together: each is named with what to do.
+  await assert.rejects(load({ version: '2026.1', ids: ['MED-00001', 'MED-00002', 'MED-00004', 'MED-00005', 'MED-00006'] }),
+    (error) => { refused = line(error); return true })
+  assert.equal(refused, 'load-catalog: MED-00004 is in the live list but held back in this seed; fix the row, do not retire it; '
+    + 'the active medicine 2026.1 holds an id this seed drops without retiring: MED-00006; list each in the seed\'s retired ids '
+    + 'with a reason; nothing loaded')
+  assert.deepEqual(droppedIds({ items: [{ listId: 'MED-00001' }], retired: [], heldBack: [{ listId: 'MED-00002' }, { listId: 'MED-00003' }] },
+    ['MED-00001', 'MED-00002', 'MED-00003', 'MED-00009']), { heldBack: ['MED-00002', 'MED-00003'], notRetired: ['MED-00009'] })
+  const many = { items: [], retired: [], heldBack: [{ listId: 'MED-00002' }, { listId: 'MED-00003' }], kind: 'medicine' }
+  await assert.rejects(loadSeed(new StandInClient({ active: { version: '2026.1', ids: ['MED-00002', 'MED-00003'] } }),
+    { seed: many, fileSha256: 'a'.repeat(64), approval, approvalsSha256: 'b'.repeat(64) }), (error) => error instanceof LoadRefusal
+    && error.message === 'MED-00002, MED-00003 are in the live list but held back in this seed; fix the rows, do not retire them')
+})
+
+test('0149\'s own refusals in the transaction (55000, 23514) are refusals with the database\'s message; nothing loaded', async () => {
+  assert.deepEqual(DATABASE_REFUSALS, ['55000', '23514'])
+  const seed = build(FIXTURE, { version: '2026.2' }).medicine
+  const approval = { approvalReference: 'Synthetic sign-off reference', approvedAt: '2026-12-02T09:00:00+01:00' }
+  const cases = [
+    ['insert into ehr.catalog_medicines', '55000', 'CATALOG_ID_CHANGED: MED-00001'],
+    ['insert into ehr.catalog_medicines', '55000', 'CATALOG_ID_RETIRED: MED-00002'],
+    ['insert into ehr.catalog_medicines', '55000', 'CATALOG_VERSION_SEALED: medicine 2026.2'],
+    ['set active = true', '55000', 'ehr.catalog_versions: only active, loaded_at and sealed may change'],
+    ['insert into ehr.catalog_medicines', '23514', 'new row for relation "catalog_medicines" violates check constraint "catalog_medicines_strength_check"'],
+  ]
+  for (const [sql, code, message] of cases) {
+    const client = new StandInClient({ failOn: { sql, error: Object.assign(new Error(message), { code }) } })
+    await assert.rejects(loadSeed(client, { seed, fileSha256: 'a'.repeat(64), approval, approvalsSha256: 'b'.repeat(64) }),
+      (error) => error instanceof LoadRefusal && !error.busy
+        && refusalLine(error) === `load-catalog: the database refused the load: ${message} (${code}); nothing loaded`, message)
+    assert.equal(client.statements.at(-1).sql, 'rollback', message)
+    assert.ok(!client.statements.some(({ sql: text }) => text === 'commit'), message)
+  }
+  // Anything else stays a failure (exit 1), not a refusal.
+  const dropped = new StandInClient({ failOn: { sql: 'insert into ehr.catalog_medicines',
+    error: Object.assign(new Error('terminating connection due to administrator command'), { code: '57P01' }) } })
+  await assert.rejects(loadSeed(dropped, { seed, fileSha256: 'a'.repeat(64), approval, approvalsSha256: 'b'.repeat(64) }),
+    (error) => !(error instanceof LoadRefusal) && error.code === '57P01')
+})
+
+test('a failure that is not a refusal ends with one plain line too (exit 1), never a stack trace', () => {
+  const { folder, seedPath, approvalsPath } = signedFiles(build().medicine)
+  try {
+    // A signed file, and no database listening on port 9.
+    const failed = runLoader(['--seed', seedPath, '--approvals', approvalsPath], { NODE_ENV: 'test' })
+    assert.equal(failed.status, 1)
+    assert.match(failed.stderr, /^load-catalog: .*\(ECONNREFUSED\); nothing loaded$/)
+    assert.equal(failed.stderr.split('\n').length, 1)
+    assert.equal(failed.stdout, '')
+  } finally { rmSync(folder, { recursive: true, force: true }) }
 })

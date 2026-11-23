@@ -23,12 +23,21 @@
 // and, in its transaction (catalog-load.mjs):
 // - a schema without 0149 (or, for the ICD-11 diagnosis list, 0150), or a
 //   version of that kind already loaded;
-// - an id of the active version that the seed drops without retiring it;
+// - an id of the active version that the seed drops: one it holds back
+//   ("<id> is in the live list but held back in this seed; fix the row, do
+//   not retire it"), or one it does not list in its retired ids (medicines
+//   and lab tests; a diagnosis list retires no id);
 // - a lock still busy after 5 seconds ("...; run the release again at a
-//   quieter time").
-// The database refuses on its own, and the whole load rolls back, a retired
-// id, an id whose medicine or test changed, or a lab code another id held
-// (0149's insert triggers).
+//   quieter time");
+// - 0149's own refusals, with the database's message: a retired id, an id
+//   whose medicine or test changed, a lab code another id held, a sealed
+//   version (its triggers and guard, SQLSTATE 55000: CATALOG_ID_RETIRED,
+//   CATALOG_ID_CHANGED, CATALOG_VERSION_SEALED), or a table check (23514);
+//   for a diagnosis list, 0150's the same ways (a sealed version, a table
+//   check). The whole load rolls back.
+// Anything else (no database, a dropped connection) is a failure: exit 1,
+// one line "load-catalog: ...; nothing loaded". Either way the line is the
+// last one the loader prints, which the deploy tool shows.
 //
 // --dry-run does all of it and rolls back. Old versions are kept, so old
 // prescriptions keep their meaning. Prints one JSON line: what was loaded,
@@ -47,6 +56,12 @@ const refuse = (refusal) => {
   console.error(refusalLine(refusal));
   process.exit(2);
 };
+// A failure, not a refusal: one plain line too, never a stack trace.
+const fail = (error) => {
+  const code = error?.code ? ` (${error.code})` : '';
+  console.error(`load-catalog: ${error?.message ?? error}${code}; nothing loaded`);
+  process.exit(1);
+};
 
 let prepared;
 try {
@@ -56,7 +71,7 @@ try {
     approvalsGiven: process.argv.includes('--approvals'), waveZeroPath: path.join(codes, 'hid-lab-codes.json') });
 } catch (error) {
   if (error instanceof LoadRefusal) refuse(error);
-  throw error;
+  fail(error);
 }
 const databaseUrl = process.env.DATABASE_URL || managedDatabaseUrl();
 if (!databaseUrl) refuse(new LoadRefusal('set DATABASE_URL or DATABASE_HOST, DATABASE_USERNAME and DATABASE_PASSWORD'));
@@ -71,9 +86,7 @@ try {
 } catch (error) {
   await client?.end().catch(() => {});
   if (error instanceof LoadRefusal) refuse(error);
-  const code = error?.code ? ` (${error.code})` : '';
-  console.error(`load-catalog: ${error?.message ?? error}${code}; nothing loaded`);
-  process.exit(1);
+  fail(error);
 }
 await client.end();
 console.log(JSON.stringify(outcome));

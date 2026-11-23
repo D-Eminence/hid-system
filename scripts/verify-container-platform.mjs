@@ -126,20 +126,45 @@ assert.match(ehrDockerfile, new RegExp(`FROM ${distrolessNodeRuntime} AS migrati
 const ehrRuntime = ehrDockerfile.slice(ehrDockerfile.lastIndexOf(`FROM ${distrolessNodeRuntime} AS runtime`))
 assert.doesNotMatch(ehrRuntime, /services\/ehr-api\/(?:database|scripts)/,
   'the EHR API runtime image must not contain the migration executor or ledger')
-// ORD-7: the migration image carries what the governed catalogue load reads, the sign-off (catalog-approvals.json),
-// the Wave 0 codes and the signed seed files, at /app/docs/codes, where load-catalog.mjs and the deploy tool's
-// catalogue phase look; the runtime image carries none of it.
+// ORD-7: the migration image carries exactly the files the governed catalogue load reads, by name, at
+// /app/docs/codes where load-catalog.mjs and the deploy tool's catalogue phase look: the sign-off
+// (catalog-approvals.json), the Wave 0 codes (hid-lab-codes.json) and the two signed seed files. No other file under
+// docs/codes (drafts never ship) and nothing else from docs/ reaches any stage; the runtime image carries none of it.
+// A seed file may be named with a one-name pattern ("hid-medicines.jso[n]") so the image builds before it is signed.
+const CATALOGUE_FILES = ['catalog-approvals.json', 'hid-lab-codes.json', 'hid-medicines.json', 'hid-lab-tests.json']
 const ehrMigration = ehrDockerfile.slice(ehrDockerfile.indexOf(`FROM ${distrolessNodeRuntime} AS migration`),
   ehrDockerfile.lastIndexOf(`FROM ${distrolessNodeRuntime} AS runtime`))
-assert.match(ehrMigration, /\nWORKDIR \/app\n[\s\S]*\nCOPY --chown=65532:65532 docs\/codes \.\/docs\/codes\n/,
-  'the EHR migration image must carry docs/codes (the catalogue sign-off and the signed seed files) at /app/docs/codes')
-assert.doesNotMatch(ehrRuntime, /docs\/codes/, 'the EHR API runtime image must not carry the catalogue files')
+const copyInstructions = (text) => text.replace(/\\\n/g, ' ').split('\n').filter(line => /^\s*(?:COPY|ADD)\s/i.test(line))
+  .map(line => {
+    const words = line.trim().split(/\s+/).slice(1).filter(word => !word.startsWith('--'))
+    return { line: line.trim(), fromStage: /\s--from=/.test(line), sources: words.slice(0, -1), destination: words.at(-1) }
+  })
+// "hid-medicines.jso[n]" is the name hid-medicines.json; any other pattern under docs/ is refused.
+const oneName = (source) => source.replace(/\[([^\]\\])\]$/, '$1')
+for (const copy of copyInstructions(ehrDockerfile).filter(copy => !copy.fromStage)) {
+  for (const source of copy.sources) {
+    const path = source.replace(/^\.\//, '').replace(/\/+$/, '')
+    assert.ok(!['', '.', 'docs', 'docs/codes'].includes(path), `the EHR Dockerfile must not copy ${source} whole: "${copy.line}"`)
+    if (!path.startsWith('docs/')) continue
+    assert.ok(CATALOGUE_FILES.map(name => `docs/codes/${name}`).includes(oneName(path)) && !/[*?[\]]/.test(oneName(path)),
+      `the EHR Dockerfile copies ${source}, which the catalogue load does not read: only ${CATALOGUE_FILES.join(', ')} under docs/codes ship`)
+  }
+}
+const catalogueCopies = copyInstructions(ehrDockerfile).filter(copy => copy.sources.some(source => source.startsWith('docs/')))
+assert.equal(catalogueCopies.length, 1, 'the EHR Dockerfile must copy the catalogue files in one instruction')
+assert.ok(ehrMigration.includes(`\n${catalogueCopies[0].line}\n`) && /\nWORKDIR \/app\n/.test(ehrMigration)
+  && catalogueCopies[0].destination === './docs/codes/' && catalogueCopies[0].line.includes('--chown=65532:65532'),
+'the EHR migration image must carry the catalogue files at /app/docs/codes')
+assert.deepEqual(catalogueCopies[0].sources.map(oneName), CATALOGUE_FILES.map(name => `docs/codes/${name}`),
+  `the EHR migration image must carry exactly ${CATALOGUE_FILES.join(', ')} from docs/codes, by name`)
+assert.doesNotMatch(ehrRuntime, /docs\//, 'the EHR API runtime image must not carry the catalogue files')
 assert.ok((await readFile(join(repository, 'services/ehr-api/scripts/load-catalog.mjs'), 'utf8'))
   .includes("path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../docs/codes')"),
 'load-catalog.mjs must read /app/docs/codes in the migration image')
 assert.match(await readFile(join(repository, 'scripts/production_deployment.py'), 'utf8'),
   /^CATALOG_SEEDS = \{"medicine":"\/app\/docs\/codes\/hid-medicines\.json","lab_test":"\/app\/docs\/codes\/hid-lab-tests\.json"\}$/m,
   'the deploy tool must load the signed seed files where the migration image carries them')
+// The two named without a pattern must exist, or the image does not build.
 for (const file of ['catalog-approvals.json', 'hid-lab-codes.json']) await stat(join(repository, 'docs/codes', file))
 
 const workerDockerfile = await readFile(join(repository, 'services/ocr-worker/Dockerfile'), 'utf8')

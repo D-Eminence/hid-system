@@ -19,6 +19,12 @@ class FakeAWS:
     def account(self): pass
 
 
+# Synthetic seed files as the checkout holds them: the deploy tool reads each asked one's version and sha256.
+SEED_FILES={'hid-medicines.json':json.dumps({'format':'hid-catalog-seed/1','kind':'medicine','version':'2026.1','items':[]}),
+            'hid-lab-tests.json':json.dumps({'format':'hid-catalog-seed/1','kind':'lab_test','version':'2026.1','items':[]})}
+SEED_SHA={name:c.sha(text.encode()) for name,text in SEED_FILES.items()}
+
+
 class FakeLease:
     def __init__(self,*args,**kwargs): self.released=None; self.reads=0
     def acquire(self): return self
@@ -53,8 +59,10 @@ class BackendControllerTests(unittest.TestCase):
             b.rollback_receipt(store, release)
 
     def execute(self, failure=False, alert_failure=False, loss=False, components=('identity-api',), waves=None,
-                events=None, pending_before=0, output=None, catalog=None, catalog_failure=None, migration_failure=None):
+                events=None, pending_before=0, output=None, catalog=None, catalog_failure=None, migration_failure=None,
+                seed_files=None, catalog_aws=None):
         baseline=index(); state={n:brow.copy() for n,brow in baseline['backend'].items()}
+        real_ecs=b.ECS
         physical=lambda:{n:{k:r[k] for k in ('image_uri','task_definition','config_sha256')} for n,r in state.items()}
         objects={c.INDEX_KEY:copy.deepcopy(baseline)}; calls=[]; lease=FakeLease()
         events=[] if events is None else events
@@ -79,11 +87,16 @@ class BackendControllerTests(unittest.TestCase):
                 self.migration_checks=({'pending_before':0,'plan_after':'skipped','reason':b.SKIPPED_PLAN_AFTER,'tasks':1}
                     if not pending_before else {'pending_before':pending_before,'plan_after':'ran','tasks':4})
                 return baseline['migration_task_definition'][:-1]+'2'
-            def load_catalog(self,arn,network,release_id,kinds):
-                events.append(('catalog',list(kinds)))
+            def load_catalog(self,arn,network,release_id,seeds):
+                events.append(('catalog',list(seeds)))
                 assert arn==baseline['migration_task_definition'][:-1]+'2' and network==baseline['migration_network']
-                loaded=[{'kind':kind,'version':'2026.1','file_sha256':'e'*64,'approvals_sha256':'f'*64,'items':1,'replaced':None}
-                    for kind in kinds]
+                if catalog_aws is not None:
+                    # The real catalogue phase against a stand-in for the loader's tasks and logs.
+                    real=real_ecs(catalog_aws,lease)
+                    try: return real.load_catalog(arn,network,release_id,seeds)
+                    finally: self.catalog_checks=real.catalog_checks
+                loaded=[{'kind':kind,'status':'loaded','version':seed['version'],'file_sha256':seed['file_sha256'],
+                    'approvals_sha256':'f'*64,'items':1,'replaced':None} for kind,seed in seeds.items()]
                 # A failure stops at the last seed: the ones before it were loaded, each in its own transaction.
                 self.catalog_checks=loaded[:-1] if catalog_failure else loaded
                 if catalog_failure: raise c.ReleaseError(catalog_failure)
@@ -102,6 +115,9 @@ class BackendControllerTests(unittest.TestCase):
         candidate=c.make_candidate(ctx(),list(components),{n:{'image_uri':image(n,'b'), 'publication_sha256':'d'*64} for n in components},{'select':'success'})
         with tempfile.TemporaryDirectory() as folder:
             root=pathlib.Path(folder); c.atomic_json(root/'release/candidate.json',candidate)
+            # The checkout's seed files, which the migration image carries (catalog_seeds reads them).
+            (root/'docs/codes').mkdir(parents=True)
+            for name,text in (SEED_FILES if seed_files is None else seed_files).items(): (root/'docs/codes'/name).write_text(text)
             env={'EXPECTED_CANDIDATE_SHA256':c.file_sha(root/'release/candidate.json'),
                  'RELEASE_CONFIG_JSON':json.dumps({'account':c.ACCOUNT,'region':c.REGION,'migration_network':baseline['migration_network']})}
             if catalog is not None: env['CATALOG_LOAD']=catalog
@@ -526,8 +542,6 @@ class DeployPhaseTests(unittest.TestCase):
                 self.assertEqual(len(calls),1); self.assertTrue(lease.released)
 
 
-if __name__=='__main__': unittest.main()
-
 
 class CatalogPhaseTests(unittest.TestCase):
     """ORD-7's governed catalogue load (Rahman's review of #319, point 1): opt-in, after the migrations, on the
@@ -594,25 +608,37 @@ class CatalogPhaseTests(unittest.TestCase):
         baseline,state,objects,calls,lease=self.execute(events=events,catalog='medicine',migration_failure='UNUSED')
         self.assertEqual(events,[]); self.assertEqual(list(objects),[c.INDEX_KEY]); self.assertIsNone(lease.released)
 
+    SEEDS={'medicine':{'version':'2026.1','file_sha256':'1'*64},'lab_test':{'version':'2026.1','file_sha256':'2'*64}}
+
+    def seeds(self, *kinds): return {kind:self.SEEDS[kind] for kind in kinds}
+
     def loader_aws(self, exit_code, lines):
-        starts=[]
+        starts=[]; reads=[]
         class AWS:
             def call(self,service,operation,args,**kwargs):
                 if operation=='run-task':
                     starts.append(args); return {'tasks':[{'taskArn':'arn:task/'+str(len(starts))}]}
                 if operation=='describe-tasks': return {'tasks':[{'lastStatus':'STOPPED','containers':[{'exitCode':exit_code}]}]}
                 if operation=='get-log-events':
+                    reads.append(args)
                     kind='medicine' if starts[-1]['overrides']['containerOverrides'][0]['command'][-1].endswith('hid-medicines.json') else 'lab_test'
                     return {'events':[{'message':line.replace('KIND',kind)} for line in lines]}
                 raise AssertionError(operation)
-        return AWS(),starts
+        aws=AWS(); aws.reads=reads
+        return aws,starts
+
+    @contextlib.contextmanager
+    def clock(self):
+        """No real waiting: each look at the clock is 10 seconds on, so a 90-second wait for a log line ends after 8 reads."""
+        ticks=iter(range(0,10**6,10))
+        with patch.object(b.time,'sleep'),patch.object(b.time,'monotonic',side_effect=lambda:next(ticks)): yield
 
     def test_each_seed_loads_on_the_migration_definition_with_the_loaders_command(self):
         loaded=json.dumps({'status':'loaded','kind':'KIND','version':'2026.1','fileSha256':'e'*64,'approvalsSha256':'f'*64,
             'items':145,'newRetiredIds':[],'replaced':None,'heldBack':13},separators=(',',':'))
         aws,starts=self.loader_aws(0,['some other line',loaded])
         ecs=b.ECS(aws,FakeLease())
-        with patch.object(b.time,'sleep'): ecs.load_catalog('arn:migration:2',index()['migration_network'],'release',['medicine','lab_test'])
+        with self.clock(): ecs.load_catalog('arn:migration:2',index()['migration_network'],'release',self.seeds('medicine','lab_test'))
         self.assertEqual([r['overrides']['containerOverrides'] for r in starts],[
             [{'name':'database-migration','command':['scripts/load-catalog.mjs','--seed','/app/docs/codes/hid-medicines.json']}],
             [{'name':'database-migration','command':['scripts/load-catalog.mjs','--seed','/app/docs/codes/hid-lab-tests.json']}]])
@@ -620,39 +646,137 @@ class CatalogPhaseTests(unittest.TestCase):
         self.assertEqual(len({r['clientToken'] for r in starts}),2)
         self.assertTrue(all(r['enableExecuteCommand'] is False and r['networkConfiguration']=={'awsvpcConfiguration':index()['migration_network']}
             for r in starts))
-        self.assertEqual(ecs.catalog_checks,[{'kind':kind,'version':'2026.1','file_sha256':'e'*64,'approvals_sha256':'f'*64,
-            'items':145,'replaced':None} for kind in ('medicine','lab_test')])
+        self.assertEqual(ecs.catalog_checks,[{'kind':kind,'status':'loaded','version':'2026.1','file_sha256':'e'*64,
+            'approvals_sha256':'f'*64,'items':145,'replaced':None} for kind in ('medicine','lab_test')])
 
     def test_a_refusal_ends_with_the_loaders_line_and_stops_at_that_seed(self):
         line=('load-catalog: no sign-off names this file\'s sha256 '+'e'*64+'; nothing loaded')
         aws,starts=self.loader_aws(2,[line])
         ecs=b.ECS(aws,FakeLease()); output=io.StringIO()
-        with patch.object(b.time,'sleep'),contextlib.redirect_stdout(output):
+        with self.clock(),contextlib.redirect_stdout(output):
             with self.assertRaisesRegex(c.ReleaseError,'CATALOG_LOAD_REFUSED'):
-                ecs.load_catalog('arn:migration:2',index()['migration_network'],'release',['medicine','lab_test'])
+                ecs.load_catalog('arn:migration:2',index()['migration_network'],'release',self.seeds('medicine','lab_test'))
         self.assertEqual(len(starts),1)
-        self.assertEqual(json.loads(output.getvalue()),{'release_id':'release','catalog_load':'refused','kind':'medicine','message':line})
+        self.assertEqual(json.loads(output.getvalue()),{'release_id':'release','catalog_load':'refused','kind':'medicine',
+            'exit_codes':[2],'message':line})
         busy='load-catalog: ehr.catalog_versions or another catalogue load stayed busy for 5 seconds; nothing loaded; run the release again at a quieter time'
         aws,starts=self.loader_aws(2,[busy]); ecs=b.ECS(aws,FakeLease()); output=io.StringIO()
-        with patch.object(b.time,'sleep'),contextlib.redirect_stdout(output):
+        with self.clock(),contextlib.redirect_stdout(output):
             with self.assertRaisesRegex(c.ReleaseError,'CATALOG_LOAD_REFUSED'):
-                ecs.load_catalog('arn:migration:2',index()['migration_network'],'release',['lab_test'])
+                ecs.load_catalog('arn:migration:2',index()['migration_network'],'release',self.seeds('lab_test'))
         self.assertEqual(json.loads(output.getvalue())['message'],busy)
-        # Any other failure stops the release too.
-        aws,starts=self.loader_aws(1,['load-catalog: connection refused; nothing loaded'])
-        with patch.object(b.time,'sleep'),self.assertRaisesRegex(c.ReleaseError,'CATALOG_LOAD_FAILED'):
-            b.ECS(aws,FakeLease()).load_catalog('arn:migration:2',index()['migration_network'],'release',['medicine'])
+
+    def test_a_database_refusal_from_0149_stops_the_release_with_its_message(self):
+        # 0149's trigger refused the load (55000): the loader's refusal line, exit 2, as the deploy tool shows it.
+        line='load-catalog: the database refused the load: CATALOG_ID_CHANGED: MED-00001 (55000); nothing loaded'
+        aws,starts=self.loader_aws(2,[line]); output=io.StringIO()
+        with self.clock(),contextlib.redirect_stdout(output),self.assertRaisesRegex(c.ReleaseError,'CATALOG_LOAD_REFUSED'):
+            b.ECS(aws,FakeLease()).load_catalog('arn:migration:2',index()['migration_network'],'release',self.seeds('medicine'))
+        self.assertEqual(json.loads(output.getvalue())['message'],line)
+
+    def test_any_non_zero_exit_prints_the_loaders_last_line(self):
+        cases=(
+            # exit 1: the loader's own failure line, even with other lines after it in the log.
+            (1,['starting','load-catalog: connect ECONNREFUSED 10.0.0.5:5432 (ECONNREFUSED); nothing loaded','INFO trailing'],
+             'CATALOG_LOAD_FAILED','load-catalog: connect ECONNREFUSED 10.0.0.5:5432 (ECONNREFUSED); nothing loaded'),
+            # A crash with no loader line: the log's last line, after waiting for one.
+            (137,['Killed','   '],'CATALOG_LOAD_FAILED','Killed'),
+            # No exit code (the container never ran) and no log at all.
+            (None,[],'CATALOG_LOAD_FAILED',None),
+        )
+        for exit_code,lines,error,message in cases:
+            with self.subTest(exit_code=exit_code):
+                aws,starts=self.loader_aws(exit_code,lines); output=io.StringIO()
+                with self.clock(),contextlib.redirect_stdout(output),self.assertRaisesRegex(c.ReleaseError,error):
+                    b.ECS(aws,FakeLease()).load_catalog('arn:migration:2',index()['migration_network'],'release',
+                        self.seeds('medicine','lab_test'))
+                self.assertEqual(json.loads(output.getvalue()),{'release_id':'release','catalog_load':'failed','kind':'medicine',
+                    'exit_codes':[exit_code],'message':message})
+                self.assertEqual(len(starts),1,'stops at that seed')
+                # It waited for the loader's line only when none came (90 seconds of reads, never a second task).
+                self.assertEqual(len(aws.reads),1 if exit_code==1 else 8)
+
+    def test_a_load_without_its_evidence_line_is_still_named_as_loaded(self):
+        for lines in ([],['{"status":"loaded",broken}'],['{"status":"loaded","kind":"KIND"}'],
+                      ['{"status":"loaded","kind":"KIND","version":"2026.1","fileSha256":"x","approvalsSha256":"'+'f'*64+'","items":1,"replaced":null}'],
+                      ['{"status":"loaded","kind":"other","version":"2026.1","fileSha256":"'+'e'*64+'","approvalsSha256":"'+'f'*64+'","items":1,"replaced":null}']):
+            with self.subTest(lines=lines):
+                aws,starts=self.loader_aws(0,lines); ecs=b.ECS(aws,FakeLease()); output=io.StringIO()
+                with self.clock(),contextlib.redirect_stdout(output),self.assertRaisesRegex(c.ReleaseError,'^CATALOG_LOAD_EVIDENCE_MISSING$'):
+                    ecs.load_catalog('arn:migration:2',index()['migration_network'],'release',self.seeds('medicine','lab_test'))
+                self.assertEqual(ecs.catalog_checks,[{'kind':'medicine','status':'loaded','version':'2026.1','file_sha256':'1'*64,
+                    'evidence':'evidence line missing'}])
+                self.assertEqual(json.loads(output.getvalue()),{'release_id':'release','catalog_load':'loaded','kind':'medicine',
+                    'version':'2026.1','file_sha256':'1'*64,'evidence':'evidence line missing'})
+                self.assertEqual(len(starts),1,'the lab tests are not loaded after it')
+
+    def test_through_the_release_a_missing_evidence_line_fails_with_its_code_and_the_receipt_names_the_seed(self):
+        loaded=json.dumps({'status':'loaded','kind':'KIND','version':'2026.1','fileSha256':'e'*64,'approvalsSha256':'f'*64,
+            'items':145,'newRetiredIds':[],'replaced':None,'heldBack':13},separators=(',',':'))
+        for lines in ([],['{"status":"loaded",broken}']):
+            with self.subTest(lines=lines):
+                aws,starts=self.loader_aws(0,lines); events=[]; output=io.StringIO()
+                with self.clock():
+                    baseline,state,objects,calls,lease=self.execute(components=self.RELEASE,events=events,catalog='medicine',
+                        catalog_aws=aws,catalog_failure='expected',output=output)
+                failed=self.receipt(objects,'failed.json')
+                self.assertEqual(failed['error_code'],'CATALOG_LOAD_EVIDENCE_MISSING')
+                self.assertEqual(failed['catalog_checks'],[{'kind':'medicine','status':'loaded','version':'2026.1',
+                    'file_sha256':SEED_SHA['hid-medicines.json'],'evidence':'evidence line missing'}])
+                self.assertEqual(events,[('migrate',None),('catalog',['medicine']),('update_all',[])])
+                self.assertEqual(state,baseline['backend']); self.assertEqual(calls,[])
+                # The operator's next step: dispatch again with no catalogue load (loading it again would be refused).
+                lines=[json.loads(l) for l in output.getvalue().splitlines() if l.startswith('{')]
+                self.assertIn({'release_id':self.receipt(objects,'started.json')['candidate']['release_id'],
+                    'catalog_loaded_before_failure':[{'kind':'medicine','version':'2026.1'}],
+                    'next':'dispatch the release again with catalog_load none'},lines)
+        # With its evidence line, the same release succeeds and the receipt records the loader's own figures.
+        aws,starts=self.loader_aws(0,[loaded])
+        with self.clock():
+            baseline,state,objects,calls,lease=self.execute(components=self.RELEASE,catalog='medicine,lab_test',catalog_aws=aws)
+        self.assertEqual([(k['kind'],k['status'],k['file_sha256'],k['items']) for k in self.receipt(objects)['catalog_checks']],
+            [('medicine','loaded','e'*64,145),('lab_test','loaded','e'*64,145)])
+
+    def test_the_seeds_asked_for_are_read_from_the_checkout_before_the_release_starts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=pathlib.Path(folder); (root/'docs/codes').mkdir(parents=True)
+            for name,text in SEED_FILES.items(): (root/'docs/codes'/name).write_text(text)
+            with patch.object(b,'ROOT',root):
+                self.assertEqual(b.catalog_seeds(['medicine','lab_test']),{
+                    'medicine':{'version':'2026.1','file_sha256':SEED_SHA['hid-medicines.json']},
+                    'lab_test':{'version':'2026.1','file_sha256':SEED_SHA['hid-lab-tests.json']}})
+                self.assertEqual(b.catalog_seeds([]),{})
+                for text in ('{"kind":"lab_test","version":"2026.1"}','{"kind":"medicine"}','not json','[]'):
+                    (root/'docs/codes/hid-medicines.json').write_text(text)
+                    with self.assertRaisesRegex(c.ReleaseError,'CATALOG_SEED_MISSING'): b.catalog_seeds(['medicine'])
+                (root/'docs/codes/hid-medicines.json').unlink()
+                with self.assertRaisesRegex(c.ReleaseError,'CATALOG_SEED_MISSING'): b.catalog_seeds(['medicine'])
+        # Through deploy(): a seed missing from the checkout (so from the image) is refused before the lease.
+        events=[]
+        baseline,state,objects,calls,lease=self.execute(components=self.RELEASE,events=events,catalog='medicine',
+            seed_files={'hid-lab-tests.json':SEED_FILES['hid-lab-tests.json']},migration_failure='UNUSED')
+        self.assertEqual(events,[]); self.assertEqual(list(objects),[c.INDEX_KEY]); self.assertIsNone(lease.released)
 
     def test_the_migration_image_carries_what_the_catalogue_phase_loads(self):
         dockerfile=(b.ROOT/'services/ehr-api/Dockerfile').read_text()
         migration=dockerfile[dockerfile.index(' AS migration'):dockerfile.index(' AS runtime')]
         runtime=dockerfile[dockerfile.index(' AS runtime'):]
-        self.assertRegex(migration,r'\nWORKDIR /app\n[\s\S]*\nCOPY --chown=65532:65532 docs/codes \./docs/codes\n')
-        self.assertNotIn('docs/codes',runtime)
+        # Exactly the four files the loader reads, by name (a seed file's "[n]" pattern copies nothing until it is signed).
+        self.assertRegex(migration,r'\nWORKDIR /app\n[\s\S]*\nCOPY --chown=65532:65532 docs/codes/catalog-approvals\.json '
+            r'docs/codes/hid-lab-codes\.json docs/codes/hid-medicines\.jso\[n\] docs/codes/hid-lab-tests\.jso\[n\] \./docs/codes/\n')
+        # No other COPY in any stage takes anything from docs/.
+        self.assertEqual([line for line in dockerfile.splitlines() if line.startswith('COPY') and 'docs' in line],
+            ['COPY --chown=65532:65532 docs/codes/catalog-approvals.json docs/codes/hid-lab-codes.json docs/codes/hid-medicines.jso[n] '
+             'docs/codes/hid-lab-tests.jso[n] ./docs/codes/'])
+        self.assertNotIn('docs/',runtime)
         self.assertEqual(b.CATALOG_SEEDS,{'medicine':'/app/docs/codes/hid-medicines.json','lab_test':'/app/docs/codes/hid-lab-tests.json'})
+        # The deploy tool reads the same files from its checkout, by the same names.
+        self.assertEqual({pathlib.PurePosixPath(seed).name for seed in b.CATALOG_SEEDS.values()},{'hid-medicines.json','hid-lab-tests.json'})
         # load-catalog.mjs (at /app/services/ehr-api/scripts) reads its approvals and Wave 0 codes from /app/docs/codes.
         loader=(b.ROOT/'services/ehr-api/scripts/load-catalog.mjs').read_text()
         self.assertIn("path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../docs/codes')",loader)
         self.assertEqual(os.path.normpath('/app/services/ehr-api/scripts/../../../docs/codes'),'/app/docs/codes')
         self.assertTrue(all(pathlib.PurePosixPath(seed).parent==pathlib.PurePosixPath('/app/docs/codes') for seed in b.CATALOG_SEEDS.values()))
         for name in ('catalog-approvals.json','hid-lab-codes.json'): self.assertTrue((b.ROOT/'docs/codes'/name).is_file())
+
+if __name__=='__main__': unittest.main()
