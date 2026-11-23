@@ -1487,6 +1487,9 @@ together, like section 46's setting.
   - WHOCC terms for using ATC codes in a commercial product. This is an open
     point with no decision yet, to be decided before this section is built.
     Until it is decided, `atcCode` stays `null`.
+  - The owner's confirmation that the Nigeria Essential Medicines List, 8th
+    edition ("All rights reserved"), may be used for its facts.
+  - Both answers are recorded in the sign-off (second slice, `licences`).
 - ORD-2 (0133) and order routes for the name-only send paths.
 - SX-1 fixture for the new permission.
 
@@ -1536,8 +1539,8 @@ signs a version (Q124 A) and the governed loader (a later slice) loads it.
     "COVID-19", "U/A" and "G&XM" find the tests named so. Only the first 6
     words count, each cut to 40 characters;
     `q` never reaches the query parser as typed, so brackets or operators
-    answer nothing, never an error. Brand names come with the loader (they
-    are other names).
+    answer nothing, never an error. Brand names come with the seed files
+    (they are other names; second slice).
   - The order: names that start with `q` first, then by name in the "C"
     collation, then strength and the list id, so it is the same on every
     load.
@@ -1588,45 +1591,125 @@ signs a version (Q124 A) and the governed loader (a later slice) loads it.
 
 ### Second slice: the seed files and the governed loader (draft, not live)
 
-Built on 23 Nov 2026 (lane D), stacked on the first slice. No migration and
-no route: two scripts in `services/ehr-api/scripts`, a shared module, and the
-approvals file. Nothing is loaded until the clinical lead signs a file.
+Built on 23 Nov 2026 (lane D), stacked on the first slice; Rahman's review
+of hid-system#319 built in. No migration and no route: three scripts in
+`services/ehr-api/scripts`, the approvals file, and an opt-in phase of the
+deploy tool. Nothing is loaded until the clinical lead signs a file.
 
 - **Seed files:** `catalog:build-seeds` turns the combined list (#312) into
   `hid-medicines.json` and `hid-lab-tests.json` (format
   `hid-catalog-seed/1`). The bytes are stable, so the sha256 the lead signs
-  is reproducible, and `--check` fails on any drift.
+  is reproducible, and `--check` fails on any drift. The builder prints what
+  the lead signs with each file: what was held back and why, how every Wave 0
+  code stands (kept ones included), and every brand that did not map.
   - A row the database would refuse is **held back** with why (for example
     a strength over 80 characters, or a test with no code), never cut or
     guessed. The seed lists its held-back rows, so the lead signs with them
     in view.
   - Every gap in the ids must be a retired id with a reason, and no retired
     id may still be a row.
-  - The lab-test seed reports each Wave 0 HID-LAB code as kept, renamed,
-    recoded or missing.
+  - **ATC codes:** `atcCode` is `null` in the seed unless the builder is run
+    with `--with-atc`, which it refuses until a medicine sign-off of that
+    version records the WHOCC terms answer (`licences.whoccAtc`).
+  - **Brand names:** the active rows of `ocr-worker`'s `brand-names.ts` are
+    added to `otherNames`, so they are signed with the file, only where the
+    brand's generic (compared without case, white space collapsed) is the
+    generic name of exactly one medicine in the seed. A combination counts
+    only when written as the seed writes it ("amoxicillin + clavulanic
+    acid"). The brand then goes on every item (strength and form) of that
+    medicine. Nothing is guessed: each brand that does not map is listed,
+    with its generic, in the builder's report for the clinical lead.
+  - **Wave 0:** the lab-test seed reports each Wave 0 HID-LAB code as kept,
+    renamed, recoded, held back (a row of that name with no code) or
+    missing. An HID-LAB item whose code is not in
+    `docs/codes/hid-lab-codes.json`, or is there with another name, is
+    refused, so a Wave 0 code is never changed or reused.
   - The notices: LOINC's when a test has a LOINC code; the WHO Model List's
     citation (CC BY-NC-SA 3.0 IGO) when a medicine comes from it.
 - **Sign-off:** `docs/codes/catalog-approvals.json` (format
   `hid-catalog-approvals/1`, empty until the lead signs). An entry names a
-  file's kind, version and sha256, an approval reference and the time. It
-  is added in a reviewed PR that records the sign-off; no personal names.
-- **The loader,** `catalog:load --seed <file> [--dry-run]`, is run by the
-  release integrator after the migrations, never inside one, as the schema
-  owner. It refuses (exit 2, nothing written) a file whose sha256 is not
-  signed for its kind and version, a seed that breaks 0149's rules, a
-  version already loaded, and a schema without 0149. The database refuses
-  a retired, changed or reused id on its own, and the whole load rolls
-  back. In one transaction it takes its advisory lock and SHARE ROW
-  EXCLUSIVE on the versions, records the new retired ids, inserts the
-  version and its rows, then turns the old version off and the new one on.
-  `--dry-run` rolls back. It prints one line: what loaded and what it
-  replaced.
-- **Proven** on a throwaway copy with #312's list as of 23 Nov:
-  - 1,616 medicines and 145 tests load, with 4 and 13 rows held back;
-  - an unsigned file, a second load of a version, and a version whose
-    medicine changed are each refused, with nothing written;
-  - a version that retires an id replaces the old one in 170 ms, and the
-    old version is kept.
+  file's kind, version and sha256, an approval reference and the time. A
+  medicine entry also records the owner's licence answers under `licences`,
+  each a reference to where the answer is kept: `nigeriaEml8` always, and
+  `whoccAtc` for a file with ATC codes. It is added in a reviewed PR that
+  records the sign-off; no personal names.
+- **The loader,** `catalog:load --seed <file> [--dry-run]`, runs after the
+  migrations, never inside one, as the schema owner. It refuses (exit 2,
+  nothing written, one line ending "nothing loaded"):
+  - before it connects: `--approvals` under `NODE_ENV=production` (only the
+    deployed approvals file signs a load); a seed, approvals or Wave 0 file
+    that cannot be read or is not JSON; a seed that breaks 0149's rules or
+    Wave 0's; a file whose sha256 is not signed for its kind and version;
+    a medicine sign-off without `licences.nigeriaEml8`, or a file with ATC
+    codes whose sign-off lacks `licences.whoccAtc`;
+  - in its transaction: a schema without 0149; a version already loaded;
+    an id of the active version that the new seed drops without listing it
+    in its retired ids with a reason;
+  - a lock still busy after 5 seconds: "ehr.catalog_versions or another
+    catalogue load stayed busy for 5 seconds; nothing loaded; run the
+    release again at a quieter time".
+
+  The database refuses a retired, changed or reused id on its own, and the
+  whole load rolls back. In one transaction it takes its advisory lock and
+  SHARE ROW EXCLUSIVE on the versions, records the new retired ids, inserts
+  the version (with `approvals_sha256`, the approvals file's own sha256) and
+  its rows, then turns the old version off and the new one on. `--dry-run`
+  rolls back. It prints one line: what loaded, the seed's and the approvals
+  file's sha256, and what it replaced.
+- **Where it runs in production:** only in the migration image, which
+  carries `docs/codes` (the approvals file, the Wave 0 codes and the signed
+  seed files) at `/app/docs/codes`, where the loader looks. A change under
+  `docs/codes/` rebuilds the migration image. The deploy tool
+  (`scripts/production_deployment.py`) has an opt-in catalogue phase:
+  - It runs only when the release asks for it: a dispatch of "Production
+    backend candidates" with `catalog_load` set to `medicine`, `lab_test`
+    or both (`CATALOG_LOAD`; a push always deploys with `none`), in a
+    release that carries the migration image. Any other value, a rollback,
+    or a release without the migration image is refused before it starts.
+  - It runs after the migration phase has succeeded (after the apply and the
+    final plan, or after a plan that found nothing pending), before any
+    service is updated: one Fargate task per seed on the migration task
+    definition the release registered, its command
+    `scripts/load-catalog.mjs --seed /app/docs/codes/<file>`.
+  - A refusal (exit 2) stops the release (`CATALOG_LOAD_REFUSED`) and prints
+    the loader's own line; any other failure stops it too. The receipt
+    records each load (`catalog_checks`: kind, version, the seed's and the
+    approvals file's sha256, items, the version replaced). Each seed is its
+    own transaction: if the lab tests are refused after the medicines
+    loaded, the medicines stay loaded and the failed receipt names them.
+  - Not asked, the release runs exactly as before.
+- **Before the first real load:**
+  - #312's open points: the Wave 0 codes, the 13 uncoded tests and the four
+    over-long fields. The builder shows each one until it is settled.
+  - The owner's WHO licence answer (CC BY-NC-SA 3.0 IGO), before the WHO
+    rows ship.
+  - The owner's confirmation that the Nigeria EML 8th edition may be used,
+    recorded in the sign-off as `licences.nigeriaEml8`; the loader refuses a
+    medicine file without it.
+  - The WHOCC terms answer, recorded as `licences.whoccAtc`, only if ATC
+    codes are wanted; until then the seed is built without `--with-atc` and
+    every `atcCode` is `null`.
+  - The clinical lead's sign-off in `catalog-approvals.json`, and the seeds
+    committed as `docs/codes/hid-medicines.json` and `hid-lab-tests.json`.
+- **Proven** on a throwaway copy (NOBYPASSRLS schema owner) with #312's
+  list as of 23 Nov and a synthetic approvals file recording both licence
+  answers:
+  - 1,616 medicines (4 held back, 4 retired) and 145 tests (13 held back)
+    load. 80 of the 86 brands map, onto 238 items; 6 are listed as not
+    mapped. Wave 0: WIDAL and EUCR kept (as LAB-0145 and LAB-0113), 9
+    recoded to LOINC, MP-SMEAR and HIV-SCREEN missing.
+  - As the EHR runtime, every medicine name and other name typed exactly
+    (1,914) finds its item, and so does every lab-test name and other name
+    of two or more characters (529; "K" and "E" are under the search's
+    2-character minimum). `panadol` finds the 8 paracetamol items and
+    `augmentin` the 7 amoxicillin + clavulanic acid items.
+  - An unsigned file, `--approvals` under production, a malformed approvals
+    file, a sign-off without the Nigeria EML confirmation, an ATC file
+    without the WHOCC answer, a second load of a version, a held lock
+    (refused after 5.07 s) and a version that drops the highest id
+    (MED-01624) without retiring it are each refused with exit 2, nothing
+    written. With MED-01624 retired with a reason, that version loads,
+    replaces 2026.1 (kept) and records MED-01624 as retired.
 
 ### Target
 
