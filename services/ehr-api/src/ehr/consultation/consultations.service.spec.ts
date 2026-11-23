@@ -408,16 +408,20 @@ describe('EHR-C5 one-call consultation (service)', () => {
       expect(db.savepoints).toEqual([...each, ...each]);
       expect(db.audits.map((row) => row.action)).toEqual(['ehr.encounter.create', 'ehr.note.create',
         'ehr.vital.create', 'ehr.diagnosis.create', 'ehr.diagnosis.create']);
-      // A warning with the SQLSTATE only (none for a schema without 0151): no patient, member, facility or request id.
-      expect(warn.mock.calls).toEqual(code === '42883' ? []
-        : [[`A recent diagnosis could not be recorded (${code})`], [`A recent diagnosis could not be recorded (${code})`]]);
+      // A warning with the SQLSTATE and the request's correlation id, as other ehr-api warnings log them (none for a
+      // schema without 0151): no patient, member, facility or account id.
+      const warning = { message: 'A recent diagnosis could not be recorded', sqlState: code,
+        correlationId: 'correlation-0001' };
+      expect(warn.mock.calls).toEqual(code === '42883' ? [] : [[warning], [warning]]);
+      expect(JSON.stringify(warn.mock.calls)).not.toMatch(new RegExp([patientId, membershipId, facilityId, accountId]
+        .join('|')));
     }
   });
 
   it('saves a single diagnosis (the route) when its pick meets a deadlock or a lock not available', async () => {
     for (const code of ['40P01', '55P03']) {
       const db = fakeDatabase();
-      jest.spyOn((db.diagnoses as unknown as { logger: { warn: () => void } }).logger, 'warn')
+      const warn = jest.spyOn((db.diagnoses as unknown as { logger: { warn: () => void } }).logger, 'warn')
         .mockImplementation(() => undefined);
       const context = contextFor('correlation-0001');
       const visit = await db.encounters.create(context, patientId, { ...body().visit, reuseOpenVisit: true },
@@ -428,6 +432,8 @@ describe('EHR-C5 one-call consultation (service)', () => {
       expect(db.tables().diagnoses).toHaveLength(1);
       expect(db.tables().recent).toEqual([]);
       expect(db.savepoints).toEqual(['savepoint', 'rollback to savepoint']);
+      expect(warn.mock.calls).toEqual([[{ message: 'A recent diagnosis could not be recorded', sqlState: code,
+        correlationId: 'correlation-0001' }]]);
     }
   });
 

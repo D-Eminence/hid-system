@@ -2001,10 +2001,15 @@ live table is altered.
     per membership; the oldest drop off. It never waits for another save:
     it first takes the membership's recording lock,
     `pg_try_advisory_xact_lock(7409, hashtext(membership id))` (class key
-    7409 for this record only; no other code takes the two-key form), held
-    to the end of the save's transaction, and records nothing while another
-    transaction holds it. So two saves of one clinician cannot deadlock on
-    their picks or on the 200-cap trim; the later one may skip its record.
+    7409 for this record only), held to the end of the save's transaction,
+    and records nothing while another transaction holds it. No other code
+    takes the two-key form: ehr-api's `allergy-reader.ts` takes the one-key
+    form on `hashtext` of a text key, and every other advisory lock in the
+    repository the one-key form on `hashtextextended` of a text key.
+    PostgreSQL keeps the one-key and two-key key spaces apart, so class key
+    7409 cannot collide with any of them. So two saves of one clinician
+    cannot deadlock on their picks or on the 200-cap trim; the later one
+    may skip its record.
   - `ehr.recent_diagnoses(limit)` gives the session's membership's picks at
     its facility, newest first, and none without the permission. 22023
     `RECENT_DIAGNOSES_INVALID` outside 1-50.
@@ -2015,10 +2020,11 @@ live table is altered.
   the clinical save: any failure of the record, a schema without 0151
   (42883), a deadlock (40P01) or a lock not available (55P03) included, is
   rolled back to the savepoint and the diagnosis saves as before, with a
-  warning naming only the SQLSTATE (none for 42883). Only a serialization
-  failure (40001) in a SERIALIZABLE transaction is passed on, so the whole
-  transaction is run again; the diagnosis saves are READ COMMITTED. An
-  idempotent replay records nothing.
+  warning naming the SQLSTATE and the request's correlation id, as other
+  ehr-api warnings do, and nothing of the patient or the member (none for
+  42883). Only a serialization failure (40001) in a SERIALIZABLE
+  transaction is passed on, so the whole transaction is run again; the
+  diagnosis saves are READ COMMITTED. An idempotent replay records nothing.
 - **Route:** `GET /api/v1/ehr/terminology/diagnoses/recent?limit=` as
   above. It takes `X-Facility-Id` and no purpose header, and needs
   `ehr.diagnosis.write`. The answer is never kept (the global

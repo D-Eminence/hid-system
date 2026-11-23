@@ -46,16 +46,22 @@
 --
 -- The recording lock (at run time, not while applying): the two-key form
 -- pg_try_advisory_xact_lock(7409, hashtext(membership id)), class key 7409
--- for this record only. No other code in this repository takes the two-key
--- form (every other advisory lock here takes the one-key form on
--- hashtextextended of a text key, and the two key spaces never overlap),
--- and nothing else may use class key 7409. Only this function writes the
--- table, always under its membership's lock, so the upsert and the
--- 200-cap trim never wait on another transaction's rows (two saves of one
--- clinician recording the same codes in opposite orders, or a trim taking
--- the oldest row another save is about to keep, cannot deadlock). The
--- save that finds the lock taken skips its record; two memberships whose
--- ids share a hash only skip a record now and then.
+-- for this record only. A survey of every advisory lock in this
+-- repository (23 November 2026) found no other code taking the two-key
+-- form: ehr-api's allergy-reader.ts takes the one-key form on hashtext of
+-- a text key (pg_advisory_xact_lock(hashtext('ehr.allergy:' || patient
+-- id))), and every other one (the migrations, the scripts, ehr-api and
+-- identity-api; waiting or try, transaction or session) takes the one-key
+-- form on hashtextextended of a text key. PostgreSQL keeps the one-key and
+-- two-key key spaces apart (objsubid 1 and 2 in pg_locks), so class key
+-- 7409 cannot collide with any of them; nothing else may use class key
+-- 7409. Only this function writes the table, always under its
+-- membership's lock, so the upsert and the 200-cap trim never wait on
+-- another transaction's rows (two saves of one clinician recording the
+-- same codes in opposite orders, or a trim taking the oldest row another
+-- save is about to keep, cannot deadlock). The save that finds the lock
+-- taken skips its record; two memberships whose ids share a hash only
+-- skip a record now and then.
 --
 -- Old services on this schema: nothing calls the functions. New services
 -- on a schema without this file: the record call fails inside its

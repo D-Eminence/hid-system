@@ -108,7 +108,7 @@ export class DiagnosesService {
           ],
         );
         const row = this.single(result.rows[0]);
-        await this.recordRecent(client, row);
+        await this.recordRecent(client, context, row);
         return { value: row, id: row.id };
       },
       (id) => this.findById(client, context, patientId, id),
@@ -129,10 +129,11 @@ export class DiagnosesService {
    * ROLLBACK TO SAVEPOINT the rest of the transaction commits normally. Only
    * a serialization failure (40001) in a SERIALIZABLE transaction is passed
    * on, so withTransaction runs the whole transaction again (no diagnosis
-   * path is SERIALIZABLE today). The warning names the SQLSTATE only, no
-   * identifier. An idempotent replay records nothing.
+   * path is SERIALIZABLE today). The warning names the SQLSTATE and the
+   * request's correlation id, as other ehr-api warnings do, and nothing of
+   * the patient or the member. An idempotent replay records nothing.
    */
-  private async recordRecent(client: PoolClient, row: DiagnosisRow): Promise<void> {
+  private async recordRecent(client: PoolClient, context: DataAccessContext, row: DiagnosisRow): Promise<void> {
     await client.query('savepoint ehr_recent_diagnosis');
     try {
       await client.query('select ehr.record_recent_diagnosis($1, $2, $3)', [row.codeSystem, row.code, row.display]);
@@ -141,7 +142,10 @@ export class DiagnosesService {
       const code = sqlState(error);
       await client.query('rollback to savepoint ehr_recent_diagnosis');
       if (code === '40001' && await isSerializable(client)) throw error;
-      if (code !== '42883') this.logger.warn(`A recent diagnosis could not be recorded (${code})`);
+      if (code !== '42883') {
+        this.logger.warn({ message: 'A recent diagnosis could not be recorded', sqlState: code,
+          correlationId: context.correlationId });
+      }
     }
   }
 

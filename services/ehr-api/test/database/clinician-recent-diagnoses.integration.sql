@@ -3,7 +3,8 @@
 --   1. a doctor's picks are recorded in the session's membership and
 --      facility, newest first, with a count; the same pick again updates
 --      its display, time and count; no code records nothing; a member
---      without ehr.diagnosis.write records and reads nothing;
+--      without ehr.diagnosis.write records and reads nothing; the record
+--      never waits for another save's recording lock;
 --   2. the same account at another facility (another membership) sees its
 --      own picks only; no session, a malformed one, or a membership
 --      presented at another facility reads and records nothing;
@@ -14,8 +15,13 @@
 -- and case 3c) runs as the EHR runtime (set local role hid_ehr_runtime ...
 -- reset role); only the direct counts of the table run as its owner. The
 -- concurrency of the record (it never waits; a save that finds the
--- membership's recording lock taken skips its record) needs two sessions
--- and is proven outside this suite; 1c checks the lock is taken.
+-- membership's recording lock taken skips its record) needs two sessions,
+-- which no suite here holds (none uses dblink or a second connection), so
+-- it is proven outside this suite. Here 1c checks the record takes the
+-- lock, and 1f checks the function as stored: it tries the lock with
+-- pg_try_advisory_xact_lock(7409, ...) before it writes, returns when the
+-- lock is taken, and takes no waiting advisory lock. A blocking
+-- pg_advisory_xact_lock in its place, or the early return dropped, fails 1f.
 -- Synthetic values only: uuid prefix 151, example.invalid addresses.
 set plpgsql.variable_conflict = error;
 begin;
@@ -119,6 +125,18 @@ select pg_temp.as_member('staff:151-pharmacist', '15100000-0000-4000-8000-000000
 set local role hid_ehr_runtime;
 select pg_temp.expect('1e another account''s membership in the session reads nothing', '', pg_temp.recent());
 reset role;
+select pg_temp.expect('1f the record never waits: before it writes, it tries the membership''s recording lock '
+  || '(pg_try_advisory_xact_lock, class key 7409) and returns when the lock is taken; it takes no waiting '
+  || 'advisory lock', 'returns when taken: true|tried before the writes: true|waiting advisory lock: false',
+  (select 'returns when taken: '
+          || (proc.prosrc ~ 'if\s+not\s+pg_try_advisory_xact_lock\(7409,\s*hashtext\(membership_value::text\)\)\s+then\s+return;\s+end\s+if;')::text
+          || '|tried before the writes: '
+          || (strpos(proc.prosrc, 'pg_try_advisory_xact_lock(7409,')
+                between 1 and least(strpos(proc.prosrc, 'insert into ehr.clinician_recent_diagnoses'),
+                                    strpos(proc.prosrc, 'delete from ehr.clinician_recent_diagnoses')) - 1)::text
+          || '|waiting advisory lock: '
+          || (proc.prosrc ~* 'pg_advisory(_xact)?_lock(_shared)?\s*\(')::text
+     from pg_proc proc where proc.oid = 'ehr.record_recent_diagnosis(text,text,text)'::regprocedure));
 
 -- 2. Another facility, no session.
 select pg_temp.as_member('staff:151-doctor', '15100000-0000-4000-8000-000000000042', '15100000-0000-4000-8000-000000000022');
