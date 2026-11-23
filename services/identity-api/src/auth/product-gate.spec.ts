@@ -315,18 +315,19 @@ describe('the permission codes the gate reads are the database seeds\' (auth.rol
     const holders = (code: string) => [...SEEDS.entries()].filter(([, set]) => set.has(code)).map(([role]) => role).sort();
     expect(holders('ehr.encounter.write')).toEqual(['clinician', 'doctor', 'nurse', 'receptionist']);
     expect(holders('organization.manage')).toEqual(['admin', 'org_admin']);
-    expect(holders('lab.work-item.read')).toEqual(['clinician', 'lab', 'nurse']);
+    expect(holders('lab.work-item.read')).toEqual(['admin', 'clinician', 'doctor', 'lab', 'nurse']);
     expect(holders('lab.work-item.accept')).toEqual(['clinician', 'doctor', 'lab', 'nurse']);
-    expect(holders('pharmacy.work-item.read')).toEqual(['clinician', 'nurse', 'pharmacist']);
+    expect(holders('pharmacy.work-item.read')).toEqual(['admin', 'clinician', 'doctor', 'nurse', 'pharmacist']);
     expect(holders('pharmacy.dispensing.read')).toEqual(['admin', 'clinician', 'doctor', 'nurse', 'pharmacist']);
     expect(holders('outreach.registration.read')).toEqual(['admin', 'clinician', 'nurse', 'org_admin',
       'org_admin_awaiting_review', 'outreach_organiser', 'outreach_volunteer', 'receptionist']);
     expect(holders('outreach.campaign.read')).toEqual(['admin', 'clinician', 'nurse', 'org_admin',
       'org_admin_awaiting_review', 'outreach_organiser', 'outreach_volunteer', 'receptionist']);
     // Q111 A: doctors keep ocr.job.write (checking readings, confirming their
-    // patient); starting a reading also needs ocr.job.start, which they lack.
+    // patient); starting a reading also needs ocr.job.start, which 0136 took
+    // from them and 0144 (Q134 B) gives back.
     expect(holders('ocr.job.write')).toEqual(['clinician', 'doctor', 'nurse', 'receptionist']);
-    expect(holders('ocr.job.start')).toEqual(['clinician', 'nurse', 'receptionist']);
+    expect(holders('ocr.job.start')).toEqual(['clinician', 'doctor', 'nurse', 'receptionist']);
     // Q112 A: only the front desk holds the "own uploads" reads, and it holds
     // neither full read.
     expect(holders('ehr.document.read-own')).toEqual(['receptionist']);
@@ -419,18 +420,19 @@ describe('the permission codes the gate reads are the database seeds\' (auth.rol
     expect(PRODUCTS.filter((product) => facilityAdmittedOnProduct(facility, product))).toEqual(['ehr', 'migrate']);
   });
 
-  it('doctors and administrators lose the 0136 rows; the kept rows stay (doctors keep checking, Q111 A)', () => {
+  it('doctors lose the 0136 outreach rows; 0144 (Q134 B) gives doctors and administrators back the work lists, and doctors starting a reading', () => {
     const doctor = permissionsOf('doctor');
-    for (const code of ['ocr.job.start', 'outreach.campaign.read', 'outreach.campaign.write', 'outreach.registration.read',
-      'outreach.registration.write', 'lab.work-item.read', 'pharmacy.work-item.read']) {
+    for (const code of ['outreach.campaign.read', 'outreach.campaign.write', 'outreach.registration.read',
+      'outreach.registration.write']) {
       expect(doctor).not.toContain(code);
     }
     expect(doctor).toEqual(expect.arrayContaining(['ocr.job.write', 'ocr.job.read', 'ocr.validation.write',
       'ocr.patient.confirm', 'ocr.publication.write', 'lab.work-item.accept', 'ehr.lab-request.read',
-      'ehr.prescription.read', 'lab.result.released.read']));
+      'ehr.prescription.read', 'lab.result.released.read', 'ocr.job.start', 'lab.work-item.read',
+      'pharmacy.work-item.read']));
     const admin = permissionsOf('admin');
-    expect(admin).not.toContain('lab.work-item.read');
-    expect(admin).not.toContain('pharmacy.work-item.read');
+    expect(admin).toContain('lab.work-item.read');
+    expect(admin).toContain('pharmacy.work-item.read');
     expect(admin).toEqual(expect.arrayContaining(['identity.registration.approve', 'organization.manage',
       'workforce.manage', 'audit.read']));
     expect(permissionsOf('nurse')).toEqual(expect.arrayContaining(['ehr.note.write', 'ocr.job.write', 'ocr.job.start',

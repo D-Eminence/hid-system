@@ -349,14 +349,17 @@
       "lab.import.write",
       "lab.result.released.read",
       "lab.work-item.accept",
+      "lab.work-item.read",
       "ocr.job.read",
+      "ocr.job.start",
       "ocr.job.write",
       "ocr.patient.confirm",
       "ocr.publication.write",
       "ocr.validation.write",
       "pharmacy.dispensing.read",
       "pharmacy.import.read",
-      "pharmacy.import.write"
+      "pharmacy.import.write",
+      "pharmacy.work-item.read"
     ],
     "clinician": [
       "ehr.diagnosis.read",
@@ -455,6 +458,7 @@
       "lab.execution.read",
       "lab.import.read",
       "lab.result.released.read",
+      "lab.work-item.read",
       "ocr.job.read",
       "organization.manage",
       "outreach.campaign.read",
@@ -463,6 +467,7 @@
       "outreach.registration.write",
       "pharmacy.dispensing.read",
       "pharmacy.import.read",
+      "pharmacy.work-item.read",
       "workforce.manage"
     ],
     "org_admin": [

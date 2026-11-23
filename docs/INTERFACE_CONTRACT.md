@@ -8727,6 +8727,34 @@ and administrators; hide Outreach from doctors; hide visits and the Migrate
 desk from laboratory staff. Screens already follow the permissions list in the
 session, so most of this happens by itself.
 
+### 0144. Q134 B: the work lists and starting a reading given back (Release B)
+
+Release A's dry run stopped at 0136's real-staff guard: 9 hospital
+administrators and 1 doctor would lose these permissions. The owner decided
+Q134 B: "accept 0136's losses for 9 admins and 1 doctor; raise its limits to
+these counts and restore their when done". 0144 gives back five role rows, so
+it applies to every administrator and doctor, as before 0136:
+
+| Role | After 0136 | After 0144 |
+| --- | --- | --- |
+| `doctor` | no `ocr.job.start`; neither work list | `ocr.job.start`, `lab.work-item.read`, `pharmacy.work-item.read` (with `ocr.job.write` and `ocr.job.read`, kept by Q111 A, a doctor starts and retries readings again) |
+| `admin` (hospital administrator) | `ocr.job.read` only | `ocr.job.read`, `lab.work-item.read`, `pharmacy.work-item.read` |
+
+Everything else 0136 did stays. Doctors stay off Outreach, and laboratory
+staff stay off visits and readings. The front desk keeps its six rows and
+its own-uploads reads. Nurses and clinicians keep `ocr.job.start`, and the
+three codes stay.
+
+From Release B on, the 403s above for these two roles go away:
+- doctors: `POST /ocr/jobs`, `POST /ocr/jobs/:jobId/retry`, and the lab and
+  pharmacy work-item routes;
+- administrators: `GET /lab/work-items` and `GET /pharmacy/work-items` (each
+  with `/:id`).
+
+No service changes. Screens follow the session's permission list, so the
+Laboratory and Pharmacy work lists and "start reading" show again for these
+roles. Undo: delete the five rows (owner's signature needed).
+
 ## ORD-2. This facility's own pharmacy and lab work; prescriptions sent to the hospital's own pharmacy (Akos Release A, migration 0133)
 
 Owner decisions of 18 November 2026: activated prescriptions go
