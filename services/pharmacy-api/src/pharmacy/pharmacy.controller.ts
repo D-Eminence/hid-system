@@ -1,8 +1,10 @@
-import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Query, Req, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { InternalCaller, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
 import { AcceptEhrPrescriptionDto } from './dto/accept-ehr-prescription.dto';
+import { AcceptWorkItemDto } from './dto/accept-work-item.dto';
 import { CreateDispensingDto, ReverseDispensingDto } from './dto/dispensing.dto';
 import { ListImportedMedicationsQueryDto, OcrMedicationImportBatchDto, OcrMedicationImportDto }
   from './dto/ocr-medication-import.dto';
@@ -33,6 +35,24 @@ export class PharmacyController {
   getWorkItem(@Param('workItemId', new ParseUUIDPipe({ version: '4' })) id: string,
     @Req() request: HidRequest) {
     return this.pharmacy.getWorkItem(requireRequestContext(request), id);
+  }
+
+  /**
+   * ORD-4: a pharmacist accepts a work item before dispensing it. A browser
+   * write (Origin and CSRF checks as for other browser writes), with a
+   * required Idempotency-Key and exactly { expectedWorkItemVersion }. 201 when
+   * this call recorded the acceptance, 200 with `alreadyAccepted: true` when
+   * the item was already accepted, by anyone and in any way.
+   */
+  @Post('work-items/:workItemId/accept')
+  @RequirePermissions('pharmacy.work-item.accept')
+  async acceptWorkItem(@Param('workItemId', new ParseUUIDPipe({ version: '4' })) id: string,
+    @Body() input: AcceptWorkItemDto, @Headers('idempotency-key') key: string | undefined,
+    @Req() request: HidRequest, @Res({ passthrough: true }) response: Response) {
+    const answer = await this.pharmacy.acceptWorkItem(requireRequestContext(request), id, input,
+      requireIdempotencyKey(key));
+    response.status(answer.alreadyAccepted ? 200 : 201);
+    return answer;
   }
 
   @Post('work-items/:workItemId/dispensings')

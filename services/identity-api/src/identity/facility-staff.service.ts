@@ -123,6 +123,41 @@ interface AdminStaffRow extends QueryResultRow {
   created_at: Timestamp;
 }
 
+interface LicenceRow extends QueryResultRow {
+  membership_id: string;
+  role_code: string;
+  licence_body: string | null;
+  licence_number_hint: string | null;
+  vouched_by_name: string | null;
+  vouched_at: Timestamp;
+  verification_method: string | null;
+}
+
+/**
+ * SX-4 (0139): one licence per licensed active role, read only where 0139 is
+ * applied (else the members carry no `licences`, and `licence` alone, as
+ * before). The check and the read run in the list's own read-only
+ * transaction.
+ */
+export const LICENCE_READS_PRESENT_SQL =
+  `select to_regprocedure('identity.list_facility_staff_licences()') is not null as present`;
+export const FACILITY_STAFF_LICENCES_SQL = 'select * from identity.list_facility_staff_licences()';
+export const ADMIN_FACILITY_STAFF_LICENCES_SQL = 'select * from identity.admin_list_facility_staff_licences($1)';
+
+async function licenceRows(client: { query: <Row extends QueryResultRow>(sql: string, values?: unknown[]) => Promise<{ rows: Row[] }> },
+  sql: string, values: unknown[] = []): Promise<LicenceRow[] | undefined> {
+  const present = (await client.query<{ present: boolean }>(LICENCE_READS_PRESENT_SQL)).rows[0]?.present === true;
+  return present ? (await client.query<LicenceRow>(sql, values)).rows : undefined;
+}
+
+function licencesOf(rows: LicenceRow[] | undefined, membershipId: string | null) {
+  if (!rows) return {};
+  return { licences: rows.filter((row) => row.membership_id === membershipId).map((row) => ({
+    role: row.role_code, body: row.licence_body, numberHint: row.licence_number_hint,
+    vouchedBy: row.vouched_by_name, vouchedAt: iso(row.vouched_at), method: row.verification_method,
+  })) };
+}
+
 interface FoundInvitationRow extends QueryResultRow {
   invitation_id: string;
   reference: string;
@@ -170,11 +205,13 @@ export class FacilityStaffService {
     let state: StateRow | undefined;
     let members: MemberRow[];
     let invitations: InvitationRow[];
+    let licences: LicenceRow[] | undefined;
     try {
-      ({ state, members, invitations } = await this.database.withTransaction(context, async (client) => ({
+      ({ state, members, invitations, licences } = await this.database.withTransaction(context, async (client) => ({
         state: (await client.query<StateRow>('select * from identity.facility_staff_management_state()')).rows[0],
         members: (await client.query<MemberRow>('select * from identity.list_facility_staff()')).rows,
         invitations: (await client.query<InvitationRow>('select * from identity.list_facility_staff_invitations()')).rows,
+        licences: await licenceRows(client, FACILITY_STAFF_LICENCES_SQL),
       }), { readOnly: true }));
     } catch (error) {
       throw staffCommandProblem(error, 'staff');
@@ -221,6 +258,7 @@ export class FacilityStaffService {
         joinedAt: iso(row.joined_at),
         licence: row.licence_body ? { body: row.licence_body, numberHint: row.licence_number_hint,
           vouchedBy: row.vouched_by_name, vouchedAt: iso(row.vouched_at), method: row.verification_method } : null,
+        ...licencesOf(licences, row.membership_id),
       })),
       invitations: invitations.map((row) => ({
         invitationId: row.invitation_id,
@@ -321,16 +359,18 @@ export class FacilityStaffService {
   async adminStaff(context: PlatformAdminContext, facilityId: string) {
     let facility: AdminFacilityRow | undefined;
     let rows: AdminStaffRow[];
+    let licences: LicenceRow[] | undefined;
     try {
-      ({ facility, rows } = await this.database.withPlatformTransaction(context, async (client) => {
+      ({ facility, rows, licences } = await this.database.withPlatformTransaction(context, async (client) => {
         const header = await client.query<AdminFacilityRow>(
           `select facility.id::text as id, facility.name, state.review_state, state.organization_type, state.product_code
              from identity.facilities facility
              left join lateral identity.organization_self_service_state(facility.organization_id) state on true
             where facility.id = $1`, [facilityId]);
-        if (!header.rows[0]) return { facility: undefined, rows: [] };
+        if (!header.rows[0]) return { facility: undefined, rows: [], licences: undefined };
         return { facility: header.rows[0],
-          rows: (await client.query<AdminStaffRow>('select * from identity.admin_list_facility_staff($1)', [facilityId])).rows };
+          rows: (await client.query<AdminStaffRow>('select * from identity.admin_list_facility_staff($1)', [facilityId])).rows,
+          licences: await licenceRows(client, ADMIN_FACILITY_STAFF_LICENCES_SQL, [facilityId]) };
       }, { readOnly: true }));
     } catch (error) {
       throw this.adminProblem(error);
@@ -364,7 +404,8 @@ export class FacilityStaffService {
           ? { review: facility.review_state, organizationType: facility.organization_type,
             productCode: facility.product_code } : null,
       },
-      members: rows.filter((row) => row.kind !== 'invitation').map(item),
+      members: rows.filter((row) => row.kind !== 'invitation')
+        .map((row) => ({ ...item(row), ...licencesOf(licences, row.membership_id) })),
       invitations: rows.filter((row) => row.kind === 'invitation').map(item),
     };
   }

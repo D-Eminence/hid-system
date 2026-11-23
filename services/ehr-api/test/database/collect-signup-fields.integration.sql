@@ -505,7 +505,9 @@ begin
     raise exception 'The erasure left a value or removed the row';
   end if;
   if not exists (select 1 from audit.events where action = 'identity.patient-facility-contact.erase'
-                  and details = '{"reason": "erasure_request", "facilityContacts": 1, "registrationContacts": 1, "statedHealthIds": 0}'::jsonb) then
+                  -- 0145 (ID-7) counts an unknown record's held contact too.
+                  and details = '{"reason": "erasure_request", "facilityContacts": 1, "registrationContacts": 1, "statedHealthIds": 0,
+                                  "unknownRecordContacts": 0}'::jsonb) then
     raise exception 'The erasure was not audited with counts only';
   end if;
   begin
@@ -608,7 +610,8 @@ do $$ begin
   end if;
   if not exists (select 1 from audit.events where action = 'identity.patient-facility-contact.erase'
                   and patient_id = 'c1220600-0000-4000-8000-000000000002'
-                  and details = '{"reason": "account_deleted", "facilityContacts": 1, "registrationContacts": 1, "statedHealthIds": 1}'::jsonb) then
+                  and details = '{"reason": "account_deleted", "facilityContacts": 1, "registrationContacts": 1, "statedHealthIds": 1,
+                                  "unknownRecordContacts": 0}'::jsonb) then
     raise exception 'The account-deletion erasure was not audited with counts only';
   end if;
 end $$;

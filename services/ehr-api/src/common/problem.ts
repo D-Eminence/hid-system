@@ -27,6 +27,8 @@ export class DomainProblem extends HttpException {
     public readonly code: string,
     detail: string,
     public readonly errors?: ProblemDetails['errors'],
+    /** Extra fields the answer carries (EHR-C6: the existing draft's `draftId`); never a standard field. */
+    public readonly extensions?: Readonly<Record<string, string>>,
   ) {
     super(detail, status);
   }
@@ -74,6 +76,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
     }
 
     const problem: ProblemDetails = {
+      ...(domainProblem?.extensions ?? {}),
       type: `https://healthidentitydirectory.com/problems/${code.toLowerCase().replaceAll('_', '-')}`,
       title: this.title(status),
       status,

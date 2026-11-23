@@ -75,10 +75,14 @@ describe('staff queries are pinned (golden)',()=>{
   // Measured at 34d69557: today's staff evidence query (LOCAL_EVIDENCE_QUERY with the
   // $4 permission filter and completed-visit diagnoses and vitals) with only
   // ",patient_id" added to the final select, and today's staff document query.
+  // EHR-C8b (0142) changed the vitals branch on purpose: readings entered in
+  // error are left out and the status columns stay out of the fields (was
+  // fd73cd5d42d12fb4f1faa20cc4f22851aed5eda132c87d614cfb1a02c48b250f and
+  // 0621ed428f74b62604eb2566a1654a19cf41bdee0d33330a8ad5eb52e1d53bd5).
   it('keeps the staff evidence query exactly as it was, plus patient_id in the final select',()=>{
     expect(sha(STAFF_EVIDENCE_QUERY.replace(',origin_hint,patient_id from sources',',origin_hint from sources')))
-      .toBe('fd73cd5d42d12fb4f1faa20cc4f22851aed5eda132c87d614cfb1a02c48b250f');
-    expect(sha(STAFF_EVIDENCE_QUERY)).toBe('0621ed428f74b62604eb2566a1654a19cf41bdee0d33330a8ad5eb52e1d53bd5');
+      .toBe('b15ada065bb22c1564484a2ca6bc993da04bd24eec626c75d6ccf81be681bffc');
+    expect(sha(STAFF_EVIDENCE_QUERY)).toBe('3ad9ad00df95e2bb36267cafecfc20cefde2d46f364b1519a935d9012c0a7a6c');
     expect(STAFF_EVIDENCE_QUERY).toContain('where patient_id=$1 and kind=any($4::text[]) and (kind');
     expect(STAFF_EVIDENCE_QUERY).not.toBe(PATIENT_EVIDENCE_QUERY);
   });

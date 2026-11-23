@@ -1,5 +1,5 @@
 import type { DataAccessContext } from '../common/request-context';
-import { DatabaseService, OWN_FACILITY_WORK } from './database.service';
+import { DatabaseService, OWN_FACILITY_WORK, VITALS_STATUS_AWARE } from './database.service';
 
 // 0133 D13 and D14 (owner's Q120 B and Q121 A): the new ehr-api sets app.own_facility_work to '0133' in every staff
 // transaction, so the order-route send and its resend flag follow D14's rule. It never sets it in a patient-self,
@@ -35,7 +35,13 @@ const switchValue = (calls: Call[]) => {
   return parameter ? settings.values[Number(parameter[1]) - 1] : undefined;
 };
 const mentionsSwitch = (calls: Call[]) => calls.some((call) => call.sql.includes('own_facility_work')
-  || call.values.includes(OWN_FACILITY_WORK));
+  || call.values.includes(OWN_FACILITY_WORK) || call.sql.includes('vitals_status') || call.values.includes(VITALS_STATUS_AWARE));
+const VITALS_SWITCH = /set_config\('app\.vitals_status',\s*\$(\d+),\s*true\)/;
+const vitalsSwitchValue = (calls: Call[]) => {
+  const settings = calls.find((call) => call.sql.includes('set_config'))!;
+  const parameter = VITALS_SWITCH.exec(settings.sql);
+  return parameter ? settings.values[Number(parameter[1]) - 1] : undefined;
+};
 
 describe('EHR DatabaseService staff session (0133 D13 and D14, owner\'s Q120 B and Q121 A)', () => {
   it('sets app.own_facility_work to 0133 in every staff transaction, beside the staff context', async () => {
@@ -61,7 +67,15 @@ describe('EHR DatabaseService staff session (0133 D13 and D14, owner\'s Q120 B a
     expect(connections.map(switchValue)).toEqual(['0133', '0133', '0133', '0133']);
   });
 
-  it('never sets it in a patient-self, system or workload transaction', async () => {
+  it('sets app.vitals_status to 0142 in every staff transaction (0142 D2: this image reads withdrawn readings)', async () => {
+    const { database, connections } = service();
+    await database.withTransaction(context, async () => 'done');
+    await database.withTransaction(context, async () => 'read', { readOnly: true });
+    expect(VITALS_STATUS_AWARE).toBe('0142');
+    expect(connections.map(vitalsSwitchValue)).toEqual(['0142', '0142']);
+  });
+
+  it('never sets either switch in a patient-self, system or workload transaction', async () => {
     const { database, connections } = service();
     await database.withPatientTransaction({ subject: 'synthetic:patient', accountId: 'account', sessionId: 'session',
       patientId: 'patient', expiresAt: new Date(Date.now() + 30_000).toISOString() }, 'correlation', async () => 'done');

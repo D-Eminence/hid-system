@@ -36,8 +36,9 @@ const BASE_EVIDENCE_QUERY = `with sources as (
  from ehr.lab_requests l where l.status not in ('draft','entered_in_error')
  union all select 'vital',v.id,v.patient_id,v.row_version::text,'Vital measurements',v.recorded_at,v.recorded_at,
  'Recorded vital measurements','recorded',
- (to_jsonb(v)-array['id','encounter_id','patient_id','facility_id','created_by','created_by_membership_id','created_at','updated_at','row_version','current_correction_no'])||coalesce(c.replacement_values,'{}'::jsonb)||jsonb_build_object('_encounterId',v.encounter_id),null
+ (to_jsonb(v)-array['id','encounter_id','patient_id','facility_id','created_by','created_by_membership_id','created_at','updated_at','row_version','current_correction_no','status','status_changed_at'])||coalesce(c.replacement_values,'{}'::jsonb)||jsonb_build_object('_encounterId',v.encounter_id),null
  from ehr.vitals v left join ehr.vital_corrections c on c.vital_id=v.id and c.correction_no=v.current_correction_no and c.patient_id=v.patient_id
+ where coalesce(to_jsonb(v)->>'status','recorded')='recorded'
  union all select 'import',r.id,r.patient_id,v.id::text,coalesce(r.source_payload->>'title','Imported medical record'),
  v.source_created_at,v.source_created_at,case when r.origin='patient-provided' then 'Patient reported imported history' else 'Provider authored imported history; original verification not inferred' end,'imported',
  jsonb_build_object('category',r.source_payload->>'category','infoType',r.source_payload->>'info_type','record',v.source_payload->'record','notes',v.source_payload->'notes','structuredData',v.source_payload->'structured_data','transcriptionText',v.source_payload->'transcription_text','transcriptionStatus','original source text; extraction quality not independently verified'),r.origin
@@ -120,7 +121,7 @@ export function evidenceQuery(audience: EvidenceAudience): string {
     `from ehr.lab_requests l ${completedEncounter('l')} where l.status in ('active','on_hold','completed') and coalesce(l.test_display,'') !~* '${SENSITIVE_TEST_SQL_PATTERN}'`
     + ` and not (btrim(coalesce(l.test_code_system,'')) ~* '${LOINC_SYSTEM_SQL_PATTERN}' and btrim(coalesce(l.test_code,'')) in (${SENSITIVE_LOINC_SQL_LIST}))`);
   // Vitals: an explicit list of measures, so a future column cannot leak.
-  q = replaceOnce(q, "(to_jsonb(v)-array['id','encounter_id','patient_id','facility_id','created_by','created_by_membership_id','created_at','updated_at','row_version','current_correction_no'])", VITAL_FIELDS_SQL);
+  q = replaceOnce(q, "(to_jsonb(v)-array['id','encounter_id','patient_id','facility_id','created_by','created_by_membership_id','created_at','updated_at','row_version','current_correction_no','status','status_changed_at'])", VITAL_FIELDS_SQL);
   return replaceOnce(q, SELECT, SELECT_WITH_PATIENT);
 }
 /** Params $1 patient id, $2/$3 keyset cursor. */

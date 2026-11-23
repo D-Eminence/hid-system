@@ -503,7 +503,8 @@ grant execute on function platform.current_actor_subject(),platform.current_acco
 grant usage on schema platform, identity, pharmacy to hid_pharmacy_runtime;
 grant select, insert on pharmacy.work_items, pharmacy.work_item_events,
   pharmacy.dispensings, pharmacy.dispensing_reversals,
-  pharmacy.imported_medication_evidence, pharmacy.outbox_events to hid_pharmacy_runtime;
+  pharmacy.imported_medication_evidence, pharmacy.outbox_events,
+  pharmacy.work_item_acceptances to hid_pharmacy_runtime;
 grant usage, select on all sequences in schema pharmacy to hid_pharmacy_runtime;
 grant execute on function platform.current_actor_subject(), platform.current_account_id(),
   platform.current_facility_id(), platform.current_membership_id(), platform.current_correlation_id(),
@@ -681,7 +682,8 @@ grant select,insert,update on lab.specimens to hid_schema_test_runtime;
 grant select, insert on ehr.prescriptions to hid_schema_test_runtime;
 grant select, insert on pharmacy.work_items, pharmacy.work_item_events,
   pharmacy.dispensings, pharmacy.dispensing_reversals,
-  pharmacy.imported_medication_evidence, pharmacy.outbox_events to hid_schema_test_runtime;
+  pharmacy.imported_medication_evidence, pharmacy.outbox_events,
+  pharmacy.work_item_acceptances to hid_schema_test_runtime;
 grant select, insert, update on outreach.registration_cases to hid_schema_test_runtime;
 grant select, insert, update on outreach.campaigns to hid_schema_test_runtime;
 grant select, insert, delete on outreach.campaign_members to hid_schema_test_runtime;
@@ -1892,11 +1894,127 @@ revoke all on pharmacy.own_prescription_sends, pharmacy.prescription_item_claims
 -- its install is the owner's alone.
 revoke all on function identity.sealed_qa_hospital_work_staff_install() from public;
 
+-- A NIN verified later and linked at this facility's desk (0138, ID-6),
+-- exactly as 0138 grants: the precheck and the link to the Identity and
+-- schema test runtimes, no other; no grant on identity.patient_nin_links.
+grant execute on function identity.patient_nin_link_precheck(uuid, char, text, char),
+  identity.link_patient_nin(uuid, uuid, char, bytea, text, char, text, boolean, text, char)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function identity.patient_nin_link_precheck(uuid, char, text, char),
+  identity.link_patient_nin(uuid, uuid, char, bytea, text, char, text, boolean, text, char) from public;
+revoke all on identity.patient_nin_links from public;
+
+-- Adding or removing one staff role (0139, SX-4, owner decision Q129 A),
+-- exactly as 0139 grants them: the administrator's and support's commands
+-- and the two licence reads, to the Identity runtime alone. The helpers they
+-- call run only inside them, as their owner.
+grant execute on function
+  identity.add_facility_staff_role(uuid,bigint,text,text,text,text,text,text,character),
+  identity.remove_facility_staff_role(uuid,bigint,text,text),
+  identity.admin_add_facility_staff_role(uuid,uuid,bigint,text,text,text,text,text,text,character),
+  identity.admin_remove_facility_staff_role(uuid,uuid,bigint,text,text,text,character),
+  identity.list_facility_staff_licences(),
+  identity.admin_list_facility_staff_licences(uuid) to hid_identity_runtime;
+revoke all on function
+  identity.add_facility_staff_role(uuid,bigint,text,text,text,text,text,text,character),
+  identity.remove_facility_staff_role(uuid,bigint,text,text),
+  identity.admin_add_facility_staff_role(uuid,uuid,bigint,text,text,text,text,text,text,character),
+  identity.admin_remove_facility_staff_role(uuid,uuid,bigint,text,text,text,character),
+  identity.list_facility_staff_licences(),
+  identity.admin_list_facility_staff_licences(uuid),
+  identity.staff_role_change_roles(uuid),
+  identity.staff_role_change_member(uuid,uuid,uuid,boolean),
+  identity.staff_role_change_apply(identity.staff_facility_memberships,bigint,text,text,text,text,text,text,uuid,uuid,text),
+  identity.staff_role_licences(uuid) from public;
+
+-- The open patient a staff sign-in keeps across a reload (0140, SX-8),
+-- exactly as 0140 grants: the Identity runtime only.
+grant select, insert, update, delete on auth.session_open_patient to hid_identity_runtime;
+revoke all on function auth.guard_session_open_patient_change() from public;
+revoke all on function auth.session_open_patient_target_exists(uuid) from public;
+grant execute on function auth.session_open_patient_target_exists(uuid) to hid_identity_runtime;
+
+-- Consultation drafts (0141, EHR-C6, owner decision Q126 A), exactly as 0141
+-- grants them: the table under its author-only policies (no DELETE: discard
+-- is ehr.discard_consultation_draft), the author check the policies call,
+-- the author's list, the sweeper, discard and the on-demand expiry, to the
+-- EHR runtime alone. The table's owner policies are the owner's; no runtime
+-- role is a member of the owner. The session helper and the legal-hold check
+-- are run only by 0141's own functions (the hold check is platform.legal_holds'
+-- owner's, with EXECUTE for 0141's owner alone).
+grant select, insert, update on ehr.consultation_drafts to hid_ehr_runtime;
+revoke delete on ehr.consultation_drafts from hid_ehr_runtime;
+grant execute on function ehr.list_my_consultation_drafts(), ehr.sweep_consultation_drafts(integer),
+  ehr.is_consultation_draft_author(uuid, uuid, uuid), ehr.discard_consultation_draft(uuid, uuid),
+  ehr.expire_my_consultation_draft(uuid, uuid) to hid_ehr_runtime;
+revoke all on ehr.consultation_drafts from public;
+revoke all on function ehr.list_my_consultation_drafts(), ehr.sweep_consultation_drafts(integer),
+  ehr.is_consultation_draft_author(uuid, uuid, uuid), ehr.guard_consultation_draft(),
+  ehr.discard_consultation_draft(uuid, uuid), ehr.expire_my_consultation_draft(uuid, uuid),
+  ehr.consultation_draft_session(), ehr.consultation_draft_held(uuid, uuid) from public;
+
+-- "Ordered by me" (0143, MY-1), exactly as 0143 grants it: the list to the EHR
+-- runtime alone. The order tables' counting policies are the owner's; no
+-- runtime role is a member of the owner.
+grant execute on function ehr.list_my_orders(text[], boolean, date, timestamptz, text, uuid, integer) to hid_ehr_runtime;
+revoke all on function ehr.list_my_orders(text[], boolean, date, timestamptz, text, uuid, integer) from public;
+-- Its counting marker: the table is the owner's only; the marker check is run
+-- by every role that reads the order tables (their policies call it).
+revoke all on ehr.my_orders_scans from public;
+grant execute on function ehr.my_orders_scan_open() to public;
+
+-- Unknown patient records (0145, ID-7), exactly as 0145 grants them: the
+-- six commands and reads and the record kind to the Identity runtime, the waiting list's record
+-- kinds to the EHR runtime; the record table, its cancel-check marker table
+-- and the helpers are the owner's. The cancel check's marker test is run by
+-- every role that reads the clinical tables (their policies call it).
+grant execute on function
+  identity.create_unknown_patient(uuid, text, text, integer, text, bytea, text, text, text),
+  identity.list_unknown_patients(text, integer, timestamp with time zone, uuid),
+  identity.read_unknown_patient(uuid),
+  identity.identify_unknown_patient(uuid, bigint, text, text, date, text, text, bytea, bytea, text, text, text),
+  identity.decide_unknown_patient(uuid, text, bigint, text, text, text),
+  identity.review_unknown_patient(uuid), identity.patient_record_kind(uuid) to hid_identity_runtime;
+grant execute on function ehr.visit_queue_record_kinds(uuid[]) to hid_ehr_runtime;
+grant execute on function ehr.unknown_patient_cancel_scan_open() to public;
+revoke all on identity.unknown_patients, ehr.unknown_patient_cancel_scans from public;
+revoke all on function
+  identity.create_unknown_patient(uuid, text, text, integer, text, bytea, text, text, text),
+  identity.list_unknown_patients(text, integer, timestamp with time zone, uuid),
+  identity.read_unknown_patient(uuid),
+  identity.identify_unknown_patient(uuid, bigint, text, text, date, text, text, bytea, bytea, text, text, text),
+  identity.decide_unknown_patient(uuid, text, bigint, text, text, text),
+  identity.review_unknown_patient(uuid), identity.patient_record_kind(uuid),
+  ehr.visit_queue_record_kinds(uuid[]),
+  identity.unknown_patient_actor(text),
+  identity.unknown_patient_audit(text, uuid, uuid, uuid, uuid, text, text, text, uuid, text, jsonb),
+  identity.unknown_patient_cards(uuid[]), identity.unknown_patient_missing_reason(uuid, uuid),
+  identity.refuse_nin_for_unknown_patient(), identity.refuse_login_for_unknown_patient(),
+  identity.refuse_registration_for_unknown_patient() from public;
+
+-- A pharmacist accepts a prescription before dispensing (0144, ORD-4, owner
+-- decision Q125 B of 19 November 2026), exactly as 0144 grants it: SELECT and
+-- INSERT on pharmacy.work_item_acceptances to the Pharmacy runtime and the
+-- schema test runtime, with the other Pharmacy tables above (as
+-- pharmacy.dispensings; no UPDATE or DELETE: its rows are never changed);
+-- the steps reader (0133 D10's states, whether the item was sent
+-- automatically, and its pharmacist's acceptance) to the same two. The
+-- acceptance's insert trigger function, pharmacy.validate_work_item_acceptance,
+-- is executed by no role: its trigger runs it as its owner (the owner of
+-- pharmacy.validate_dispensing, the role 0133 D5's ehr.prescriptions policies
+-- name). The replaced pharmacy.validate_work_item_event keeps its ACL.
+grant execute on function pharmacy.own_work_item_steps(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
+revoke all on function pharmacy.own_work_item_steps(uuid[]), pharmacy.validate_work_item_acceptance() from public;
+revoke all on pharmacy.work_item_acceptances from public;
+
 -- The national medicine and lab-test lists (0149, ORD-7 of the Akos EHR
--- plan, first slice; design note on hid-system#258, 23 November 2026),
--- exactly as 0149 grants them: the two searches and the status to the EHR
--- runtime and the schema test runtime; no privilege on the tables, the
--- query helper or the versions' guard for any runtime.
+-- plan, first slice; design note on hid-system#258, 23 November 2026, and
+-- Rahman's reviews), exactly as 0149 grants and revokes them: the two
+-- searches and the status to the EHR runtime and the schema test runtime;
+-- no privilege for any runtime on the four tables (the versions, the two
+-- lists and the retired ids), the query helper, the versions' guard or the
+-- two lists' insert trigger functions (fixed ids and sealed versions), which
+-- their triggers run as the inserting role, the tables' owner.
 grant execute on function ehr.search_catalog_medicines(text, integer, text, text),
   ehr.search_catalog_lab_tests(text, integer),
   ehr.catalog_status() to hid_ehr_runtime, hid_schema_test_runtime;
@@ -1904,5 +2022,8 @@ revoke all on function ehr.search_catalog_medicines(text, integer, text, text),
   ehr.search_catalog_lab_tests(text, integer),
   ehr.catalog_status(),
   ehr.catalog_search_query(text),
-  ehr.catalog_versions_guard() from public;
-revoke all on ehr.catalog_versions, ehr.catalog_medicines, ehr.catalog_lab_tests from public;
+  ehr.catalog_versions_guard(),
+  ehr.catalog_medicine_id_fixed(),
+  ehr.catalog_lab_test_id_fixed() from public;
+revoke all on ehr.catalog_versions, ehr.catalog_medicines, ehr.catalog_lab_tests, ehr.catalog_retired_codes
+  from public;
