@@ -21,8 +21,8 @@
 --      on a duplicate record answers on_another_record after the match (the
 --      precheck stays eligible: no oracle) and writes nothing; another NIN
 --      for the attested patient is source_nin_differs, before QoreID and at
---      the link; a legacy run in flight answers try_later; the attested NIN
---      itself links;
+--      the link; a legacy run in flight, or a legacy inventory not
+--      completely attested, answers try_later; the attested NIN itself links;
 --   5. refusals: no registration permission, another purpose, no
 --      membership; malformed input;
 --   6. the evidence cannot be changed or deleted, and the runtime cannot read
@@ -335,6 +335,42 @@ begin
   reset role;
   set local session_replication_role = replica;
   delete from migration.runs where id = 'e1380700-0000-4000-8000-000000000002';
+  set local session_replication_role = origin;
+  set local role hid_identity_api_runtime;
+end $$;
+-- A legacy inventory that is not completely attested, with no run in flight:
+-- p5 counts as a promoted legacy patient, and its completed run has an active
+-- crosswalk row but no attestation (0057's readiness is false), so any desk
+-- link waits too.
+create temporary table nin_link_p5_source on commit drop as
+  select source_system from identity.patients where id = (select patient from pg_temp.link_patients where n = 5);
+grant select on nin_link_p5_source to public;
+create temporary table nin_link_runs_in_flight (runs bigint) on commit drop;
+grant select, insert on nin_link_runs_in_flight to public;
+do $$
+begin
+  reset role;
+  set local session_replication_role = replica;
+  update identity.patients set source_system = 'legacy_identity'
+   where id = (select patient from pg_temp.link_patients where n = 5);
+  insert into pg_temp.nin_link_runs_in_flight
+  select count(*) from migration.runs where source_system = 'legacy_identity' and status in ('running', 'staged');
+  set local session_replication_role = origin;
+  set local role hid_identity_api_runtime;
+end $$;
+select pg_temp.check_case('4b an unattested legacy inventory, no run in flight: try_later at the precheck and the link',
+  '0|try_later|try_later',
+  (select runs::text from pg_temp.nin_link_runs_in_flight)
+  || '|' || pg_temp.precheck(1, (select patient from pg_temp.link_patients where n = 6), repeat('f', 64),
+    'nin-link-key-0075', repeat('b', 64))
+  || '|' || pg_temp.link(1, (select patient from pg_temp.link_patients where n = 6),
+    'e1380600-0000-4000-8000-000000000075', repeat('f', 64), 'nin-link-key-0075', repeat('b', 64)));
+do $$
+begin
+  reset role;
+  set local session_replication_role = replica;
+  update identity.patients set source_system = (select source_system from pg_temp.nin_link_p5_source)
+   where id = (select patient from pg_temp.link_patients where n = 5);
   set local session_replication_role = origin;
   set local role hid_identity_api_runtime;
 end $$;

@@ -9780,12 +9780,16 @@ else holds it, and nothing is charged for a refusal the database gives first:
 2. The patient's own verified NIN: the same NIN answers `already_linked` (no
    QoreID call); another answers 409 `PATIENT_ALREADY_HAS_NIN`.
 2a. The legacy NIN crosswalk (0057), kept as the patient's own check keeps it
-   (0058, 0092). While a legacy migration run is in flight, the answer is 503
+   (0058, 0092). Until the legacy records' NIN inventory is complete (no
+   legacy run `running` or `staged`, and every legacy run's NIN dispositions
+   attested: `identity.legacy_nin_crosswalk_ready()`), the answer is 409
    `NIN_LINK_TRY_LATER`. A patient promoted from the legacy system whose
    earlier records attest a different NIN gets 409 `PATIENT_ALREADY_HAS_NIN`
    ("This patient's earlier records hold a different NIN. Ask Health ID
    support to review it."): a different NIN goes to governed review and never
-   replaces the attested one. Neither calls QoreID.
+   replaces the attested one. Both are answered before QoreID is asked. If the
+   crosswalk changes between that check and the link, the link (step 5) gives
+   the same answer after QoreID's match.
 3. The NIN check, with the name and date of birth on the patient's record:
    the desk's check (deferred or switched off, the sealed tenants, Q110's
    record, the NIN service behind ID-0's breaker, 0137's guard as path
@@ -9828,12 +9832,12 @@ Answer `200`:
 | 409 | `PATIENT_ALREADY_HAS_NIN` | "This patient already has a verified NIN.", or for a migrated patient whose earlier records hold another NIN, "This patient's earlier records hold a different NIN. Ask Health ID support to review it." |
 | 409 | `NIN_ON_ANOTHER_RECORD` | "This NIN is already on another patient record. Ask an approver to review the two records." |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | "This request key was already used for a different request." |
+| 409 | `NIN_LINK_TRY_LATER` | "A NIN cannot be added until the earlier records' NIN check is complete. Please try again later." (the legacy records' NIN inventory is not complete; no QoreID call at the precheck. Not a 503: the gateway replaces an upstream 503's body.) |
 | 409 | `NIN_CHECK_IN_PROGRESS`, `NIN_CHECK_HELD` | as 0137, with `retryAfterSeconds` |
 | 422 | `NIN_VERIFICATION_FAILED` | "This NIN could not be verified. Check the number and try again." (Q117; an answer, not a breaker failure) |
 | 502 | `QOREID_PROVIDER_RESPONSE_INVALID` | as 0137 |
 | 503 | `NIN_PROVIDER_UNAVAILABLE` | NIN checks off here, a sealed tenant's desk, or the breaker open (nothing sent) |
 | 503 | `NIN_PROVIDER_DEFERRED` | staging with NIN checks deferred |
-| 503 | `NIN_LINK_TRY_LATER` | "A NIN cannot be added just now. Please try again later." (a legacy migration run in flight; nothing sent) |
 | 504 | `QOREID_TIMEOUT` | as 0137 |
 
 Audit: one `identity.patient.nin-link` row for each answer and each refusal:

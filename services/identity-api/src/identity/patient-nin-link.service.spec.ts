@@ -182,12 +182,15 @@ describe('PatientNinLinkService (ID-6, 0138)', () => {
   });
 
   it.each([
-    ['source_nin_differs', 409, 'PATIENT_ALREADY_HAS_NIN', 'source_nin_differs'],
-    ['try_later', 503, 'NIN_LINK_TRY_LATER', 'legacy_records_pending'],
-  ] as const)('refuses the legacy crosswalk\'s %s before any NIN check, with its own refusal kind',
-    async (decision, status, code, refusal) => {
+    ['source_nin_differs', 409, 'PATIENT_ALREADY_HAS_NIN', 'source_nin_differs',
+      'This patient\'s earlier records hold a different NIN. Ask Health ID support to review it.'],
+    ['try_later', 409, 'NIN_LINK_TRY_LATER', 'legacy_records_pending',
+      'A NIN cannot be added until the earlier records\' NIN check is complete. Please try again later.'],
+  ] as const)('refuses the legacy crosswalk\'s %s before any NIN check, with its own words and refusal kind',
+    async (decision, status, code, refusal, message) => {
       const { service, registrations, audit } = harness({ precheck: { decision } });
-      await expect(service.link(PATIENT, input(), KEY, context)).rejects.toMatchObject({ status, code });
+      // 409, never 503: the gateway replaces an upstream 503's body with its own.
+      await expect(service.link(PATIENT, input(), KEY, context)).rejects.toMatchObject({ status, code, message });
       expect(registrations.checkNinForLink).not.toHaveBeenCalled();
       expect(auditDetails(audit)).toEqual([expect.objectContaining({ outcome: 'denied',
         details: { refusal, qoreidCalled: false } })]);
@@ -195,7 +198,7 @@ describe('PatientNinLinkService (ID-6, 0138)', () => {
 
   it.each([
     ['source_nin_differs', 409, 'PATIENT_ALREADY_HAS_NIN', 'source_nin_differs'],
-    ['try_later', 503, 'NIN_LINK_TRY_LATER', 'legacy_records_pending'],
+    ['try_later', 409, 'NIN_LINK_TRY_LATER', 'legacy_records_pending'],
   ] as const)('answers the link\'s %s after a NIN check', async (outcome, status, code, refusal) => {
     const { service, audit } = harness({ link: { outcome, other_patient_id: null } });
     await expect(service.link(PATIENT, input(), KEY, context)).rejects.toMatchObject({ status, code });

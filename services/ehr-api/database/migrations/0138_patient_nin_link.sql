@@ -59,13 +59,16 @@
 -- The legacy NIN crosswalk (0057), kept as the patient's own check keeps it
 -- (identity.patient_self_nin_eligibility, 0058 and 0092): a patient promoted
 -- from the legacy system carries an attested source disposition in
--- migration.legacy_nin_crosswalk. While a legacy run is running or staged
--- (identity.legacy_nin_crosswalk_ready() is false), 3 and 4 answer
--- 'try_later' (identity-api: 503 before QoreID is asked), because the absence
--- of a crosswalk row is not yet evidence. An active attested_exact row for
+-- migration.legacy_nin_crosswalk. While identity.legacy_nin_crosswalk_ready()
+-- is false (a legacy run running or staged, or a legacy run's NIN
+-- dispositions not completely attested), 3 and 4 answer 'try_later'
+-- (identity-api: 409 NIN_LINK_TRY_LATER), because the absence of a crosswalk
+-- row is not yet evidence. An active attested_exact row for
 -- this patient with a different NIN answers 'source_nin_differs' (409
 -- PATIENT_ALREADY_HAS_NIN, with its own refusal kind): a different NIN goes
--- to governed review and never replaces the attested one. After the lock
+-- to governed review and never replaces the attested one. 3 gives both
+-- answers before QoreID is asked; 4 gives the same answer after the match if
+-- the crosswalk changed in between. After the lock
 -- and QoreID's match, 4 answers 'on_another_record' when an active crosswalk
 -- row gives this NIN to another patient, so a migrated patient's NIN is never
 -- put on a duplicate record (and the route is never an oracle: the check
@@ -365,9 +368,9 @@ begin
                         null::text, null::text, null::date;
     return;
   end if;
-  -- The legacy crosswalk (0057, as 0058 and 0092 keep it): not while a legacy
-  -- run is in flight, and never a NIN other than the one attested for this
-  -- patient.
+  -- The legacy crosswalk (0057, as 0058 and 0092 keep it): not while its NIN
+  -- inventory is incomplete (identity.legacy_nin_crosswalk_ready()), and
+  -- never a NIN other than the one attested for this patient.
   if not identity.legacy_nin_crosswalk_ready() then
     return query select 'try_later'::text, null::text, null::text, null::date;
     return;
@@ -387,7 +390,7 @@ end;
 $$;
 revoke all on function identity.patient_nin_link_precheck(uuid, char, text, char) from public;
 comment on function identity.patient_nin_link_precheck(uuid, char, text, char) is
-  '0138 (ID-6): what POST identity/patients/:id/nin may do before QoreID is asked: not_found, not_permitted, already_linked, has_nin, replay, key_reused, try_later (a legacy run in flight), source_nin_differs (the legacy crosswalk attests another NIN), or eligible with the record''s name and date of birth (compared with the NIN record by identity-api).';
+  '0138 (ID-6): what POST identity/patients/:id/nin may do before QoreID is asked: not_found, not_permitted, already_linked, has_nin, replay, key_reused, try_later (the legacy NIN inventory not complete), source_nin_differs (the legacy crosswalk attests another NIN), or eligible with the record''s name and date of birth (compared with the NIN record by identity-api).';
 
 -- 4. The link.
 create function identity.link_patient_nin(

@@ -150,7 +150,7 @@ const acceptedMigrations = new Map([
   ['0135_visit_queue.sql', '8880d71e8d03ae9dea7614eb88316788d3ad16dca8974218755c8a922a6ce891'],
   ['0136_role_permission_changes.sql', '503d85cac83d368da02c0721e8c97fdd1a734ef6e4ffed0b52ef0379af2750b0'],
   ['0137_qoreid_nin_check_once.sql', 'd77983a0d82bc3c2e016f9fda0990666aecc218ac9bed6f7e9901bc90bff3543'],
-  ['0138_patient_nin_link.sql', 'b82b55b78e8ea7d7504b667fd2afcbc6c7f0a54b9c6315198fce21c50fb811a2'],
+  ['0138_patient_nin_link.sql', 'b11c79d4b00c31393d9887e8a73443732a8d908e1cc32a21e5abfeafce040b22'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))
