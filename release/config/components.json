@@ -652,11 +652,11 @@
       },
       {
         "name": "0138_patient_nin_link.sql",
-        "sha256": "b82b55b78e8ea7d7504b667fd2afcbc6c7f0a54b9c6315198fce21c50fb811a2"
+        "sha256": "b11c79d4b00c31393d9887e8a73443732a8d908e1cc32a21e5abfeafce040b22"
       },
       {
         "name": "0146_unknown_patient_record.sql",
-        "sha256": "1d484ac4a6f8a26b1f016fa54764d92f8d2e02f5a2217bf7323ae37f72c55b47"
+        "sha256": "6a9f40bd6f11b056c23bcab78d43db5d0b12f7e7ccf495ed3ad18a0affb57c65"
       }
     ]
   },

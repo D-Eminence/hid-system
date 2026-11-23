@@ -125,8 +125,10 @@ export class PatientNinLinkService {
         await this.refuse(context, patientId, 'source_nin_differs', false);
         throw sourceNinDiffers();
       case 'try_later':
-        // A legacy migration run is in flight, so the crosswalk is not yet
-        // evidence (0058, 0092): nothing is charged; the desk tries later.
+        // The legacy records' NIN inventory is not complete (a legacy run
+        // running or staged, or one whose NIN dispositions are not fully
+        // attested), so a missing crosswalk row is no evidence yet (0058,
+        // 0092): nothing is charged; the desk tries later.
         await this.refuse(context, patientId, 'legacy_records_pending', false);
         throw tryLater();
       case 'already_linked':
@@ -289,8 +291,12 @@ function sourceNinDiffers(): DomainProblem {
     'This patient\'s earlier records hold a different NIN. Ask Health ID support to review it.');
 }
 
+// 409, not 503: the gateway turns every upstream 502, 503 and 504 into its own
+// UPSTREAM_UNAVAILABLE answer, so a 503 would never carry these words. A 409
+// with a retry hint is how 0137's NIN_CHECK_HELD says "try again later" too.
 function tryLater(): DomainProblem {
-  return new DomainProblem(503, 'NIN_LINK_TRY_LATER', 'A NIN cannot be added just now. Please try again later.');
+  return new DomainProblem(409, 'NIN_LINK_TRY_LATER',
+    'A NIN cannot be added until the earlier records\' NIN check is complete. Please try again later.');
 }
 
 function ninVerificationFailed(): DomainProblem {
