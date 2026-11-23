@@ -30,6 +30,8 @@ export const CLEANED_NAMES = {
   'poliomyelitis vaccine (inactivated)': 'inactivated poliomyelitis vaccine',
   'poliomyelitis vaccine (oral)': 'oral poliomyelitis vaccine',
   'potassium ferric hexacyanoferrate (ii)': 'potassium ferric hexacyanoferrate',
+  // The WHO list's name for Ringer's lactate, which the Nigeria list gives as "ringer's lactate" (also listed): the
+  // same medicine under two names until the CSV keeps only one.
   'sodium lactate, compound solution': 'compound sodium lactate solution',
   'sunscreen, broad-spectrum': 'broad-spectrum sunscreen',
 };

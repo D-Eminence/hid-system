@@ -35,6 +35,11 @@ describe('drug list (hard pages only)', () => {
     expect(matchDrugName('Sodium valproate')?.generic).toBe('valproic acid');
     expect(matchDrugName('Desferrioxamine')?.generic).toBe('deferoxamine');
     expect(matchDrugName('Ferrous sulphate')?.generic).toBe('ferrous salt');
+    // Left unmapped on purpose (see the header): mapping would name a form the prescriber never wrote.
+    for (const name of ['Fluticasone', 'Vitamin B12', 'Cyanocobalamin', 'Multivitamin', 'Vitamin E', 'Zinc']) {
+      expect([name, matchDrugName(name)]).toEqual([name, null]);
+    }
+    expect(matchDrugName('Seretide')?.generic).toBe('salmeterol + fluticasone');
   });
 
   it('corrects one slip within the thresholds, and no further', () => {

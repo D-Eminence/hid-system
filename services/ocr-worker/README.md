@@ -825,7 +825,10 @@ Each claimed job runs, in order:
      activated" reads "activated charcoal"). Until 2026-11-23 the names were
      typed by hand from the 7th edition (2020); its names that the new list
      spells differently are kept as other names (chlorpheniramine, benzhexol,
-     sodium valproate, desferrioxamine, ...). Plus the lists' own bracketed
+     sodium valproate, desferrioxamine, ...). A few are left unmapped on
+     purpose, since mapping would name a form the prescriber never wrote
+     (fluticasone, vitamin b12, multivitamin, vitamin e, zinc; see the
+     header of `drug-list.ts`). Plus the lists' own bracketed
      other names, a few marked British names (frusemide, lignocaine,
      co-amoxiclav), and the brand table below. Applied only on hard pages.
      The list never creates a drug: it only checks, and respells, a name the

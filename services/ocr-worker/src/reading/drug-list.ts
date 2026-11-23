@@ -41,7 +41,17 @@ import { editDistance, fuzzyListMatch, letterCount, LOOKALIKE_DISTANCE, MAX_EDIT
  * (https://extranet.who.int/cpcd/sites/default/files/public_file_repository/NGA_Nigeria-Essential-Medicine-List_2020.pdf).
  * Each name on that list that the new list gives under another spelling or salt is kept in SYNONYMS (marked "kept
  * from the 7th edition list"), so it is still recognised; the names the new list does not have in any form were
- * dropped.
+ * dropped. A few were left unmapped on purpose, because mapping would show a form or product the prescriber never
+ * wrote; each is shown as read with "?":
+ * - fluticasone: the new list has only fluticasone furoate (a nasal spray) and the combination salmeterol +
+ *   fluticasone, while plain "fluticasone" on Nigerian charts usually means the propionate (a different ester and
+ *   dose).
+ * - vitamin b12 (and cyanocobalamin): the new list has only hydroxocobalamin, which the CSV notes as "Vitamin B12";
+ *   a chart's "Vit B12" may mean cyanocobalamin, a different form with a different dosing schedule.
+ * - multivitamin and vitamin e: the nearest the new list has is "multiple micronutrients" (vitamins with iron, zinc
+ *   and others), not the same product.
+ * - zinc and zinc sulfate: on the new list only inside combinations (oral rehydration salts + zinc sulfate, calamine
+ *   + zinc, zinc chloride + zinc sulfate).
  *
  * Other names for the same medicine (SYNONYMS): names the lists give in brackets or as "listed as" (adrenaline,
  * hydroxyurea, aspirin, co-trimoxazole, cyclosporin, busulphan, cytisinicline), the 7th edition names above, and a
@@ -100,7 +110,6 @@ export const SYNONYMS: Readonly<Record<string, string>> = {
   'bendrofluazide': 'bendroflumethiazide',
   'dabigatran': 'dabigatran etexilate',
   'fluocinolone': 'fluocinolone acetonide',
-  'fluticasone': 'fluticasone furoate',
   'ferrous sulfate': 'ferrous salt',
   'isophane insulin': 'intermediate-acting insulin',
   'lugol\'s iodine': 'iodine + potassium iodide',
