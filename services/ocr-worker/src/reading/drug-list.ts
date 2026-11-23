@@ -195,7 +195,17 @@ export const UNLISTED_LOOKALIKES: readonly string[] = [
   'ropivacaine', 'mepivacaine', 'digitoxin', 'fosinopril', 'pentobarbital', 'saxagliptin',
   // Added 2026-11-23: on the 7th edition list, not on the new one, and a letter or two from a listed name.
   'neomycin', 'vitamin b12', 'vitamin e',
+  // Added 2026-11-23 (Ola, clinical owner): "kalium", potassium's Latin name, two letters from calcium; "calium" may be
+  // a misreading of either.
+  'kalium',
 ];
+
+/**
+ * Look-alikes whose listed neighbour is never offered as the other option either (drugLookalike gives nothing): the
+ * pair is dangerous to confuse, so even "(or Calcium?)" would steer the reader. The name is shown as read, with "?",
+ * for a person to read (Ola, 23 Nov 2026: potassium and calcium).
+ */
+export const LOOKALIKES_WITHOUT_OPTION: readonly string[] = ['kalium'];
 
 /** Salt words written after a name that do not change which medicine it is (except after SALT_OPEN_NAMES). */
 const SALT_ONLY_WORDS = new Set(['hydrochloride', 'hcl', 'sodium', 'potassium', 'sulfate', 'sulphate', 'maleate',
@@ -238,6 +248,7 @@ export const DRUG_ENTRIES: readonly Entry[] = [
 const capitalise = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
 const LOOKALIKE_KEYS = UNLISTED_LOOKALIKES.map(normaliseDrugName);
+const NO_OPTION_KEYS = LOOKALIKES_WITHOUT_OPTION.map(normaliseDrugName);
 const SALT_OPEN_KEYS = new Set(SALT_OPEN_NAMES.map(normaliseDrugName));
 /**
  * Whether a match was reached by taking a salt word off a name, onto a listed name that leaves the salt open
@@ -283,6 +294,7 @@ export function drugLookalike(proposed: string): DrugMatch | null {
   const candidates = [...new Set([whole, withoutSalts(whole)].filter((name) => name.length > 0))];
   const best = fuzzyListMatch(candidates, DRUG_ENTRIES);
   if (best === null || saltDropped(best.entry, best.name, whole)) return null;
+  if (candidates.some((name) => NO_OPTION_KEYS.some((key) => editDistance(name, key) <= LOOKALIKE_DISTANCE))) return null;
   const { generic, brand } = best.entry.value;
   return { generic, brand, exact: false,
     display: brand === null ? `${capitalise(generic)}?` : `${capitalise(brand)}? (${generic})` };

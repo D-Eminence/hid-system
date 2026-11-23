@@ -1,6 +1,6 @@
 import { BRAND_ROWS, COORDINATOR_SOURCE, isActiveBrandRow, NAFDAC_SOURCE } from './brand-names';
 import { BRAND_NAMES, BRANDS_WITH_UNLISTED_GENERIC, CHART_NAMES, DRUG_ENTRIES, drugLookalike, editDistance,
-  LOOKALIKE_DISTANCE, matchDrugName, MAX_EDIT_DISTANCE, MIN_FUZZY_LETTERS, MIN_SIMILARITY, NEML_GENERICS,
+  LOOKALIKE_DISTANCE, LOOKALIKES_WITHOUT_OPTION, matchDrugName, MAX_EDIT_DISTANCE, MIN_FUZZY_LETTERS, MIN_SIMILARITY, NEML_GENERICS,
   normaliseDrugName, SALT_OPEN_NAMES, SYNONYMS, UNLISTED_LOOKALIKES } from './drug-list';
 import { SEVENTH_EDITION_NAMES } from './drug-list-7th-edition-fixtures';
 
@@ -122,6 +122,17 @@ describe('drug list (hard pages only)', () => {
       expect([name, matchDrugName(name)]).toEqual([name, null]);
     }
     expect(matchDrugName('Vitamin B1')?.generic).toBe('thiamine');
+  });
+
+  it('leaves "calium" unresolved, with no other option: it may be kalium (potassium) or calcium', () => {
+    for (const name of ['Calium', 'Kalium', 'Kalcium']) {
+      expect([name, matchDrugName(name), drugLookalike(name)]).toEqual([name, null, null]);
+    }
+    expect(matchDrugName('Calcium')?.exact).toBe(true);
+    expect(matchDrugName('Calcium gluconate')?.exact).toBe(true);
+    // Arteether still offers its listed neighbour: only the dangerous pairs lose the other option.
+    expect(drugLookalike('Arteether')?.generic).toBe('artemether');
+    for (const name of LOOKALIKES_WITHOUT_OPTION) expect(UNLISTED_LOOKALIKES).toContain(name);
   });
 
   it('never makes a salt or product written on the chart less specific than the chart', () => {
