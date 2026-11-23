@@ -13,7 +13,7 @@ on:
         default: notification-worker
         options: [notification-worker, database-migration, novu-update, admin-update, identity-api, ehr-api, lab-api, pharmacy-api, ocr-api, ocr-worker, outreach-api, notification-api, event-dispatcher, gateway, support-api, all]
       catalog_load:
-        description: ORD-7 signed catalogue files to load after the migrations (needs the migration image); none unless chosen
+        description: ORD-7 signed catalogue files to load after the migrations (needs the migration image); none unless chosen, and none again after a failed release that already loaded one
         type: choice
         default: none
         options: [none, medicine, lab_test, 'medicine,lab_test']

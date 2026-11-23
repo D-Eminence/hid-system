@@ -27,10 +27,12 @@ PROTECT_POOL = 4
 ROLLOUT_POLL_SECONDS = 5
 SKIPPED_PLAN_AFTER = "PLAN_BEFORE_FOUND_ZERO_PENDING"
 # ORD-7's governed catalogue load, opt-in (CATALOG_LOAD): the signed seed files where the migration image carries
-# them (services/ehr-api/Dockerfile copies docs/codes to /app/docs/codes), and the loader's two kinds of last line.
+# them (services/ehr-api/Dockerfile copies them by name to /app/docs/codes), and the loader's two kinds of last line:
+# its evidence line when it loaded (exit 0), its one line when it loaded nothing (a refusal, exit 2, or a failure).
 CATALOG_SEEDS = {"medicine":"/app/docs/codes/hid-medicines.json","lab_test":"/app/docs/codes/hid-lab-tests.json"}
 CATALOG_LOADED = re.compile(r'\{"status":"loaded",.*\}')
-CATALOG_REFUSED = re.compile(r"load-catalog: .*; nothing loaded(?:; run the release again at a quieter time)?")
+CATALOG_NOT_LOADED = re.compile(r"load-catalog: .*; nothing loaded(?:; run the release again at a quieter time)?")
+EVIDENCE_LINE_MISSING = "evidence line missing"
 PHASES = frozenset({"approval","lease","snapshot-before","receipt-started","migration","catalog","register-services",
     "rollout-services","register-gateway","rollout-gateway","snapshot-after","index-and-receipt","notify",
     "rollback-rollout","rollback-snapshot","rollback-index"})
@@ -95,6 +97,36 @@ def catalog_request(value, mode, desired):
     require(len(set(kinds)) == len(kinds) and set(kinds) <= set(CATALOG_SEEDS), "INVALID_CATALOG_LOAD_REQUEST")
     require(mode == "deploy" and "database-migration" in desired, "CATALOG_LOAD_NEEDS_MIGRATION_IMAGE")
     return [kind for kind in CATALOG_SEEDS if kind in kinds]
+
+def catalog_seeds(kinds):
+    """Each asked seed as this checkout holds it: its version and the file's sha256, by kind, in load order.
+
+    The deploy job checks out the commit the migration image was built from, and the image carries these files
+    by name, so a receipt can name a seed that loaded even when the loader's evidence line never arrives. A seed
+    missing here is missing from the image: refused (CATALOG_SEED_MISSING) before the release starts."""
+    seeds = {}
+    for kind in kinds:
+        try:
+            data = (ROOT/"docs/codes"/pathlib.PurePosixPath(CATALOG_SEEDS[kind]).name).read_bytes()
+            seed = json.loads(data)
+        except (OSError, ValueError):
+            raise ReleaseError("CATALOG_SEED_MISSING") from None
+        require(isinstance(seed, dict) and seed.get("kind") == kind and isinstance(seed.get("version"), str),
+                "CATALOG_SEED_MISSING")
+        seeds[kind] = {"version":seed["version"],"file_sha256":sha(data)}
+    return seeds
+
+def catalog_outcome(line, kind):
+    """The loader's evidence line as the receipt records it, or None when it is not one for this kind."""
+    try: outcome = json.loads(line)
+    except ValueError: return None
+    if not (isinstance(outcome, dict) and outcome.get("status") == "loaded" and outcome.get("kind") == kind
+            and isinstance(outcome.get("version"), str) and type(outcome.get("items")) is int
+            and all(isinstance(outcome.get(k), str) and re.fullmatch(r"[0-9a-f]{64}", outcome[k])
+                    for k in ("fileSha256","approvalsSha256"))
+            and (outcome.get("replaced") is None or isinstance(outcome.get("replaced"), str))): return None
+    return {"kind":kind,"status":"loaded","version":outcome["version"],"file_sha256":outcome["fileSha256"],
+            "approvals_sha256":outcome["approvalsSha256"],"items":outcome["items"],"replaced":outcome["replaced"]}
 
 def candidate():
     ctx = context("backend")
@@ -419,12 +451,14 @@ class ECS:
             self.migration_checks = {"pending_before":0,"plan_after":"skipped","reason":SKIPPED_PLAN_AFTER,"tasks":len(tasks)}
         return definition["taskDefinitionArn"]
 
-    def load_catalog(self, arn, network, release_id, kinds):
-        """ORD-7's governed loader, after the migrations succeeded: one task per seed file on the migration task
-        definition this release registered, its command overridden. A refusal (exit 2, nothing loaded) stops the
-        release with the loader's own line; any other failure stops it too."""
+    def load_catalog(self, arn, network, release_id, seeds):
+        """ORD-7's governed loader, after the migrations succeeded: one task per seed file (seeds: catalog_seeds)
+        on the migration task definition this release registered, its command overridden. A refusal (exit 2,
+        nothing loaded) stops the release, and so does any other non-zero exit; either way the loader's last line is
+        printed. A task that exits 0 has loaded its seed: without its evidence line, the receipt still names the seed
+        (kind, version, sha256) as loaded, and the release stops with CATALOG_LOAD_EVIDENCE_MISSING."""
         self.catalog_checks = []
-        for kind in kinds:
+        for kind, seed in seeds.items():
             self.lease.assert_owned()
             task = self.aws.call("ecs","run-task",{"cluster":CLUSTER,"taskDefinition":arn,"launchType":"FARGATE",
                 "clientToken":sha((release_id+"catalog-"+kind).encode()),
@@ -443,31 +477,42 @@ class ECS:
                 time.sleep(5)
             codes = [c.get("exitCode") for c in rows["tasks"][0]["containers"]]
             if all(code == 0 for code in codes):
-                outcome = json.loads(self.catalog_line(task_arn,CATALOG_LOADED))
-                require(outcome.get("kind") == kind, "CATALOG_LOAD_EVIDENCE_MISSING")
-                self.catalog_checks.append({"kind":kind,"version":outcome["version"],"file_sha256":outcome["fileSha256"],
-                    "approvals_sha256":outcome["approvalsSha256"],"items":outcome["items"],"replaced":outcome["replaced"]})
+                line, _ = self.catalog_line(task_arn,CATALOG_LOADED)
+                outcome = catalog_outcome(line,kind) if line is not None else None
+                if outcome is None:
+                    # Exit 0 is a committed load: the version is live whatever the log says.
+                    self.catalog_checks.append({"kind":kind,"status":"loaded","version":seed["version"],
+                        "file_sha256":seed["file_sha256"],"evidence":EVIDENCE_LINE_MISSING})
+                    print(json.dumps({"release_id":release_id,"catalog_load":"loaded","kind":kind,"version":seed["version"],
+                        "file_sha256":seed["file_sha256"],"evidence":EVIDENCE_LINE_MISSING}), flush=True)
+                    raise ReleaseError("CATALOG_LOAD_EVIDENCE_MISSING")
+                self.catalog_checks.append(outcome)
                 continue
-            if 2 in codes:
-                print(json.dumps({"release_id":release_id,"catalog_load":"refused","kind":kind,
-                    "message":self.catalog_line(task_arn,CATALOG_REFUSED)}), flush=True)
-                raise ReleaseError("CATALOG_LOAD_REFUSED")
-            raise ReleaseError("CATALOG_LOAD_FAILED")
+            # Any other exit: the loader's last line (its refusal or failure line, else whatever it printed last).
+            line, last = self.catalog_line(task_arn,CATALOG_NOT_LOADED)
+            refused = 2 in codes
+            print(json.dumps({"release_id":release_id,"catalog_load":"refused" if refused else "failed","kind":kind,
+                "exit_codes":codes,"message":line if line is not None else last}), flush=True)
+            raise ReleaseError("CATALOG_LOAD_REFUSED" if refused else "CATALOG_LOAD_FAILED")
 
     def catalog_line(self, arn, pattern):
-        """The loader's line in the task's log (the migration log group): polls reads only, never re-runs a task."""
+        """The loader's line matching pattern in the task's log (the migration log group), and the log's last line:
+        polls reads only, never re-runs a task, and after 90 seconds returns (None, the last line or None)."""
         end = time.monotonic()+90
+        last = None
         while time.monotonic() < end:
             self.lease.assert_owned()
             try:
                 events = self.aws.call("logs","get-log-events",{"logGroupName":"/hid/staging/database-migration",
                     "logStreamName":"migration/database-migration/"+arn.split("/")[-1],"startFromHead":True}).get("events",[])
-                found = [e["message"] for e in events if pattern.fullmatch(e["message"])]
-                if found: return found[-1]
+                lines = [e["message"] for e in events if isinstance(e.get("message"), str) and e["message"].strip()]
+                if lines: last = lines[-1]
+                found = [line for line in lines if pattern.fullmatch(line)]
+                if found: return found[-1], last
             except ReleaseError as error:
                 if str(error) != "AWS_ResourceNotFoundException": raise
             time.sleep(5)
-        raise ReleaseError("CATALOG_LOAD_EVIDENCE_MISSING")
+        return None, last
 
     def migration_logs(self, arn):
         # Task exit can precede CloudWatch delivery. Poll reads only, never re-run a task.
@@ -491,7 +536,7 @@ def deploy(mode="deploy", rollback_id=None):
     candidate = json.loads(path.read_text())
     require(file_sha(path) == os.environ.get("EXPECTED_CANDIDATE_SHA256"), "APPROVED_ARTIFACT_CHANGED")
     validate_candidate(candidate,ctx)
-    catalog = catalog_request(os.environ.get("CATALOG_LOAD"), mode, candidate["evidence"])
+    catalog = catalog_seeds(catalog_request(os.environ.get("CATALOG_LOAD"), mode, candidate["evidence"]))
     github = GitHub(ctx["repository"])
     phases = Phases()
     # The approval step before cloud credentials already waited for GitHub's job records to settle.
@@ -623,6 +668,13 @@ def deploy(mode="deploy", rollback_id=None):
                 # Lease loss/uncertain rollback blocks takeover until explicit reconciliation.
                 reconciled = False
         if not started: reconciled = True
+        try:
+            loaded = [{"kind":k["kind"],"version":k["version"]} for k in (ecs.catalog_checks or []) if k.get("status") == "loaded"]
+            if loaded:
+                # The runbook (planned contract, ORD-7): a loaded version stays loaded and loading it again is refused.
+                print(json.dumps({"release_id":candidate["release_id"],"catalog_loaded_before_failure":loaded,
+                    "next":"dispatch the release again with catalog_load none"}), flush=True)
+        except Exception: pass
         try: notify(aws,candidate,"failed-rolled-back" if reconciled and started else "reconciliation-required")
         except Exception: pass
         raise
