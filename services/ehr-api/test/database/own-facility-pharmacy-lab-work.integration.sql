@@ -362,9 +362,11 @@ begin
       ('lab.own_work_access_for(text,uuid,text)', '1c834e3ed17d864dadb27f3105cffa04', 's'),
       ('pharmacy.own_work_item_states(uuid[])', 'dd091ced7e74b0e6e2ffb9169a80aced', 's'),
       ('lab.own_work_item_bases(uuid[])', '19f42fb8eaabcdc98726e3929bf9ec3f', 's'),
-      -- D14's claims (trigger functions) and reader, D15's list (trigger function).
+      -- D14's claims (trigger functions) and reader, D15's list (trigger
+      -- function). The dispensing claim is 0152's (ORD-12): fill 1 as 0133
+      -- made it, a refill only on a live, dispensed, own claim.
       ('pharmacy.claim_prescription_work_item()', 'c60a03a6aed78900827fc4c7654dd593', 'v'),
-      ('pharmacy.claim_prescription_dispensing()', '2c7f20d7c0df7c582bccc0291f452fdd', 'v'),
+      ('pharmacy.claim_prescription_dispensing()', '1a50612f5330a36c9b64d0d831c77812', 'v'),
       ('identity.list_own_work_patient()', '4a5d85a1c4d6f22c1f289c0dba7ed143', 'v'),
       ('pharmacy.own_withdrawn_work_items()', '1d25a10b83c34e91e9104c448b98e8dd', 's'),
       ('pharmacy.refuse_claim_key_change()', '234d53aafb3653ce4732a0292d995432', 'v')) expected(proc_name, digest, volatility)

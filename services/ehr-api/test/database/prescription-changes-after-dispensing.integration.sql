@@ -236,7 +236,11 @@ begin
   -- fingerprint, and the first resume after it would read 'edited') meets
   -- this case and decides whether to add its name to the left-out keys by
   -- replacing pharmacy.prescription_change_after_dispensing(); a timestamptz
-  -- or interval column must be left out.
+  -- or interval column must be left out. 0152 (ORD-12) added
+  -- refills_allowed smallint, nullable and without a default: null in every
+  -- older row, so no fingerprint changes and the trigger function stays
+  -- 0148's (its md5 is pinned in 1e); a value an owner sets after
+  -- dispensing shows as 'edited' (prescription-refills, case 9).
   perform pg_temp.expect('1h ehr.prescriptions'' columns and types, in order (a migration that adds one decides C2''s excluded keys)',
     (select string_agg(attribute.attname || ' ' || format_type(attribute.atttypid, attribute.atttypmod)
               || case when attribute.attnotnull then ' not null' else '' end
@@ -250,7 +254,7 @@ begin
     || 'status text not null, row_version bigint not null default, created_at timestamp with time zone not null '
     || 'default, updated_at timestamp with time zone not null default, priority text, medication_strength text, '
     || 'medication_dose_form text, duration_value integer, duration_unit text, quantity_to_dispense numeric(12,4), '
-    || 'quantity_unit text');
+    || 'quantity_unit text, refills_allowed smallint');
   -- 1i. The work items' read policies: the reader repeats exactly these two
   -- as conditions (0086's consent or order route, 0133's own work), and
   -- none is restrictive.
