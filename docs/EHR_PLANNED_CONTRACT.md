@@ -2042,9 +2042,9 @@ No new route. Changed:
 | GET | `/api/v1/pharmacy/work-items`, `/api/v1/pharmacy/work-items/:workItemId` | pharmacy staff, as today | `pharmacy.work-item.read` |
 | POST | `/api/v1/pharmacy/work-items/accept-ehr-prescription` (its replay only; internal, ehr-api only) | a pharmacist, through ehr-api's `POST /api/v1/ehr/patients/:patientId/encounters/:encounterId/prescriptions/:prescriptionId/pharmacy-work-item`, which passes the answer through unchanged, as today | `pharmacy.work-item.accept` |
 
-Not changed: the dispensing and its reversal, ORD-4's Accept, the order-route routes, the progress call (ORD-3) and its two headers, and ehr-api's code and its own answers (it passes the hand-off's replay through unchanged, so the notice reaches the pharmacist through any ehr-api image).
+Not changed: the dispensing and its reversal, ORD-4's Accept, the order-route routes, the progress call (ORD-3) and its two headers, and ehr-api's code and its own answers (it passes the hand-off's replay through unchanged).
 
-**Work item answers** (the list, a read, and a replay of `accept-ehr-prescription`) gain, on a dispensed item whose prescription changed afterwards **(coordinator decision 1, 20 Nov 2026)**:
+**Work item answers** (the list and a read) gain, on a dispensed item whose prescription changed afterwards **(coordinator decision 1, 20 Nov 2026)**, the field below. A replay of `accept-ehr-prescription` answers it too, but that is not a path the notice takes in practice: any change after the dispensing raises the prescription's version, which the replay's digest covers, so a hand-off after a change answers 409 `IDEMPOTENCY_CONFLICT` before the notice is read; only `@hid/api-client`'s single immediate retry of the same request could meet one.
 
 ```json
 { "changedAfterDispensing": { "change": "cancelled", "changedAt": "2026-11-20T09:15:00.000Z", "changeCount": 2 } }

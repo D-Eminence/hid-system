@@ -10445,11 +10445,12 @@ change after 0148 (no backfill).
 
 ### Work item answers
 
-`GET /api/v1/pharmacy/work-items`, `GET
-/api/v1/pharmacy/work-items/:workItemId` and the replay of
-`accept-ehr-prescription` gain, as the item's last field (after `withdrawn`
-and `withdrawnReason`), on a dispensed item (reversed or not) with at least
-one shown change:
+`GET /api/v1/pharmacy/work-items` and `GET
+/api/v1/pharmacy/work-items/:workItemId` gain, as the item's last field
+(after `withdrawn` and `withdrawnReason`), on a dispensed item (reversed or
+not) with at least one shown change (the replay of `accept-ehr-prescription`
+answers it too, but in practice never carries it: see the last point of
+this list):
 
 ```json
 { "changedAfterDispensing": { "change": "cancelled", "changedAt": "2026-11-20T09:15:00.000Z", "changeCount": 2 } }
@@ -10493,12 +10494,20 @@ one shown change:
   facility. What the pharmacy was shown at a time can be rebuilt from 0148's
   append-only table and the reader's text at that time.
 - No new error: the list and the read keep theirs.
-- The hand-off reaches a pharmacist through ehr-api's `POST
-  .../prescriptions/:prescriptionId/pharmacy-work-item` (the hand-off to
-  this facility's pharmacy, `pharmacy.work-item.accept`), which passes
-  pharmacy-api's answer through unchanged (ehr-api calls it through
-  `@hid/api-client`, whose command checks only `id`), so the replay's notice
-  reaches the pharmacist through any ehr-api image, Release A's included.
+- The notice reaches the pharmacist on the list and the read. The hand-off
+  replay is not a path that carries it in practice. A replay answers the
+  stored item only when its request digest matches the first hand-off's,
+  and the digest covers the prescription's `row_version`. Any change after
+  the dispensing raises that version, and ehr-api's `POST
+  .../prescriptions/:prescriptionId/pharmacy-work-item` sends the current
+  one, so a hand-off after a change answers 409 `IDEMPOTENCY_CONFLICT`
+  before the reader runs. Only `@hid/api-client`'s single immediate retry of
+  the same request could see a notice, if a dispensing and a change both
+  commit inside it. pharmacy-api's W6 and W8 replay the first hand-off's own
+  input to pin where the field sits on that answer and that a 40001 from the
+  reader reruns the replay; real traffic does not send that input after a
+  change. ehr-api passes pharmacy-api's answer through unchanged (it calls
+  it through `@hid/api-client`, whose command checks only `id`).
 
 ### Who sees it
 

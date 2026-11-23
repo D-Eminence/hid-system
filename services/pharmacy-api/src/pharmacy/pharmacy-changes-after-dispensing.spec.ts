@@ -414,6 +414,12 @@ describe('Q132 A: changedAfterDispensing on a single read and the hand-off repla
     expect(readerStatements(h.last())).toHaveLength(1);
   });
 
+  // W6 and W8 replay the first hand-off's own input (its prescription version), so the stored item is answered.
+  // Real traffic does not send that input after a change: any change after the dispensing raises the prescription's
+  // row_version, ehr-api's hand-off sends the current one, and the digest covers it, so a hand-off after a change is
+  // 409 IDEMPOTENCY_CONFLICT before the reader runs (the end of W6). Only @hid/api-client's single immediate retry of
+  // the same request could meet a notice here, if a dispensing and a change both committed inside it. W6 and W8 pin
+  // where the field sits on that answer and the SERIALIZABLE rerun, not a path the notice takes in practice.
   it('W6 the hand-off replay answers it as the read does, in its SERIALIZABLE transaction', async () => {
     const h = harness();
     const read = await readOf(h, 3);
@@ -431,6 +437,12 @@ describe('Q132 A: changedAfterDispensing on a single read and the hand-off repla
     // An item handed in and not dispensed yet: the replay asks nothing new.
     const undispensed = await replayOf(h, 9);
     expect(undispensed).not.toHaveProperty('changedAfterDispensing');
+    expect(readerStatements(h.last())).toEqual([]);
+    // What ehr-api sends after a change: the prescription's current, higher version. The digest differs, so the
+    // answer is 409 IDEMPOTENCY_CONFLICT and the reader is never asked.
+    const afterChange = { ...handOffInput(3), sourceEhrPrescriptionVersion: 3 };
+    await expect(h.service.acceptPrescription(pharmacist, afterChange as never, 'q132-handoff-key-3'))
+      .rejects.toMatchObject({ status: 409, code: 'IDEMPOTENCY_CONFLICT' });
     expect(readerStatements(h.last())).toEqual([]);
   });
 
@@ -474,6 +486,7 @@ describe('Q132 A: the list and the read stay as before when the notice is not th
       }
     });
 
+  // Like W6, this replays the first hand-off's own input, which real traffic does not send after a change (see W6).
   it('W8 a 40001 from the reader runs the hand-off replay again, which then answers the notice', async () => {
     const h = harness({ readerErrors: [sqlError('40001')] });
     const replay = await replayOf(h, 3);
