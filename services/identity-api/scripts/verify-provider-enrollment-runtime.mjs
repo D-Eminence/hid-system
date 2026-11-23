@@ -3128,7 +3128,10 @@ try {
       || ' ' || coalesce(resource_id, '') as text from audit.events where sequence_id > $1`, [p4bAuditStart])).rows;
   for (const value of sensitive) {
     if (!value) continue;
-    const leaked = p4bRows.find(row => row.text.includes(value));
+    // A 6-digit code matches only as a whole value: inside a random UUID's hex (an auth.login row's session id) it
+    // would match by chance (about 6 in 10 million per code and id). Every other value matches anywhere.
+    const leaked = p4bRows.find(row => (/^\d{6}$/.test(value)
+      ? new RegExp(`(?<![0-9a-fA-F])${value}(?![0-9a-fA-F])`).test(row.text) : row.text.includes(value)));
     assert(!leaked, `An audit row (${leaked?.action}) carries a synthetic secret or personal value`);
   }
   assert(!p4bRows.some(row => row.facility_id && /accountCase|account_case/.test(row.text)),
