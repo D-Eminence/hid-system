@@ -625,7 +625,8 @@ describe('EHR-C5 one-call consultation (service)', () => {
       const equal = body({ vitals: { ...body().vitals!, systolicMmhg: 120, diastolicMmhg: 120 } });
       await expect(db.consultations.create(contextFor('correlation-0001'), patientId, equal, KEY))
         .rejects.toMatchObject({ status: 400, code: 'BLOOD_PRESSURE_ORDER_INVALID' });
-      expect(db.tables()).toEqual({ keys: [], encounters: [], notes: [], revisions: [], vitals: [], diagnoses: [] });
+      expect(db.tables()).toEqual({ keys: [], encounters: [], notes: [], revisions: [], vitals: [], diagnoses: [],
+        recent: [] });
       // An older image (before VIT-1) saved it; the answer was lost, and the retry reaches this image.
       const rule = db.vitals.checkBloodPressureOrder;
       db.vitals.checkBloodPressureOrder = () => undefined;
