@@ -298,14 +298,15 @@ jobs:
         id: candidate
         env:
           SELECTED_COMPONENTS: ${{ needs.select.outputs.matrix }}
-          # The schema change is compared with the select job's base, the commit of the
-          # last run that deployed (releasedBase), so a migration that a failed release
-          # left pending is still a new file and a reviewed change to it needs no carrier
-          # push. Without a released base it falls back to the push's before, as before.
+          # Two bases: this push's change (the push's before, HEAD^ for a dispatch) must be
+          # declared, and the declaration may also name files earlier pushes left pending
+          # since the select job's released base (the last run that deployed), each a new
+          # file since then; production's plan then binds the declaration to what is pending.
+          # With no released base (a dispatch, an API error) the push's before is the only base.
           RELEASED_BASE_SHA: ${{ needs.select.outputs.released_base }}
           EVENT_BASE_SHA: ${{ github.event.before }}
         run: |
-          export BASE_SHA="${RELEASED_BASE_SHA:-${EVENT_BASE_SHA:-$(git rev-parse HEAD^)}}"
+          export BASE_SHA="${EVENT_BASE_SHA:-$(git rev-parse HEAD^)}"
           node scripts/production-deployment.mjs candidate
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

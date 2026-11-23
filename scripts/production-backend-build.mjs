@@ -178,11 +178,11 @@ export function selectChanged(base, diff=gitDiff) {
 // not deploy (deployment switched off) is passed over the same way. Any API error,
 // unexpected answer, no qualifying run among the newest 30, or a base that is not
 // an ancestor of HEAD returns null, and a null base builds every component.
-// The select job also hands this base to the candidate step (released_base), which
-// compares the schema change with it: a migration that a failed release left pending
-// is then still a new file there, so a reviewed change to it needs no carrier push.
-// A pull request, a dispatch or a null base hands over nothing, and the candidate
-// falls back to the push's before.
+// The select job also hands this base to the candidate step (released_base): the
+// schema declaration may name files that earlier pushes left pending since it (a
+// failed release's migrations), so the next release declares them and needs no
+// carrier push. A pull request, a dispatch or a null base hands over nothing, and the
+// candidate compares with the push's before only.
 export function selectionOutputs(matrix, base, env) {
   const released=env.GITHUB_EVENT_NAME==='push'&&/^[a-f0-9]{40}$/.test(base??'')&&!/^0+$/.test(base)?base:'';
   return `matrix=${matrix}\nhas_changes=${JSON.parse(matrix).component.length>0}\nreleased_base=${released}\n`;

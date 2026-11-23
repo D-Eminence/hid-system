@@ -10,8 +10,8 @@ import re
 import time
 import urllib.request
 from production_deployment_core import (ACCOUNT, REGION, CLUSTER, COMPONENTS, INDEX_KEY, REGISTER_FIELDS, AWS,
-    GitHub, Lease, Store, ReleaseError, atomic_json, canonical, changed_paths, context, file_sha, git,
-    image, make_candidate, migration_files, notify, require, require_additive_schema_change, schema_contract, sha, summarize,
+    GitHub, Lease, Store, ReleaseError, atomic_json, canonical, candidate_schema_change, context, file_sha, git,
+    image, make_candidate, migration_files, notify, require, sha, summarize,
     task_config_hash, task_payload, validate_candidate, validate_index)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -113,11 +113,7 @@ def candidate():
         records[component] = {"image_uri":receipt["image_uri"],"publication_sha256":file_sha(path),
             "sbom_sha256":receipt["sbom_sha256"],"scan_sha256":receipt["scan_sha256"]}
     require(set(records) == set(selected), "COMPLETE_PUBLICATION_SET_REQUIRED")
-    paths = changed_paths(ROOT)
-    contract = schema_contract(ROOT, paths, carry="database-migration" in records)
-    if contract.get("changed") and not contract.get("carried"):
-        require("database-migration" in records, "MIGRATION_IMAGE_REQUIRED")
-        require_additive_schema_change(ROOT, os.environ["BASE_SHA"], contract)
+    contract = candidate_schema_change(ROOT, "database-migration" in records)
     checks = {"select":"success","build":"success","verify-publisher":"success","publish":"success"}
     release = make_candidate(ctx, selected, records, checks, schema=contract)
     atomic_json(ROOT/"release/candidate.json",release)

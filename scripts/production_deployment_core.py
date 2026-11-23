@@ -444,7 +444,12 @@ def summarize(candidate, path=None):
         "Schema changes: "+str(candidate["schema_change"].get("changed",False))
             +(" (reviewed declaration carried forward; applies only if production's pending migrations are exactly: "
               +", ".join(pathlib.PurePosixPath(p).name for p in migration_files(candidate["schema_change"]))+")"
-              if candidate["schema_change"].get("carried") else ""),
+              if candidate["schema_change"].get("carried") else
+              " (declares files earlier pushes left pending: "
+              +", ".join(pathlib.PurePosixPath(p).name for p in candidate["schema_change"]["from_earlier_pushes"])
+              +"; applies only if production's pending migrations are exactly: "
+              +", ".join(pathlib.PurePosixPath(p).name for p in migration_files(candidate["schema_change"]))+")"
+              if candidate["schema_change"].get("from_earlier_pushes") else ""),
         "Backend dependencies: "+json.dumps(candidate.get("backend_dependencies",{}),sort_keys=True), "",
         "Build results do not certify untested application features.",
         "Prior verified release is rechecked after policy verification before any mutation.", ""]
@@ -479,18 +484,36 @@ def migration_files(contract):
 # a migration is not part of the schema change to declare.
 SCHEMA_TESTS = "services/ehr-api/database/tests/"
 
-def schema_contract(root, changed_paths, carry=False):
-    affected = [p for p in changed_paths
-                if p.startswith("services/ehr-api/database/") and not p.startswith(SCHEMA_TESTS)]
+def schema_files(paths):
+    return [p for p in paths if p.startswith("services/ehr-api/database/") and not p.startswith(SCHEMA_TESTS)]
+
+def declared_migrations(metadata):
+    try:
+        return set(migration_files({"files":dict(json.loads(metadata.read_text()).get("files",{}))}))
+    except (ValueError, OSError, AttributeError, TypeError, RecursionError):
+        return set()
+
+# Two bases:
+#   B, the push's base (github.event.before, or HEAD^ for a dispatch): what this push changed;
+#   R, the released base (the select job's released_base: the last push run that deployed),
+#      or None when there is none (a dispatch, an API error, no qualifying run): R is then B.
+# The declaration D must hold this push's change and may hold files that earlier pushes left
+# pending since R:  schema(B) <= D <= schema(R). Whether a failed release applied some of
+# them is production's to say: migrate() applies only when the pending (name, sha256) set
+# equals D's migrations, so D names exactly what production still has to apply.
+def schema_contract(root, changed_paths, carry=False, released_paths=None):
+    affected = schema_files(changed_paths)
+    since_release = affected if released_paths is None else schema_files(released_paths)
     metadata = pathlib.Path(root)/"config/production-schema-compatibility.json"
-    if not affected:
-        # A release that fails after its schema is reviewed leaves those migrations
-        # pending. The candidate diffs from the select job's released base (the last
-        # run that deployed), so they stay in its diff; but without a released base
-        # it diffs from the push's before, the failed commit, and would never declare
-        # them. Carry the reviewed declaration then: migrate() still applies only
-        # when production's pending set equals its migrations.
-        if not carry or not metadata.exists(): return {"changed":False}
+    if not affected and not declared_migrations(metadata) & set(since_release):
+        # Nothing in this push, and the declaration names nothing pending since R: a
+        # released declaration, so this push declares nothing. Without a released base a
+        # release that fails after its schema is reviewed leaves those migrations pending
+        # and the push's base is the failed commit, so they are never in the diff: carry
+        # the reviewed declaration then (a dispatch, or a push the Actions API could not
+        # place); migrate() still applies only when production's pending set equals its
+        # migrations. With a released base the case above declares them instead.
+        if not carry or released_paths is not None or not metadata.exists(): return {"changed":False}
         try:
             contract = schema_contract(root, list(json.loads(metadata.read_text()).get("files",{})))
         except (ReleaseError, ValueError, OSError, AttributeError, TypeError, RecursionError):
@@ -500,25 +523,56 @@ def schema_contract(root, changed_paths, carry=False):
     value = json.loads(metadata.read_text())
     require(value.get("schema") == "hid.schema-compatibility/v1" and value.get("backward_compatible") is True
             and value.get("reviewed_by") and value.get("evidence"), "REVIEWED_BACKWARD_COMPATIBILITY_REQUIRED")
-    require(set(value.get("files",{})) == set(affected), "EXACT_SCHEMA_CHANGE_DECLARATION_REQUIRED")
+    declared = set(value.get("files",{}))
+    require(set(affected) <= declared, "SCHEMA_DECLARATION_MISSES_THIS_PUSH_CHANGE")
+    require(declared <= set(since_release), "SCHEMA_DECLARATION_BEYOND_RELEASED_BASE")
     for name, digest in value["files"].items():
         require((re.fullmatch(re.escape(MIGRATIONS)+r"\d{4}_[a-z0-9_]+\.sql", name) or name == RUNTIME_GRANTS)
                 and file_sha(pathlib.Path(root)/name) == digest,
                 "SCHEMA_DECLARATION_CONTENT_DIFFERS")
     require(RUNTIME_GRANTS not in value["files"] or migration_files(value), "RUNTIME_GRANTS_NEED_A_MIGRATION")
-    return {"changed":True,"contract_sha256":file_sha(metadata),"files":value["files"],
+    contract = {"changed":True,"contract_sha256":file_sha(metadata),"files":value["files"],
             "backward_compatible":True,"evidence":value["evidence"],"reviewed_by":value["reviewed_by"]}
+    earlier = sorted(declared - set(affected))
+    return dict(contract, from_earlier_pushes=earlier) if earlier else contract
 
-def require_additive_schema_change(root, base, contract):
+def require_additive_schema_change(root, base, contract, released_base=None):
     # Changed applied files or RDS substitutions are outside this automatic additive path.
-    # The role bootstrap file is the one existing file a reviewed change may modify.
-    # Against the released base, a migration a failed release left pending is still new.
+    # Every declared migration is a new file since R (B when there is none), so one that
+    # was released is never edited; runtime-grants.sql is the one existing file a reviewed
+    # change may modify.
     for name in contract["files"]:
         change = "M" if name == RUNTIME_GRANTS else "A"
-        require(git("diff","--diff-filter="+change,"--name-only",base,"HEAD","--",name,cwd=root) == name,
+        require(git("diff","--diff-filter="+change,"--name-only",released_base or base,"HEAD","--",name,cwd=root) == name,
                 "ONLY_NEW_REVIEWED_SCHEMA_FILES_ALLOWED")
+        # A migration this push changed is new in this push too. One an earlier push added
+        # may already be applied (a failed release can commit some files before it fails,
+        # and a dispatch is not a released base), so editing it is refused here, before
+        # approval, not only by the runner's checksum check inside the deploy.
+        if name != RUNTIME_GRANTS and git("diff","--name-only",base,"HEAD","--",name,cwd=root):
+            require(git("diff","--diff-filter=A","--name-only",base,"HEAD","--",name,cwd=root) == name,
+                    "MIGRATION_FROM_AN_EARLIER_PUSH_EDITED")
 
 def changed_paths(root):
     base = os.environ.get("BASE_SHA","")
     require(re.fullmatch(r"[a-f0-9]{40}",base) and not re.fullmatch("0+",base), "KNOWN_COMPARISON_BASE_REQUIRED")
     return git("diff","--name-only",base,"HEAD",cwd=root).splitlines()
+
+def released_paths(root):
+    # The select job's released base (RELEASED_BASE_SHA); empty when it has none, and
+    # then None: the push's base is the only base, as before.
+    base = os.environ.get("RELEASED_BASE_SHA","")
+    if not base: return None
+    require(re.fullmatch(r"[a-f0-9]{40}",base) and not re.fullmatch("0+",base), "KNOWN_RELEASED_BASE_REQUIRED")
+    ancestor = subprocess.run(["git","merge-base","--is-ancestor",base,"HEAD"],cwd=root,capture_output=True,timeout=60)
+    require(ancestor.returncode == 0, "RELEASED_BASE_NOT_AN_ANCESTOR")
+    return git("diff","--name-only",base,"HEAD",cwd=root).splitlines()
+
+def candidate_schema_change(root, migration_image):
+    released = released_paths(root)
+    contract = schema_contract(root, changed_paths(root), carry=migration_image, released_paths=released)
+    if contract.get("changed") and not contract.get("carried"):
+        require(migration_image, "MIGRATION_IMAGE_REQUIRED")
+        require_additive_schema_change(root, os.environ["BASE_SHA"], contract,
+                                       os.environ["RELEASED_BASE_SHA"] if released is not None else None)
+    return contract

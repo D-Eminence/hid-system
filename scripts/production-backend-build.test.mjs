@@ -681,12 +681,15 @@ test('the select job hands its push base to the candidate, and nothing otherwise
     assert.ok(selectionOutputs(matrix,base,env).endsWith('\nreleased_base=\n'),name);
   assert.equal(selectionOutputs(JSON.stringify({component:[]}),sha(1),pushEnv).split('\n')[1],'has_changes=false');
 });
-test('the candidate compares the schema change with the released base before the push\'s before',()=>{
+test('the candidate gets the push\'s before as its base and the released base beside it',()=>{
   const text=readFileSync(join(repoRoot,'.github/workflows/production-backend-images.yml'),'utf8');
   const select=text.slice(text.indexOf('\n  select:\n'),text.indexOf('\n  build:\n'));
   assert.ok(select.includes('released_base: ${{ steps.matrix.outputs.released_base }}\n'));
   const candidate=text.slice(text.indexOf('\n  candidate:\n'),text.indexOf('\n  deploy:\n'));
   assert.ok(/needs: \[select, /.test(candidate));
   assert.ok(candidate.includes('RELEASED_BASE_SHA: ${{ needs.select.outputs.released_base }}\n'));
-  assert.ok(candidate.includes('export BASE_SHA="${RELEASED_BASE_SHA:-${EVENT_BASE_SHA:-$(git rev-parse HEAD^)}}"\n'));
+  assert.ok(candidate.includes('EVENT_BASE_SHA: ${{ github.event.before }}\n'));
+  // The released base never replaces the push's base: this push's change is always declared.
+  assert.ok(candidate.includes('export BASE_SHA="${EVENT_BASE_SHA:-$(git rev-parse HEAD^)}"\n'));
+  assert.ok(!/BASE_SHA="\$\{RELEASED_BASE_SHA/.test(candidate));
 });
