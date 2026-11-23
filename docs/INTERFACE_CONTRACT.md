@@ -10449,8 +10449,8 @@ change after 0148 (no backfill).
 /api/v1/pharmacy/work-items/:workItemId` gain, as the item's last field
 (after `withdrawn` and `withdrawnReason`), on a dispensed item (reversed or
 not) with at least one shown change (the replay of `accept-ehr-prescription`
-answers it too, but in practice never carries it: see the last point of
-this list):
+answers it too, but almost never carries it in practice: see the last point
+of this list):
 
 ```json
 { "changedAfterDispensing": { "change": "cancelled", "changedAt": "2026-11-20T09:15:00.000Z", "changeCount": 2 } }
