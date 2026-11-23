@@ -1,6 +1,7 @@
 import { PharmacyApiClient, type PharmacyChangeAfterDispensing,
   type PharmacyChangedAfterDispensing } from '@hid/api-client';
 import { CHANGES_AFTER_DISPENSING } from '../pharmacy/changes-after-dispensing';
+import { orderRouteCard } from '../pharmacy/order-route-cards';
 
 // Q132 A (Release B, 0148): a dispensed work item's changedAfterDispensing as packages/api-client parses it
 // (parseChangedAfterDispensing). Lenient for a value: absent is left out, and a `change` the client does not
@@ -9,9 +10,9 @@ import { CHANGES_AFTER_DISPENSING } from '../pharmacy/changes-after-dispensing';
 // Strict for a type only: 502. The two types are imported from the package's entry point, so this file also
 // stops compiling if they are no longer exported there. It runs in pharmacy-api's jest, beside
 // pharmacy-client-steps.contract.spec.ts, because packages/api-client has no test runner of its own and the root
-// `npm test` builds the client first. Own items only: the client still refuses an item from another facility
-// (it requires the ids such an item never carries), which a separate fix comes first for (SPEC decision 26);
-// route-backed notices are tested on the service side (pharmacy-changes-after-dispensing.spec.ts).
+// `npm test` builds the client first. Own items, and (C9) an item from another facility's order route: the client
+// accepts such items, without the source ids they never carry and with their route card, since 2a9aa2f3 (in
+// Release B; SPEC decision 26). The service side of route-backed notices is in pharmacy-changes-after-dispensing.spec.ts.
 
 const context = {
   authorization: 'Bearer propagated-user', correlationId: 'client-contract-q132-1234',
@@ -117,4 +118,37 @@ describe('PharmacyApiClient work item changedAfterDispensing (Q132 A)', () => {
     expect(item.changedAfterDispensing).toStrictEqual({ change: 'on_hold', changedAt, changeCount: 1 });
     expect(Object.keys(item).at(-1)).toBe('changedAfterDispensing');
   });
+
+  it('C9 a route-backed item: the notice kept beside its route card, with no source ids, on the list and a read',
+    async () => {
+      // As pharmacy-api projects a route-backed row (PRIV P4.3): no sourceEhrPrescriptionId or sourceEncounterId, and
+      // the card and its patient as pharmacy-api's own orderRouteCard() builds them; the notice is the last field.
+      const card = orderRouteCard({ work_item_id: '123e4567-e89b-42d3-a456-426614174021',
+        route_id: '123e4567-e89b-42d3-a456-426614174020', reference: 'RX-7Q2K', effective_state: 'accepted',
+        access: 'read', ordering_facility_name: 'Ordering Hospital', orderer_name: 'Dr Ada Obi',
+        orderer_licence_body: 'Fictional Medical Board', orderer_licence_number: 'FMB-0042',
+        patient_full_name: 'Bisi Route', patient_sex: 'female', patient_date_of_birth: '1988-04-05',
+        patient_health_id_last4: 'RT42', row_version: '3', ended_kind: null });
+      const { sourceEhrPrescriptionId: _prescription, sourceEncounterId: _encounter, ...unsourced } = base;
+      const routed = { ...unsourced, id: '123e4567-e89b-42d3-a456-426614174021',
+        patientId: '123e4567-e89b-42d3-a456-426614174022', orderRoute: card.orderRoute, patient: card.patient,
+        changedAfterDispensing: notice('on_hold', 1) };
+      respond({ items: [{ ...base, changedAfterDispensing: notice('cancelled', 2) }, routed] });
+      const [own, listed] = await client.listWorkItems(context);
+      respond(routed);
+      const read = await client.getWorkItem(routed.id, context);
+      expect(own?.changedAfterDispensing).toStrictEqual({ change: 'cancelled', changedAt, changeCount: 2 });
+      for (const item of [listed, read]) {
+        expect(item?.changedAfterDispensing).toStrictEqual({ change: 'on_hold', changedAt, changeCount: 1 });
+        expect(Object.keys(item!).at(-1)).toBe('changedAfterDispensing');
+        expect(item?.orderRoute).toStrictEqual(card.orderRoute);
+        expect(item?.orderRoute?.orderingFacilityName).toBe('Ordering Hospital');
+        expect(item).not.toHaveProperty('sourceEhrPrescriptionId');
+        expect(item).not.toHaveProperty('sourceEncounterId');
+      }
+      // A malformed notice on a route-backed item is refused as on an own item.
+      respond({ ...routed, changedAfterDispensing: { change: 'on_hold', changedAt, changeCount: 0 } });
+      await expect(client.getWorkItem(routed.id, context)).rejects.toMatchObject({ status: 502,
+        payload: { detail: 'Pharmacy field changeCount is malformed.' } });
+    });
 });

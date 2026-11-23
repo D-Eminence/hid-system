@@ -432,10 +432,12 @@ export class PharmacyService {
         // sent elsewhere: D14) when it was (no flag when it cannot be read).
         const states = existing.order_route_id ? undefined
           : await this.ownWork.states(client, [existing.id], context.correlationId, 'flag');
-        // Q132 A: and, once dispensed, its change after dispensing, as the read answers it. This route is
-        // internal: ehr-api passes the answer through unchanged, so the notice reaches the pharmacist through
-        // any ehr-api image. The transaction is SERIALIZABLE: a 40001 from the reader is passed on, and
-        // DatabaseService runs the whole replay again.
+        // Q132 A: and, once dispensed, its change after dispensing, as the read answers it (ehr-api passes the
+        // answer through unchanged). In practice a replay seldom carries one: any change raises the
+        // prescription's row_version, which the digest covers, so a hand-off after a change is the 409 above;
+        // only api-client's single immediate retry could meet a notice. The list and the read carry it. The
+        // transaction is SERIALIZABLE: a 40001 from the reader is passed on, and DatabaseService runs the whole
+        // replay again.
         const changed = existing.dispensing_id
           ? await this.dispensedChanges.changes(client, [existing.id], context.correlationId) : undefined;
         return this.projectWorkItem(existing, undefined, undefined, undefined, states?.get(existing.id),

@@ -4,12 +4,14 @@
 -- the dispensing pharmacy's own work item, facts only, with no
 -- acknowledgement and no change on the prescriber's side. The planned
 -- contract's section "Q132 A: changed after dispensing" is what this file
--- builds. Written on ORD-4's branch (Release A: 0001-0137 applied and signed;
--- staging 06f98040). The number is provisional and given in merge order; no
--- migration number appears inside a function body, a policy or a trigger, so
--- renumbering leaves every md5. This file requires 0001-0137 applied and
--- relies on nothing of 0144 (ORD-4), so the two apply in either order. The
--- declaration is signed separately.
+-- builds. Base: Release B (0001-0146 applied and signed; staging 926b1c58),
+-- where 0144 (ORD-4) is live; first written on ORD-4's branch over Release A.
+-- The number is provisional and given in merge order; no migration number
+-- appears inside a function body, a policy or a trigger, so renumbering
+-- leaves every md5. Section 0 checks for 0001-0137 (0137's markers), which
+-- is all this file needs: 0138-0146 changed no body, trigger, policy or
+-- column it pins or reads (0143 adds a policy on ehr.prescriptions, but no
+-- query of this file reads that table). The declaration is signed separately.
 --
 -- THE GAP. 0133 D8 tells a pharmacy when a prescription it has received
 -- changes before it is dispensed (the item reads withdrawn). After the first
@@ -56,7 +58,11 @@
 --    (the safe side) unless that migration replaces C2 with the column added
 --    to the keys left out; a later timestamptz or interval column must be
 --    left out (its jsonb text follows the session's TimeZone); a later
---    nullable column changes nothing. The time is clock_timestamp() taken in
+--    nullable column changes nothing. A later ALTER COLUMN TYPE that changes
+--    a column's jsonb text (numeric(12,4) to numeric(14,6) turns 1.0000 into
+--    1.000000), or a RENAME or DROP of a column that holds values, also
+--    changes every later fingerprint, so the first resume after it reads
+--    'edited' too (the safe side). The time is clock_timestamp() taken in
 --    C2, never the version's updated_at (see "after dispensing" below).
 -- C3 pharmacy.work_item_changes_after_dispensing(uuid[]) (plpgsql, STABLE,
 --    SECURITY DEFINER, same owner; EXECUTE to hid_pharmacy_runtime and
@@ -131,11 +137,14 @@
 --
 -- ORD-12 (refills) coupling: section 0 pins
 -- pharmacy.claim_prescription_dispensing(), which sets dispensed_at once and
--- refuses a second fill today. ORD-12 must replace it, keeping dispensed_at
--- as the first fill and never clearing it, so "after dispensing" means
--- "after the first fill" and 'resumed' compares with the first fill's
--- content. ORD-12 merges after this file, or re-pins it, and adds its
--- refills_allowed column to C2's keys left out.
+-- refuses a second fill today. ORD-12 (0152, provisional) must replace it,
+-- keeping dispensed_at as the first fill and never clearing it, so "after
+-- dispensing" means "after the first fill" and 'resumed' compares with the
+-- first fill's content. ORD-12 merges after this file, or re-pins it. Its
+-- refills column follows C2's maintenance rule: a NOT NULL or defaulted
+-- refills column must be left out of the fingerprint (by replacing C2); a
+-- nullable one needs nothing. ORD-12 adds refills_allowed as a nullable
+-- column, so C2 stays as it is.
 --
 -- 0. Preconditions (catalog reads only; 55000, or 42501 for e and f; nothing
 --    applied): a. 0001-0137 applied (0144's markers); b. this file not
@@ -196,12 +205,16 @@
 -- the NOWAIT, so a long one stops the file after 5 seconds, nothing applied.
 -- In the dry run the lock lasts until the dry run ends; an earlier file's
 -- strong locks make this file take one attempt.
--- Measured on throwaway PostgreSQL 16 with 0001-0137 and 0144 applied and
--- 20,000 prescriptions, work items and claims (fictional data), with a
--- superuser applier and with a NOSUPERUSER NOBYPASSRLS applier:
---   the file takes 44-78 ms; the hold, from the SHARE ROW EXCLUSIVE to
---   commit, is 20-26 ms in all 16 runs (target under 50 ms, so the lock
---   stays in section 1; no late-lock fallback is used);
+-- Measured on throwaway PostgreSQL 16 on Release B (0001-0146 and its
+-- runtime roles, staging 926b1c58) with 20,000 prescriptions, work items and
+-- claims (fictional data), ten runs with a superuser applier and ten with a
+-- NOSUPERUSER NOBYPASSRLS applier: the file takes 32-60 ms to commit; the
+-- hold, from the SHARE ROW EXCLUSIVE to commit, is 15-31 ms in all 20 runs
+-- (target under 50 ms, so the lock stays in section 1; no late-lock fallback
+-- is used).
+-- Measured earlier on 0001-0137 and 0144 (ORD-4's branch over Release A),
+-- with the same data and both appliers (the file then took 44-78 ms and the
+-- hold 20-26 ms in all 16 runs):
 --   a blocker held by another session on each of section 1's eleven tables
 --   and 41 indexes, and a writer and a SHARE UPDATE EXCLUSIVE holder (as
 --   autovacuum) on ehr.prescriptions: each time the file stops with section
@@ -218,13 +231,13 @@
 --   (median) when none has a recorded row, and in 366 ms when all 200 have
 --   one (its policy tests run per recorded item; a real page has few).
 --
--- Old services on this schema. Release A ehr-api: each change of an active
--- or on-hold prescription fires C4, and C2 finds no dispensed claim (one
--- index probe) or records a row; nothing ehr-api reads or answers changes
--- (its PATCH audit, ownPharmacy.withdraw and 0133 D8 are unchanged).
--- Release A and ORD-4 pharmacy-api call nothing new, and this file replaces
--- no function they call; changes recorded meanwhile show once the new
--- pharmacy-api serves.
+-- Old services on this schema. Release B's ehr-api (the live one): each
+-- change of an active or on-hold prescription fires C4, and C2 finds no
+-- dispensed claim (one index probe) or records a row; nothing ehr-api reads
+-- or answers changes (its PATCH audit, ownPharmacy.withdraw and 0133 D8 are
+-- unchanged). Release B's pharmacy-api (ORD-4's included) calls nothing new,
+-- and this file replaces no function it calls; changes recorded meanwhile
+-- show once the new pharmacy-api serves.
 --
 -- New services on a schema without this file. The new pharmacy-api reads
 -- 42883 (or 42P01 on a half-undone schema) from C3 and answers the work item
@@ -746,6 +759,10 @@ revoke all on pharmacy.prescription_changes_after_dispensing from public;
 -- left out by replacing this function (CREATE OR REPLACE FUNCTION takes no
 -- lock on ehr.prescriptions); a later timestamptz or interval column must
 -- be left out; a later nullable column, null in old rows, changes nothing.
+-- A later ALTER COLUMN TYPE that changes a column's jsonb text (numeric(12,4)
+-- to numeric(14,6) turns 1.0000 into 1.000000), or a RENAME or DROP of a
+-- column that holds values, also changes every later fingerprint, so the
+-- first resume after it reads 'edited' too (the safe side).
 -- The time is clock_timestamp() taken here, after the route sync's wait
 -- (C4's name), never the version's updated_at, stamped before that wait.
 create function pharmacy.prescription_change_after_dispensing()
@@ -893,7 +910,7 @@ $$;
 comment on table pharmacy.prescription_changes_after_dispensing is
   '0148 Q132 A: one row per prescription version after a work item''s first dispensing (0133''s claim dispensed_at), written by the trigger prescriptions_pharmacy_change_after_dispensing: the work item, its facility, the version, the status before and after, a SHA-256 fingerprint of the content before and after, and the time. Facts only: no actor, reason, prescription id or field value. Append-only; the owner''s only (no policy, no grant).';
 comment on function pharmacy.prescription_change_after_dispensing() is
-  '0148 Q132 A: the function of the trigger prescriptions_pharmacy_change_after_dispensing on ehr.prescriptions: for each dispensed claim of the changed prescription, one row in pharmacy.prescription_changes_after_dispensing (on conflict nothing). Never refuses the change. Fingerprint: SHA-256 of the row as jsonb without status, row_version, created_at, updated_at and null-valued keys; a later NOT NULL or defaulted column must be added to those keys by replacing this function, or the first resume after it reads edited. Executed by no role.';
+  '0148 Q132 A: the function of the trigger prescriptions_pharmacy_change_after_dispensing on ehr.prescriptions: for each dispensed claim of the changed prescription, one row in pharmacy.prescription_changes_after_dispensing (on conflict nothing). Never refuses the change. Fingerprint: SHA-256 of the row as jsonb without status, row_version, created_at, updated_at and null-valued keys; a later NOT NULL or defaulted column must be added to those keys by replacing this function, or the first resume after it reads edited (as it does after a type change that changes a column''s jsonb text, or a rename or drop of a column that holds values). Executed by no role.';
 comment on function pharmacy.work_item_changes_after_dispensing(uuid[]) is
   '0148 Q132 A: for each requested work item the session may read (its facility, and pharmacy.work_items'' two read policies repeated), the latest shown change after its dispensing (entered_in_error, cancelled, on_hold, edited or resumed, set here from the recorded facts), its time and the number of shown changes. Needs pharmacy.work-item.read. At most 200 ids, else 22023 WORK_ITEM_CHANGES_AFTER_DISPENSING_INVALID.';
 comment on trigger prescriptions_pharmacy_change_after_dispensing on ehr.prescriptions is
@@ -1113,16 +1130,18 @@ begin
   end if;
   -- Probes, each undone. They open only what section 1 holds, so none waits
   -- for a lock; should one still meet a busy lock (55P03), the file stops as
-  -- busy, nothing applied, not with the probe's own message. P3: the reader
-  -- refuses 201 ids and a null array before it reads anything.
+  -- busy, nothing applied, not with the probe's own message, and in the
+  -- wording of section 1's refusals, which the runner's dry run retries
+  -- (isBusyRefusal in scripts/dry-run-attempts.mjs). P3: the reader refuses
+  -- 201 ids and a null array before it reads anything.
   begin
     perform pharmacy.work_item_changes_after_dispensing(array(select gen_random_uuid() from generate_series(1, 201)));
     error_state := 'no error';
   exception
     when lock_not_available then
       raise exception using errcode = '55P03',
-        message = '0148: a table a post-check probe reads is busy (' || sqlerrm || '); nothing applied; run the '
-          || 'release again at a quieter time';
+        message = '0148: a table a post-check probe reads is busy (' || sqlerrm || '), so it does not wait; '
+          || 'nothing applied; run the release again at a quieter time';
     when others then
       get stacked diagnostics error_state = returned_sqlstate, error_message = message_text;
   end;
@@ -1139,8 +1158,8 @@ begin
   exception
     when lock_not_available then
       raise exception using errcode = '55P03',
-        message = '0148: a table a post-check probe reads is busy (' || sqlerrm || '); nothing applied; run the '
-          || 'release again at a quieter time';
+        message = '0148: a table a post-check probe reads is busy (' || sqlerrm || '), so it does not wait; '
+          || 'nothing applied; run the release again at a quieter time';
     when others then
       get stacked diagnostics error_state = returned_sqlstate, error_message = message_text;
   end;
@@ -1166,8 +1185,8 @@ begin
   exception
     when lock_not_available then
       raise exception using errcode = '55P03',
-        message = '0148: a table a post-check probe reads is busy (' || sqlerrm || '); nothing applied; run the '
-          || 'release again at a quieter time';
+        message = '0148: a table a post-check probe reads is busy (' || sqlerrm || '), so it does not wait; '
+          || 'nothing applied; run the release again at a quieter time';
   end;
   -- Nothing was recorded.
   if exists (select 1 from pharmacy.prescription_changes_after_dispensing) then

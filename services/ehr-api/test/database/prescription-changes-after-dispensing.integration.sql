@@ -236,7 +236,12 @@ begin
   -- fingerprint, and the first resume after it would read 'edited') meets
   -- this case and decides whether to add its name to the left-out keys by
   -- replacing pharmacy.prescription_change_after_dispensing(); a timestamptz
-  -- or interval column must be left out. 0152 (ORD-12) added
+  -- or interval column must be left out. A migration that changes a
+  -- column's type so that its jsonb text changes (numeric(12,4) to
+  -- numeric(14,6) turns 1.0000 into 1.000000), or renames or drops a column
+  -- that holds values, meets this case too: that also changes every later
+  -- fingerprint, and the first resume after it reads 'edited' (the safe
+  -- side). 0152 (ORD-12) added
   -- refills_allowed smallint, nullable and without a default: null in every
   -- older row, so no fingerprint changes and the trigger function stays
   -- 0148's (its md5 is pinned in 1e); a value an owner sets after
