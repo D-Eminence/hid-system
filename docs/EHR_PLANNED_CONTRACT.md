@@ -1572,6 +1572,48 @@ signs a version (Q124 A) and the governed loader (a later slice) loads it.
   loaded by owner SQL (the doctor and the pharmacist search), and the
   refusals and the audit rows.
 
+### Second slice: the seed files and the governed loader (draft, not live)
+
+Built on 23 Nov 2026 (lane D), stacked on the first slice. No migration and
+no route: two scripts in `services/ehr-api/scripts`, a shared module, and the
+approvals file. Nothing is loaded until the clinical lead signs a file.
+
+- **Seed files:** `catalog:build-seeds` turns the combined list (#312) into
+  `hid-medicines.json` and `hid-lab-tests.json` (format
+  `hid-catalog-seed/1`). The bytes are stable, so the sha256 the lead signs
+  is reproducible, and `--check` fails on any drift.
+  - A row the database would refuse is **held back** with why (for example
+    a strength over 80 characters, or a test with no code), never cut or
+    guessed. The seed lists its held-back rows, so the lead signs with them
+    in view.
+  - Every gap in the ids must be a retired id with a reason, and no retired
+    id may still be a row.
+  - The lab-test seed reports each Wave 0 HID-LAB code as kept, renamed,
+    recoded or missing.
+  - The notices: LOINC's when a test has a LOINC code; the WHO Model List's
+    citation (CC BY-NC-SA 3.0 IGO) when a medicine comes from it.
+- **Sign-off:** `docs/codes/catalog-approvals.json` (format
+  `hid-catalog-approvals/1`, empty until the lead signs). An entry names a
+  file's kind, version and sha256, an approval reference and the time. It
+  is added in a reviewed PR that records the sign-off; no personal names.
+- **The loader,** `catalog:load --seed <file> [--dry-run]`, is run by the
+  release integrator after the migrations, never inside one, as the schema
+  owner. It refuses (exit 2, nothing written) a file whose sha256 is not
+  signed for its kind and version, a seed that breaks 0149's rules, a
+  version already loaded, and a schema without 0149. The database refuses
+  a retired, changed or reused id on its own, and the whole load rolls
+  back. In one transaction it takes its advisory lock and SHARE ROW
+  EXCLUSIVE on the versions, records the new retired ids, inserts the
+  version and its rows, then turns the old version off and the new one on.
+  `--dry-run` rolls back. It prints one line: what loaded and what it
+  replaced.
+- **Proven** on a throwaway copy with #312's list as of 23 Nov:
+  - 1,616 medicines and 145 tests load, with 4 and 13 rows held back;
+  - an unsigned file, a second load of a version, and a version whose
+    medicine changed are each refused, with nothing written;
+  - a version that retires an id replaces the old one in 170 ms, and the
+    old version is kept.
+
 ### Target
 
 Release B (0144).

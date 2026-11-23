@@ -1,0 +1,5 @@
+{
+  "format": "hid-catalog-approvals/1",
+  "description": "The clinical lead's sign-off of each version of the national medicine and lab-test lists (owner decision Q124 A, 19 November 2026). The governed loader (services/ehr-api/scripts/load-catalog.mjs) loads a seed file only when an entry here names its sha256, kind and version. Each entry is added in a reviewed PR that records the lead's sign-off; no personal names here, only the reference to that record.",
+  "approvals": []
+}
