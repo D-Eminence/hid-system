@@ -644,7 +644,7 @@
       },
       {
         "name": "0136_role_permission_changes.sql",
-        "sha256": "66e17d50e8ce377d42fedab127c8a99dd8b132611ea2766aba2f84ef650c2ea2"
+        "sha256": "503d85cac83d368da02c0721e8c97fdd1a734ef6e4ffed0b52ef0379af2750b0"
       },
       {
         "name": "0137_qoreid_nin_check_once.sql",

@@ -10,6 +10,11 @@
 // measure of the query's cost; for both, the permission checks (auth.membership_has_permission) must not grow with the
 // rows (0133's policies ask the session's half of their member test once per statement); the time is the measure
 // against the limit.
+//
+// The list reaches open work of any age and done work received on or after the Lagos midnight of its second parameter
+// (owner decision Q123 A; lab-api sends workListSince(), 90 days back). The cost and order checks read it with a day
+// before every synthetic item (WIDE_SINCE), so the window leaves nothing out; the window itself is checked with a fixed
+// day (WINDOW_SINCE) against items either side of its Lagos midnight, so the result never depends on today's date.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
@@ -27,6 +32,13 @@ const OPEN_STATES = ['no_test', 'test_only', 'accession_only', 'specimen_only', 
   'released_then_amended', 'released_then_entered_in_error'];
 const DONE_STATES = ['amended_and_released_again'];
 const OTHER_FACILITY_STATES = ['other_facility_released', 'other_facility_open'];
+/** A first day before every synthetic item: the window leaves none out. */
+const WIDE_SINCE = '2025-01-01';
+/** A first day after the 1,040 done items: its Lagos midnight is 2026-01-01T23:00:00Z. */
+const WINDOW_SINCE = '2026-01-02';
+/** Done work either side of WINDOW_SINCE's Lagos midnight: 1 ms before it (left out), and at it (listed). */
+const WINDOW_EDGE = [{ n: 2201, state: 'released', at: '2026-01-01T22:59:59.999Z' },
+  { n: 2202, state: 'released', at: '2026-01-01T23:00:00.000Z' }];
 
 const id = (prefix, n) => `${prefix}000000-0000-4000-8000-${n.toString(16).padStart(12, '0')}`;
 
@@ -111,12 +123,14 @@ begin
 end $do$;`;
 
 export async function labWorkListRuntimeChecks({ admin, connect, password }) {
-  // Done work, oldest first in time; open work both older and newer than all of it; another facility's work.
+  // Done work, oldest first in time; open work both older and newer than all of it; done work either side of
+  // WINDOW_SINCE's Lagos midnight; another facility's work.
   const minutes = (base, n) => new Date(Date.parse(base) + n * 60000).toISOString();
   const plan = [
     ...Array.from({ length: DONE_WORK_ITEMS }, (_, i) => ({ n: i + 1, state: 'released', at: minutes('2026-01-01T00:00:00Z', i) })),
     ...OPEN_STATES.map((state, i) => ({ n: 2001 + i, state, at: minutes(i % 2 ? '2025-12-01T00:00:00Z' : '2026-06-01T00:00:00Z', i) })),
     ...DONE_STATES.map((state, i) => ({ n: 2101 + i, state, at: minutes('2026-05-01T00:00:00Z', i) })),
+    ...WINDOW_EDGE,
     ...OTHER_FACILITY_STATES.map((state, i) => ({ n: 3001 + i, state, at: minutes('2026-07-01T00:00:00Z', i) })),
   ];
   await admin.query('begin');
@@ -139,8 +153,9 @@ export async function labWorkListRuntimeChecks({ admin, connect, password }) {
       'identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamptz)'::regprocedure::oid::text consent,
       'auth.membership_has_permission(text,uuid,uuid,text)'::regprocedure::oid::text permission`)).rows[0];
   // switched: the session sets app.own_facility_work to '0133', as the new lab-api image does (0133 D13). Today's
-  // image never sets it, so its fresh connection reads it unset (null).
-  const readWorkList = async (subject, membership, switched = true) => {
+  // image never sets it, so its fresh connection reads it unset (null). since: the window's first day ($2, Q123 A).
+  // timeZone: the session's TimeZone, which the window's Lagos midnight must not depend on.
+  const readWorkList = async (subject, membership, { switched = true, since = WIDE_SINCE, timeZone } = {}) => {
     const lab = await connect('lab_work_list_test');
     try {
       await lab.query('begin');
@@ -152,8 +167,9 @@ export async function labWorkListRuntimeChecks({ admin, connect, password }) {
       if (switched) await lab.query(`select set_config('app.own_facility_work','0133',true)`);
       else assert.equal((await lab.query(`select current_setting('app.own_facility_work',true) as switch`)).rows[0].switch,
         null, "Today's lab-api image leaves app.own_facility_work unset");
+      if (timeZone) await lab.query(`select set_config('TimeZone',$1,true)`, [timeZone]);
       const started = performance.now();
-      const rows = (await lab.query(WORK_LIST_QUERY, [FACILITY])).rows;
+      const rows = (await lab.query(WORK_LIST_QUERY, [FACILITY, since])).rows;
       const ms = Math.round(performance.now() - started);
       const calls = (await lab.query(`select pg_stat_get_xact_function_calls($1::oid) consent,
         pg_stat_get_xact_function_calls($2::oid) permission`, [counted.consent, counted.permission])).rows[0];
@@ -186,6 +202,22 @@ export async function labWorkListRuntimeChecks({ admin, connect, password }) {
     'Every open state comes first, oldest first');
   assert.deepEqual(mine.slice(openPlan.length).map((row) => row.id),
     donePlan.slice(0, mine.length - openPlan.length).map((item) => id('c1', item.n)), 'Done work fills the rest, newest first');
+  // The window (Q123 A): from WINDOW_SINCE, open work of any age (some from before it) and only the done work received
+  // from its Lagos midnight on, in the same order; the same rows whatever the session's TimeZone.
+  const windowed = await readWorkList('staff:test-clinician', '40000000-0000-4000-8000-000000000001', { since: WINDOW_SINCE });
+  const windowStart = Date.parse('2026-01-01T23:00:00Z');
+  const inWindow = donePlan.filter((item) => Date.parse(item.at) >= windowStart);
+  assert.ok(openPlan.some((item) => Date.parse(item.at) < windowStart), 'Some open work is older than the window');
+  assert.deepEqual(inWindow.map((item) => item.n), [...DONE_STATES.map((_, i) => 2101 + i), 2202],
+    'The window keeps the done work from its Lagos midnight on');
+  assert.deepEqual(windowed.rows.filter((row) => row.id !== FIXTURE_WORK_ITEM).map((row) => row.id),
+    [...openPlan, ...inWindow].map((item) => id('c1', item.n)),
+    'From the window\'s first day: every open item, then the done work received from its Lagos midnight, newest first');
+  assert.ok(!windowed.rows.some((row) => row.id === id('c1', 2201)), 'Done work 1 ms before the Lagos midnight is left out');
+  const farZone = await readWorkList('staff:test-clinician', '40000000-0000-4000-8000-000000000001',
+    { since: WINDOW_SINCE, timeZone: 'Pacific/Kiritimati' });
+  assert.deepEqual(farZone.rows.map((row) => row.id), windowed.rows.map((row) => row.id),
+    'The window\'s Lagos midnight does not depend on the session\'s TimeZone');
   // The laboratory's own lab scientist (lab.work-item.read and lab.order-route.receive here), with no consent grant
   // for anyone: every work item here is this laboratory's own work, so the same 200 rows, through 0133's own-work
   // policies, within the same limit.
@@ -212,11 +244,12 @@ export async function labWorkListRuntimeChecks({ admin, connect, password }) {
     `Permission checks for the lab scientist: ${labScientist.permissionChecks} (at most ${PERMISSION_CHECKS_AT_MOST})`);
   // Today's lab-api image does not set app.own_facility_work (0133 D13): the same lab scientist, who holds no grant,
   // sees none of the laboratory's work, as before 0133.
-  const todaysImage = await readWorkList('staff:synthetic-work-list-scientist', SCIENTIST.membership, false);
+  const todaysImage = await readWorkList('staff:synthetic-work-list-scientist', SCIENTIST.membership, { switched: false });
   assert.equal(todaysImage.rows.length, 0, 'Without the switch, the lab scientist without a grant sees no work item');
   return { workItems: visible, ms, consentChecks, consentChecksPerWorkItem: Number((consentChecks / visible).toFixed(2)),
     permissionChecks: clinician.permissionChecks,
     labScientist: { ms: labScientist.ms, consentChecks: labScientist.consentChecks,
       permissionChecks: labScientist.permissionChecks, rowsWithoutSwitch: todaysImage.rows.length },
+    window: { since: WINDOW_SINCE, rows: windowed.rows.length, ms: windowed.ms, consentChecks: windowed.consentChecks },
     statementTimeoutMs: 15000 };
 }

@@ -1,19 +1,12 @@
 #!/usr/bin/env node
 import { App } from 'aws-cdk-lib';
-import { environmentConfig, externalAwsEnvironment } from '../src/config.js';
+import { environmentConfig, environmentSettingsFrom, externalAwsEnvironment } from '../src/config.js';
 import { HidRegionalStack } from '../src/hid-regional-stack.js';
 import { HidCostGovernanceStack } from '../src/cost-governance-stack.js';
 
 const application = new App();
-const configuration = environmentConfig(
-  process.env.HID_INFRA_ENV,
-  process.env.HID_STAGING_MODE,
-  process.env.HID_QOREID_ENABLED,
-  process.env.HID_OWN_WORK_PATIENT_CARD_ENABLED,
-  process.env.HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED,
-  process.env.HID_STAFF_FACILITY_SELECTION_MODE,
-  process.env.HID_STAFF_OPEN_PATIENT_ENABLED,
-);
+// Each setting is read by its own variable (environmentSettingVariables), never by position.
+const configuration = environmentConfig(process.env.HID_INFRA_ENV, environmentSettingsFrom(process.env));
 const regionalEnvironment = externalAwsEnvironment(process.env.HID_AWS_ACCOUNT, process.env.HID_AWS_REGION);
 
 new HidRegionalStack(application, `Hid-${configuration.name}-Regional`, {

@@ -9,9 +9,9 @@ const inventory = {
   generatedFrom: 'typed IaC configuration; quantities only; no fabricated prices',
   profiles: [
     environmentConfig('development'),
-    environmentConfig('staging', 'sleep'),
-    environmentConfig('staging', 'economy'),
-    environmentConfig('staging', 'fidelity'),
+    environmentConfig('staging', { stagingMode: 'sleep' }),
+    environmentConfig('staging', { stagingMode: 'economy' }),
+    environmentConfig('staging', { stagingMode: 'fidelity' }),
     environmentConfig('production'),
   ].map(costInventory),
 }

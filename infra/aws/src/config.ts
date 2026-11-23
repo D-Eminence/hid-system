@@ -178,15 +178,79 @@ const environmentIdentity: Record<EnvironmentName, Pick<HidEnvironmentConfig,
   },
 };
 
+/**
+ * The settings a configuration is chosen with, besides HID_INFRA_ENV, each
+ * by name. They were positional arguments, so two settings of the same type
+ * could be passed in each other's place, and each Release B setting would
+ * have added a position (Ola's decision 8 on #258). Each value is the raw
+ * string from the environment, checked below exactly as before; leaving one
+ * out gives its default.
+ */
+export interface EnvironmentSettings {
+  /** HID_STAGING_MODE: sleep, economy or fidelity. Required for staging, refused elsewhere. */
+  stagingMode?: string | undefined;
+  /** HID_QOREID_ENABLED: true or false (default false). */
+  qoreIdEnabled?: string | undefined;
+  /** HID_OWN_WORK_PATIENT_CARD_ENABLED: true or false (default false). */
+  ownWorkPatientCardEnabled?: string | undefined;
+  /** HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED: true or false (default false). */
+  prescriptionDispensingDetailsEnabled?: string | undefined;
+  /** HID_STAFF_FACILITY_SELECTION_MODE: off, keep or ask (default off). */
+  staffFacilitySelectionMode?: string | undefined;
+  /** HID_STAFF_OPEN_PATIENT_ENABLED: true or false (default false). SX-8, Release B. */
+  staffOpenPatientEnabled?: string | undefined;
+}
+
+/**
+ * Each setting's environment variable: the one place a name is tied to a
+ * setting. `satisfies` makes a setting without a variable a type error.
+ */
+export const environmentSettingVariables = {
+  stagingMode: 'HID_STAGING_MODE',
+  qoreIdEnabled: 'HID_QOREID_ENABLED',
+  ownWorkPatientCardEnabled: 'HID_OWN_WORK_PATIENT_CARD_ENABLED',
+  prescriptionDispensingDetailsEnabled: 'HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED',
+  staffFacilitySelectionMode: 'HID_STAFF_FACILITY_SELECTION_MODE',
+  staffOpenPatientEnabled: 'HID_STAFF_OPEN_PATIENT_ENABLED',
+} as const satisfies Record<keyof EnvironmentSettings, string>;
+
+type EnvironmentSettingName = keyof typeof environmentSettingVariables;
+const environmentSettingNames = Object.keys(environmentSettingVariables) as EnvironmentSettingName[];
+
+/** The settings read from an environment (process.env at synth time), by each setting's variable. */
+export function environmentSettingsFrom(variables: Readonly<Record<string, string | undefined>>): EnvironmentSettings {
+  const settings: EnvironmentSettings = {};
+  for (const name of environmentSettingNames) {
+    const value = variables[environmentSettingVariables[name]];
+    if (value !== undefined) settings[name] = value;
+  }
+  return settings;
+}
+
 export function environmentConfig(
   value: string | undefined,
-  stagingModeValue?: string,
-  qoreIdEnabledValue?: string,
-  ownWorkPatientCardEnabledValue?: string,
-  prescriptionDispensingDetailsEnabledValue?: string,
-  staffFacilitySelectionModeValue?: string,
-  staffOpenPatientEnabledValue?: string,
+  settings: EnvironmentSettings = {},
 ): HidEnvironmentConfig {
+  // A positional value from an unchecked JavaScript caller, or an unknown name
+  // (a misspelt setting built outside an object literal, which TypeScript would
+  // not catch), is refused rather than read as something else or ignored.
+  if (typeof settings !== 'object' || settings === null || Array.isArray(settings)) {
+    throw new Error('environmentConfig takes its settings by name, for example { stagingMode: \'economy\' }; '
+      + `received ${Array.isArray(settings) ? 'an array' : typeof settings}`);
+  }
+  for (const name of Object.keys(settings)) {
+    if (!(environmentSettingNames as string[]).includes(name)) {
+      throw new Error(`Unknown environment setting ${name}; expected one of ${environmentSettingNames.join(', ')}`);
+    }
+  }
+  const {
+    stagingMode: stagingModeValue,
+    qoreIdEnabled: qoreIdEnabledValue,
+    ownWorkPatientCardEnabled: ownWorkPatientCardEnabledValue,
+    prescriptionDispensingDetailsEnabled: prescriptionDispensingDetailsEnabledValue,
+    staffFacilitySelectionMode: staffFacilitySelectionModeValue,
+    staffOpenPatientEnabled: staffOpenPatientEnabledValue,
+  } = settings;
   const selected = value ?? 'development';
   if (!environmentNames.includes(selected as EnvironmentName)) {
     throw new Error(`HID_INFRA_ENV must be one of ${environmentNames.join(', ')}; received ${selected}`);

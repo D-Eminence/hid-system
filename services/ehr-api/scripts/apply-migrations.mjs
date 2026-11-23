@@ -10,6 +10,7 @@ import {
   loadLocalEnvironment,
 } from '../../../scripts/local-environment.mjs';
 import { databaseOptions, managedDatabaseUrl } from './database-options.mjs';
+import { dryRunAttemptOptions, MigrationFileError, withDryRunAttempts } from './dry-run-attempts.mjs';
 import { forwardMigrationNotices } from './migration-notices.mjs';
 import { orderMigrations } from './migration-order.mjs';
 
@@ -33,6 +34,7 @@ const migrationDirectory = process.env.HID_TEST_MIGRATION_DIRECTORY
 const rdsCompatibilityDirectory = path.resolve(scriptDirectory, '../database/rds-compat');
 const dryRun = process.argv.includes('--dry-run');
 const planOnly = process.argv.includes('--plan');
+const dryRunOptions = dryRunAttemptOptions();
 const databaseUrl = process.env.DATABASE_URL || managedDatabaseUrl();
 
 if (!databaseUrl) {
@@ -128,16 +130,31 @@ async function main() {
     }
 
     if (dryRun) {
-      await client.query("set local lock_timeout = '5s'");
-      await client.query("set local statement_timeout = '120s'");
-      for (const migration of pending) {
-        try {
-          await notices.during(migration.version, () => client.query(migration.effectiveSql));
-        } catch (error) {
-          throw new Error(`Migration ${migration.version}: ${error.message}`);
+      // A file's own busy-table refusal rolls the whole dry run back, and it runs again from the start, within a
+      // bound (dry-run-attempts.mjs; coordinator, #258, 20 November 2026). The first attempt runs in the
+      // transaction that read the plan; each later one in a new transaction, with the same pending files (the
+      // advisory lock above keeps every other runner out).
+      await withDryRunAttempts(async (attempt) => {
+        if (attempt > 1) {
+          await client.query('begin');
+          await client.query(bootstrapSql);
         }
-      }
-      await client.query('rollback');
+        try {
+          await client.query("set local lock_timeout = '5s'");
+          await client.query("set local statement_timeout = '120s'");
+          for (const migration of pending) {
+            try {
+              await notices.during(migration.version, () => client.query(migration.effectiveSql));
+            } catch (error) {
+              throw new MigrationFileError(migration.version, error);
+            }
+          }
+        } catch (error) {
+          await client.query('rollback').catch(() => undefined);
+          throw error;
+        }
+        await client.query('rollback');
+      }, dryRunOptions);
       process.stdout.write('Dry run succeeded; all changes were rolled back\n');
       return;
     }
