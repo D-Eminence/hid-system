@@ -6,7 +6,9 @@
 -- work item (pharmacy.dispensings.fill_number, one row per fill number) while
 -- the prescription stays active and unchanged and its ends_on is not past
 -- (the Lagos day); a route-backed item takes one fill; a reversed fill still
--- counts.
+-- counts. The pharmacy reads an own item's refills through 0152's reader,
+-- pharmacy.work_item_refills (Ola's answers to Rahman's review, #258, 23
+-- November 2026).
 -- Rollback-only. Through the exact runtime roles the services use
 -- (hid_ehr_api_runtime with ehr-api's INSERT and UPDATE and app.change_reason,
 -- hid_pharmacy_api_runtime with pharmacy-api's dispensing and reversal
@@ -18,9 +20,11 @@
 --   1. structure: both columns (type, null, default, no column privilege)
 --      and CHECKs (validated); the new key exactly and 0023's gone; the two
 --      replaced functions (md5, owner, attributes, ACL), the claim function
---      naming no ehr.prescriptions, 0133's S7 list and 0148's recorder
---      unchanged; the five triggers on pharmacy.dispensings and their modes;
---      what the runtimes may do with the new columns;
+--      naming no ehr.prescriptions and 0148's recorder unchanged; 0133's S7
+--      list with the reader added and nothing else; the five triggers on
+--      pharmacy.dispensings and their modes; what the runtimes may do with
+--      the new columns; the reader exactly (md5, owner, attributes, result)
+--      and who may execute it (the Pharmacy and schema test runtimes only);
 --   2. fills 1 to 1 + N pass for N = 0, 1, 2 and 11, and fill N + 2 is
 --      refused NO_REFILLS_LEFT; null refills_allowed is one fill; the
 --      claim's dispensed_at stays the first fill's;
@@ -52,7 +56,20 @@
 --  11. refills_allowed's CHECK: 0, 11 and null pass, -1 and 12 are refused
 --      on create and on update;
 --  12. the undo of 0152's header, step 1 (0101's and 0133's bodies put
---      back): every refill is refused, first fills still pass.
+--      back): every refill is refused, first fills still pass;
+--  13. the reader, pharmacy.work_item_refills, through the Pharmacy runtime:
+--      one row per own item the session may read, never a route-backed
+--      item, another facility's item, or one read without
+--      pharmacy.work-item.read; each of the work items' two read policies
+--      alone lets a pharmacist read (the own-work half without a grant, the
+--      consent test without the own-work switch), and the reader answers
+--      the items and fills the runtime itself may select, under a superuser
+--      owner and a NOSUPERUSER NOBYPASSRLS one alike; at most 200 ids; each
+--      closed reason (none_left, stopped, changed, ended) and the open and
+--      closed transitions of one item (no fill, fill 1, fill 2, none left;
+--      open, held, resumed; cancelled), the Lagos day under far time zones;
+--      every item of cases 2-12 as those cases left it; and refill_open is
+--      true exactly when the next fill would be recorded.
 -- Fixtures inserted as the suite runner with session_replication_role =
 -- replica where the services would not write them (identity rows, the
 -- outside pharmacy's approval). Synthetic values only; uuid prefix e152.
@@ -139,11 +156,15 @@ begin
       or exists (select 1 from aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) privilege
                   where privilege.grantee <> proc.proowner);
   perform pg_temp.expect('1c the two replaced functions and 0148''s recorder', coalesce(mismatch, 'as built'), 'as built');
-  -- 1d. The claim function names no ehr.prescriptions, so 0133's S7 list
-  -- (the owner-run definers whose text names ehr.prescriptions, each of
-  -- which sees 0133 D5's rows in a pharmacist's session) is the ten 0133's
-  -- suite pins; the validator was on it already.
-  perform pg_temp.expect('1d the claim function names no ehr.prescriptions; 0133''s S7 list unchanged',
+  -- 1d. The claim function names no ehr.prescriptions; the reader does, so
+  -- 0133's S7 list (the owner-run definers whose text names
+  -- ehr.prescriptions, each of which sees 0133 D5's rows in a pharmacist's
+  -- session) is the ten 0133's suite pinned on Release B and the reader
+  -- (the validator was on it already). Case 13 shows the reader gives the
+  -- pharmacist nothing the Pharmacy runtime may not select itself, and
+  -- own-facility-pharmacy-lab-work's case 8 that the EHR runtime may not run
+  -- it.
+  perform pg_temp.expect('1d the claim function names no ehr.prescriptions; 0133''s S7 list gains the reader alone',
     (select count(*) from pg_proc proc
       where proc.oid = 'pharmacy.claim_prescription_dispensing()'::regprocedure and proc.prosrc ~* 'ehr\.prescriptions')
     || ' | ' || (select string_agg(proc.oid::regprocedure::text, ' ' order by proc.oid::regprocedure::text) from pg_proc proc
@@ -153,7 +174,7 @@ begin
     || 'character) ehr.send_prescription_to_own_pharmacy(uuid,bigint) ehr.withdraw_own_pharmacy_send(uuid) '
     || 'identity.decide_unknown_patient(uuid,text,bigint,text,text,text) '
     || 'identity.demo_story_install(text) pharmacy.validate_dispensing() pharmacy.validate_work_item() '
-    || 'pharmacy.validate_work_item_acceptance()');
+    || 'pharmacy.validate_work_item_acceptance() pharmacy.work_item_refills(uuid[])');
   -- 1e. The five triggers on pharmacy.dispensings: the validator, the
   -- immutability guard and 0086's route return in origin mode; 0133's claim
   -- and key guard always.
@@ -194,6 +215,37 @@ begin
   -- reads fill 1.
   perform pg_temp.expect('1g every dispensing already there is fill 1',
     (select count(*) filter (where dispensing.fill_number <> 1)::text from pharmacy.dispensings dispensing), '0');
+  -- 1h. The reader: its body (md5), owner (the work items' and the
+  -- dispensing validator's, the role 0133 D5's prescription policies name),
+  -- SECURITY DEFINER, STABLE, plpgsql, not STRICT, search_path, its result;
+  -- 0125's reader is still 0125's.
+  perform pg_temp.expect('1h the reader exactly; 0125''s reader unchanged',
+    (select format('md5=%s owner=%s definer=%s volatile=%s strict=%s language=%s config=%s', md5(proc.prosrc),
+              proc.proowner = owner_oid, proc.prosecdef, proc.provolatile, proc.proisstrict, language_row.lanname,
+              proc.proconfig)
+       from pg_proc proc join pg_language language_row on language_row.oid = proc.prolang
+      where proc.oid = 'pharmacy.work_item_refills(uuid[])'::regprocedure)
+    || ' | ' || pg_get_function_result('pharmacy.work_item_refills(uuid[])'::regprocedure)
+    || ' | ' || (select md5(proc.prosrc) from pg_proc proc
+                  where proc.oid = 'pharmacy.work_item_prescription_details(uuid[])'::regprocedure),
+    'md5=19870149098020ef3a39c51b562138eb owner=t definer=t volatile=s strict=f language=plpgsql '
+    || 'config={"search_path=pg_catalog, pg_temp"} | TABLE(work_item_id uuid, refills_allowed integer, '
+    || 'fills_recorded integer, refill_open boolean, closed_reason text) | e6013d732354a56794ad8ec7f2bbaf0c');
+  -- 1i. Who may execute it, through any membership: the Pharmacy runtime
+  -- (and the Pharmacy API's login through it) and the schema test runtime;
+  -- no other runtime; PUBLIC neither.
+  select string_agg(format('%s=%s', role_row.rolname,
+           has_function_privilege(role_row.oid, 'pharmacy.work_item_refills(uuid[])', 'EXECUTE')), '; ') into mismatch
+    from pg_roles role_row
+   where role_row.rolname ~ '^hid_.*(runtime|worker|writer|dispatcher|commands|scanner)$'
+     and has_function_privilege(role_row.oid, 'pharmacy.work_item_refills(uuid[])', 'EXECUTE')
+         <> (role_row.rolname in ('hid_pharmacy_runtime', 'hid_pharmacy_api_runtime', 'hid_schema_test_runtime'));
+  perform pg_temp.expect('1i EXECUTE on the reader: the Pharmacy and schema test runtimes only',
+    coalesce(mismatch, 'as granted') || ' public='
+    || exists (select 1 from pg_proc proc, aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
+                where proc.oid = 'pharmacy.work_item_refills(uuid[])'::regprocedure and acl.grantee = 0)
+    || ' ehr_api=' || has_function_privilege('hid_ehr_api_runtime', 'pharmacy.work_item_refills(uuid[])', 'EXECUTE'),
+    'as granted public=false ehr_api=false');
 end $$;
 
 -- Fixtures. Organization O (e1520000...01) with facility F1 "Refills Test
@@ -201,7 +253,8 @@ end $$;
 -- organization O4 "Refills Outside Pharmacy Ltd" (a governed, approved
 -- pharmacy) with facility F4 (...04). Members (account e1520002...n, staff
 -- e1520003...n, membership e1520004...n, role e1520005...n): 1 DR doctor F1
--- (write grants), 2 PH pharmacist F1 (no grant), 3 P4 pharmacist F4.
+-- (write grants), 2 PH pharmacist F1 (no grant), 3 P4 pharmacist F4, 4 PG
+-- pharmacist F1 (write grants, for case 13's consent test).
 -- Patients (e1520006...n): 1 Ada (an active account, so an order route can
 -- reach her), 2 Bisi.
 set local session_replication_role = replica;
@@ -218,7 +271,8 @@ insert into identity.facilities (id, organization_id, name, code, timezone, acti
    'REFILLS-4', 'Africa/Lagos', true, 'verified');
 create temporary table refills_members (n integer primary key, code text, role_code text, site integer,
   organization integer) on commit drop;
-insert into refills_members values (1, 'dr', 'doctor', 1, 1), (2, 'ph', 'pharmacist', 1, 1), (3, 'p4', 'pharmacist', 4, 4);
+insert into refills_members values (1, 'dr', 'doctor', 1, 1), (2, 'ph', 'pharmacist', 1, 1), (3, 'p4', 'pharmacist', 4, 4),
+  (4, 'pg', 'pharmacist', 1, 1);
 grant select on refills_members to public;
 insert into auth.accounts (id, subject, email, display_name, status)
 select ('e1520002-0000-4000-8000-0000000000' || lpad(n::text, 2, '0'))::uuid, 'synthetic:refills-' || code,
@@ -254,10 +308,11 @@ insert into identity.patients (id, account_id, hid_code, first_name, last_name, 
 insert into identity.consent_grants (id, patient_id, staff_id, account_id, membership_id, facility_id, scope,
   purpose_of_use, status, reason, starts_at, expires_at)
 select gen_random_uuid(), ('e1520006-0000-4000-8000-00000000000' || patient)::uuid,
-       'e1520003-0000-4000-8000-000000000001', 'e1520002-0000-4000-8000-000000000001',
-       'e1520004-0000-4000-8000-000000000001', 'e1520001-0000-4000-8000-000000000001', 'write_records', 'direct-care',
-       'active', 'Synthetic refills consent', clock_timestamp() - interval '1 hour', clock_timestamp() + interval '30 days'
-  from generate_series(1, 2) patient;
+       ('e1520003-0000-4000-8000-00000000000' || member)::uuid, ('e1520002-0000-4000-8000-00000000000' || member)::uuid,
+       ('e1520004-0000-4000-8000-00000000000' || member)::uuid, 'e1520001-0000-4000-8000-000000000001', 'write_records',
+       'direct-care', 'active', 'Synthetic refills consent', clock_timestamp() - interval '1 hour',
+       clock_timestamp() + interval '30 days'
+  from generate_series(1, 2) patient cross join (values (1), (4)) granted(member);
 -- The outside pharmacy (as 0133's, 0144's and 0148's suites): its governed
 -- approval and product, and orders between facilities switched on
 -- (control_settings readable by a non-superuser owner).
@@ -548,7 +603,8 @@ end $$;
 --   rx10, rx11, rx12 refills 2 (5);
 --   rx13 refills 2 (6); rx14 refills null, never dispensed (7);
 --   rx15 refills 1 (8); rx16 refills null, rx17 refills 2, rx18 refills 2 (9);
---   rx19 refills 1 (12).
+--   rx19 refills 1 (12); rx20 refills 2, rx21 refills 2 ending today
+--   (Lagos), rx22 refills 2, rx23 refills 1 (13).
 set local role hid_ehr_api_runtime;
 select pg_temp.as_member(1);
 insert into ehr.encounters (id, patient_id, facility_id, created_by, created_by_membership_id, encounter_type, status,
@@ -563,7 +619,8 @@ insert into refills_prescriptions values
   (1, 2, 0, null), (2, 2, 1, null), (3, 2, 2, null), (4, 2, 11, null), (5, 2, null, null),
   (6, 2, 2, pg_temp.lagos_day(0)), (7, 2, 2, pg_temp.lagos_day(-1)), (8, 1, 2, null), (9, 1, 2, null),
   (10, 2, 2, null), (11, 2, 2, null), (12, 2, 2, null), (13, 2, 2, null), (14, 2, null, null), (15, 2, 1, null),
-  (16, 2, null, null), (17, 2, 2, null), (18, 2, 2, null), (19, 2, 1, null);
+  (16, 2, null, null), (17, 2, 2, null), (18, 2, 2, null), (19, 2, 1, null), (20, 2, 2, null),
+  (21, 2, 2, pg_temp.lagos_day(0)), (22, 2, 2, null), (23, 2, 1, null);
 grant select on refills_prescriptions to public;
 select pg_temp.expect('fixtures: DR writes the prescriptions (active, refills_allowed as given) and D7 sends each',
   (select string_agg(distinct pg_temp.try(pg_temp.prescribe_sql(n, patient, refills,
@@ -575,7 +632,8 @@ select pg_temp.expect('fixtures: refills_allowed as written; each own item at ve
   || ' | ' || (select count(*) from pharmacy.work_items item join refills_prescriptions p
                  on item.source_ehr_prescription_id = pg_temp.rx(p.n)
                where item.order_route_id is null and item.source_ehr_prescription_version = 1),
-  '1:0 2:1 3:2 4:11 5:null 6:2 7:2 8:2 9:2 10:2 11:2 12:2 13:2 14:null 15:1 16:null 17:2 18:2 19:1 | 19');
+  '1:0 2:1 3:2 4:11 5:null 6:2 7:2 8:2 9:2 10:2 11:2 12:2 13:2 14:null 15:1 16:null 17:2 18:2 19:1 20:2 21:2 22:2 '
+  || '23:1 | 23');
 
 -- 2. Fills 1 to 1 + N, then N + 2 refused, through the Pharmacy runtime as
 -- PH (no grant, own work).
@@ -855,6 +913,199 @@ select pg_temp.expect('12 after the undo''s savepoint: 0152''s bodies again, and
     where proc.oid in ('pharmacy.validate_dispensing()'::regprocedure,
             'pharmacy.claim_prescription_dispensing()'::regprocedure)) || ' ' || pg_temp.fills_from(19, 1, 3),
   '1a50612f5330a36c9b64d0d831c77812 61a927efcf0626ac434d2f894b319b4d ok,ok,23514 NO_REFILLS_LEFT / -');
+
+-- 13. The reader, pharmacy.work_item_refills (0152's R6), through the
+-- Pharmacy runtime as the services call it. 'rxN:allowed/recorded/open/
+-- reason' for each row it answers ('-' for no reason), by prescription; the
+-- prescriptions' own items are asked for (route-backed ones with routed).
+-- The suite runs under a superuser owner and under a NOSUPERUSER
+-- NOBYPASSRLS one with the same expectations, so both answer alike.
+create function pg_temp.item_of(n integer, routed boolean) returns uuid language sql as $f$
+  select case when routed then pg_temp.routed_item_of(pg_temp.rx(n)) else pg_temp.work_item_of(pg_temp.rx(n)) end
+$f$;
+create function pg_temp.session_of(member integer, own_work boolean) returns void language plpgsql as $f$
+begin
+  perform pg_temp.as_member(member);
+  if not own_work then
+    perform set_config('app.own_facility_work', '', true);
+  end if;
+end
+$f$;
+create function pg_temp.refills(member integer, prescriptions integer[], own_work boolean default true,
+  routed boolean default false) returns text language plpgsql as $f$
+declare answer text;
+begin
+  set local role hid_pharmacy_api_runtime;
+  perform pg_temp.session_of(member, own_work);
+  select coalesce(string_agg(format('rx%s:%s/%s/%s/%s', p, reader.refills_allowed, reader.fills_recorded,
+           reader.refill_open::text, coalesce(reader.closed_reason, '-')), ' ' order by p), 'none')
+    into answer
+    from unnest(prescriptions) p
+    join pharmacy.work_item_refills(array(select pg_temp.item_of(q, routed) from unnest(prescriptions) q)) reader
+      on reader.work_item_id = pg_temp.item_of(p, routed);
+  reset role;
+  return answer;
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end
+$f$;
+-- What the Pharmacy runtime itself may select in that session (row-level
+-- security on pharmacy.work_items and pharmacy.dispensings): 'rxN:fills'
+-- for each own item it may read.
+create function pg_temp.runtime_sees(member integer, prescriptions integer[], own_work boolean default true)
+returns text language plpgsql as $f$
+declare answer text;
+begin
+  set local role hid_pharmacy_api_runtime;
+  perform pg_temp.session_of(member, own_work);
+  select coalesce(string_agg(format('rx%s:%s', p, (select count(*) from pharmacy.dispensings dispensing
+                                                    where dispensing.work_item_id = item.id)), ' ' order by p), 'none')
+    into answer
+    from unnest(prescriptions) p
+    join pharmacy.work_items item on item.id = pg_temp.work_item_of(pg_temp.rx(p)) and item.order_route_id is null;
+  reset role;
+  return answer;
+end
+$f$;
+-- The reader's ids as given, as PH: 'rows=N' or the error.
+create function pg_temp.refills_of_ids(ids uuid[]) returns text language plpgsql as $f$
+declare answer text;
+begin
+  set local role hid_pharmacy_api_runtime;
+  perform pg_temp.as_member(2);
+  select 'rows=' || count(*) into answer from pharmacy.work_item_refills(ids);
+  reset role;
+  return answer;
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end
+$f$;
+-- Whether the reader's refill_open (as PH) is what the next fill (fills
+-- recorded + 1, by PH, undone at once) does: 'rxN:open=ok' or
+-- 'rxN:closed=refused', else the disagreement.
+create function pg_temp.next_fill_agrees(n integer) returns text language plpgsql as $f$
+declare
+  reader record;
+  outcome text;
+begin
+  set local role hid_pharmacy_api_runtime;
+  perform pg_temp.as_member(2);
+  select * into reader from pharmacy.work_item_refills(array[pg_temp.work_item_of(pg_temp.rx(n))]);
+  reset role;
+  begin
+    outcome := pg_temp.fill(n, reader.fills_recorded + 1);
+    raise exception using errcode = 'P0001', message = 'refills: undo the next fill';
+  exception when raise_exception then
+    null;
+  end;
+  return format('rx%s:%s', n, case when reader.refill_open and outcome = 'ok' then 'open=ok'
+                                   when not reader.refill_open and outcome <> 'ok' then 'closed=refused'
+                                   else 'open=' || reader.refill_open || ' but ' || outcome end);
+end
+$f$;
+grant execute on function pg_temp.item_of(integer, boolean), pg_temp.session_of(integer, boolean),
+  pg_temp.refills(integer, integer[], boolean, boolean), pg_temp.runtime_sees(integer, integer[], boolean),
+  pg_temp.refills_of_ids(uuid[]), pg_temp.next_fill_agrees(integer) to public;
+
+-- 13a. Every item of cases 2-12, as those cases left it (case 7's and 11's
+-- and 12's undone parts aside), as PH (no grant, the own-work switch).
+select pg_temp.expect('13a the items of cases 2-12: allowed (null as 0), fills recorded, open, closed reason',
+  pg_temp.refills(2, array(select generate_series(1, 19))),
+  'rx1:0/1/false/none_left rx2:1/2/false/none_left rx3:2/3/false/none_left rx4:11/12/false/none_left '
+  || 'rx5:0/1/false/none_left rx6:2/3/false/none_left rx7:2/1/false/ended rx8:2/0/false/- rx9:2/0/false/- '
+  || 'rx10:2/1/false/changed rx11:2/1/false/changed rx12:2/1/false/stopped rx13:2/2/true/- rx14:0/0/false/- '
+  || 'rx15:1/2/false/none_left rx16:0/1/false/none_left rx17:2/1/false/changed rx18:3/1/false/changed '
+  || 'rx19:1/2/false/none_left');
+-- 13b. One item through its fills (rx22, refills 2): no fill (closed, no
+-- reason), fill 1 and fill 2 (open), fill 3 (none left).
+select pg_temp.expect('13b rx22: no fill, fill 1, fill 2, fill 3',
+  pg_temp.refills(2, array[22]) || ' ' || pg_temp.fill(22, 1) || ' ' || pg_temp.refills(2, array[22]) || ' '
+  || pg_temp.fill(22, 2) || ' ' || pg_temp.refills(2, array[22]) || ' ' || pg_temp.fill(22, 3) || ' '
+  || pg_temp.refills(2, array[22]),
+  'rx22:2/0/false/- ok rx22:2/1/true/- ok rx22:2/2/true/- ok rx22:2/3/false/none_left');
+-- 13c. rx20 (refills 2): fill 1 (open); DR holds it (stopped); DR resumes
+-- it (changed: a new version).
+select pg_temp.expect('13c rx20: open after fill 1, stopped while held, changed once resumed',
+  pg_temp.fill(20, 1) || ' ' || pg_temp.refills(2, array[20]) || ' ' || pg_temp.dr(20, 'on_hold') || ' '
+  || pg_temp.refills(2, array[20]) || ' ' || pg_temp.dr(20, 'active') || ' ' || pg_temp.refills(2, array[20]),
+  'ok rx20:2/1/true/- ok rx20:2/1/false/stopped ok rx20:2/1/false/changed');
+-- 13d. rx23 (refills 1): fill 1, then DR cancels it: stopped.
+select pg_temp.expect('13d rx23: cancelled after fill 1: stopped',
+  pg_temp.fill(23, 1) || ' ' || pg_temp.dr(23, 'cancelled') || ' ' || pg_temp.refills(2, array[23]),
+  'ok ok rx23:1/1/false/stopped');
+-- 13e. The Lagos day: rx21 ends today (open after fill 1), rx7 ended
+-- yesterday (ended), whatever the session's time zone (at any hour, one of
+-- the two far zones is on another calendar day than Lagos).
+select pg_temp.expect('13e rx21 ends today: open after fill 1; rx7 ended yesterday',
+  pg_temp.fill(21, 1) || ' ' || pg_temp.refills(2, array[7, 21]), 'ok rx7:2/1/false/ended rx21:2/1/true/-');
+set local timezone = 'Pacific/Kiritimati';
+select pg_temp.expect('13e under TimeZone Pacific/Kiritimati (UTC+14): the same',
+  pg_temp.refills(2, array[7, 21]), 'rx7:2/1/false/ended rx21:2/1/true/-');
+set local timezone = 'Etc/GMT+12';
+select pg_temp.expect('13e under TimeZone Etc/GMT+12 (UTC-12): the same',
+  pg_temp.refills(2, array[7, 21]), 'rx7:2/1/false/ended rx21:2/1/true/-');
+reset timezone;
+-- 13f. refill_open is true exactly when the next fill would be recorded
+-- (each next fill tried by PH and undone): every own item with a fill.
+select pg_temp.expect('13f refill_open agrees with the next fill, for every own item with a fill',
+  (select string_agg(pg_temp.next_fill_agrees(n), ' ' order by n)
+     from generate_series(1, 23) n where n not in (8, 9, 14)),
+  'rx1:closed=refused rx2:closed=refused rx3:closed=refused rx4:closed=refused rx5:closed=refused '
+  || 'rx6:closed=refused rx7:closed=refused rx10:closed=refused rx11:closed=refused rx12:closed=refused '
+  || 'rx13:open=ok rx15:closed=refused rx16:closed=refused rx17:closed=refused rx18:closed=refused '
+  || 'rx19:closed=refused rx20:closed=refused rx21:open=ok rx22:closed=refused rx23:closed=refused');
+-- 13g. Own items only: rx8's and rx9's route-backed items give no row, at
+-- F4 (where P4 reads them) or at F1; their released own items read no fill.
+select pg_temp.expect('13g route-backed items give no row; their own items read no fill',
+  pg_temp.refills(3, array[8, 9], true, true) || ' | ' || pg_temp.refills(2, array[8, 9], true, true) || ' | '
+  || pg_temp.refills(2, array[8, 9]),
+  'none | none | rx8:2/0/false/- rx9:2/0/false/-');
+-- 13h. The session's facility: P4 (F4) asking for F1's items, none.
+select pg_temp.expect('13h another facility''s items give no row', pg_temp.refills(3, array[13, 21, 22]), 'none');
+-- 13i. pharmacy.work-item.read: DR (a doctor, with consent grants that let
+-- the Pharmacy runtime select the items, but no pharmacy.work-item.read)
+-- gets none.
+select pg_temp.expect('13i without pharmacy.work-item.read, none (though the runtime may select the items)',
+  pg_temp.refills(1, array[13, 21]) || ' | ' || pg_temp.runtime_sees(1, array[13, 21]), 'none | rx13:2 rx21:1');
+-- 13j. The work items' two read policies, each alone: PH (no grant) with
+-- the own-work switch (0133's own-work half); PG (grants) without it (the
+-- consent test); PH without it (neither: none). Each time the reader
+-- answers exactly the items and fills the Pharmacy runtime itself may
+-- select in that session.
+select pg_temp.expect('13j the own-work half alone (PH): the reader and the runtime''s own reads',
+  pg_temp.refills(2, array[13, 21, 22]) || ' | ' || pg_temp.runtime_sees(2, array[13, 21, 22]),
+  'rx13:2/2/true/- rx21:2/1/true/- rx22:2/3/false/none_left | rx13:2 rx21:1 rx22:3');
+select pg_temp.expect('13j the consent test alone (PG without the own-work switch): the same',
+  pg_temp.refills(4, array[13, 21, 22], false) || ' | ' || pg_temp.runtime_sees(4, array[13, 21, 22], false),
+  'rx13:2/2/true/- rx21:2/1/true/- rx22:2/3/false/none_left | rx13:2 rx21:1 rx22:3');
+select pg_temp.expect('13j neither (PH without the own-work switch): none, and the runtime selects none',
+  pg_temp.refills(2, array[13, 21, 22], false) || ' | ' || pg_temp.runtime_sees(2, array[13, 21, 22], false),
+  'none | none');
+-- 13k. At most 200 ids: 200 unknown ids and an empty array answer no row;
+-- 201 ids and a null array are refused before anything is read.
+select pg_temp.expect('13k 200 ids, an empty array, 201 ids, a null array',
+  pg_temp.refills_of_ids(array(select gen_random_uuid() from generate_series(1, 200))) || ' | '
+  || pg_temp.refills_of_ids(array[]::uuid[]) || ' | '
+  || pg_temp.refills_of_ids(array(select gen_random_uuid() from generate_series(1, 201))) || ' | '
+  || pg_temp.refills_of_ids(null),
+  'rows=0 | rows=0 | 22023 WORK_ITEM_REFILLS_INVALID | 22023 WORK_ITEM_REFILLS_INVALID');
+-- 13l. Nothing for ids that are not work items (prescription ids), or in
+-- a session without a facility (PH's, the facility setting cleared).
+create function pg_temp.refills_without_facility(n integer) returns text language plpgsql as $f$
+declare answer text;
+begin
+  set local role hid_pharmacy_api_runtime;
+  perform pg_temp.as_member(2);
+  perform set_config('app.facility_id', '', true);
+  select 'rows=' || count(*) into answer from pharmacy.work_item_refills(array[pg_temp.work_item_of(pg_temp.rx(n))]);
+  reset role;
+  return answer;
+end
+$f$;
+grant execute on function pg_temp.refills_without_facility(integer) to public;
+select pg_temp.expect('13l prescription ids give no row; no session facility, no row',
+  pg_temp.refills_of_ids(array[pg_temp.rx(13), pg_temp.rx(21)]) || ' | ' || pg_temp.refills_without_facility(13),
+  'rows=0 | rows=0');
 
 do $$ begin raise notice 'prescription refills: every case passed'; end $$;
 rollback;

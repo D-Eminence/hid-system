@@ -18,7 +18,8 @@
 --      UPDATE triggers; the two functions (md5, owner, SECURITY DEFINER,
 --      volatility, language, search_path, not STRICT) and who may execute
 --      them; no 0148 body names ehr.prescriptions or the sends table, and
---      0133's S7 list is unchanged; ehr.prescriptions' columns in order (a
+--      0133's S7 list is unchanged by 0148 (0152's refills reader joins it);
+--      ehr.prescriptions' columns in order (a
 --      migration that adds one decides the fingerprint's left-out keys);
 --      pharmacy.work_items' read policies are the two the reader repeats;
 --   2. recording (own items sent automatically, dispensed by PH): a hold
@@ -213,11 +214,13 @@ begin
     'as granted public=false');
   -- 1g. No 0148 body names ehr.prescriptions or the sends table, so 0133's
   -- S7 list (the owner-run definers whose text names ehr.prescriptions,
-  -- each of which sees D5's rows in a pharmacist's session) stays the ten
-  -- 0133's suite pins on Release B (0143's ehr.list_my_orders, 0144's
-  -- acceptance trigger function and 0145's identity.decide_unknown_patient
-  -- among them).
-  perform pg_temp.expect('1g no 0148 body names ehr.prescriptions or the sends table; 0133''s S7 list unchanged',
+  -- each of which sees D5's rows in a pharmacist's session) is unchanged by
+  -- 0148: the ten 0133's suite pins on Release B (0143's ehr.list_my_orders,
+  -- 0144's acceptance trigger function and 0145's
+  -- identity.decide_unknown_patient among them), and, once 0152 (ORD-12,
+  -- refills) is applied, its reader pharmacy.work_item_refills (the
+  -- prescription-refills suite, case 13).
+  perform pg_temp.expect('1g no 0148 body names ehr.prescriptions or the sends table; 0133''s S7 list (with 0152''s reader)',
     (select count(*) from pg_proc proc
       where proc.oid in ('pharmacy.work_item_changes_after_dispensing(uuid[])'::regprocedure,
               'pharmacy.prescription_change_after_dispensing()'::regprocedure)
@@ -229,7 +232,7 @@ begin
     || 'character) ehr.send_prescription_to_own_pharmacy(uuid,bigint) ehr.withdraw_own_pharmacy_send(uuid) '
     || 'identity.decide_unknown_patient(uuid,text,bigint,text,text,text) '
     || 'identity.demo_story_install(text) pharmacy.validate_dispensing() pharmacy.validate_work_item() '
-    || 'pharmacy.validate_work_item_acceptance()');
+    || 'pharmacy.validate_work_item_acceptance() pharmacy.work_item_refills(uuid[])');
   -- 1h. ehr.prescriptions' columns, in order: the trigger fingerprints the
   -- whole row less status, row_version and the two times, so a migration
   -- that adds a NOT NULL or defaulted column (which changes every later

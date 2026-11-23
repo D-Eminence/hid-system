@@ -2023,3 +2023,19 @@ revoke all on pharmacy.work_item_acceptances from public;
 grant execute on function pharmacy.work_item_changes_after_dispensing(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
 revoke all on function pharmacy.work_item_changes_after_dispensing(uuid[]), pharmacy.prescription_change_after_dispensing() from public;
 revoke all on pharmacy.prescription_changes_after_dispensing from public;
+
+-- Prescription refills (0152, ORD-12: owner decision Q131 A of 19 November
+-- 2026; the clinical owner's answers to Rahman's review on hid-system#258,
+-- 23 November 2026), exactly as 0152 grants it: the reader of an own work
+-- item's refills, pharmacy.work_item_refills (refills allowed, fills
+-- recorded, whether a refill is open and why not, for the own items the
+-- session may read), to the Pharmacy runtime and the schema test runtime;
+-- nothing to the EHR, Lab, Identity, OCR, Outreach or Notification runtimes
+-- (it reads pharmacy.work_items, ehr.prescriptions and pharmacy.dispensings
+-- as its owner, the owner of pharmacy.validate_dispensing). The two new
+-- columns (ehr.prescriptions.refills_allowed, pharmacy.dispensings.fill_number)
+-- need no grant: the table privileges above are table-wide. The replaced
+-- pharmacy.validate_dispensing and pharmacy.claim_prescription_dispensing keep
+-- their ACLs (executed by no role).
+grant execute on function pharmacy.work_item_refills(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
+revoke all on function pharmacy.work_item_refills(uuid[]) from public;

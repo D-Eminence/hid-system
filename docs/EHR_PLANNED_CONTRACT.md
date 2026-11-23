@@ -1186,7 +1186,7 @@ Own pharmacy work items (no order route) gain:
 Dispensing: the body is unchanged (`CreateDispensingDto`: `expectedWorkItemVersion`, `quantityDispensed`, `quantityUnit`, `reason` 8-500), and the `Idempotency-Key` is required as today.
 - A work item now takes up to `1 + refillsAllowed` dispensings (owner decision Q131 A, 19 Nov 2026).
 - The answer gains `fillNumber`: 1 is the first fill, 2 and above are refills.
-- A refill also needs the prescription to be active and not past its `endsOn` (Lagos day). It is checked by 0101's guard, as the first fill is.
+- A refill also needs the prescription to be active, unchanged since the item was accepted, and not past its `endsOn` (Lagos day). 0152's dispensing check does this: 0101's guard (active, at the accepted version), then, for a refill only, the refill count and the Lagos day. A first fill is not checked against `endsOn`, as today.
 - A reversed fill still counts as used. A reversal never gives a refill back, as today a reversed dispensing counts as done.
 
 Routed prescriptions (an outside pharmacy) do not carry refills in this package, as the 0125 details don't ("item 4b, later"). After the hospital pharmacy's first fill, refills stay at the hospital pharmacy. The prescriber may route to an outside pharmacy only until the hospital pharmacy starts dispensing (Q119 and Q121 A). Splitting one prescription across several pharmacies is a later project.
@@ -1226,10 +1226,12 @@ Audit: today's `pharmacy.dispensing.create` row, plus `fillNumber`. No new patie
 
 ### Target
 
-Release B (lane D), as the build plan's default ("refills are added to the 0125 prescription details"). Size **M**:
-- one column and CHECK on `ehr.prescriptions`, taking 0125's lock (ACCESS EXCLUSIVE NOWAIT);
+Release B (lane D), as the build plan's default ("refills are added to the 0125 prescription details"). Size **M**. The database part is migration 0152 (provisional; the interface contract's "ORD-12. Prescription refills" has it as built):
+- a nullable `refills_allowed` column and its CHECK on `ehr.prescriptions`, and `fill_number` with its CHECK on `pharmacy.dispensings`;
 - replacing the unique `work_item_id` on `pharmacy.dispensings` with a unique (`work_item_id`, `fill_number`);
-- 0101's guard;
+- 0101's guard with a refill block, and 0133's claim function, which today refuses every second fill, replaced so a refill needs the item's live, dispensed, own claim;
+- a new reader for pharmacy-api, `pharmacy.work_item_refills(uuid[])` (refills allowed, fills recorded, whether a refill is open and why not), since the Pharmacy runtime cannot read `ehr.prescriptions`;
+- the locks: ACCESS EXCLUSIVE NOWAIT on `ehr.prescriptions` and `pharmacy.dispensings` (after ACCESS SHARE on the tables it reads), retried every 100 ms for 5 seconds, or one attempt only when the runner's dry run already holds an earlier migration's locks (0148's rule; 0125's 50 × 100 ms loop has no such rule);
 - the list and progress fields.
 
 If the pharmacy half misses the Release B cut-off, it moves to Release C. Release B then ships the field and its display only, and the screen keeps the "not available yet" line for second fills.

@@ -185,7 +185,8 @@ test('0152\'s two busy refusals, read from the file, are ones the dry run retrie
     assert.ok(literals, `a 55P03 in ${file} has no literal message`);
     messages.push([...literals[1].matchAll(/'((?:[^']|'')*)'/g)].map((part) => part[1].replaceAll("''", "'")).join(''));
   }
-  const tables = 'pharmacy.dispensings, ehr.prescriptions, pharmacy.work_items or ehr.order_routes';
+  const tables = 'pharmacy.dispensings, ehr.prescriptions or a table 0152 reads (the Pharmacy work items, the order '
+    + 'routes or 0133\'s claims)';
   assert.deepEqual(messages, [
     `0152: ${tables} is busy, and this transaction already holds an earlier migration's locks, so it does not wait; `
       + `nothing applied; ${tail}`,
