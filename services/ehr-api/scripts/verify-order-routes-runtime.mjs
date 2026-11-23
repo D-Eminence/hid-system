@@ -1506,6 +1506,88 @@ try {
   const q132Route = { heldAfterOutsideDispensing: 'on_hold (1) with the ordering facility', hospitalItem: 'nothing',
     enteredInError: 'route closed: left the outside list, read 404 PHARMACY_WORK_ITEM_NOT_FOUND; both changes recorded' };
   step('Q132 A: a hold after the outside dispensing shows on the outside item; an entry in error closes the route');
+
+  // Q132 A (V6, V7): the route-backed race. The outside pharmacist's dispensing in flight holds the order route FOR
+  // UPDATE (0101) until it commits; the doctor's PATCH does not wait on the prescription for a routed item, but
+  // 0086's prescriptions_order_routes_sync locks the same route, so the PATCH waits there. C4 fires after that
+  // trigger (name order), so C2 runs once the dispensing has committed and records the change. V7, on this
+  // disposable copy only: with C4 renamed to sort before the route sync, C2 runs before the wait, sees no dispensed
+  // claim, and records nothing; its name is put back afterwards. Session A is the Pharmacy runtime in the outside
+  // pharmacist's session (as pharmacy-api sets it); the wait is read from pg_stat_activity, no fixed sleep.
+  const pharmacistSubject = (await one('select subject from auth.accounts where id = $1', [pharmacist.accountId])).subject;
+  const routeRace = async label => {
+    const rx = await newPrescription('active');
+    const route = await sendPrescription(rx);
+    const accepted = expectStatus(await acceptPrescription(route.id, 1, { kind: 'date_of_birth', value: patient.dob }),
+      201, `the outside pharmacy accepts the ${label} prescription`);
+    const item = await one(`select id::text as id, row_version, patient_id::text as patient_id, facility_id::text as facility_id,
+        medication_code_system, medication_code, medication_display from pharmacy.work_items where id = $1`,
+    [accepted.workItemId]);
+    const before = (await ehrCall(doctor, 'GET', `${enc}/prescriptions/${rx.id}`)).body;
+    const sessionA = new Client({ connectionString: databaseUrl('hid_pharmacy_api_runtime') });
+    await sessionA.connect();
+    let edit;
+    try {
+      await sessionA.query('begin');
+      await sessionA.query(`select set_config('app.actor_subject', $1, true), set_config('app.facility_id', $2, true),
+          set_config('app.correlation_id', 'order-routes-verifier-race', true), set_config('app.membership_id', $3, true),
+          set_config('app.purpose_of_use', 'direct-care', true), set_config('app.own_facility_work', '0133', true)`,
+      [pharmacistSubject, pharmacyFacility.facilityId, outsideMembership]);
+      await sessionA.query(`insert into pharmacy.dispensings (id, work_item_id, work_item_version, patient_id, facility_id,
+          medication_code_system, medication_code, medication_display, quantity_dispensed, quantity_unit, dispensed_by,
+          dispensed_by_membership_id, reason, idempotency_key, request_sha256, correlation_id)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, 30, 'tablet', $9, $10, 'Synthetic outside dispensing in flight', $11, $12,
+          'order-routes-verifier-race')`,
+      [randomUUID(), item.id, item.row_version, item.patient_id, item.facility_id, item.medication_code_system,
+        item.medication_code, item.medication_display, pharmacist.accountId, outsideMembership, freshKey('race-dispense'),
+        randomBytes(32).toString('hex')]);
+      edit = ehrCall(doctor, 'PATCH', `${enc}/prescriptions/${rx.id}`,
+        { expectedRowVersion: Number(before.rowVersion), status: 'on_hold',
+          changeReason: 'Synthetic hold while an outside dispensing is in flight' });
+      let waiting = false;
+      for (let tries = 0; tries < 200 && !waiting; tries += 1) {
+        // ehr-api's backend: its login is the runtime role, or (a local cluster) the superuser with the runtime role
+        // set, so it is found by its application name too (ehr-api's pool names itself hid-ehr-...).
+        waiting = (await one(`select count(*)::int as n from pg_stat_activity
+            where (usename = 'hid_ehr_api_runtime' or application_name like 'hid-ehr-%')
+              and wait_event_type = 'Lock' and state = 'active'`)).n > 0;
+        if (!waiting) await new Promise(done => setTimeout(done, 25));
+      }
+      assert(waiting, `${label}: the PATCH never waited on the outside dispensing in flight`);
+      await sessionA.query('commit');
+    } catch (error) {
+      await sessionA.query('rollback').catch(() => {});
+      throw error;
+    } finally {
+      await sessionA.end();
+    }
+    const edited = expectStatus(await edit, 200, `${label}: the PATCH after the outside dispensing committed`);
+    const rows = await all(`select change_row.prescription_version::text as version,
+        change_row.changed_at > claim.dispensed_at as after_dispensing
+      from pharmacy.prescription_changes_after_dispensing change_row
+      join pharmacy.prescription_item_claims claim on claim.work_item_id = change_row.work_item_id
+     where change_row.work_item_id = $1`, [item.id]);
+    return { rows, editedVersion: String(edited.rowVersion) };
+  };
+  const v6 = await routeRace('route race');
+  assert.deepEqual(v6.rows, [{ version: v6.editedVersion, after_dispensing: true }],
+    `the route race's recorded change: ${JSON.stringify(v6.rows)}`);
+  const triggerName = 'prescriptions_pharmacy_change_after_dispensing';
+  const earlyName = 'prescriptions_a_pharmacy_change_after_dispensing';
+  await owner.query(`alter trigger ${triggerName} on ehr.prescriptions rename to ${earlyName}`);
+  let v7;
+  try {
+    v7 = await routeRace('route race, trigger renamed first');
+  } finally {
+    await owner.query(`alter trigger ${earlyName} on ehr.prescriptions rename to ${triggerName}`);
+  }
+  assert.deepEqual(v7.rows, [], `with C4 named to fire before the route sync, nothing is recorded: ${JSON.stringify(v7.rows)}`);
+  assert.equal((await one(`select count(*)::int as n from pg_trigger where tgrelid = 'ehr.prescriptions'::regclass
+      and tgname = $1`, [triggerName])).n, 1, 'the trigger has its name back');
+  q132Route.routeRace = { patchWaitedInRouteSync: true, rows: 1, afterDispensing: true,
+    triggerRenamedFirst: 'nothing recorded (the name order matters); renamed back' };
+  step('Q132 A: a PATCH racing an outside dispensing waits in the route sync and is recorded once; fired before the '
+    + 'sync, the recorder would see nothing');
   // rx10: sent to the hospital's pharmacy, then elsewhere, then declined there. It never comes back to the
   // hospital's pharmacy ("Send to pharmacy" answers routed); it can still be sent to another outside pharmacy.
   const rx10 = await newPrescription('active');
