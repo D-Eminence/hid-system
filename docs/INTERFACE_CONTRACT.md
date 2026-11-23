@@ -9196,12 +9196,14 @@ membership. Body, exactly these fields:
   with this purpose, for this member, in its no-notice form (`precheck`: no
   second "Your records were opened" notice, no access-history entry; an
   `identity.authorization.precheck` audit row).
-- A refused and an unknown patient get the same 403 and store nothing, so the
-  route cannot test whether a UUID exists. Identity first asks 0140's
+- A refused and an unknown patient get the same 403 status and body, and
+  nothing is stored for either. The timing can differ: Identity first asks 0140's
   `auth.session_open_patient_target_exists`: a UUID that is no patient gets no
   access check (so no `identity.authorization.precheck` row, whose patient key
-  admits only a real patient), and its denied `auth.open-patient.set` row
-  names the id in `details.requestedPatientId`, not as the row's patient.
+  admits only a real patient), so its answer can come back a little faster.
+  Its denied `auth.open-patient.set` row names the id in
+  `details.requestedPatientId`, not as the row's patient. The caller must
+  already hold the UUID, and every attempt leaves a denied audit row.
 - A new set replaces the old one (one row per sign-in).
 - `expiresAt` is the earlier of the set time plus 8 hours and the sign-in's
   own end.

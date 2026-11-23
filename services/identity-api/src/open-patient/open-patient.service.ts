@@ -187,10 +187,10 @@ export class OpenPatientService {
   /**
    * POST /auth/open-patient. The caller is a staff session of an Identity
    * sign-in at its X-Facility-ID facility (SecurityGuard). A refused and an
-   * unknown patient get the same 403, so the route cannot test whether a UUID
-   * exists; nothing is stored for either. An unknown one is found first (0140
-   * D6), so no access check is made for it, and its denied row names the
-   * requested id in details instead of as the patient.
+   * unknown patient get the same 403 status and body, and nothing is stored
+   * for either. An unknown one is found first (0140 D6), so no access check is
+   * made for it (its answer can come back a little faster), and its denied row
+   * names the requested id in details instead of as the patient.
    */
   async set(actor: StaffSignIn, patientId: string, purpose: OpenPatientPurpose, request: OpenPatientRequest) {
     const facility = actor.facility!;
