@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { App } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
-import { environmentConfig, externalAwsEnvironment } from '../src/config.js';
+import { environmentConfig, environmentSettingsFrom, environmentSettingVariables, externalAwsEnvironment,
+  type EnvironmentSettings } from '../src/config.js';
+import { readFileSync } from 'node:fs';
 import { HidCostGovernanceStack } from '../src/cost-governance-stack.js';
 import { HidRegionalStack } from '../src/hid-regional-stack.js';
 import { costInventory } from '../src/cost-inventory.js';
@@ -25,45 +27,45 @@ const regional = Template.fromStack(regionalStack).toJSON() as {
 };
 const stagingApplication = new App();
 const stagingRegionalStack = new HidRegionalStack(stagingApplication, 'StagingRegionalTest', {
-  configuration: environmentConfig('staging', 'economy'),
+  configuration: environmentConfig('staging', { stagingMode: 'economy' }),
 });
 const stagingRegional = Template.fromStack(stagingRegionalStack).toJSON() as {
   readonly Parameters: Record<string, Record<string, unknown>>;
   readonly Resources: Record<string, Resource>;
 };
-const sleepConfiguration = environmentConfig('staging', 'sleep');
+const sleepConfiguration = environmentConfig('staging', { stagingMode: 'sleep' });
 const sleepApplication = new App();
 const sleepRegional = Template.fromStack(new HidRegionalStack(sleepApplication, 'SleepRegionalTest', {
   configuration: sleepConfiguration,
 })).toJSON() as typeof regional;
-const fidelityConfiguration = environmentConfig('staging', 'fidelity');
+const fidelityConfiguration = environmentConfig('staging', { stagingMode: 'fidelity' });
 const fidelityApplication = new App();
 const fidelityRegional = Template.fromStack(new HidRegionalStack(fidelityApplication, 'FidelityRegionalTest', {
   configuration: fidelityConfiguration,
 })).toJSON() as typeof regional;
 const qoreIdStagingApplication = new App();
 const qoreIdStagingRegional = Template.fromStack(new HidRegionalStack(qoreIdStagingApplication, 'QoreIdStagingRegionalTest', {
-  configuration: environmentConfig('staging', 'economy', 'true'),
+  configuration: environmentConfig('staging', { stagingMode: 'economy', qoreIdEnabled: 'true' }),
 })).toJSON() as typeof regional;
 const ownWorkPatientCardApplication = new App();
 const ownWorkPatientCardRegional = Template.fromStack(new HidRegionalStack(ownWorkPatientCardApplication,
   'OwnWorkPatientCardRegionalTest', {
-    configuration: environmentConfig('staging', 'economy', undefined, 'true'),
+    configuration: environmentConfig('staging', { stagingMode: 'economy', ownWorkPatientCardEnabled: 'true' }),
   })).toJSON() as typeof regional;
 const prescriptionDispensingDetailsApplication = new App();
 const prescriptionDispensingDetailsRegional = Template.fromStack(new HidRegionalStack(prescriptionDispensingDetailsApplication,
   'PrescriptionDispensingDetailsRegionalTest', {
-    configuration: environmentConfig('staging', 'economy', undefined, undefined, 'true'),
+    configuration: environmentConfig('staging', { stagingMode: 'economy', prescriptionDispensingDetailsEnabled: 'true' }),
   })).toJSON() as typeof regional;
 const facilitySelectionKeepApplication = new App();
 const facilitySelectionKeepRegional = Template.fromStack(new HidRegionalStack(facilitySelectionKeepApplication,
   'FacilitySelectionKeepRegionalTest', {
-    configuration: environmentConfig('staging', 'economy', undefined, undefined, undefined, 'keep'),
+    configuration: environmentConfig('staging', { stagingMode: 'economy', staffFacilitySelectionMode: 'keep' }),
   })).toJSON() as typeof regional;
 const facilitySelectionAskApplication = new App();
 const facilitySelectionAskRegional = Template.fromStack(new HidRegionalStack(facilitySelectionAskApplication,
   'FacilitySelectionAskRegionalTest', {
-    configuration: environmentConfig('production', undefined, undefined, undefined, undefined, 'ask'),
+    configuration: environmentConfig('production', { staffFacilitySelectionMode: 'ask' }),
   })).toJSON() as typeof regional;
 
 function resources(template: typeof regional, type: string): Array<[string, Resource]> {
@@ -87,58 +89,58 @@ test('environment names are typed and production is multi-AZ', () => {
   assert.equal(configuration.availabilityZones, 3);
   assert.equal(configuration.publicApiSubdomain, 'api');
   assert.throws(() => environmentConfig('staging'), /HID_STAGING_MODE/);
-  assert.throws(() => environmentConfig('production', 'sleep'), /valid only/);
-  assert.throws(() => environmentConfig('staging', 'economy', 'enabled'), /HID_QOREID_ENABLED/);
-  assert.equal(environmentConfig('staging', 'economy').qoreIdEnabled, false);
-  assert.equal(environmentConfig('staging', 'economy', 'true').qoreIdEnabled, true);
-  assert.throws(() => environmentConfig('staging', 'economy', undefined, 'enabled'),
+  assert.throws(() => environmentConfig('production', { stagingMode: 'sleep' }), /valid only/);
+  assert.throws(() => environmentConfig('staging', { stagingMode: 'economy', qoreIdEnabled: 'enabled' }), /HID_QOREID_ENABLED/);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy' }).qoreIdEnabled, false);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', qoreIdEnabled: 'true' }).qoreIdEnabled, true);
+  assert.throws(() => environmentConfig('staging', { stagingMode: 'economy', ownWorkPatientCardEnabled: 'enabled' }),
     /HID_OWN_WORK_PATIENT_CARD_ENABLED must be true or false when supplied/);
-  assert.throws(() => environmentConfig('production', undefined, undefined, 'TRUE'), /HID_OWN_WORK_PATIENT_CARD_ENABLED/);
-  assert.equal(environmentConfig('staging', 'economy').ownWorkPatientCardEnabled, false);
+  assert.throws(() => environmentConfig('production', { ownWorkPatientCardEnabled: 'TRUE' }), /HID_OWN_WORK_PATIENT_CARD_ENABLED/);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy' }).ownWorkPatientCardEnabled, false);
   assert.equal(environmentConfig('production').ownWorkPatientCardEnabled, false);
-  assert.equal(environmentConfig('staging', 'economy', undefined, 'false').ownWorkPatientCardEnabled, false);
-  assert.equal(environmentConfig('staging', 'economy', undefined, 'true').ownWorkPatientCardEnabled, true);
-  assert.equal(environmentConfig('production', undefined, undefined, 'true').ownWorkPatientCardEnabled, true);
-  assert.equal(environmentConfig('staging', 'economy', undefined, 'true').qoreIdEnabled, false);
-  assert.equal(environmentConfig('staging', 'economy', 'true').ownWorkPatientCardEnabled, false);
-  assert.throws(() => environmentConfig('staging', 'economy', undefined, undefined, 'enabled'),
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', ownWorkPatientCardEnabled: 'false' }).ownWorkPatientCardEnabled, false);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', ownWorkPatientCardEnabled: 'true' }).ownWorkPatientCardEnabled, true);
+  assert.equal(environmentConfig('production', { ownWorkPatientCardEnabled: 'true' }).ownWorkPatientCardEnabled, true);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', ownWorkPatientCardEnabled: 'true' }).qoreIdEnabled, false);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', qoreIdEnabled: 'true' }).ownWorkPatientCardEnabled, false);
+  assert.throws(() => environmentConfig('staging', { stagingMode: 'economy', prescriptionDispensingDetailsEnabled: 'enabled' }),
     /HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED must be true or false when supplied/);
-  assert.throws(() => environmentConfig('production', undefined, undefined, undefined, 'TRUE'),
+  assert.throws(() => environmentConfig('production', { prescriptionDispensingDetailsEnabled: 'TRUE' }),
     /HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED/);
-  assert.equal(environmentConfig('staging', 'economy').prescriptionDispensingDetailsEnabled, false);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy' }).prescriptionDispensingDetailsEnabled, false);
   assert.equal(environmentConfig('production').prescriptionDispensingDetailsEnabled, false);
-  assert.equal(environmentConfig('staging', 'economy', undefined, undefined, 'false').prescriptionDispensingDetailsEnabled, false);
-  assert.equal(environmentConfig('staging', 'economy', undefined, undefined, 'true').prescriptionDispensingDetailsEnabled, true);
-  assert.equal(environmentConfig('production', undefined, undefined, undefined, 'true').prescriptionDispensingDetailsEnabled, true);
-  assert.equal(environmentConfig('staging', 'economy', undefined, undefined, 'true').qoreIdEnabled, false);
-  assert.equal(environmentConfig('staging', 'economy', undefined, undefined, 'true').ownWorkPatientCardEnabled, false);
-  assert.equal(environmentConfig('staging', 'economy', 'true', 'true').prescriptionDispensingDetailsEnabled, false);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', prescriptionDispensingDetailsEnabled: 'false' }).prescriptionDispensingDetailsEnabled, false);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', prescriptionDispensingDetailsEnabled: 'true' }).prescriptionDispensingDetailsEnabled, true);
+  assert.equal(environmentConfig('production', { prescriptionDispensingDetailsEnabled: 'true' }).prescriptionDispensingDetailsEnabled, true);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', prescriptionDispensingDetailsEnabled: 'true' }).qoreIdEnabled, false);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', prescriptionDispensingDetailsEnabled: 'true' }).ownWorkPatientCardEnabled, false);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', qoreIdEnabled: 'true', ownWorkPatientCardEnabled: 'true' }).prescriptionDispensingDetailsEnabled, false);
   // 0129: a staff member's chosen facility, kept per sign-in. Off unless keep
   // or ask is given at synth time; anything else refuses to synthesize.
   for (const invalid of ['on', 'true', 'false', 'KEEP', ' keep', 'keep ', '', 'default']) {
-    assert.throws(() => environmentConfig('staging', 'economy', undefined, undefined, undefined, invalid),
+    assert.throws(() => environmentConfig('staging', { stagingMode: 'economy', staffFacilitySelectionMode: invalid }),
       /HID_STAFF_FACILITY_SELECTION_MODE must be off, keep or ask when supplied/);
   }
-  assert.throws(() => environmentConfig('production', undefined, undefined, undefined, undefined, 'Ask'), /HID_STAFF_FACILITY_SELECTION_MODE/);
+  assert.throws(() => environmentConfig('production', { staffFacilitySelectionMode: 'Ask' }), /HID_STAFF_FACILITY_SELECTION_MODE/);
   assert.equal(environmentConfig('development').staffFacilitySelectionMode, 'off');
-  assert.equal(environmentConfig('staging', 'economy').staffFacilitySelectionMode, 'off');
-  assert.equal(environmentConfig('staging', 'sleep').staffFacilitySelectionMode, 'off');
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy' }).staffFacilitySelectionMode, 'off');
+  assert.equal(environmentConfig('staging', { stagingMode: 'sleep' }).staffFacilitySelectionMode, 'off');
   assert.equal(environmentConfig('production').staffFacilitySelectionMode, 'off');
   for (const mode of ['off', 'keep', 'ask'] as const) {
-    assert.equal(environmentConfig('staging', 'economy', undefined, undefined, undefined, mode).staffFacilitySelectionMode, mode);
-    assert.equal(environmentConfig('production', undefined, undefined, undefined, undefined, mode).staffFacilitySelectionMode, mode);
+    assert.equal(environmentConfig('staging', { stagingMode: 'economy', staffFacilitySelectionMode: mode }).staffFacilitySelectionMode, mode);
+    assert.equal(environmentConfig('production', { staffFacilitySelectionMode: mode }).staffFacilitySelectionMode, mode);
   }
-  assert.equal(environmentConfig('staging', 'economy', 'true').staffFacilitySelectionMode, 'off');
-  assert.equal(environmentConfig('staging', 'economy', undefined, undefined, undefined, 'keep').qoreIdEnabled, false);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', qoreIdEnabled: 'true' }).staffFacilitySelectionMode, 'off');
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', staffFacilitySelectionMode: 'keep' }).qoreIdEnabled, false);
   // Each opt-in leaves the others as they were.
-  assert.equal(environmentConfig('staging', 'economy', undefined, 'true', 'true').staffFacilitySelectionMode, 'off');
-  assert.equal(environmentConfig('staging', 'economy', undefined, undefined, undefined, 'keep').ownWorkPatientCardEnabled, false);
-  assert.equal(environmentConfig('staging', 'economy', undefined, undefined, undefined, 'keep').prescriptionDispensingDetailsEnabled, false);
-  assert.equal(environmentConfig('production', undefined, undefined, 'true', 'true', 'ask').staffFacilitySelectionMode, 'ask');
-  assert.equal(environmentConfig('production', undefined, undefined, 'true', 'true', 'ask').ownWorkPatientCardEnabled, true);
-  assert.equal(environmentConfig('production', undefined, undefined, 'true', 'true', 'ask').prescriptionDispensingDetailsEnabled, true);
-  assert.equal(environmentConfig('staging', 'economy').publicApiSubdomain, 'api.staging');
-  assert.deepEqual(environmentConfig('staging', 'economy').browserSubdomains, [
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', ownWorkPatientCardEnabled: 'true', prescriptionDispensingDetailsEnabled: 'true' }).staffFacilitySelectionMode, 'off');
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', staffFacilitySelectionMode: 'keep' }).ownWorkPatientCardEnabled, false);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', staffFacilitySelectionMode: 'keep' }).prescriptionDispensingDetailsEnabled, false);
+  assert.equal(environmentConfig('production', { ownWorkPatientCardEnabled: 'true', prescriptionDispensingDetailsEnabled: 'true', staffFacilitySelectionMode: 'ask' }).staffFacilitySelectionMode, 'ask');
+  assert.equal(environmentConfig('production', { ownWorkPatientCardEnabled: 'true', prescriptionDispensingDetailsEnabled: 'true', staffFacilitySelectionMode: 'ask' }).ownWorkPatientCardEnabled, true);
+  assert.equal(environmentConfig('production', { ownWorkPatientCardEnabled: 'true', prescriptionDispensingDetailsEnabled: 'true', staffFacilitySelectionMode: 'ask' }).prescriptionDispensingDetailsEnabled, true);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy' }).publicApiSubdomain, 'api.staging');
+  assert.deepEqual(environmentConfig('staging', { stagingMode: 'economy' }).browserSubdomains, [
     'staging', 'ehr.staging', 'lab.staging', 'pharmacy.staging', 'migrate.staging', 'outreach.staging', 'admin.staging',
   ]);
   assert.deepEqual(environmentConfig('production').browserSubdomains, [
@@ -152,6 +154,54 @@ test('account and region are both external or both absent', () => {
   assert.deepEqual(externalAwsEnvironment('123456789012', 'eu-west-1'), {
     account: '123456789012', region: 'eu-west-1',
   });
+});
+
+test('each setting is named, read by its own variable, and changes only its own field', () => {
+  // Every setting has exactly one variable, and the names are the ones the deploy workflows set.
+  assert.deepEqual(environmentSettingVariables, {
+    stagingMode: 'HID_STAGING_MODE',
+    qoreIdEnabled: 'HID_QOREID_ENABLED',
+    ownWorkPatientCardEnabled: 'HID_OWN_WORK_PATIENT_CARD_ENABLED',
+    prescriptionDispensingDetailsEnabled: 'HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED',
+    staffFacilitySelectionMode: 'HID_STAFF_FACILITY_SELECTION_MODE',
+  });
+  assert.equal(new Set(Object.values(environmentSettingVariables)).size, Object.keys(environmentSettingVariables).length);
+  // Read from an environment by name; unset and unrelated variables are left out.
+  assert.deepEqual(environmentSettingsFrom({
+    HID_INFRA_ENV: 'staging', HID_STAGING_MODE: 'economy', HID_QOREID_ENABLED: 'true',
+    HID_OWN_WORK_PATIENT_CARD_ENABLED: 'false', HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED: 'true',
+    HID_STAFF_FACILITY_SELECTION_MODE: 'ask', HID_SOMETHING_ELSE: 'true', PATH: '/usr/bin',
+  }), {
+    stagingMode: 'economy', qoreIdEnabled: 'true', ownWorkPatientCardEnabled: 'false',
+    prescriptionDispensingDetailsEnabled: 'true', staffFacilitySelectionMode: 'ask',
+  });
+  assert.deepEqual(environmentSettingsFrom({}), {});
+  assert.deepEqual(environmentSettingsFrom({ HID_QOREID_ENABLED: undefined }), {});
+  // Setting any one switch alone changes that field and no other: the swap positional arguments allowed.
+  const base = environmentConfig('production');
+  const alone: Array<[keyof EnvironmentSettings, string, Partial<ReturnType<typeof environmentConfig>>]> = [
+    ['qoreIdEnabled', 'true', { qoreIdEnabled: true }],
+    ['ownWorkPatientCardEnabled', 'true', { ownWorkPatientCardEnabled: true }],
+    ['prescriptionDispensingDetailsEnabled', 'true', { prescriptionDispensingDetailsEnabled: true }],
+    ['staffFacilitySelectionMode', 'keep', { staffFacilitySelectionMode: 'keep' }],
+  ];
+  for (const [name, value, changed] of alone) {
+    const fromSettings = environmentConfig('production', { [name]: value });
+    assert.deepEqual(fromSettings, { ...base, ...changed }, name);
+    // The same through the environment variable.
+    assert.deepEqual(environmentConfig('production', environmentSettingsFrom({ [environmentSettingVariables[name]]: value })),
+      fromSettings, environmentSettingVariables[name]);
+  }
+  // A positional value from an unchecked JavaScript caller is refused, not read as a setting.
+  assert.throws(() => environmentConfig('staging', 'economy' as unknown as EnvironmentSettings),
+    /takes its settings by name.*received string/);
+  // An unknown name is refused, not ignored (a misspelt setting built outside an object literal).
+  assert.throws(() => environmentConfig('production', { qoreIDEnabled: 'true' } as unknown as EnvironmentSettings),
+    /Unknown environment setting qoreIDEnabled/);
+  // The CDK entry reads every setting by its variable, never by position.
+  const entry = readFileSync(new URL('../bin/hid-infrastructure.ts', import.meta.url), 'utf8');
+  assert.match(entry, /environmentConfig\(process\.env\.HID_INFRA_ENV, environmentSettingsFrom\(process\.env\)\)/);
+  assert.doesNotMatch(entry, /process\.env\.HID_(STAGING_MODE|QOREID_ENABLED|OWN_WORK|PRESCRIPTION|STAFF_FACILITY)/);
 });
 
 test('staging requires the selected Novu region while production configuration is unchanged', () => {
@@ -857,7 +907,7 @@ test('cost inventory is deterministic and never labels sleep zero-cost', () => {
   assert.equal(sleep.s3Buckets, 1);
   assert.equal(sleep.kmsKeys, 4);
   for (const mode of ['sleep', 'economy', 'fidelity'] as const) {
-    assert.equal(costInventory(environmentConfig('staging', mode)).kmsKeys, 4,
+    assert.equal(costInventory(environmentConfig('staging', { stagingMode: mode })).kmsKeys, 4,
       `${mode} must account for the retained workload signing key`);
   }
   for (const environment of ['development', 'production'] as const) {

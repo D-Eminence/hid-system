@@ -16,7 +16,7 @@ import { buildStagingEcrBootstrap, prepareStagingEcrBootstrap } from '../scripts
 function synthesizedStagingTemplate() {
   const app = new App()
   const stack = new HidRegionalStack(app, 'StagingEcrBootstrapTest', {
-    configuration: environmentConfig('staging', 'economy'),
+    configuration: environmentConfig('staging', { stagingMode: 'economy' }),
   })
   return {
     Description: 'HID staging private data and independently deployable ECS/Fargate runtimes',

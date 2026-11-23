@@ -7,7 +7,7 @@
   "hid_expires_at": "2026-12-01T00:00:00Z",
   "hid_scope": "gateway image only; exact libssl3 and libcrypto3 3.5.9-r0 aarch64 Alpine 3.24.2 purls; original findings retained in grype.raw.json; no risk-acceptance waiver",
   "hid_bound_files": {
-    "gateway/Dockerfile": "c42118ecb6a82dbd45782d8e08691444ef34671502736c5d6d9d3a3bc8cef57a",
+    "gateway/Dockerfile": "3b1389f2a1bbf16f06d9dbca32ebf82fa51a089aae7a92ce353b3b04705cbd2e",
     "gateway/nginx.conf.template": "058bffd804832b70daff36d57d6ad71528d2943d8a29e1c24e6a9c6c684691fb",
     "gateway/proxy-headers.conf": "17f90e70dedbc21f01e24a40f721541e234e91b0dd1907b3e0c9428957ed273e"
   },
@@ -75,7 +75,87 @@
       "status": "not_affected",
       "justification": "vulnerable_code_not_in_execute_path",
       "impact_statement": "The affected code is CMS_encrypt and CMS_encrypt_ex with an EC recipient of group order 1; TLS and QUIC do not use it. nginx, njs, libapk and ssl_client import no CMS_* function. The gateway image (nginxinc/nginx-unprivileged@sha256:782bb897..., Alpine 3.24.2, arm64) serves through nginx 1.30.7-r1 (nginx.org Alpine 3.24 package, pinned in gateway/Dockerfile) with gateway/nginx.conf.template: one plain-HTTP listen 3000 with no ssl or quic parameter, and every proxy_pass target is an http:// *_UPSTREAM value, so nginx never creates a TLS or QUIC session. No load_module directive exists, so the njs, xslt, geoip and image-filter modules are never loaded. The only other OpenSSL user that runs is the entrypoint's apk manifest (libapk imports only digest, PEM key and TLS-client symbols); c_rehash is never run, and the wget health check is plain http://127.0.0.1:3000, so busybox's ssl_client is not started. Assessed 2026-11-18 from the base layers fetched by digest. Rechecked 2026-11-19 for nginx and modules 1.30.7-r1: the same OpenSSL imports as 1.30.6-r1, and no nginx, module or njs ELF imports EVP_CIPHER_fetch, EVP_get_cipherbyname, OSSL_QUIC_*, CMS_*, PEM_X509_INFO_* or SSL_new_listener. Alpine 3.24 serves no libssl3/libcrypto3 newer than 3.5.9-r0; OpenSSL 3.5.10 is due 2026-12-01. Expires 2026-12-01: replace with a pinned fixed Alpine 3.24 package, do not renew."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-84786"
+      },
+      "products": [
+        {
+          "@id": "pkg:apk/alpine/libssl3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl"
+        },
+        {
+          "@id": "pkg:apk/alpine/libcrypto3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The affected code is OpenSSL's DANE verification in a TLS client (SSL_dane_enable and SSL_dane_tlsa_add). nginx has no DANE support and never acts as a TLS client here (every upstream is http://), and libapk's manifest run enables no DANE. The gateway image (nginxinc/nginx-unprivileged@sha256:782bb897..., Alpine 3.24.2, arm64) serves through nginx 1.30.7-r1 with gateway/nginx.conf.template: one plain-HTTP listen 3000 with no ssl or quic parameter, and every proxy_pass target is an http:// *_UPSTREAM value, so nginx never creates a TLS or QUIC session. No load_module directive exists, so the njs, xslt, geoip and image-filter modules are never loaded. The only other OpenSSL user that runs is the entrypoint's apk manifest (libapk imports only digest, PEM key and TLS-client symbols, and makes no network connection there); the wget health check is plain http://127.0.0.1:3000. As rechecked on 2026-11-19, no nginx, module or njs ELF imports OSSL_QUIC_*, CMS_*, PEM_X509_INFO_* or SSL_new_listener. Assessed 2026-11-22; approved by the owner, Q136 A, 2026-11-22."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-107493"
+      },
+      "products": [
+        {
+          "@id": "pkg:apk/alpine/libssl3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl"
+        },
+        {
+          "@id": "pkg:apk/alpine/libcrypto3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The affected PEM_X509_INFO_read_bio_ex() failure path is reached only by a caller that passes an existing stack; OpenSSL's own callers pass NULL, and no gateway ELF imports PEM_X509_INFO_*. With no ssl directive nginx loads no certificate file. The gateway image (nginxinc/nginx-unprivileged@sha256:782bb897..., Alpine 3.24.2, arm64) serves through nginx 1.30.7-r1 with gateway/nginx.conf.template: one plain-HTTP listen 3000 with no ssl or quic parameter, and every proxy_pass target is an http:// *_UPSTREAM value, so nginx never creates a TLS or QUIC session. No load_module directive exists, so the njs, xslt, geoip and image-filter modules are never loaded. The only other OpenSSL user that runs is the entrypoint's apk manifest (libapk imports only digest, PEM key and TLS-client symbols, and makes no network connection there); the wget health check is plain http://127.0.0.1:3000. As rechecked on 2026-11-19, no nginx, module or njs ELF imports OSSL_QUIC_*, CMS_*, PEM_X509_INFO_* or SSL_new_listener. Assessed 2026-11-22; approved by the owner, Q136 A, 2026-11-22."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-124709"
+      },
+      "products": [
+        {
+          "@id": "pkg:apk/alpine/libssl3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl"
+        },
+        {
+          "@id": "pkg:apk/alpine/libcrypto3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The affected code is the OpenSSL QUIC server's stream handling (OSSL_QUIC_server_method or SSL_new_listener). nginx has no listen ... quic here and no gateway ELF imports OSSL_QUIC_* or SSL_new_listener. The gateway image (nginxinc/nginx-unprivileged@sha256:782bb897..., Alpine 3.24.2, arm64) serves through nginx 1.30.7-r1 with gateway/nginx.conf.template: one plain-HTTP listen 3000 with no ssl or quic parameter, and every proxy_pass target is an http:// *_UPSTREAM value, so nginx never creates a TLS or QUIC session. No load_module directive exists, so the njs, xslt, geoip and image-filter modules are never loaded. The only other OpenSSL user that runs is the entrypoint's apk manifest (libapk imports only digest, PEM key and TLS-client symbols, and makes no network connection there); the wget health check is plain http://127.0.0.1:3000. As rechecked on 2026-11-19, no nginx, module or njs ELF imports OSSL_QUIC_*, CMS_*, PEM_X509_INFO_* or SSL_new_listener. Assessed 2026-11-22; approved by the owner, Q136 A, 2026-11-22."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-107494"
+      },
+      "products": [
+        {
+          "@id": "pkg:apk/alpine/libssl3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl"
+        },
+        {
+          "@id": "pkg:apk/alpine/libcrypto3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The affected code is OpenSSL's QUIC stack, which queues RETIRE_CONNECTION_ID frames without a limit (upstream openssl/openssl pull 33544). It needs a QUIC connection; nginx has no listen ... quic here, makes no QUIC connection, and no gateway ELF imports OSSL_QUIC_*. The gateway image (nginxinc/nginx-unprivileged@sha256:782bb897..., Alpine 3.24.2, arm64) serves through nginx 1.30.7-r1 with gateway/nginx.conf.template: one plain-HTTP listen 3000 with no ssl or quic parameter, and every proxy_pass target is an http:// *_UPSTREAM value, so nginx never creates a TLS or QUIC session. No load_module directive exists, so the njs, xslt, geoip and image-filter modules are never loaded. The only other OpenSSL user that runs is the entrypoint's apk manifest (libapk imports only digest, PEM key and TLS-client symbols, and makes no network connection there); the wget health check is plain http://127.0.0.1:3000. As rechecked on 2026-11-19, no nginx, module or njs ELF imports OSSL_QUIC_*, CMS_*, PEM_X509_INFO_* or SSL_new_listener. Assessed 2026-11-22; approved by the owner, Q136 A, 2026-11-22."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-121482"
+      },
+      "products": [
+        {
+          "@id": "pkg:apk/alpine/libssl3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl"
+        },
+        {
+          "@id": "pkg:apk/alpine/libcrypto3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The affected code is CMS and PKCS#7 SignedData verification with CRL checking (upstream openssl/openssl pull 33546). No gateway ELF imports CMS_* or PKCS7_verify, and nothing in the image verifies SignedData. The gateway image (nginxinc/nginx-unprivileged@sha256:782bb897..., Alpine 3.24.2, arm64) serves through nginx 1.30.7-r1 with gateway/nginx.conf.template: one plain-HTTP listen 3000 with no ssl or quic parameter, and every proxy_pass target is an http:// *_UPSTREAM value, so nginx never creates a TLS or QUIC session. No load_module directive exists, so the njs, xslt, geoip and image-filter modules are never loaded. The only other OpenSSL user that runs is the entrypoint's apk manifest (libapk imports only digest, PEM key and TLS-client symbols, and makes no network connection there); the wget health check is plain http://127.0.0.1:3000. As rechecked on 2026-11-19, no nginx, module or njs ELF imports OSSL_QUIC_*, CMS_*, PEM_X509_INFO_* or SSL_new_listener. Assessed 2026-11-22; approved by the owner, Q136 A, 2026-11-22."
     }
   ],
-  "hid_owner_approval": "D-Eminence, verbatim in chat on 2026-11-18 at about 12:57 UTC: \"Q99 A\""
+  "hid_owner_approval": "D-Eminence, verbatim in chat on 2026-11-18 at about 12:57 UTC: \"Q99 A\"; D-Eminence, verbatim in chat on 2026-11-22 at about 20:58 UTC: \"Q136 A: approve the gateway OpenVEX for CVE-2026-84786, CVE-2026-107493, CVE-2026-124709, CVE-2026-107494 and CVE-2026-121482 (Alpine libssl3/libcrypto3 3.5.9-r0) in #313, expiring 2026-12-01\""
 }
