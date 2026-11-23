@@ -651,12 +651,12 @@
         "sha256": "d77983a0d82bc3c2e016f9fda0990666aecc218ac9bed6f7e9901bc90bff3543"
       },
       {
-        "name": "0145_pharmacy_work_item_acceptance.sql",
-        "sha256": "d15b64b29bd73043f513c1888dc7a63e0ddb164c21e7dc6c2a22264c0278bc1e"
+        "name": "0144_pharmacy_work_item_acceptance.sql",
+        "sha256": "17f8e54c409b6a2cd8e7e4709d1a7802337c3cc4bf392081bce7ab5928192773"
       },
       {
         "name": "0148_prescription_changes_after_dispensing.sql",
-        "sha256": "6844036701f73e478cce14660ddc93fd2e808771aa7700c8996f6a6fd127fbb6"
+        "sha256": "75d1b0a84dbc9b7a094e0609e61aa97ac30a5bd286155b7a045a052edb322cc8"
       }
     ]
   },
