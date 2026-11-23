@@ -39,12 +39,14 @@
 --    'not_permitted' (not this facility's own patient), 'already_linked' (the
 --    same NIN, by lookup HMAC), 'has_nin' (another verified NIN), 'replay'
 --    or 'key_reused' (the account's Idempotency-Key, with the same or
---    another digest), or 'eligible' with the record's first and last name
+--    another digest), 'try_later' and 'source_nin_differs' (the legacy
+--    crosswalk, below), or 'eligible' with the record's first and last name
 --    and date of birth, which identity-api compares with the NIN record.
 -- 4. identity.link_patient_nin(...): the link, in one transaction. 0058's
 --    advisory lock on the NIN (so a desk link and the patient's own binding
 --    of the same NIN wait for each other), then the patient row FOR UPDATE;
---    3's checks again; a NIN already on another record answers
+--    3's checks again; a NIN already on another record, as an identifier
+--    or as another patient's active legacy crosswalk row, answers
 --    'on_another_record' and the other record's id (for the audit row only:
 --    the route never names it); else the evidence row, the verified `nin`
 --    identifier (source 'hid-desk-nin-link') and the patient's row_version
@@ -53,6 +55,23 @@
 -- 5. identity.patient_self_access_log: 0132's text plus one kind, nin_added
 --    ("NIN added at <facility>"), for a staff identity.patient.nin-link row
 --    whose outcome is nin_linked.
+--
+-- The legacy NIN crosswalk (0057), kept as the patient's own check keeps it
+-- (identity.patient_self_nin_eligibility, 0058 and 0092): a patient promoted
+-- from the legacy system carries an attested source disposition in
+-- migration.legacy_nin_crosswalk. While a legacy run is running or staged
+-- (identity.legacy_nin_crosswalk_ready() is false), 3 and 4 answer
+-- 'try_later' (identity-api: 503 before QoreID is asked), because the absence
+-- of a crosswalk row is not yet evidence. An active attested_exact row for
+-- this patient with a different NIN answers 'source_nin_differs' (409
+-- PATIENT_ALREADY_HAS_NIN, with its own refusal kind): a different NIN goes
+-- to governed review and never replaces the attested one. After the lock
+-- and QoreID's match, 4 answers 'on_another_record' when an active crosswalk
+-- row gives this NIN to another patient, so a migrated patient's NIN is never
+-- put on a duplicate record (and the route is never an oracle: the check
+-- comes after the match, as for an identifier). The attested NIN itself
+-- links. The crosswalk has no row-level security and no grant; the two
+-- functions read it as its owner.
 --
 -- Both functions are SECURITY DEFINER, for hid_identity_runtime (and the
 -- schema test runtime, as 0137's). Each
@@ -148,12 +167,36 @@ begin
       ('auth.membership_has_permission(text,uuid,uuid,text)', '65e3eaff93fe729fd5c5b986b80c9dd6'),
       ('auth.account_id_for_subject(text)', '4678770cf6a210034740f09422fdfbaa'),
       ('platform.reject_mutation()', '398738f39f6eebed2c54da5009495def'),
-      ('identity.patient_self_access_log(text,uuid,integer,timestamptz,bigint)', '40a2511cee0c86f1d68be83e047e1ab9')
+      ('identity.patient_self_access_log(text,uuid,integer,timestamptz,bigint)', '40a2511cee0c86f1d68be83e047e1ab9'),
+      ('identity.legacy_nin_crosswalk_ready()', '3cb94302760ad10492861ec97cd6c7c2')
     ) expected(signature, body_md5)
    where (select md5(proc.prosrc) from pg_proc proc where proc.oid = to_regprocedure(expected.signature))
          is distinct from expected.body_md5;
   if mismatch is not null then
     raise exception using errcode = '55000', message = '0138: these bodies are not as 0001-0137 left them: ' || mismatch;
+  end if;
+  -- The legacy NIN crosswalk as 0057 made it: the columns 3 and 4 read, and
+  -- its two active unique indexes (one disposition per patient, one patient
+  -- per NIN).
+  select string_agg(expected.column_name, ', ') into mismatch
+    from (values ('patient_id', 'uuid'), ('nin_state', 'text'), ('nin_lookup_hmac', 'character(64)'),
+                 ('status', 'text')) expected(column_name, type_name)
+   where to_regclass('migration.legacy_nin_crosswalk') is null
+      or not exists (select 1 from pg_attribute attribute
+                      where attribute.attrelid = to_regclass('migration.legacy_nin_crosswalk')
+                        and attribute.attname = expected.column_name and not attribute.attisdropped
+                        and format_type(attribute.atttypid, attribute.atttypmod) = expected.type_name);
+  if mismatch is not null then
+    raise exception using errcode = '55000', message = '0138: these legacy NIN crosswalk columns are not as 0057 made them: ' || mismatch;
+  end if;
+  select string_agg(expected.index_name, ', ') into mismatch
+    from (values ('migration.legacy_nin_crosswalk_active_patient_uq', '38ee5550096aed399711f07e0ff69ee9'),
+                 ('migration.legacy_nin_crosswalk_active_nin_uq', '15df5168c6b96d0e4ed492e0f3c7532c'))
+         expected(index_name, definition_md5)
+   where to_regclass(expected.index_name) is null
+      or md5(pg_get_indexdef(to_regclass(expected.index_name))) is distinct from expected.definition_md5;
+  if mismatch is not null then
+    raise exception using errcode = '55000', message = '0138: these legacy NIN crosswalk indexes are not as 0057 made them: ' || mismatch;
   end if;
 end
 $$;
@@ -322,6 +365,20 @@ begin
                         null::text, null::text, null::date;
     return;
   end if;
+  -- The legacy crosswalk (0057, as 0058 and 0092 keep it): not while a legacy
+  -- run is in flight, and never a NIN other than the one attested for this
+  -- patient.
+  if not identity.legacy_nin_crosswalk_ready() then
+    return query select 'try_later'::text, null::text, null::text, null::date;
+    return;
+  end if;
+  if exists (select 1 from migration.legacy_nin_crosswalk crosswalk
+              where crosswalk.patient_id = patient_value and crosswalk.status = 'active'
+                and crosswalk.nin_state = 'attested_exact'
+                and crosswalk.nin_lookup_hmac is distinct from requested_lookup_hmac) then
+    return query select 'source_nin_differs'::text, null::text, null::text, null::date;
+    return;
+  end if;
   -- Eligible: the record's name and date of birth, which identity-api
   -- compares with the NIN record (either order, as the patient's own check).
   return query select 'eligible'::text, patient.first_name, patient.last_name, patient.dob
@@ -330,7 +387,7 @@ end;
 $$;
 revoke all on function identity.patient_nin_link_precheck(uuid, char, text, char) from public;
 comment on function identity.patient_nin_link_precheck(uuid, char, text, char) is
-  '0138 (ID-6): what POST identity/patients/:id/nin may do before QoreID is asked: not_found, not_permitted, already_linked, has_nin, replay, key_reused, or eligible with the record''s name and date of birth (compared with the NIN record by identity-api).';
+  '0138 (ID-6): what POST identity/patients/:id/nin may do before QoreID is asked: not_found, not_permitted, already_linked, has_nin, replay, key_reused, try_later (a legacy run in flight), source_nin_differs (the legacy crosswalk attests another NIN), or eligible with the record''s name and date of birth (compared with the NIN record by identity-api).';
 
 -- 4. The link.
 create function identity.link_patient_nin(
@@ -419,12 +476,34 @@ begin
                         null::uuid;
     return;
   end if;
+  -- The legacy crosswalk, as in 3 (it may have changed since).
+  if not identity.legacy_nin_crosswalk_ready() then
+    return query select 'try_later'::text, null::uuid;
+    return;
+  end if;
+  if exists (select 1 from migration.legacy_nin_crosswalk crosswalk
+              where crosswalk.patient_id = patient_value and crosswalk.status = 'active'
+                and crosswalk.nin_state = 'attested_exact'
+                and crosswalk.nin_lookup_hmac is distinct from requested_lookup_hmac) then
+    return query select 'source_nin_differs'::text, null::uuid;
+    return;
+  end if;
   -- Any NIN row of this HMAC, revoked or not, holds the NIN (the unique index
   -- patient_identifiers_lookup_uq covers them all).
   select identifier.patient_id into other_value
     from identity.patient_identifiers identifier
    where identifier.identifier_type = 'nin' and identifier.lookup_hmac = requested_lookup_hmac
    limit 1;
+  if other_value is not null then
+    return query select 'on_another_record'::text, other_value;
+    return;
+  end if;
+  -- A migrated patient's attested NIN belongs to that patient: never on a
+  -- duplicate record (after QoreID's match, so the route is no oracle).
+  select crosswalk.patient_id into other_value
+    from migration.legacy_nin_crosswalk crosswalk
+   where crosswalk.nin_lookup_hmac = requested_lookup_hmac and crosswalk.status = 'active'
+     and crosswalk.patient_id <> patient_value;
   if other_value is not null then
     return query select 'on_another_record'::text, other_value;
     return;
@@ -483,7 +562,7 @@ begin
 end
 $$;
 comment on function identity.link_patient_nin(uuid, uuid, char, bytea, text, char, text, boolean, text, char) is
-  '0138 (ID-6): link a QoreID-checked NIN to this facility''s own patient: nin_linked, or not_found, not_permitted, already_linked, has_nin, on_another_record (with the other record, for the audit row only), replay or key_reused.';
+  '0138 (ID-6): link a QoreID-checked NIN to this facility''s own patient: nin_linked, or not_found, not_permitted, already_linked, has_nin, try_later, source_nin_differs, on_another_record (an identifier or another patient''s legacy crosswalk row; with the other record, for the audit row only), replay or key_reused.';
 
 -- 5. The patient's access log: 0132's text plus nin_added.
 create or replace function identity.patient_self_access_log(

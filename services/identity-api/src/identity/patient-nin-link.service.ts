@@ -44,8 +44,8 @@ export interface LinkedPatientNin {
   replayed: boolean;
 }
 
-type Decision = 'not_found' | 'not_permitted' | 'already_linked' | 'has_nin' | 'replay' | 'key_reused' | 'eligible'
-  | 'unknown_record';
+type Decision = 'not_found' | 'not_permitted' | 'already_linked' | 'has_nin' | 'replay' | 'key_reused'
+  | 'try_later' | 'source_nin_differs' | 'eligible' | 'unknown_record';
 
 interface PrecheckRow extends QueryResultRow {
   decision: Decision;
@@ -56,13 +56,13 @@ interface PrecheckRow extends QueryResultRow {
 
 interface LinkRow extends QueryResultRow {
   outcome: 'nin_linked' | 'not_found' | 'not_permitted' | 'already_linked' | 'has_nin' | 'on_another_record'
-    | 'replay' | 'key_reused';
+    | 'replay' | 'key_reused' | 'try_later' | 'source_nin_differs';
   other_patient_id: string | null;
 }
 
 /** The refusal kinds an audit row may name (never the NIN). */
 type RefusalKind = 'not_found' | 'not_permitted' | 'already_has_nin' | 'no_record' | 'details_mismatch'
-  | 'on_another_record' | 'key_reused' | 'not_identified';
+  | 'on_another_record' | 'key_reused' | 'not_identified' | 'source_nin_differs' | 'legacy_records_pending';
 
 const MESSAGES = {
   nin_linked: 'NIN Verified. It is now on this patient\'s record.',
@@ -99,6 +99,7 @@ export class PatientNinLinkService {
     if (!precheck) throw new DomainProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Something went wrong on our side. Please try again.');
     switch (precheck.decision) {
       case 'replay':
+        await this.replayRow(context, patientId, false);
         return this.answer(patientId, 'nin_linked', true);
       case 'key_reused':
         await this.refuse(context, patientId, 'key_reused', false);
@@ -118,6 +119,16 @@ export class PatientNinLinkService {
         // 0146 (ID-7): an unknown patient record is identified first; QoreID is not asked.
         await this.refuse(context, patientId, 'not_identified', false);
         throw notIdentified();
+      case 'source_nin_differs':
+        // 0057's crosswalk attests another NIN for this migrated patient: a
+        // different NIN goes to governed review, never replaces it (0092).
+        await this.refuse(context, patientId, 'source_nin_differs', false);
+        throw sourceNinDiffers();
+      case 'try_later':
+        // A legacy migration run is in flight, so the crosswalk is not yet
+        // evidence (0058, 0092): nothing is charged; the desk tries later.
+        await this.refuse(context, patientId, 'legacy_records_pending', false);
+        throw tryLater();
       case 'already_linked':
         await this.auditRow(context, patientId, 'success', { outcome: 'already_linked', qoreidCalled: false });
         return this.answer(patientId, 'already_linked', false);
@@ -175,6 +186,7 @@ export class PatientNinLinkService {
       case 'nin_linked':
         return this.answer(patientId, 'nin_linked', false);
       case 'replay':
+        await this.replayRow(context, patientId, qoreidCalled);
         return this.answer(patientId, 'nin_linked', true);
       case 'already_linked':
         await this.auditRow(context, patientId, 'success', { outcome: 'already_linked', qoreidCalled });
@@ -195,6 +207,12 @@ export class PatientNinLinkService {
       case 'has_nin':
         await this.refuse(context, patientId, 'already_has_nin', qoreidCalled);
         throw alreadyHasNin();
+      case 'source_nin_differs':
+        await this.refuse(context, patientId, 'source_nin_differs', qoreidCalled);
+        throw sourceNinDiffers();
+      case 'try_later':
+        await this.refuse(context, patientId, 'legacy_records_pending', qoreidCalled);
+        throw tryLater();
       default:
         throw new DomainProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Something went wrong on our side. Please try again.');
     }
@@ -202,6 +220,15 @@ export class PatientNinLinkService {
 
   private answer(patientId: string, outcome: 'nin_linked' | 'already_linked', replayed: boolean): LinkedPatientNin {
     return { patientId, outcome, ninStatus: 'verified', message: MESSAGES[outcome], replayed };
+  }
+
+  /**
+   * A replayed answer writes its own row, as 0130 and 0146 do. Its outcome is
+   * 'replayed', not 'nin_linked': the patient's access log (0138 section 5)
+   * shows "NIN added" for each nin_linked row, and the NIN was added once.
+   */
+  private replayRow(context: DataAccessContext, patientId: string, qoreidCalled: boolean): Promise<void> {
+    return this.auditRow(context, patientId, 'success', { outcome: 'replayed', replayed: true, qoreidCalled });
   }
 
   private refuse(context: DataAccessContext, patientId: string | null, refusal: RefusalKind, qoreidCalled: boolean,
@@ -255,6 +282,15 @@ function notIdentified(): DomainProblem {
 
 function alreadyHasNin(): DomainProblem {
   return new DomainProblem(409, 'PATIENT_ALREADY_HAS_NIN', 'This patient already has a verified NIN.');
+}
+
+function sourceNinDiffers(): DomainProblem {
+  return new DomainProblem(409, 'PATIENT_ALREADY_HAS_NIN',
+    'This patient\'s earlier records hold a different NIN. Ask Health ID support to review it.');
+}
+
+function tryLater(): DomainProblem {
+  return new DomainProblem(503, 'NIN_LINK_TRY_LATER', 'A NIN cannot be added just now. Please try again later.');
 }
 
 function ninVerificationFailed(): DomainProblem {

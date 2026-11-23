@@ -174,10 +174,42 @@ describe('PatientNinLinkService (ID-6, 0138)', () => {
       details: { outcome: 'already_linked', qoreidCalled: false } })]);
   });
 
-  it('replays the first answer for the same key and request', async () => {
-    const { service, registrations } = harness({ precheck: { decision: 'replay' } });
+  it('replays the first answer for the same key and request, with its own audit row', async () => {
+    const { service, registrations, audit } = harness({ precheck: { decision: 'replay' } });
     await expect(service.link(PATIENT, input(), KEY, context)).resolves.toMatchObject({ outcome: 'nin_linked', replayed: true });
     expect(registrations.checkNinForLink).not.toHaveBeenCalled();
+    // Not 'nin_linked': the patient's access log shows "NIN added" once.
+    expect(auditDetails(audit)).toEqual([expect.objectContaining({ outcome: 'success',
+      details: { outcome: 'replayed', replayed: true, qoreidCalled: false } })]);
+  });
+
+  it('writes a row for a replay the link answers after a NIN check', async () => {
+    const { service, audit } = harness({ link: { outcome: 'replay', other_patient_id: null } });
+    await expect(service.link(PATIENT, input(), KEY, context)).resolves.toMatchObject({ outcome: 'nin_linked', replayed: true });
+    expect(auditDetails(audit)).toEqual([expect.objectContaining({ outcome: 'success',
+      details: { outcome: 'replayed', replayed: true, qoreidCalled: true } })]);
+  });
+
+  it.each([
+    ['source_nin_differs', 409, 'PATIENT_ALREADY_HAS_NIN', 'source_nin_differs'],
+    ['try_later', 503, 'NIN_LINK_TRY_LATER', 'legacy_records_pending'],
+  ] as const)('refuses the legacy crosswalk\'s %s before any NIN check, with its own refusal kind',
+    async (decision, status, code, refusal) => {
+      const { service, registrations, audit } = harness({ precheck: { decision } });
+      await expect(service.link(PATIENT, input(), KEY, context)).rejects.toMatchObject({ status, code });
+      expect(registrations.checkNinForLink).not.toHaveBeenCalled();
+      expect(auditDetails(audit)).toEqual([expect.objectContaining({ outcome: 'denied',
+        details: { refusal, qoreidCalled: false } })]);
+    });
+
+  it.each([
+    ['source_nin_differs', 409, 'PATIENT_ALREADY_HAS_NIN', 'source_nin_differs'],
+    ['try_later', 503, 'NIN_LINK_TRY_LATER', 'legacy_records_pending'],
+  ] as const)('answers the link\'s %s after a NIN check', async (outcome, status, code, refusal) => {
+    const { service, audit } = harness({ link: { outcome, other_patient_id: null } });
+    await expect(service.link(PATIENT, input(), KEY, context)).rejects.toMatchObject({ status, code });
+    expect(auditDetails(audit)).toEqual([expect.objectContaining({ outcome: 'denied',
+      details: { refusal, qoreidCalled: true } })]);
   });
 
   it('passes the NIN service\'s refusals and failures through unchanged', async () => {
@@ -188,7 +220,8 @@ describe('PatientNinLinkService (ID-6, 0138)', () => {
   });
 
   it('never writes the NIN or its HMAC in an audit row', async () => {
-    for (const decision of ['not_found', 'not_permitted', 'has_nin', 'already_linked', 'key_reused']) {
+    for (const decision of ['not_found', 'not_permitted', 'has_nin', 'already_linked', 'key_reused', 'replay',
+      'source_nin_differs', 'try_later']) {
       const { service, audit } = harness({ precheck: { decision } });
       await service.link(PATIENT, input(), KEY, context).catch(() => undefined);
       const written = JSON.stringify(auditDetails(audit));

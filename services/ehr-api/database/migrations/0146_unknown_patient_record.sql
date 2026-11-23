@@ -197,7 +197,7 @@ begin
     from (values
       ('identity.own_facility_basis(uuid,uuid)', '629709624cc0eaafb96a47b685f6a4f9'),
       ('identity.staff_patient_search(text,text,text,date,text,text[],text,text)', '7a3bc8ac5275cffac8438300366480b0'),
-      ('identity.patient_nin_link_precheck(uuid,character,text,character)', 'f7d00a86b3e5cb72f802640ab88749ce'),
+      ('identity.patient_nin_link_precheck(uuid,character,text,character)', 'da79ca27b81f1210887bce361e57bafa'),
       ('identity.register_patient_without_nin(uuid,text,text,date,text,text,text,bytea,bytea,text,text,text,text,text)',
        '5782de6e51b2747ad4131efa4221fbdc'),
       ('identity.erase_patient_facility_contacts(uuid,text)', '06dfceb83bfb64cb5afaa668de2cc60e'),
@@ -792,6 +792,20 @@ begin
   if existing_hmac is not null then
     return query select case when existing_hmac = requested_lookup_hmac then 'already_linked' else 'has_nin' end,
                         null::text, null::text, null::date;
+    return;
+  end if;
+  -- The legacy crosswalk (0057, as 0058 and 0092 keep it): not while a legacy
+  -- run is in flight, and never a NIN other than the one attested for this
+  -- patient.
+  if not identity.legacy_nin_crosswalk_ready() then
+    return query select 'try_later'::text, null::text, null::text, null::date;
+    return;
+  end if;
+  if exists (select 1 from migration.legacy_nin_crosswalk crosswalk
+              where crosswalk.patient_id = patient_value and crosswalk.status = 'active'
+                and crosswalk.nin_state = 'attested_exact'
+                and crosswalk.nin_lookup_hmac is distinct from requested_lookup_hmac) then
+    return query select 'source_nin_differs'::text, null::text, null::text, null::date;
     return;
   end if;
   -- Eligible: the record's name and date of birth, which identity-api

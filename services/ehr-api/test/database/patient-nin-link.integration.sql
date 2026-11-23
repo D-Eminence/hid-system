@@ -17,6 +17,12 @@
 --      key_reused (both in the precheck and the link);
 --   4. a NIN on another record: on_another_record names that record (for the
 --      audit only) and writes nothing;
+--   4b. the legacy NIN crosswalk (0057): a migrated patient's attested NIN
+--      on a duplicate record answers on_another_record after the match (the
+--      precheck stays eligible: no oracle) and writes nothing; another NIN
+--      for the attested patient is source_nin_differs, before QoreID and at
+--      the link; a legacy run in flight answers try_later; the attested NIN
+--      itself links;
 --   5. refusals: no registration permission, another purpose, no
 --      membership; malformed input;
 --   6. the evidence cannot be changed or deleted, and the runtime cannot read
@@ -257,6 +263,87 @@ end $$;
 select pg_temp.check_case('4 p2 still eligible for its own NIN', 'nin_linked',
   pg_temp.link(1, (select patient from pg_temp.link_patients where n = 2), 'e1380600-0000-4000-8000-000000000042',
     repeat('b', 64), 'nin-link-key-0042', repeat('5', 64), 'healthcare-operations', 'QOREID-TXN-0002'));
+
+-- 4b. The legacy NIN crosswalk (0057, the rule 0058 and 0092 keep for the
+-- patient's own check). p5 stands for a patient promoted from the legacy
+-- system with an attested NIN ('c' x 64); p6, registered at clinic A later,
+-- stands for the same person registered again.
+insert into link_patients
+select 5, pg_temp.register(1, 'e1380500-0000-4000-8000-000000000005', 'Ada', 'Linkfive',
+  ((clock_timestamp() at time zone 'Africa/Lagos')::date - interval '9 years')::date, 'nin-link-reg-0005',
+  repeat('5', 64), 'HID-NLJ2K3');
+insert into link_patients
+select 6, pg_temp.register(1, 'e1380500-0000-4000-8000-000000000006', 'Bayo', 'Linksix',
+  ((clock_timestamp() at time zone 'Africa/Lagos')::date - interval '10 years')::date, 'nin-link-reg-0006',
+  repeat('6', 64), 'HID-NLM4P5');
+do $$
+begin
+  reset role;
+  set local session_replication_role = replica;
+  insert into migration.runs (id, source_system, source_snapshot, mode, status, started_by, completed_at)
+  values ('e1380700-0000-4000-8000-000000000001', 'legacy_identity', 'nin-link-suite-snapshot', 'promote',
+          'completed', 'nin-link-suite', clock_timestamp());
+  insert into migration.legacy_nin_crosswalk (run_id, patient_id, source_row_sha256, nin_state, nin_lookup_hmac,
+    source_snapshot, evidence_reference, attested_by, attested_at)
+  values ('e1380700-0000-4000-8000-000000000001', (select patient from pg_temp.link_patients where n = 5),
+          repeat('7', 64), 'attested_exact', repeat('c', 64), 'nin-link-suite-snapshot',
+          'nin-link-suite fictional evidence', 'nin-link-suite', clock_timestamp());
+  set local session_replication_role = origin;
+  set local role hid_identity_api_runtime;
+end $$;
+select pg_temp.check_case('4b the duplicate''s precheck is eligible (no oracle before QoreID)', 'eligible',
+  split_part(pg_temp.precheck(1, (select patient from pg_temp.link_patients where n = 6), repeat('c', 64),
+    'nin-link-key-0071', repeat('7', 64)), '/', 1));
+select pg_temp.check_case('4b the attested NIN on the duplicate: on_another_record, the legacy patient',
+  'on_another_record/' || (select patient from pg_temp.link_patients where n = 5),
+  pg_temp.link(1, (select patient from pg_temp.link_patients where n = 6), 'e1380600-0000-4000-8000-000000000071',
+    repeat('c', 64), 'nin-link-key-0071', repeat('7', 64)));
+do $$
+begin
+  reset role;
+  perform pg_temp.check_case('4b nothing written for the duplicate', '0/0',
+    (select format('%s/%s',
+       (select count(*) from identity.patient_identifiers identifier join pg_temp.link_patients p on p.patient = identifier.patient_id
+         where p.n = 6 and identifier.identifier_type = 'nin'),
+       (select count(*) from identity.patient_nin_links where id = 'e1380600-0000-4000-8000-000000000071'))));
+  set local role hid_identity_api_runtime;
+end $$;
+select pg_temp.check_case('4b another NIN for the attested patient: refused before QoreID', 'source_nin_differs',
+  pg_temp.precheck(1, (select patient from pg_temp.link_patients where n = 5), repeat('d', 64),
+    'nin-link-key-0072', repeat('8', 64)));
+select pg_temp.check_case('4b and at the link', 'source_nin_differs',
+  pg_temp.link(1, (select patient from pg_temp.link_patients where n = 5), 'e1380600-0000-4000-8000-000000000072',
+    repeat('d', 64), 'nin-link-key-0072', repeat('8', 64)));
+-- A legacy run in flight: the absence of a crosswalk row is not evidence yet.
+do $$
+begin
+  reset role;
+  set local session_replication_role = replica;
+  insert into migration.runs (id, source_system, source_snapshot, mode, status, started_by)
+  values ('e1380700-0000-4000-8000-000000000002', 'legacy_identity', 'nin-link-suite-running', 'stage',
+          'running', 'nin-link-suite');
+  set local session_replication_role = origin;
+  set local role hid_identity_api_runtime;
+end $$;
+select pg_temp.check_case('4b a legacy run in flight: try_later at the precheck and the link', 'try_later|try_later',
+  pg_temp.precheck(1, (select patient from pg_temp.link_patients where n = 6), repeat('e', 64),
+    'nin-link-key-0073', repeat('9', 64))
+  || '|' || pg_temp.link(1, (select patient from pg_temp.link_patients where n = 6),
+    'e1380600-0000-4000-8000-000000000073', repeat('e', 64), 'nin-link-key-0073', repeat('9', 64)));
+do $$
+begin
+  reset role;
+  set local session_replication_role = replica;
+  delete from migration.runs where id = 'e1380700-0000-4000-8000-000000000002';
+  set local session_replication_role = origin;
+  set local role hid_identity_api_runtime;
+end $$;
+select pg_temp.check_case('4b the attested NIN links to its own patient', 'eligible|nin_linked',
+  split_part(pg_temp.precheck(1, (select patient from pg_temp.link_patients where n = 5), repeat('c', 64),
+    'nin-link-key-0074', repeat('a', 64)), '/', 1)
+  || '|' || pg_temp.link(1, (select patient from pg_temp.link_patients where n = 5),
+    'e1380600-0000-4000-8000-000000000074', repeat('c', 64), 'nin-link-key-0074', repeat('a', 64),
+    'healthcare-operations', 'QOREID-TXN-0074'));
 
 -- 5. Refusals.
 select pg_temp.check_case('5 no registration permission (lab)', '42501 NIN_LINK_DENIED',
