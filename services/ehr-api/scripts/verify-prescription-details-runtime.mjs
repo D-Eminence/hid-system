@@ -664,15 +664,18 @@ try {
     + 'never kept; only refusals are audited, never with the search text');
 
   // ── ORD-9 (0150), first slice: the ICD-11 diagnosis search ──
+  // Loaded as the governed loader loads it: the release (still loading, with the approvals file's sha256), its
+  // entries, then the switch, which seals it (0149, 0150).
   const icdNotice = 'Synthetic notice: ICD-11, World Health Organization, CC BY-ND 3.0 IGO.';
   const diagnosisVersion = randomUUID();
-  await owner.query(`insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference, approved_at,
-      active, attribution) values ($1, 'diagnosis', '2026-01', repeat('d', 64), 'synthetic sign-off reference',
-      '2026-12-01T09:00:00+01:00', true, $2)`, [diagnosisVersion, [icdNotice]]);
+  await owner.query(`insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference,
+      approvals_sha256, approved_at, attribution) values ($1, 'diagnosis', '2026-01', repeat('d', 64),
+      'synthetic sign-off reference', repeat('1', 64), '2026-12-01T09:00:00+01:00', $2)`, [diagnosisVersion, [icdNotice]]);
   await owner.query(`insert into ehr.catalog_diagnoses (version_id, code, title, other_names, chapter, residual) values
     ($1, '1F40', 'Malaria due to Plasmodium falciparum', 'falciparum malaria', '01', false),
     ($1, 'KA64.20', 'Congenital falciparum malaria', '', '19', false),
     ($1, '1A07', 'Typhoid fever', 'enteric fever; typhoid', '01', false)`, [diagnosisVersion]);
+  await owner.query('update ehr.catalog_versions set active = true where id = $1', [diagnosisVersion]);
   const terminologyGet = (who, path) => http(ehr, 'GET', `/ehr/terminology${path}`, { cookie: who.cookie,
     facility: who.facilityId });
   const falciparum = await terminologyGet(doctor, '/diagnoses?q=falciparum&limit=5');

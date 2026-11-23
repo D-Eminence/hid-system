@@ -26,15 +26,24 @@
 --    from WHO's words, no ICD-10 content), the chapter and whether the entry
 --    is residual ("other specified", "unspecified"). Extension codes (X...)
 --    and blocks without a code are never loaded. A generated tsvector over
---    the code (whole, and its parts: the parser keeps "1F40.Z" as one word,
---    while a search splits q at the dot), the title and the other names
---    ('simple') with a GIN index.
---    Append-only, as 0149's lists: a new WHO release is a new version.
+--    the code, the title and the other names, split into words exactly as
+--    a search splits q, as 0149's lists now are (Rahman's review of #318,
+--    finding 1): lower case, at anything that is not a letter or a digit,
+--    so "1F40.Z" gives 1f40 and z, "COVID-19" covid and 19, and
+--    "T-cell/histiocyte" t, cell and histiocyte (the default parser kept
+--    "-19" and "cell/histiocyte" as words no search could reach);
+--    configuration 'simple'; with a GIN index.
+--    Append-only, as 0149's lists: a new WHO release is a new version. As
+--    0149's lists do (Rahman's review of #318, finding 2), a BEFORE INSERT
+--    trigger refuses (55000) a row for a sealed version
+--    (CATALOG_VERSION_SEALED), reading the version row FOR SHARE: 0149's
+--    guard seals a release when it goes live, so a release that is or has
+--    been live gains no row, and only a release still loading takes rows.
 -- 3. ehr.search_catalog_diagnoses(q, limit) (SECURITY DEFINER, STABLE): the
 --    active release's entries where every word of q starts a word of the
---    code and title or of one other name, with 0149's query rules (the
---    first 6 words of q, each cut to 40 characters; q never reaches
---    to_tsquery as typed). The entry whose code q is (upper-cased, with or
+--    code and title or of one other name, each split as q is, with 0149's
+--    query rules (the first 6 words of q, each cut to 40 characters; q
+--    never reaches to_tsquery as typed). The entry whose code q is (upper-cased, with or
 --    without its dot: "9A03.0" or "9a030") first, found even without the
 --    dot; then entries whose title or one of our other names starts with q
 --    (LIKE's %, _ and \ escaped), then shorter titles, then the title in the
@@ -48,7 +57,8 @@
 --    for the diagnosis list too.
 -- 5. Grants: EXECUTE on 3 to hid_ehr_runtime and hid_schema_test_runtime
 --    only, where those roles exist (and in runtime-grants.sql); 4 keeps
---    0149's grants; no privilege on the table for any runtime.
+--    0149's grants; no privilege on the table or on 2's trigger function
+--    for any runtime.
 --
 -- What it does not do: no recent diagnoses, no diagnosis by name only and
 -- no codeStatus (a later slice, which alters ehr.diagnoses), no loader
@@ -65,7 +75,8 @@
 -- refusal, so a dry run rolls back and tries again (dry-run-attempts.mjs).
 -- While it is held, a catalogue search (a few milliseconds) waits; nothing
 -- else reads the table. The new table's foreign key reaches only that
--- table. Creating and replacing functions locks no existing relation.
+-- table, and its triggers are on the new table. Creating and replacing
+-- functions locks no existing relation.
 --
 -- Old services on this schema: nothing calls the new function; 0149's
 -- status answers as before for medicines and lab tests. New services on a
@@ -74,8 +85,8 @@
 -- available.
 --
 -- Undo (by hand only): drop the search function; replace the status with
--- 0149's body; drop the table; then put back 0149's kind check (only once
--- no diagnosis version is left).
+-- 0149's body; drop the table, then its insert trigger function; then put
+-- back 0149's kind check (only once no diagnosis version is left).
 --
 -- 0. Preconditions (catalog reads only; 55000 and nothing applied): 0149's
 --    status and query helper as made (the md5 of their bodies; the helper's
@@ -169,8 +180,9 @@ create table ehr.catalog_diagnoses (
   other_names text not null default '' check (length(other_names) <= 2000),
   chapter text not null check (chapter ~ '^([0-9]{2}|[A-Z])$'),
   residual boolean not null default false,
-  search_terms tsvector generated always as
-    (to_tsvector('simple'::regconfig, code || ' ' || replace(code, '.', ' ') || ' ' || title || ' ' || other_names)) stored,
+  -- Split as a search splits q (ehr.catalog_search_query): lower case, at anything not a letter or a digit.
+  search_terms tsvector generated always as (to_tsvector('simple'::regconfig,
+    regexp_replace(lower(code || ' ' || title || ' ' || other_names), '[^[:alnum:]]+', ' ', 'g'))) stored,
   constraint catalog_diagnoses_pkey primary key (version_id, code)
 );
 create index catalog_diagnoses_search_idx on ehr.catalog_diagnoses using gin (search_terms);
@@ -181,6 +193,31 @@ create trigger catalog_diagnoses_append_only
 create trigger catalog_diagnoses_no_truncate
   before truncate on ehr.catalog_diagnoses
   for each statement execute function platform.reject_mutation();
+-- No row for a sealed release (one that is or has been live), as 0149's lists' insert triggers: the release's row
+-- is read FOR SHARE, so a switch that seals it waits for the insert's transaction, and an insert waits for a switch
+-- in progress, then reads the release as switched. It runs as the inserting role: only the table's owner may
+-- insert, and it holds the UPDATE privilege that FOR SHARE needs.
+create function ehr.catalog_diagnosis_not_sealed()
+returns trigger
+language plpgsql
+set search_path = pg_catalog, pg_temp
+as $$
+declare
+  target record;
+begin
+  select versions.kind, versions.version, versions.sealed into target
+    from ehr.catalog_versions versions where versions.id = new.version_id for share;
+  if target.sealed then
+    raise exception using errcode = '55000',
+      message = 'CATALOG_VERSION_SEALED: ' || target.kind || ' ' || target.version;
+  end if;
+  return new;
+end;
+$$;
+revoke all on function ehr.catalog_diagnosis_not_sealed() from public;
+create trigger catalog_diagnoses_not_sealed
+  before insert on ehr.catalog_diagnoses
+  for each row execute function ehr.catalog_diagnosis_not_sealed();
 
 -- 3. The search.
 create function ehr.search_catalog_diagnoses(requested_q text, requested_limit integer)
@@ -216,10 +253,12 @@ begin
     with found as (
       select diagnosis.code, diagnosis.title, version_row.version as version_label,
              coalesce(diagnosis.code = typed_code, false) as code_hit,
-             to_tsvector('simple'::regconfig, diagnosis.code || ' ' || replace(diagnosis.code, '.', ' ') || ' '
-               || diagnosis.title) @@ query as title_hit,
+             to_tsvector('simple'::regconfig, regexp_replace(lower(diagnosis.code || ' ' || diagnosis.title),
+               '[^[:alnum:]]+', ' ', 'g')) @@ query as title_hit,
              (select other.name from unnest(string_to_array(diagnosis.other_names, '; ')) as other(name)
-               where other.name <> '' and to_tsvector('simple'::regconfig, other.name) @@ query
+               where other.name <> ''
+                 and to_tsvector('simple'::regconfig, regexp_replace(lower(other.name), '[^[:alnum:]]+', ' ', 'g'))
+                     @@ query
                order by (lower(other.name) like starts escape '\') desc, lower(other.name) collate "C",
                  other.name collate "C" limit 1) as other_hit
         from ehr.catalog_diagnoses diagnosis
@@ -319,6 +358,18 @@ begin
          and trigger_row.tgrelid = 'ehr.catalog_diagnoses'::regclass
          and trigger_row.tgfoid = 'platform.reject_mutation()'::regprocedure) <> 2 then
     raise exception using errcode = '55000', message = '0150: the diagnosis list is missing its append-only triggers';
+  end if;
+  if not exists (select 1 from pg_trigger trigger_row
+                  where not trigger_row.tgisinternal and trigger_row.tgenabled = 'O'
+                    and trigger_row.tgrelid = 'ehr.catalog_diagnoses'::regclass
+                    and trigger_row.tgname = 'catalog_diagnoses_not_sealed'
+                    and trigger_row.tgfoid = 'ehr.catalog_diagnosis_not_sealed()'::regprocedure)
+     or not exists (select 1 from pg_proc proc
+                     where proc.oid = 'ehr.catalog_diagnosis_not_sealed()'::regprocedure and not proc.prosecdef
+                       and proc.proowner = owner_oid and proc.proconfig = array['search_path=pg_catalog, pg_temp'])
+     or exists (select 1 from pg_proc proc, lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
+                 where proc.oid = 'ehr.catalog_diagnosis_not_sealed()'::regprocedure and acl.grantee <> proc.proowner) then
+    raise exception using errcode = '55000', message = '0150: the diagnosis list''s sealed-release trigger is not as made';
   end if;
   if not exists (select 1 from pg_constraint constraint_row
                   where constraint_row.conrelid = 'ehr.catalog_versions'::regclass

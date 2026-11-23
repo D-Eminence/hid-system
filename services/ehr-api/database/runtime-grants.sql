@@ -2030,9 +2030,11 @@ revoke all on ehr.catalog_versions, ehr.catalog_medicines, ehr.catalog_lab_tests
 
 -- The ICD-11 diagnosis search (0150, ORD-9 of the Akos EHR plan, first
 -- slice; design note on hid-system#258, 23 November 2026), exactly as 0150
--- grants it: the search to the EHR runtime and the schema test runtime; no
--- privilege on the diagnosis list for any runtime. The catalogue status
--- keeps 0149's grants.
+-- grants and revokes it: the search to the EHR runtime and the schema test
+-- runtime; no privilege for any runtime on the diagnosis list or on its
+-- insert trigger function (sealed releases), which its trigger runs as the
+-- inserting role, the table's owner. The catalogue status keeps 0149's
+-- grants.
 grant execute on function ehr.search_catalog_diagnoses(text, integer) to hid_ehr_runtime, hid_schema_test_runtime;
-revoke all on function ehr.search_catalog_diagnoses(text, integer) from public;
+revoke all on function ehr.search_catalog_diagnoses(text, integer), ehr.catalog_diagnosis_not_sealed() from public;
 revoke all on ehr.catalog_diagnoses from public;

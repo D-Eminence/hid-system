@@ -1924,9 +1924,11 @@ file's seed in `docs/codes/catalog-approvals.json`.
   (ACCESS EXCLUSIVE on that small table, NOWAIT for at most 5 seconds, else
   55P03 "0150: …"). `ehr.catalog_diagnoses` holds one row per coded entry
   per release: code, WHO's title verbatim, our other names apart, chapter,
-  and whether the entry is residual. It is append-only. Instead of the
-  planned `ehr.terminology_icd11`, the list shares ORD-7's versions, loader
-  and sign-off.
+  and whether the entry is residual. It is append-only, and, as ORD-7's
+  lists, a release that is or has been live takes no new entry (55000
+  `CATALOG_VERSION_SEALED`): only a release still loading takes entries.
+  Instead of the planned `ehr.terminology_icd11`, the list shares ORD-7's
+  versions, loader and sign-off.
 - **The seed** `docs/codes/drafts/icd11-mms-2026-01.json` is built by
   `catalog:build-icd11-seed` from WHO's `SimpleTabulation-ICD-11-MMS-en.zip`
   (2026-01, sha256 `f1356588…`). That is the file
@@ -1943,6 +1945,14 @@ file's seed in `docs/codes/catalog-approvals.json`.
   with ORD-7's rules for `q` (6 words, never raw `to_tsquery`, no Health ID
   or NIN shapes, never logged) and its 429 and cache.
   - The code matches too, whole or in parts ("1F40", "1f40.z").
+  - Titles and our other names are split into words as `q` is (lower case,
+    at anything that is not a letter or a digit), as ORD-7's lists are. So
+    a title typed as written is found: `COVID-19`, `T-cell/histiocyte`,
+    `glucose-6-phosphate`. With the 2026-01 release loaded, each of its
+    17,255 titles typed as written (cut to 100 characters at a word) is
+    among the answers at limit 25. Split by the default parser, 20 were
+    not found at all, among them RA01 "COVID-19" and the other COVID-19
+    entries.
   - The entry whose code `q` is comes first: `q` upper-cased and trimmed,
     with or without its dot ("9A03.0" or "9a030"), and found even without
     the dot. So a parent code such as 9A03 comes before its child codes,
@@ -1961,11 +1971,13 @@ file's seed in `docs/codes/catalog-approvals.json`.
     again in a minute." The catalogue status fills
     `diagnoses: { available, release, fileSha256 }`.
 - **Measured** with the full release loaded on throwaway PostgreSQL 16
-  (median of 7 calls through `psql`): the load takes about 0.4 s. A word or
-  a code takes 1–2 ms (`falciparum`, `9A03`, `1f40.z`). Two-letter `q` take
-  longest: `di` (2,974 entries match) about 24 ms, and the broadest, `of`
-  (6,715), about 60 ms at limit 10 or 25, with single calls up to about
-  110 ms.
+  (median of 25 calls inside the server, as the EHR runtime): the load
+  takes about 0.4 s. A word or a code takes under 1 ms (`falciparum`,
+  `9A03`, `1f40.z`, `covid-19`). Two-letter `q` take longest: `di` (2,974
+  entries match) about 31 ms, and the broadest, `of` (6,715), about 74 ms
+  at limit 10 or 25, with single calls up to about 100 ms. Splitting each
+  title as `q` is costs these broad ones about 7–16 ms (`of` 58 to 74 ms,
+  side by side on one cluster); a word or a code costs nothing measurable.
 - **Not in this slice:** recent diagnoses, diagnoses by name only and
   `codeStatus`, which alter `ehr.diagnoses` and need a lock plan.
 
