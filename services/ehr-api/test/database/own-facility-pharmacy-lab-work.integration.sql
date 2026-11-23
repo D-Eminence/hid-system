@@ -455,7 +455,10 @@ begin
         where proc.prosecdef and proc.prosrc ~* 'ehr\.prescriptions');
   end if;
   if exists (select 1 from pg_roles role_row
+              -- not a superuser, nor the function's owner, the migration login, whatever its name
+              -- (hid_synthetic_schema_owner on the rehearsal's copy)
               where role_row.rolname like 'hid\_%' and not role_row.rolsuper
+                and role_row.oid <> (select proowner from pg_proc where oid = 'identity.demo_story_install(text)'::regprocedure)
                 and has_function_privilege(role_row.oid, 'identity.demo_story_install(text)', 'EXECUTE')) then
     raise exception 'own facility work: a hid_ role may execute identity.demo_story_install(text)';
   end if;

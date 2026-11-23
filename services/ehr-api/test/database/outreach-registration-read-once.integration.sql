@@ -222,9 +222,14 @@ insert into ro_named values
 do $$
 begin
   -- A superuser (CI's rehearsal superuser is named hid_rehearsal_admin) holds every privilege; no runtime role is one.
+  -- Nor is the owner, the migration login, whatever its name (hid_synthetic_schema_owner on the rehearsal's copy;
+  -- docs/INTERFACE_CONTRACT.md, expected owner attributes), which holds every privilege on its own objects.
   if exists (select 1 from pg_roles role_row where role_row.rolname ~ '^hid_' and not role_row.rolsuper
-              and (has_table_privilege(role_row.oid, 'outreach.privileged_runs', 'INSERT')
-                   or has_function_privilege(role_row.oid, 'outreach.begin_privileged_run(text)', 'EXECUTE'))) then
+              and ((role_row.oid <> (select c.relowner from pg_class c where c.oid = 'outreach.privileged_runs'::regclass)
+                    and has_table_privilege(role_row.oid, 'outreach.privileged_runs', 'INSERT'))
+                   or (role_row.oid <> (select p.proowner from pg_proc p
+                                         where p.oid = 'outreach.begin_privileged_run(text)'::regprocedure)
+                       and has_function_privilege(role_row.oid, 'outreach.begin_privileged_run(text)', 'EXECUTE')))) then
     raise exception '0121: a runtime role can start a privileged run';
   end if;
 end $$;

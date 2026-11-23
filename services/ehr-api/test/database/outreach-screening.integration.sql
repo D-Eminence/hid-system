@@ -22,11 +22,15 @@ begin
      or has_table_privilege('hid_ehr_api_runtime', 'outreach.registration_screenings', 'SELECT')
      or not exists (select 1 from pg_class where oid = 'outreach.registration_screenings'::regclass
                      and relrowsecurity and relforcerowsecurity)
-     -- not a superuser (CI's rehearsal superuser is named hid_rehearsal_admin; no runtime role is one)
-     or exists (select 1 from pg_roles role_row where role_row.rolname like 'hid\_%' and not role_row.rolsuper
-                 and (has_function_privilege(role_row.oid, 'outreach.validate_registration_screening()', 'EXECUTE')
-                      or has_function_privilege(role_row.oid, 'outreach.registration_case_screening_redact()', 'EXECUTE')
-                      or has_function_privilege(role_row.oid, 'outreach.registration_case_area_guard()', 'EXECUTE')))
+     -- not a superuser (CI's rehearsal superuser is named hid_rehearsal_admin; no runtime role is one), nor the
+     -- function's owner, the migration login, whatever its name (hid_synthetic_schema_owner on the rehearsal's copy)
+     or exists (select 1 from pg_roles role_row
+                 cross join unnest(array['outreach.validate_registration_screening()'::regprocedure,
+                   'outreach.registration_case_screening_redact()'::regprocedure,
+                   'outreach.registration_case_area_guard()'::regprocedure]) command(oid)
+                 where role_row.rolname like 'hid\_%' and not role_row.rolsuper
+                   and role_row.oid <> (select p.proowner from pg_proc p where p.oid = command.oid)
+                   and has_function_privilege(role_row.oid, command.oid, 'EXECUTE'))
      or not exists (select 1 from pg_proc where oid = 'outreach.validate_registration_screening()'::regprocedure
                      and prosecdef and proconfig = '{"search_path=pg_catalog, pg_temp"}'::text[])
      or (select prosrc from pg_proc where oid = 'outreach.enforce_organiser_tenant_rules()'::regprocedure)
