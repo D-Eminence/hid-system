@@ -14,8 +14,10 @@
 // - --approvals under NODE_ENV=production: only the deployed
 //   docs/codes/catalog-approvals.json signs a load;
 // - a seed, approvals or Wave 0 codes file that cannot be read or is not JSON;
-// - a seed that breaks 0149's rules, or an HID-LAB code that is not Wave 0's
-//   with its name (catalog-seed.mjs's seedProblems);
+// - a seed that breaks 0149's rules, an HID-LAB code that is not Wave 0's
+//   with its name, or an id the seed holds back and also lists as retired
+//   ("<id> is held back in this seed and also listed as retired; fix the
+//   row, do not retire it") (catalog-seed.mjs's seedProblems);
 // - a seed file whose sha256 is not signed off for its kind and version
 //   (Q124 A: the clinical lead approves every change), or a medicine sign-off
 //   without the licence answers it needs (the Nigeria EML 8th edition
@@ -32,9 +34,12 @@
 //   version (its triggers and guard, SQLSTATE 55000: CATALOG_ID_RETIRED,
 //   CATALOG_ID_CHANGED, CATALOG_VERSION_SEALED), or a table check (23514).
 //   The whole load rolls back.
-// Anything else (no database, a dropped connection) is a failure: exit 1,
-// one line "load-catalog: ...; nothing loaded". Either way the line is the
-// last one the loader prints, which the deploy tool shows.
+// Anything else is a failure: exit 1, one line "load-catalog: ...; nothing
+// loaded", never a stack trace. That covers an error before it connects (a
+// DATABASE_HOST that makes no address, a bad TLS setting), no database, and a
+// connection dropped mid-load (a terminated backend, a failover: the client's
+// 'error' event is listened for, so it is never an unhandled one). Either way
+// the line is the last one the loader prints, which the deploy tool shows.
 //
 // --dry-run does all of it and rolls back. Old versions are kept, so old
 // prescriptions keep their meaning. Prints one JSON line: what was loaded,
@@ -70,20 +75,32 @@ try {
   if (error instanceof LoadRefusal) refuse(error);
   fail(error);
 }
-const databaseUrl = process.env.DATABASE_URL || managedDatabaseUrl();
-if (!databaseUrl) refuse(new LoadRefusal('set DATABASE_URL or DATABASE_HOST, DATABASE_USERNAME and DATABASE_PASSWORD'));
-
-const { default: pg } = await import('pg');
 let client;
+let lost;
 let outcome;
 try {
+  let databaseUrl;
+  try {
+    databaseUrl = process.env.DATABASE_URL || managedDatabaseUrl();
+  } catch (error) {
+    throw Object.assign(new Error(`DATABASE_HOST does not make a database address: ${error?.message ?? error}`),
+      { code: error?.code });
+  }
+  if (!databaseUrl) throw new LoadRefusal('set DATABASE_URL or DATABASE_HOST, DATABASE_USERNAME and DATABASE_PASSWORD');
+  const { default: pg } = await import('pg');
   client = new pg.Client(databaseOptions(databaseUrl, 'hid-catalog-loader'));
+  // A connection that drops (a terminated backend, a failover) is also an 'error' event on the client, which with no
+  // listener ends Node with "Unhandled 'error' event" and a stack trace. Keep it: the statement in hand, or the next
+  // one, fails, so a load cut off before its commit leaves nothing, and the loader ends with its one line.
+  client.on('error', (error) => { lost ??= error; });
   await client.connect();
   outcome = await loadSeed(client, { ...prepared, dryRun: process.argv.includes('--dry-run') });
 } catch (error) {
   await client?.end().catch(() => {});
   if (error instanceof LoadRefusal) refuse(error);
-  fail(error);
+  // The server's own message (with its SQLSTATE, such as 57P01 for a terminated backend) says most; a statement that
+  // failed only because the connection was already gone says less than the error that dropped it.
+  fail((error?.code || !lost) ? error : lost);
 }
 await client.end();
 console.log(JSON.stringify(outcome));

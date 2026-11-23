@@ -11,7 +11,7 @@
 // check: 23514) are refusals too, with the database's message.
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { approvalFor, seedProblems, sha256 } from './catalog-seed.mjs';
+import { approvalFor, heldBackAndRetired, heldBackRetiredProblem, seedProblems, sha256 } from './catalog-seed.mjs';
 
 export class LoadRefusal extends Error {
   constructor(message, { busy = false } = {}) {
@@ -56,7 +56,8 @@ function readJson(file, what) {
  * - --approvals under NODE_ENV=production (only the deployed
  *   docs/codes/catalog-approvals.json may sign a load);
  * - a seed, approvals or Wave 0 codes file that cannot be read or is not JSON;
- * - a seed that breaks 0149's rules or Wave 0's (seedProblems);
+ * - a seed that breaks 0149's rules or Wave 0's, or holds back an id it also
+ *   retires (seedProblems);
  * - a file whose sha256 is not signed for its kind and version, or whose
  *   sign-off lacks a licence answer it needs (approvalFor).
  * Returns the seed, its sha256, the sign-off entry and the approvals file's
@@ -132,7 +133,10 @@ const activeIds = (table) => `select versions.version,
 const ACTIVE_IDS = { medicine: activeIds('ehr.catalog_medicines'), lab_test: activeIds('ehr.catalog_lab_tests') };
 
 /**
- * The load, in one transaction: this loader's advisory lock; SHARE ROW
+ * The load, in one transaction. First, before any statement, a seed that
+ * holds back an id it also retires is refused (a row to fix, never to
+ * retire; seedProblems refuses it before the loader connects, too). Then
+ * this loader's advisory lock; SHARE ROW
  * EXCLUSIVE on ehr.catalog_versions (two loaders cannot both switch, while
  * searches go on reading); the refusals that need the database (no 0149, a
  * version already loaded, an id of the active version that the seed drops:
@@ -144,6 +148,8 @@ const ACTIVE_IDS = { medicine: activeIds('ehr.catalog_medicines'), lab_test: act
  * evidence line.
  */
 export async function loadSeed(client, { seed, fileSha256, approval, approvalsSha256, dryRun = false }) {
+  const retiredHeldBack = heldBackAndRetired(seed);
+  if (retiredHeldBack.length > 0) throw new LoadRefusal(retiredHeldBack.map(heldBackRetiredProblem).join('; '));
   try {
     await client.query('begin');
     await client.query("set local lock_timeout = '5s'");

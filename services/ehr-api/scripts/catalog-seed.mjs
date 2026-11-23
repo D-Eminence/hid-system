@@ -224,6 +224,23 @@ const sameName = (name) => name.toLowerCase().replace(/\s+/g, ' ').trim();
  */
 export const CONFIRMED_BRAND_REVIEWS = Object.freeze(['coordinator-curated']);
 
+/**
+ * The coordinator-curated brands that the medicine seed built from #312's
+ * list holds (21 of the 23 such rows; ampiclox and piriton have no medicine
+ * with exactly their generic name). Ola, as clinical owner, checked each of
+ * them on 23 Nov 2026 and confirmed it (round 3 of #319). The rule above is
+ * unchanged; this records the check.
+ */
+export const CHECKED_BRANDS = Object.freeze(['valium', 'phenergan', 'flagyl', 'amoxil', 'augmentin', 'septrin', 'rocephin',
+  'zinnat', 'coartem', 'fansidar', 'daraprim', 'panadol', 'norvasc', 'adalat', 'lasix', 'plasil', 'glucophage', 'ventolin',
+  'postinor', 'buscopan', 'voltaren']);
+
+/** The record of Ola's brand decision that opens the builder's report, so the lead signs with it in view. */
+export const BRAND_DECISION = 'Brands (Ola\'s clinical decision as clinical owner, #319): only rows of brand-names.ts reviewed '
+  + '"coordinator-curated" go into the medicine seed. The 21 coordinator-curated brands in the seed built from #312\'s list '
+  + `(${CHECKED_BRANDS.join(', ')}) were checked by Ola on 23 Nov 2026 and are confirmed. A brand pending a pharmacist's `
+  + 'review stays out until a pharmacist confirms it.';
+
 /** Why a brand row may not go into a seed whatever its generic, or null. */
 function brandRowProblem(row) {
   if (row.reviewedBy === 'pending-pharmacist') return 'pending pharmacist review';
@@ -285,7 +302,9 @@ export function addBrandNames(medicines, brands) {
  * The two seeds from the combined list's rows.
  * - `version` is the version label both seeds carry (for example 2026.1).
  * - `retired` maps each retired id to why ({"MED-01375": "..."}). An id gap
- *   that is not retired, or a retired id that is still a row, stops the build.
+ *   that is not retired, or a retired id that is still a row, stops the build;
+ *   a retired id whose row is held back is named as such ("fix the row, do
+ *   not retire it").
  * - `waveZero` is docs/codes/hid-lab-codes.json's codes: each one must be in
  *   the lab-test seed with its code and name unchanged (planned contract,
  *   "The 13 Wave 0 HID-LAB codes move in unchanged"); the seed reports how
@@ -308,17 +327,6 @@ export function buildSeeds(rows, { version, retired = {}, waveZero = [], withAtc
 
   const medicines = rows.filter((row) => row.list === 'medicine').map((row) => medicineFromRow(row, withAtc));
   const labTests = rows.filter((row) => row.list === 'lab-test').map(labTestFromRow);
-  const retiredIds = Object.keys(retired);
-  const stillRows = retiredIds.filter((id) => ids.includes(id));
-  if (stillRows.length > 0) throw new Error(`retired ids that are still rows: ${stillRows.join(', ')}`);
-  const gaps = [...idGaps(medicines, 'MED-', 5), ...idGaps(labTests, 'LAB-', 4)];
-  const unexplained = gaps.filter((id) => !retiredIds.includes(id));
-  if (unexplained.length > 0) throw new Error(`id gaps with no retirement reason: ${unexplained.join(', ')}`);
-  for (const [id, reason] of Object.entries(retired)) {
-    if (!(MEDICINE_ID.test(id) || LAB_TEST_ID.test(id)) || typeof reason !== 'string' || reason.trim().length < 8
-        || reason.length > 500) throw new Error(`the retirement of ${id} needs an id and a reason of 8-500 characters`);
-  }
-
   const split = (items, problemsOf) => {
     const loaded = [];
     const heldBack = [];
@@ -331,6 +339,21 @@ export function buildSeeds(rows, { version, retired = {}, waveZero = [], withAtc
   };
   const medicineSplit = split(medicines, medicineProblems);
   const labSplit = split(labTests, labTestProblems);
+  const retiredIds = Object.keys(retired);
+  // A row held back needs fixing; retired, it would be gone for good (round 3 of #319, point 5).
+  const heldBackRows = new Set([...medicineSplit.heldBack, ...labSplit.heldBack].map((entry) => entry.listId));
+  const retiredHeldBack = retiredIds.filter((id) => heldBackRows.has(id));
+  if (retiredHeldBack.length > 0) throw new Error(retiredHeldBack.map(heldBackRetiredProblem).join('; '));
+  const stillRows = retiredIds.filter((id) => ids.includes(id));
+  if (stillRows.length > 0) throw new Error(`retired ids that are still rows: ${stillRows.join(', ')}`);
+  const gaps = [...idGaps(medicines, 'MED-', 5), ...idGaps(labTests, 'LAB-', 4)];
+  const unexplained = gaps.filter((id) => !retiredIds.includes(id));
+  if (unexplained.length > 0) throw new Error(`id gaps with no retirement reason: ${unexplained.join(', ')}`);
+  for (const [id, reason] of Object.entries(retired)) {
+    if (!(MEDICINE_ID.test(id) || LAB_TEST_ID.test(id)) || typeof reason !== 'string' || reason.trim().length < 8
+        || reason.length > 500) throw new Error(`the retirement of ${id} needs an id and a reason of 8-500 characters`);
+  }
+
   // Brands go on the items that load (a held-back medicine is not in the seed to be found).
   const branded = addBrandNames(medicineSplit.loaded, brands);
 
@@ -378,13 +401,28 @@ export function seedText(seed) {
   return `${JSON.stringify(seed, null, 2)}\n`;
 }
 
+/** The ids a seed holds back and also lists as retired: each a row to fix, never to retire. */
+export function heldBackAndRetired(seed) {
+  const listIds = (entries) => (Array.isArray(entries) ? entries : []).map((entry) => entry?.listId)
+    .filter((id) => typeof id === 'string');
+  const retired = new Set(listIds(seed?.retired));
+  return [...new Set(listIds(seed?.heldBack))].filter((id) => retired.has(id)).sort();
+}
+
+/** The words for an id held back and retired at once, in the builder's, seedProblems's and the loader's refusals. */
+export function heldBackRetiredProblem(id) {
+  return `${id} is held back in this seed and also listed as retired; fix the row, do not retire it`;
+}
+
 /**
  * Why a parsed seed may not be loaded, or [] when it may: its format, kind,
  * version and notices, each item as 0149's rules, no id twice, no item that
- * is a retired id, no held-back row presented as an item, and (lab tests) no
- * code twice, and every HID-LAB code one of Wave 0's with its name
- * unchanged. `waveZero` is docs/codes/hid-lab-codes.json's codes; a lab-test
- * seed holding an HID-LAB code is refused without them.
+ * is a retired id, no held-back row presented as an item, no held-back id
+ * also listed as retired (it would be retired for good, though its row only
+ * needs fixing), and (lab tests) no code twice, and every HID-LAB code one of
+ * Wave 0's with its name unchanged. `waveZero` is
+ * docs/codes/hid-lab-codes.json's codes; a lab-test seed holding an HID-LAB
+ * code is refused without them.
  */
 export function seedProblems(seed, { waveZero = null } = {}) {
   const problems = [];
@@ -401,6 +439,7 @@ export function seedProblems(seed, { waveZero = null } = {}) {
       || !(seed.kind === 'medicine' ? MEDICINE_ID : LAB_TEST_ID).test(entry.listId))) {
     problems.push('each retired id needs an id of this kind and a reason of 8-500 characters');
   }
+  problems.push(...heldBackAndRetired(seed).map(heldBackRetiredProblem));
   if (!Array.isArray(seed.items) || seed.items.length === 0) {
     problems.push('the seed has no items');
     return problems;
