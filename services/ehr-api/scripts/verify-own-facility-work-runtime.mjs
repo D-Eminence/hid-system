@@ -880,9 +880,9 @@ try {
     let waiting = false;
     for (let tries = 0; tries < 200 && !waiting; tries += 1) {
       // ehr-api's backend: its login is the runtime role, or (a local cluster) the superuser with the runtime role
-      // set, so it is found by its application name too.
+      // set, so it is found by its application name too (ehr-api's pool names itself hid-ehr-...).
       waiting = (await one(`select count(*)::int as n from pg_stat_activity
-          where (usename = 'hid_ehr_api_runtime' or application_name = 'hid-ehr-api')
+          where (usename = 'hid_ehr_api_runtime' or application_name like 'hid-ehr-%')
             and wait_event_type = 'Lock' and state = 'active'`)).n > 0;
       if (!waiting) await new Promise(done => setTimeout(done, 25));
     }
