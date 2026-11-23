@@ -118,8 +118,8 @@ const sqlError = (code: string, message = `synthetic ${code}`, detail?: string) 
   Object.assign(new Error(message), { code, ...(detail === undefined ? {} : { detail }) });
 
 /**
- * 0145's two unique keys on pharmacy.work_item_acceptances, by the names PostgreSQL gives them, and their 23505 as
- * node-postgres passes it on: the constraint named. The names are pinned on the database side: 0145's post-check
+ * 0144's two unique keys on pharmacy.work_item_acceptances, by the names PostgreSQL gives them, and their 23505 as
+ * node-postgres passes it on: the constraint named. The names are pinned on the database side: 0144's post-check
  * refuses any other index names, and its suite expects the 23505 messages that name them. This spec does not read
  * those files, because a pharmacy-api test that reads a file outside pharmacy-api must also be listed in
  * scripts/production-backend-build.mjs (outsideTestInputs), or a change to that file would not run these tests.
@@ -153,7 +153,7 @@ interface Options {
   stepsHide?: string[];
   /**
    * Acceptances stored for items not in ITEMS that row-level security now hides from this session (their patient's
-   * consent grant ended, or the patient set a deny directive): the key lookup reads none of them, while 0145's
+   * consent grant ended, or the patient set a deny directive): the key lookup reads none of them, while 0144's
    * unique keys see every row.
    */
   hiddenAcceptances?: { n: number; account: string; key: string }[];
@@ -270,7 +270,7 @@ function harness(options: Options = {}) {
     }
     if (sql === INSERT_PHARMACIST_ACCEPTED_EVENT) {
       if (options.eventError) throw options.eventError;
-      // The event validator (0145 A4): the session, the item's acceptance row by the same member, the fixed reason.
+      // The event validator (0144 A4): the session, the item's acceptance row by the same member, the fixed reason.
       const acceptance = working.acceptances.find((row) => row.work_item_id === values[0]);
       if (!acceptance || acceptance.accepted_by !== values[3] || acceptance.accepted_by_membership_id !== values[4]
         || values[3] !== context.account || values[4] !== context.membership
@@ -483,7 +483,7 @@ describe('POST pharmacy/work-items/:workItemId/accept (ORD-4): accepting', () =>
         { workItemId: id(1), expectedWorkItemVersion: 1 }), pharmacist.correlationId]);
     expect(sent(INSERT_PHARMACIST_ACCEPTED_EVENT).values).toEqual([id(1), ada, facilityId, pharmacistAccount,
       pharmacistMembership, PHARMACIST_ACCEPTED_REASON, pharmacist.correlationId]);
-    // 0145's event validator refuses any other reason.
+    // 0144's event validator refuses any other reason.
     expect(PHARMACIST_ACCEPTED_REASON).toBe('Accepted by the pharmacist');
     expect(INSERT_PHARMACIST_ACCEPTED_EVENT).toMatch(/values \(\$1,\$2,\$3,2,'pharmacist_accepted',\$4,\$5,\$6,\$7\)/);
   });

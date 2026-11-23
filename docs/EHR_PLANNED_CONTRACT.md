@@ -1239,8 +1239,8 @@ Akos items: P0-5, N-7, N-9, R-2, R-3, P2-5.
 
 Status: planned, not live.
 
-Build plan of 18 Nov 2026, migration 0144 (provisional; numbers are given in
-merge order at the Release B cut-off), lane D. Today there is no list route:
+Build plan of 18 Nov 2026, migration number given at merge (0144 was
+provisional; ORD-4 took it), lane D. Today there is no list route:
 the screen's built-in lists and Wave 0's HID-LAB codes (live contract, "Wave
 0", R-2; `docs/codes/hid-lab-codes.json`) are the answer, and a lab request
 must have a code (`0004:243`, F3).
@@ -1266,8 +1266,8 @@ Answers carry `Cache-Control: private, max-age=60`.
 The new permission goes to the `admin` role only. The SX-1 role-matrix
 fixture is updated in the same PR.
 
-**`GET .../catalog/status`** tells the screen what is live. Before 0144
-ships it answers 404. ORD-9 and ORD-10 phase 2 fill their own fields.
+**`GET .../catalog/status`** tells the screen what is live. Before ORD-7's
+migration ships it answers 404. ORD-9 and ORD-10 phase 2 fill their own fields.
 
 ```json
 { "medicines": { "available": true, "version": "2026.1", "approvedAt": "2026-12-01" },
@@ -1387,7 +1387,7 @@ together, like section 46's setting.
   name (`patient-evidence.policy.ts:146-148` checks the name first).
 - While the setting is off, the routes behave exactly as today.
 
-**Database (0144).**
+**Database (ORD-7's migration).**
 - `ehr.lab_requests.test_code_system` and `test_code` (`0004:242-243`) and
   `lab.work_items.test_code_system` and `test_code` (`0018:27-28`) become
   nullable. A pair CHECK is added NOT VALID, then validated.
@@ -1449,7 +1449,7 @@ together, like section 46's setting.
 
 ### Screen notes
 
-- **Before 0144 ships** (the status route answers 404):
+- **Before ORD-7's migration ships** (the status route answers 404):
   - Keep the built-in lists (68 medicines, 26 tests).
   - Send HID-LAB codes for the 13 tests that have no LOINC code (Wave 0
     R-2).
@@ -1492,7 +1492,7 @@ together, like section 46's setting.
 
 ### Target
 
-Release B (0144).
+Release B (number given at merge).
 
 Size: **L**.
 - Code: two searches, facility items, the name-only change across ehr-api,
@@ -1507,7 +1507,7 @@ Akos items: P1-12, R-1, P2-5 (and P0-5's coding ask).
 
 Status: planned, not live.
 
-Build plan of 18 Nov 2026, migration number given at merge (0145 was provisional; ORD-4 took it), lane D. This
+Build plan of 18 Nov 2026, migration number given at merge (0145 was provisional), lane D. This
 section follows owner decision Q124 A, 19 Nov 2026: ICD-11 is the search list, and
 ICD-10 codes typed in are still accepted.
 
@@ -1685,7 +1685,7 @@ facility, newest first. `limit` is 1-50, default 20.
 
 - Q124 A (owner decision, 19 Nov 2026): ICD-11 search, ICD-10 typed
   codes kept, and Health ID's named clinical lead.
-- ORD-7 (0144): the loader, the status route, the shared search limit.
+- ORD-7: the loader, the status route, the shared search limit.
 - EHR-C4 and EHR-C5 (built in wave 1): their answers and bodies follow the
   nullable code.
 - The patient-evidence change (lane D edits `patient-records/` only for the
@@ -1707,7 +1707,7 @@ Status: planned, not live.
 
 This builds on ORD-10 phase 1, built in wave 1 (live contract,
 "ORD-10 phase 1"). It is code shipped alongside Release B. It needs no
-migration of its own: it uses 0144's `ehr.catalog_medicines.atc_code` and
+migration of its own: it uses ORD-7's `ehr.catalog_medicines.atc_code` and
 `ehr.duplicate_class_rules`.
 
 It adds a warning when a current prescription is a *different* medicine of
@@ -1808,7 +1808,7 @@ to the answer.
 
 ### Depends on
 
-- ORD-7 (0144): ATC on formulary items, the rules table and the loader.
+- ORD-7: ATC on formulary items, the rules table and the loader.
 - ORD-10 phase 1 (built in wave 1).
 - Q131 A (owner decision, 19 Nov 2026): same-medicine and same-class
   warnings only, no interaction checks now.
@@ -1819,7 +1819,7 @@ to the answer.
 
 ### Target
 
-Release B, code alongside 0144.
+Release B, code alongside ORD-7's migration.
 
 Size: **S** for code. The clinical lead's first class-rule file is the real
 work.
@@ -1830,7 +1830,7 @@ Akos items:
 - N-1 (the "Accepted" status)
 - N-8 (the pharmacy part of "accepted by"; the laboratory keeps "Sample taken" as its first visible step, see Screen notes)
 
-Status: planned, not live. Built in #<PR, to come> (migration 0145, provisional); live when Release B is signed. The contract as built is the section "ORD-4. The pharmacist accepts a prescription before dispensing" in [INTERFACE_CONTRACT.md](INTERFACE_CONTRACT.md), and this section is corrected to match the build (the ORD-4 build spec of 20 Nov 2026). Owner decision Q125 B, 19 Nov 2026: the pharmacy "Accepted" step is wanted.
+Status: planned, not live. Built in #<PR, to come> (migration 0144, provisional); live when Release B is signed. The contract as built is the section "ORD-4. The pharmacist accepts a prescription before dispensing" in [INTERFACE_CONTRACT.md](INTERFACE_CONTRACT.md), and this section is corrected to match the build (the ORD-4 build spec of 20 Nov 2026). Owner decision Q125 B, 19 Nov 2026: the pharmacy "Accepted" step is wanted.
 
 Today (Release A, 0133) this hospital's pharmacy has a prescription as soon as the prescriber activates it. The automatic send makes the work item and records the prescriber as the one who accepted it into Pharmacy, with the fixed reason "Sent automatically when the prescription was activated" (0133 D7; never recorded as a pharmacist's acceptance, ORD-2). So the work item's `status: "accepted"` and `acceptedAt` (`pharmacy.service.ts:730` and `:736` on Release A) only mean "the pharmacy has it". No pharmacist has taken it on. ORD-4 adds that step: a pharmacist accepts the prescription, and the prescriber sees "Accepted" between "Sent to pharmacy" and "Dispensed".
 
@@ -1924,7 +1924,7 @@ Rules:
 
 **"We can't complete this order" (D18, section 24).** This is for prescriptions from another facility, and it is unchanged. Such an item is `accepted` when its route is accepted, so the command is offered exactly as today (`POST /api/v1/pharmacy/order-routes/:routeId/cannot-complete`, `pharmacy.order-route.receive`). ORD-4 adds no "can't complete" for this hospital's own prescriptions. A pharmacist who accepted one and then cannot dispense it tells the prescriber, who holds or stops it (the item is then `withdrawn`).
 
-**Database** (migration 0145, number provisional, given in merge order at the Release B cut-off; needs 0001-0137):
+**Database** (migration 0144, number provisional, given in merge order at the Release B cut-off; needs 0001-0137):
 - A new table, `pharmacy.work_item_acceptances`: one row per work item (`work_item_id` unique), with patient, facility, `accepted_by`, `accepted_by_membership_id`, `accepted_at`, `accepted_with` (`accept` or `dispensing`), the idempotency key, the request digest and the correlation id, and unique `(facility_id, accepted_by, idempotency_key)`. No foreign keys (0133 D6's pattern; the insert trigger checks what they would). Rows are never updated or deleted (0023's `pharmacy.reject_immutable_evidence()`; no runtime holds UPDATE or DELETE). Row-level security, enabled and forced, follows the dispensings table: four policies, the two consent and order-route ones (`pharmacy.context_allows`) and 0133's two own-work ones for a row anchored on its work item (0133's own-work policies are now 46). SELECT and INSERT for `hid_pharmacy_runtime` and `hid_schema_test_runtime`, here and in `runtime-grants.sql`.
 - An insert trigger, `pharmacy.validate_work_item_acceptance()` (SECURITY DEFINER), owned by the owner of `pharmacy.validate_dispensing()`: 0133 D5's two `ehr.prescriptions` policies name only that role, so with another owner a pharmacist with no consent grant would find no prescription under forced row-level security. No role may execute it. It refuses with 23514, in this order:
   - "Pharmacist acceptance does not match its work item and actor context": the session is incomplete, or its purpose is not `direct-care` (an emergency session and any other purpose are refused, as for a dispensing), or the row is not the session's (facility, account, membership), or the work item is not found with the row's patient and facility;
@@ -2542,7 +2542,7 @@ Request:
 | `clinicalInformation` | optional, up to 4000 characters, copied to every test |
 | `tests` | 1-20 entries. Each takes today's single-create test fields with today's limits (R-2): `testCodeSystem` 1-255, `testCode` 1-100, `testDisplay` 1-500, optional `specimenTypeCode` up to 100, optional `priority`. |
 
-- A code is required until ORD-7 (0144) makes it optional. Use the HID-LAB codes (Wave 0, R-2) for tests with no LOINC code. Once ORD-7 ships, a test may name a catalogue item instead; that shape is ORD-7's.
+- A code is required until ORD-7 makes it optional. Use the HID-LAB codes (Wave 0, R-2) for tests with no LOINC code. Once ORD-7 ships, a test may name a catalogue item instead; that shape is ORD-7's.
 - The same code system and code twice in one group is refused.
 - Any field not listed is refused, and `null` is refused, as on every EHR body.
 
@@ -2592,7 +2592,7 @@ Audit: today's `ehr.lab-request.create` row for each request, plus one `ehr.lab-
 ### Depends on
 
 - ORD-3 (progress) and FR-1 and Q105 (no reason on a first activation): live contract sections.
-- ORD-7 (0144, Release B) for catalogue picks and name-only tests. Its national list is kept by Health ID's named clinical lead (owner decision Q124 A, 19 Nov 2026).
+- ORD-7 (Release B) for catalogue picks and name-only tests. Its national list is kept by Health ID's named clinical lead (owner decision Q124 A, 19 Nov 2026).
 - Lab's `lab.validate_work_item` (0077) must also check `requestGroupId` against the EHR order.
 - ORD-8 uses groups when it applies an order set's tests.
 
