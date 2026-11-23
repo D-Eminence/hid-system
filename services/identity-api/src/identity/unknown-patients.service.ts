@@ -13,7 +13,7 @@ import type { CreateUnknownPatientDto, DecideUnknownPatientDto, IdentifyUnknownP
 import { HidCodeGenerator } from './hid-code-generator.service';
 
 /**
- * 0146 (ID-7): unknown patient records, for a person who cannot say who they
+ * 0145 (ID-7): unknown patient records, for a person who cannot say who they
  * are. The database decides (identity.create_unknown_patient,
  * list_unknown_patients, read_unknown_patient, identify_unknown_patient,
  * review_unknown_patient, decide_unknown_patient) and writes the audit rows of each success and each

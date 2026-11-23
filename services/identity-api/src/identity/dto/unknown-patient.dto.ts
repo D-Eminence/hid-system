@@ -5,7 +5,7 @@ import { COLLECTED_PHONE_E164, NIGERIA_STATE_CODES, toCollectedPhone } from './f
 
 const trim = ({ value }: TransformFnParams): unknown => typeof value === 'string' ? value.trim() : value;
 
-/** 0146 (ID-7): why a person cannot say who they are. */
+/** 0145 (ID-7): why a person cannot say who they are. */
 export const UNKNOWN_PATIENT_REASONS = ['unconscious', 'confused', 'unaccompanied_child', 'cannot_communicate',
   'other'] as const;
 export type UnknownPatientReason = typeof UNKNOWN_PATIENT_REASONS[number];

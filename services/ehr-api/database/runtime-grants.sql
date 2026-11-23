@@ -1902,7 +1902,7 @@ revoke all on function identity.patient_nin_link_precheck(uuid, char, text, char
   identity.link_patient_nin(uuid, uuid, char, bytea, text, char, text, boolean, text, char) from public;
 revoke all on identity.patient_nin_links from public;
 
--- Unknown patient records (0146, ID-7), exactly as 0146 grants them: the
+-- Unknown patient records (0145, ID-7), exactly as 0145 grants them: the
 -- six commands and reads and the record kind to the Identity runtime, the waiting list's record
 -- kinds to the EHR runtime; the record table, its cancel-check marker table
 -- and the helpers are the owner's. The cancel check's marker test is run by

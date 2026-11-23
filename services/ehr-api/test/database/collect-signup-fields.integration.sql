@@ -505,7 +505,7 @@ begin
     raise exception 'The erasure left a value or removed the row';
   end if;
   if not exists (select 1 from audit.events where action = 'identity.patient-facility-contact.erase'
-                  -- 0146 (ID-7) counts an unknown record's held contact too.
+                  -- 0145 (ID-7) counts an unknown record's held contact too.
                   and details = '{"reason": "erasure_request", "facilityContacts": 1, "registrationContacts": 1, "statedHealthIds": 0,
                                   "unknownRecordContacts": 0}'::jsonb) then
     raise exception 'The erasure was not audited with counts only';

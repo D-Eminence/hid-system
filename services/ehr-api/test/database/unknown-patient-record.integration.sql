@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- ID-7 (0146): unknown patient records. Rollback-only. Every command runs as
+-- ID-7 (0145): unknown patient records. Rollback-only. Every command runs as
 -- the exact Identity (or EHR) API runtime role in the staff context their
 -- services set.
 --

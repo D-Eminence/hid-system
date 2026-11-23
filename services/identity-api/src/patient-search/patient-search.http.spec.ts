@@ -197,8 +197,8 @@ describe('patient search routes over HTTP', () => {
     .update(['hid-contact-lookup:v1', 'phone', phone].join('\u001f'), 'utf8').digest('hex');
   const auditEvents = () => JSON.stringify([audit.record.mock.calls, audit.recordWithClient.mock.calls]);
 
-  describe('ID-7 (0146): record kind', () => {
-    it('carries an unknown record\'s kind, and reads a database without 0146 as standard', async () => {
+  describe('ID-7 (0145): record kind', () => {
+    it('carries an unknown record\'s kind, and reads a database without 0145 as standard', async () => {
       handlers['identity.staff_patient_search'] = () => ({ rows: [{ ...card(1, 'AA22', false), record_kind: 'unknown' }] });
       const unknown = await search({ healthId: 'HID-AAAA22' });
       expect(unknown.body.patients.map((patient: { recordKind: string }) => patient.recordKind)).toEqual(['unknown']);

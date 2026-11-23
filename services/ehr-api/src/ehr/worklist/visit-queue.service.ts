@@ -34,9 +34,9 @@ export interface VisitQueueCard {
   rowVersion: number;
   /** A deny directive covers this facility: the patient stays listed, the chart cannot be opened. */
   chartBlocked: boolean;
-  /** 0146 (ID-7): an unknown patient record shows its fullName ("Unknown patient U-0007") and label. */
+  /** 0145 (ID-7): an unknown patient record shows its fullName ("Unknown patient U-0007") and label. */
   recordKind: 'standard' | 'unknown';
-  /** 0146 (ID-7): the date of birth is estimated (an unknown record's age). */
+  /** 0145 (ID-7): the date of birth is estimated (an unknown record's age). */
   dateOfBirthEstimated: boolean;
 }
 
@@ -83,7 +83,7 @@ const CARD_COLUMNS = `entry_id, patient_id, full_name, sex, date_of_birth::text 
   stage_changed_at, closed_at, row_version::text as row_version, chart_blocked`;
 
 export const CHECK_IN_SQL = `select outcome, ${CARD_COLUMNS} from ehr.visit_queue_check_in($1, $2)`;
-/** 0146 (ID-7): the record kinds of the cards' entries, read only where 0146 is applied. */
+/** 0145 (ID-7): the record kinds of the cards' entries, read only where 0145 is applied. */
 export const RECORD_KINDS_PRESENT_SQL =
   `select to_regprocedure('ehr.visit_queue_record_kinds(uuid[])') is not null as present`;
 export const RECORD_KINDS_SQL =

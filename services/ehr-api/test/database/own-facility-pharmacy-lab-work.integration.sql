@@ -436,7 +436,7 @@ begin
   end if;
   -- S7: the owner-run SECURITY DEFINER functions that read ehr.prescriptions
   -- (each sees D5's rows in a pharmacist's session) are exactly these eight
-  -- (0146's identity.decide_unknown_patient only tests that a record has
+  -- (0145's identity.decide_unknown_patient only tests that a record has
   -- none, and only the Identity runtime may run it);
   -- case 8 shows each gives the pharmacist nothing more. A new one must be
   -- added here, and to case 8, by whoever writes it. The check matches a
@@ -2170,7 +2170,7 @@ select pg_temp.expect('PH: the withdrawal refuses', pg_temp.try(format(
 -- (The list is the patient's own: a staff session is refused.)
 select pg_temp.expect('PH: the patient''s own route list answers nothing for a staff session',
   pg_temp.rows_of('select * from ehr.patient_list_order_routes()'), '42501 PATIENT_SESSION_REQUIRED');
--- 0146: the unknown record's decision is the Identity runtime's alone.
+-- 0145: the unknown record's decision is the Identity runtime's alone.
 select pg_temp.expect('PH: the unknown record''s decision is not the EHR runtime''s', pg_temp.try(format(
   'select * from identity.decide_unknown_patient(%L, %L, 1, %L, %L, %L)', pg_temp.rx(4), 'cancel',
   'Own work probe reason', 'own-work-unknown-probe', repeat('a', 64))),

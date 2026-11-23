@@ -116,7 +116,7 @@ export class PatientNinLinkService {
         await this.refuse(context, patientId, 'already_has_nin', false);
         throw alreadyHasNin();
       case 'unknown_record':
-        // 0146 (ID-7): an unknown patient record is identified first; QoreID is not asked.
+        // 0145 (ID-7): an unknown patient record is identified first; QoreID is not asked.
         await this.refuse(context, patientId, 'not_identified', false);
         throw notIdentified();
       case 'source_nin_differs':
@@ -225,7 +225,7 @@ export class PatientNinLinkService {
   }
 
   /**
-   * A replayed answer writes its own row, as 0130 and 0146 do. Its outcome is
+   * A replayed answer writes its own row, as 0130 and 0145 do. Its outcome is
    * 'replayed', not 'nin_linked': the patient's access log (0138 section 5)
    * shows "NIN added" for each nin_linked row, and the NIN was added once.
    */

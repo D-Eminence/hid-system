@@ -212,7 +212,7 @@ begin
          where lookup.registration_case_id = registration.id),
        (select count(*) from identity.outbox_events event where event.aggregate_id = registration.id
           and event.event_type = 'PatientRegistered'),
-       -- One row for the registration; 0146 audits a replay as its own row (replayed: true).
+       -- One row for the registration; 0145 audits a replay as its own row (replayed: true).
        (select count(*) from audit.events event where event.resource_id = registration.id::text
           and event.action = 'identity.registration.without-nin' and not (event.details ? 'replayed')))
        from identity.registration_cases registration

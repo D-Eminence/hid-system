@@ -25,8 +25,8 @@ export const EMERGENCY_SEARCH_MEMBER_WINDOW: RateLimitWindow = { windowSeconds: 
 /** The warning log line a search limit writes (the alert): never a name, date of birth, Health ID or phone. */
 export const PATIENT_SEARCH_LIMITED_EVENT = 'identity.patient_search.limited';
 
-// 0146 (ID-7) adds record_kind at the end of the answer; it is read by name,
-// so this also works on a database without 0146 (standard).
+// 0145 (ID-7) adds record_kind at the end of the answer; it is read by name,
+// so this also works on a database without 0145 (standard).
 export const PATIENT_SEARCH_SQL = `select outcome, reach, match_ref, full_name, sex, date_of_birth::text as date_of_birth,
        health_id_last4, nin_verified, match_ref_expires_at, to_jsonb(answer) ->> 'record_kind' as record_kind
   from identity.staff_patient_search($1, $2, $3, $4::date, $5, $6::text[], $7, $8) answer`;
@@ -42,7 +42,7 @@ export interface PatientSearchCard {
   dateOfBirth: string | null;
   healthIdLast4: string | null;
   ninStatus: NinStatus;
-  /** 0146 (ID-7): an unknown patient record is found only by its Health ID alone, at its facility. */
+  /** 0145 (ID-7): an unknown patient record is found only by its Health ID alone, at its facility. */
   recordKind: 'standard' | 'unknown';
 }
 

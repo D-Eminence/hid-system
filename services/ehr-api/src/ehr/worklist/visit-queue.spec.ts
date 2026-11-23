@@ -34,7 +34,7 @@ const cardRow = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
-/** The cards' rows, and (0146) whether the record-kind function exists and what it answers. */
+/** The cards' rows, and (0145) whether the record-kind function exists and what it answers. */
 function fakeDatabase(rows: readonly Record<string, unknown>[] | Error,
   kinds: readonly Record<string, unknown>[] | null = null) {
   const calls: { sql: string; values: unknown[] }[] = [];
@@ -190,7 +190,7 @@ describe('EHR-C7 the waiting list (0135)', () => {
       expect(answer.items.map((item) => item.fullName)).toEqual(['Amaka Queueone', 'Bayo Queuetwo']);
     });
 
-    it('adds each card\'s record kind and estimated date of birth where 0146 is applied (ID-7)', async () => {
+    it('adds each card\'s record kind and estimated date of birth where 0145 is applied (ID-7)', async () => {
       const rows = [cardRow(), cardRow({ entry_id: 'second', full_name: 'Unknown patient U-0007' })];
       const { database, calls } = fakeDatabase(rows, [{ entry_id: 'second', record_kind: 'unknown', dob_estimated: true }]);
       const answer = await new VisitQueueService(database).list(context, false);

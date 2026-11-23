@@ -1,4 +1,4 @@
--- 0146: unknown patient records (ID-7, Akos P0-4 and P0-1, Release B; the
+-- 0145: unknown patient records (ID-7, Akos P0-4 and P0-1, Release B; the
 -- planned contract's "ID-7: Unknown patient record"). Booked as 0146 on
 -- hid-system#258; numbers are given in merge order at the Release B
 -- cut-off. This file requires 0001-0138 applied: it replaces 0131's basis,
@@ -182,16 +182,16 @@ declare
 begin
   if to_regclass('identity.patient_nin_links') is null
      or to_regprocedure('identity.patient_nin_link_precheck(uuid,character,text,character)') is null then
-    raise exception using errcode = '55000', message = '0146: 0001-0138 must be applied first';
+    raise exception using errcode = '55000', message = '0145: 0001-0138 must be applied first';
   end if;
   if to_regclass('identity.unknown_patients') is not null
      or to_regprocedure('identity.patient_record_kind(uuid)') is not null then
-    raise exception using errcode = '55000', message = '0146: already applied';
+    raise exception using errcode = '55000', message = '0145: already applied';
   end if;
   if exists (select 1 from pg_trigger
               where (tgrelid = 'identity.patients'::regclass and tgname = 'patients_unknown_no_login')
                  or (tgrelid = 'identity.registration_cases'::regclass and tgname = 'registration_cases_unknown_patient')) then
-    raise exception using errcode = '55000', message = '0146: a trigger of this file already exists';
+    raise exception using errcode = '55000', message = '0145: a trigger of this file already exists';
   end if;
   select string_agg(expected.signature, ', ') into mismatch
     from (values
@@ -213,7 +213,7 @@ begin
       or (select md5(proc.prosrc) from pg_proc proc where proc.oid = to_regprocedure(expected.signature))
          is distinct from expected.body_md5;
   if mismatch is not null then
-    raise exception using errcode = '55000', message = '0146: these functions are not as this file reads or replaces them: ' || mismatch;
+    raise exception using errcode = '55000', message = '0145: these functions are not as this file reads or replaces them: ' || mismatch;
   end if;
   select string_agg(expected.table_name || '.' || expected.column_name, ', ') into mismatch
     from (values
@@ -240,11 +240,11 @@ begin
                         and attribute.attname = expected.column_name and not attribute.attisdropped
                         and format_type(attribute.atttypid, attribute.atttypmod) = expected.type_name);
   if mismatch is not null then
-    raise exception using errcode = '55000', message = '0146: these columns are not as this file reads them: ' || mismatch;
+    raise exception using errcode = '55000', message = '0145: these columns are not as this file reads them: ' || mismatch;
   end if;
   if not exists (select 1 from pg_constraint where conrelid = 'identity.patients'::regclass
                   and conname = 'patients_status_check') then
-    raise exception using errcode = '55000', message = '0146: identity.patients has no patients_status_check';
+    raise exception using errcode = '55000', message = '0145: identity.patients has no patients_status_check';
   end if;
 end
 $$;
@@ -276,12 +276,12 @@ begin
     exception when lock_not_available then
       if holding then
         raise exception using errcode = '55P03',
-          message = '0146: a clinical table, or a write to the patients, identifiers, registrations, accounts, facilities or memberships, is busy, and this transaction already holds an earlier migration''s '
+          message = '0145: a clinical table, or a write to the patients, identifiers, registrations, accounts, facilities or memberships, is busy, and this transaction already holds an earlier migration''s '
             || 'locks, so it does not wait; nothing applied; run the release again at a quieter time';
       end if;
       if attempt >= 50 then
         raise exception using errcode = '55P03',
-          message = '0146: a clinical table, or a write to the patients, identifiers, registrations, accounts, facilities or memberships, stayed busy for 5 seconds; nothing applied; run the release again at a '
+          message = '0145: a clinical table, or a write to the patients, identifiers, registrations, accounts, facilities or memberships, stayed busy for 5 seconds; nothing applied; run the release again at a '
             || 'quieter time';
       end if;
       perform pg_sleep(0.1);
@@ -494,7 +494,7 @@ as $$
 $$;
 
 comment on function identity.own_facility_basis(uuid, uuid) is
-  '0131 (ID-4, owner Q101 of 18 November 2026), with 0146 (ID-7): created_here (made as an unknown record at this facility, not cancelled or merged; it outlives identify), registered_here (a registration at this facility that created the patient, resolved the patient''s checked NIN, attached its checked NIN, or, without a NIN, was linked and then confirmed by the patient), visit_here (a visit here started in the last 24 months, not cancelled or entered in error, not imported paper records, started under a grant the patient gave to the member who started it), or null. Check-in-only, emergency-only and own-facility-only visits do not count.';
+  '0131 (ID-4, owner Q101 of 18 November 2026), with 0145 (ID-7): created_here (made as an unknown record at this facility, not cancelled or merged; it outlives identify), registered_here (a registration at this facility that created the patient, resolved the patient''s checked NIN, attached its checked NIN, or, without a NIN, was linked and then confirmed by the patient), visit_here (a visit here started in the last 24 months, not cancelled or entered in error, not imported paper records, started under a grant the patient gave to the member who started it), or null. Check-in-only, emergency-only and own-facility-only visits do not count.';
 
 -- 5. The search (D5): 0132's text with the Health-ID-alone rule and record_kind.
 drop function identity.staff_patient_search(text, text, text, date, text, text[], text, text);
@@ -603,7 +603,7 @@ begin
      or hid_value is not null then
     reach_value := 'here';
   end if;
-  -- 0146 (ID-7): an unknown patient record is found only by its Health ID
+  -- 0145 (ID-7): an unknown patient record is found only by its Health ID
   -- alone at this facility (the wristband), never by any other search.
   health_id_alone := not emergency and reach_value = 'here' and hid_value is not null
     and first_value is null and last_value is null and requested_dob is null and phone_values is null;
@@ -715,7 +715,7 @@ end
 $$;
 
 comment on function identity.staff_patient_search(text, text, text, date, text, text[], text, text) is
-  '0132 (ID-3a, ID-3b; owner decisions of 18 November 2026), with 0146 (ID-7): staff patient search. standard (identity.registration.write, direct care): strong keys (first + last name + date of birth; Health ID + last name or date of birth; phone + last name) find any active standard patient, weak keys (last name + date of birth; phone; Health ID) only this facility''s own patients (0131 basis); a Health ID alone also finds this facility''s unknown records; at most 10 cards. emergency (identity.break-glass.write, emergency purpose, break_glass_enabled, a reason of 8-500 characters): exact first + last name + date of birth only, standard records only, at most 5 cards. Outcomes found, no_match, no_such_health_id, too_many, too_broad. Cards carry a 10-minute matchRef and the record kind, never a Health ID or patient id. Audited per search (key kinds and the caller''s keyed hash, never the values) and per patient shown.';
+  '0132 (ID-3a, ID-3b; owner decisions of 18 November 2026), with 0145 (ID-7): staff patient search. standard (identity.registration.write, direct care): strong keys (first + last name + date of birth; Health ID + last name or date of birth; phone + last name) find any active standard patient, weak keys (last name + date of birth; phone; Health ID) only this facility''s own patients (0131 basis); a Health ID alone also finds this facility''s unknown records; at most 10 cards. emergency (identity.break-glass.write, emergency purpose, break_glass_enabled, a reason of 8-500 characters): exact first + last name + date of birth only, standard records only, at most 5 cards. Outcomes found, no_match, no_such_health_id, too_many, too_broad. Cards carry a 10-minute matchRef and the record kind, never a Health ID or patient id. Audited per search (key kinds and the caller''s keyed hash, never the values) and per patient shown.';
 
 -- 6. The NIN-link pre-check (D6): 0138's text with 'unknown_record'.
 create or replace function identity.patient_nin_link_precheck(
@@ -776,7 +776,7 @@ begin
     return query select 'not_permitted'::text, null::text, null::text, null::date;
     return;
   end if;
-  -- 0146 (ID-7): this facility's record that is still unknown is identified
+  -- 0145 (ID-7): this facility's record that is still unknown is identified
   -- first (another facility got not_permitted above, as for any patient).
   if exists (select 1 from identity.unknown_patients unknown_record
               where unknown_record.patient_id = patient_value and unknown_record.status <> 'identified') then
@@ -1641,7 +1641,7 @@ begin
 end
 $$;
 
--- 10. ID-2's registration (D13): 0130's text, with 0146's changes marked, and a trigger for every path that resolves a registration.
+-- 10. ID-2's registration (D13): 0130's text, with 0145's changes marked, and a trigger for every path that resolves a registration.
 create or replace function identity.register_patient_without_nin(
   requested_case_id uuid,
   requested_first_name text,
@@ -1685,7 +1685,7 @@ declare
   new_patient uuid;
   desk_reason constant text := 'No possible duplicates: created at the desk without a NIN';
   kinds text[];
-  stated_unknown_record uuid; -- 0146: another facility's unknown record, by the stated Health ID
+  stated_unknown_record uuid; -- 0145: another facility's unknown record, by the stated Health ID
 begin
   if actor_account is null or actor_membership is null or actor_facility is null or actor_correlation is null
      or platform.current_purpose_of_use() is distinct from 'healthcare-operations'
@@ -1741,7 +1741,7 @@ begin
     if existing.request_sha256 is distinct from requested_request_sha256 or existing.identity_evidence <> 'none' then
       raise exception using errcode = '22023', message = 'IDEMPOTENCY_KEY_REUSED';
     end if;
-    -- 0146: a replay answers the patient and its Health ID again, so it is audited too.
+    -- 0145: a replay answers the patient and its Health ID again, so it is audited too.
     insert into audit.events (
       correlation_id, actor_type, actor_subject, actor_account_id, actor_membership_id,
       organization_id, facility_id, patient_id, action, outcome, resource_type, resource_id,
@@ -1767,7 +1767,7 @@ begin
      and registration.identity_evidence = 'none'
      and registration.created_at >= (lagos_today::timestamp at time zone 'Africa/Lagos');
 
-  -- 0146 (ID-7, D13): a stated Health ID that is this facility's record that
+  -- 0145 (ID-7, D13): a stated Health ID that is this facility's record that
   -- is still unknown is identified there, not registered again.
   if stated_value is not null and exists (
        select 1 from identity.patients patient
@@ -1776,7 +1776,7 @@ begin
           and unknown_record.status <> 'identified' and unknown_record.facility_id = actor_facility) then
     raise exception using errcode = 'P0001', message = 'PATIENT_RECORD_UNKNOWN';
   end if;
-  -- 0146 (ID-7, D13): a stated Health ID that is another facility's record
+  -- 0145 (ID-7, D13): a stated Health ID that is another facility's record
   -- that is still unknown is no candidate (this facility can neither
   -- identify nor link it before ID-8), but it sends the case to an approver,
   -- and the audit row names the record. A sealed record never counts (this
@@ -1833,7 +1833,7 @@ begin
            where phone_hmacs is not null and lookup.phone_lookup_hmac = any (phone_hmacs)
              and not exists (select 1 from identity.unknown_patients unknown_record
                               where unknown_record.patient_id = patient.id and unknown_record.status <> 'identified')
-          -- 0146: an identified unknown record's phone, held on its row.
+          -- 0145: an identified unknown record's phone, held on its row.
           union all
           select held.patient_id, 80, 'phone'
             from identity.unknown_patients held
@@ -1868,7 +1868,7 @@ begin
             select 1 from identity.desk_registration_phone_lookups lookup
              where lookup.registration_case_id = registration.id
                and lookup.phone_lookup_hmac = any (phone_hmacs))));
-  -- 0146: an unknown record in review whose held details look like the same
+  -- 0145: an unknown record in review whose held details look like the same
   -- person (a real facility's only: this facility is not sealed).
   open_cases := open_cases + (
     select count(*)::integer
@@ -1884,13 +1884,13 @@ begin
     case when exists (select 1 from jsonb_array_elements(candidate_json) item where item -> 'reasons' ? 'phone')
       then 'phone' end,
     case when exists (select 1 from jsonb_array_elements(candidate_json) item where item -> 'reasons' ? 'stated_hid')
-           or stated_unknown_record is not null -- 0146
+           or stated_unknown_record is not null -- 0145
       then 'stated_health_id' end,
     case when open_cases > 0 then 'open_registration' end], null);
 
   insert into identity.no_nin_case_writes (case_id) values (requested_case_id);
 
-  if candidates_found = 0 and open_cases = 0 and stated_unknown_record is null then -- 0146: and no such record
+  if candidates_found = 0 and open_cases = 0 and stated_unknown_record is null then -- 0145: and no such record
     -- Owner Q106: no possible duplicates, so the same desk person creates the record.
     new_patient := pg_catalog.gen_random_uuid();
     insert into identity.patients (id, hid_code, first_name, last_name, full_name, dob, gender, status, source_system)
@@ -1953,7 +1953,7 @@ begin
       'candidateCount', candidates_found, 'openRegistrationCount', open_cases,
       'duplicateKinds', to_jsonb(kinds), 'contactRecorded', has_contact,
       'statedHealthId', stated_value is not null)
-      -- 0146: only when the stated Health ID is another facility's unknown record.
+      -- 0145: only when the stated Health ID is another facility's unknown record.
       || case when stated_unknown_record is not null then jsonb_build_object('statedUnknownRecord', true)
               else '{}'::jsonb end
   );
@@ -1977,7 +1977,7 @@ begin
                                 from jsonb_array_elements(candidate_json) item),
       'openRegistrationCount', open_cases, 'duplicateKinds', to_jsonb(kinds),
       'contactRecorded', has_contact, 'facilityDailyCount', facility_count + 1)
-      -- 0146: the link to another facility's unknown record, kept for ID-8.
+      -- 0145: the link to another facility's unknown record, kept for ID-8.
       || case when stated_unknown_record is not null
               then jsonb_build_object('statedUnknownRecordPatientId', stated_unknown_record) else '{}'::jsonb end
   );
@@ -1992,7 +1992,7 @@ comment on function identity.register_patient_without_nin(uuid, text, text, date
   '0130 (ID-2, owner Q106 of 18 November 2026): the desk registers a patient without a NIN. No possible duplicate: the same desk person creates the patient at once (approved_new_identity, source hid-desk-registration). Any possible duplicate (same date of birth and last name, same phone, the stated Health ID, or an open registration without a NIN): review_required, for an approver. Phone and address required unless the reason is child (under 18). No daily limit (owner Q109); the count at the facility today is returned for an operations alert. Refused at sealed demo and QA facilities. Audited with criteria kinds only.';
 
 comment on function identity.register_patient_without_nin(uuid, text, text, date, text, text, text, bytea, bytea, text, text, text, text, text) is
-  '0130 (ID-2, owner Q106 of 18 November 2026), with 0146 (ID-7): the desk registers a patient without a NIN. No possible duplicate: the same desk person creates the patient at once (approved_new_identity, source hid-desk-registration). Any possible duplicate (same date of birth and last name, same phone, including an identified unknown record''s held phone, the stated Health ID, an open registration without a NIN, or an unknown record in review whose held details match): review_required, for an approver. A record that is still unknown is never a candidate; a stated Health ID of this facility''s unknown record is refused (PATIENT_RECORD_UNKNOWN: identify it), and of another facility''s sends the case for review with no candidate. Phone and address required unless the reason is child (under 18). No daily limit (owner Q109); the count at the facility today is returned for an operations alert. Refused at sealed demo and QA facilities. Audited with criteria kinds only, a replay too.';
+  '0130 (ID-2, owner Q106 of 18 November 2026), with 0145 (ID-7): the desk registers a patient without a NIN. No possible duplicate: the same desk person creates the patient at once (approved_new_identity, source hid-desk-registration). Any possible duplicate (same date of birth and last name, same phone, including an identified unknown record''s held phone, the stated Health ID, an open registration without a NIN, or an unknown record in review whose held details match): review_required, for an approver. A record that is still unknown is never a candidate; a stated Health ID of this facility''s unknown record is refused (PATIENT_RECORD_UNKNOWN: identify it), and of another facility''s sends the case for review with no candidate. Phone and address required unless the reason is child (under 18). No daily limit (owner Q109); the count at the facility today is returned for an operations alert. Refused at sealed demo and QA facilities. Audited with criteria kinds only, a replay too.';
 
 create function identity.refuse_registration_for_unknown_patient()
 returns trigger
@@ -2059,7 +2059,7 @@ begin
      set stated_hid_code = null
    where contact.erased_at is null and contact.stated_hid_code = any (patient_hid_codes);
   get diagnostics removed_stated = row_count;
-  -- 0146 (ID-7, D14): the contact given when an unknown record was identified.
+  -- 0145 (ID-7, D14): the contact given when an unknown record was identified.
   update identity.unknown_patients held
      set contact_phone_ciphertext = null, contact_address_ciphertext = null, contact_key_version = null,
          contact_phone_lookup_hmac = null, updated_at = erased_moment, row_version = held.row_version + 1
@@ -2136,9 +2136,9 @@ end
 $$;
 
 comment on function identity.create_unknown_patient(uuid, text, text, integer, text, bytea, text, text, text) is
-  '0146 (ID-7): make an unknown patient record at this facility (identity.registration.write): a real patient with a Health ID, record_kind unknown, no login, NIN or phone, labelled U-0001 and up per facility. Refused at a sealed demo facility; at the sealed QA facility the record is a sealed QA patient. Idempotent by the caller''s key.';
+  '0145 (ID-7): make an unknown patient record at this facility (identity.registration.write): a real patient with a Health ID, record_kind unknown, no login, NIN or phone, labelled U-0001 and up per facility. Refused at a sealed demo facility; at the sealed QA facility the record is a sealed QA patient. Idempotent by the caller''s key.';
 comment on function identity.decide_unknown_patient(uuid, text, bigint, text, text, text) is
-  '0146 (ID-7): an approver (identity.registration.approve) confirms a record in review separate (the held details apply; not the member who identified it) or cancels a record made in error (only while nothing clinical is attached; the patient becomes inactive).';
+  '0145 (ID-7): an approver (identity.registration.approve) confirms a record in review separate (the held details apply; not the member who identified it) or cancels a record made in error (only while nothing clinical is attached; the patient becomes inactive).';
 
 -- 13. Post-checks.
 do $$
@@ -2151,26 +2151,26 @@ begin
        where ((tgrelid = 'identity.patients'::regclass and tgname = 'patients_unknown_no_login')
               or (tgrelid = 'identity.registration_cases'::regclass and tgname = 'registration_cases_unknown_patient'))
          and tgenabled = 'O') <> 2 then
-    raise exception using errcode = '55000', message = '0146 post-check: the no-login or registration trigger is missing';
+    raise exception using errcode = '55000', message = '0145 post-check: the no-login or registration trigger is missing';
   end if;
   -- D14 runs as 0114's owner: it must be able to erase the held contact.
   if not has_table_privilege((select proowner from pg_proc
                                where oid = 'identity.erase_patient_facility_contacts(uuid,text)'::regprocedure),
                              'identity.unknown_patients', 'UPDATE') then
-    raise exception using errcode = '55000', message = '0146 post-check: the contact eraser cannot erase an unknown record''s contact';
+    raise exception using errcode = '55000', message = '0145 post-check: the contact eraser cannot erase an unknown record''s contact';
   end if;
   if not (select prosecdef from pg_proc
            where oid = 'identity.register_patient_without_nin(uuid,text,text,date,text,text,text,bytea,bytea,text,text,text,text,text)'::regprocedure)
      or has_function_privilege('public', 'identity.erase_patient_facility_contacts(uuid,text)', 'EXECUTE') then
-    raise exception using errcode = '55000', message = '0146 post-check: a replaced registration or erasure function is not as intended';
+    raise exception using errcode = '55000', message = '0145 post-check: a replaced registration or erasure function is not as intended';
   end if;
   if pg_get_function_result('identity.staff_patient_search(text,text,text,date,text,text[],text,text)'::regprocedure)
        not like '%record_kind text)' then
-    raise exception using errcode = '55000', message = '0146 post-check: the search does not answer record_kind';
+    raise exception using errcode = '55000', message = '0145 post-check: the search does not answer record_kind';
   end if;
   if not exists (select 1 from pg_trigger where tgrelid = 'identity.patient_identifiers'::regclass
                   and tgname = 'patient_identifiers_unknown_patient' and tgenabled = 'O') then
-    raise exception using errcode = '55000', message = '0146 post-check: the NIN trigger is missing';
+    raise exception using errcode = '55000', message = '0145 post-check: the NIN trigger is missing';
   end if;
   if (select count(*) from pg_policy policy join pg_class relation on relation.oid = policy.polrelid
        join pg_namespace namespace on namespace.oid = relation.relnamespace
@@ -2179,11 +2179,11 @@ begin
         and regexp_replace(pg_get_expr(policy.polqual, policy.polrelid), '\s+', ' ', 'g') like '( SELECT CASE WHEN pg_has_role(%'
         and relation.relname in ('clinical_notes', 'diagnoses', 'documents', 'lab_requests', 'prescriptions',
                                  'recorded_allergies', 'vitals')) <> 7 then
-    raise exception using errcode = '55000', message = '0146 post-check: a cancel-check policy is missing';
+    raise exception using errcode = '55000', message = '0145 post-check: a cancel-check policy is missing';
   end if;
   if exists (select 1 from pg_class relation, aclexplode(relation.relacl) acl
               where relation.oid = 'ehr.unknown_patient_cancel_scans'::regclass and acl.grantee <> relation.relowner) then
-    raise exception using errcode = '55000', message = '0146 post-check: the cancel-check marker table is granted to a role';
+    raise exception using errcode = '55000', message = '0145 post-check: the cancel-check marker table is granted to a role';
   end if;
   -- D11's premise, in 0133's form: no hid_ role but the owner is a member of
   -- any of the seven tables' owners (MEMBER, so NOINHERIT counts too).
@@ -2195,7 +2195,7 @@ begin
                                              'ehr.vitals'::regclass)) table_owner
               where role_row.rolname like 'hid\_%' and role_row.oid <> table_owner.relowner
                 and pg_has_role(role_row.oid, table_owner.relowner, 'MEMBER')) then
-    raise exception using errcode = '55000', message = '0146 post-check: a hid_ role is a member of a clinical table''s owner';
+    raise exception using errcode = '55000', message = '0145 post-check: a hid_ role is a member of a clinical table''s owner';
   end if;
   foreach function_name in array array[
     'identity.create_unknown_patient(uuid,text,text,integer,text,bytea,text,text,text)',
@@ -2210,13 +2210,13 @@ begin
        or has_function_privilege('public', function_name, 'EXECUTE')
        or (identity_runtime and not has_function_privilege('hid_identity_runtime', function_name, 'EXECUTE'))
        or (ehr_runtime and has_function_privilege('hid_ehr_runtime', function_name, 'EXECUTE')) then
-      raise exception using errcode = '55000', message = '0146 post-check: ' || function_name || ' is not as intended';
+      raise exception using errcode = '55000', message = '0145 post-check: ' || function_name || ' is not as intended';
     end if;
   end loop;
   if has_function_privilege('public', 'ehr.visit_queue_record_kinds(uuid[])', 'EXECUTE')
      or (ehr_runtime and not has_function_privilege('hid_ehr_runtime', 'ehr.visit_queue_record_kinds(uuid[])', 'EXECUTE'))
      or (identity_runtime and has_function_privilege('hid_identity_runtime', 'ehr.visit_queue_record_kinds(uuid[])', 'EXECUTE')) then
-    raise exception using errcode = '55000', message = '0146 post-check: ehr.visit_queue_record_kinds is not as intended';
+    raise exception using errcode = '55000', message = '0145 post-check: ehr.visit_queue_record_kinds is not as intended';
   end if;
   foreach function_name in array array['identity.unknown_patient_actor(text)',
     'identity.unknown_patient_audit(text,uuid,uuid,uuid,uuid,text,text,text,uuid,text,jsonb)',
@@ -2226,7 +2226,7 @@ begin
     if has_function_privilege('public', function_name, 'EXECUTE')
        or (identity_runtime and has_function_privilege('hid_identity_runtime', function_name, 'EXECUTE'))
        or (ehr_runtime and has_function_privilege('hid_ehr_runtime', function_name, 'EXECUTE')) then
-      raise exception using errcode = '55000', message = '0146 post-check: ' || function_name || ' is granted to a role';
+      raise exception using errcode = '55000', message = '0145 post-check: ' || function_name || ' is granted to a role';
     end if;
   end loop;
 end

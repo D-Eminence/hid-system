@@ -68,7 +68,7 @@ describe('PostgresIdentityProvider records-processing cover (0104, owner decisio
   });
 });
 
-describe('PostgresIdentityProvider record kind (0146, ID-7)', () => {
+describe('PostgresIdentityProvider record kind (0145, ID-7)', () => {
   const patientRow = { id: patientId, hid_code: 'HID-UNKAAA2', first_name: 'Unknown', last_name: 'U-0007',
     full_name: 'Unknown patient U-0007', dob: '1990-07-01', gender: 'male', row_version: '2', nin_verified: false };
 
@@ -93,7 +93,7 @@ describe('PostgresIdentityProvider record kind (0146, ID-7)', () => {
     expect(query.mock.calls.some(([sql]) => sql.includes('record_kind') && sql.includes('identity.patients'))).toBe(false);
   });
 
-  it('leaves the kind out before 0146, asking again next time', async () => {
+  it('leaves the kind out before 0145, asking again next time', async () => {
     const { identity, query } = lookups(false);
     const found = await identity.lookupExactHid('HID-UNKAAA2', context);
     expect(found).not.toHaveProperty('recordKind');

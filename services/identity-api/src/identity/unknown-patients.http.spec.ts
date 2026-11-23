@@ -23,7 +23,7 @@ import { UnknownPatientsController } from './unknown-patients.controller';
 import { arrivalNoteLabel, encodeUnknownPatientCursor, UNKNOWN_PATIENT_MESSAGES, UnknownPatientsService,
   unknownPatientContactLabel } from './unknown-patients.service';
 
-// ID-7 (0146): the six routes. The database's own decisions are 0146's suite's
+// ID-7 (0145): the six routes. The database's own decisions are 0145's suite's
 // (services/ehr-api/test/database/unknown-patient-record.integration.sql).
 
 const facilityId = '10000000-0000-4000-8000-000000000002';
@@ -196,7 +196,7 @@ describe('ID-7 routes over HTTP', () => {
       expect(sqlCalls('create_unknown_patient')).toEqual([]);
     });
 
-    it('maps the database\'s refusals and writes one denied row; a database without 0146 is 503 with none', async () => {
+    it('maps the database\'s refusals and writes one denied row; a database without 0145 is 503 with none', async () => {
       for (const [error, status, code] of [
         [databaseError('42501', 'UNKNOWN_PATIENT_SEALED_FACILITY'), 403, 'UNKNOWN_PATIENT_NOT_AVAILABLE'],
         [databaseError('42501', 'UNKNOWN_PATIENT_DENIED'), 403, 'PERMISSION_DENIED'],

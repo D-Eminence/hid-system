@@ -9867,7 +9867,7 @@ facility's own patients, while `registration-capabilities` answers
 `NIN_CHECK_*` or 504 offer to try again after `retryAfterSeconds`, never
 automatically. Never echo the NIN after sending it.
 
-## ID-7. Unknown patient record (Release B, migration 0146; not live until signed)
+## ID-7. Unknown patient record (Release B, migration 0145; not live until signed)
 
 Akos P0-4 and P0-1. The planned contract's "ID-7" is the spec; this section is
 what is built, and lists where it differs. Owner decisions applied: Q100 B (404
@@ -9881,7 +9881,7 @@ a Health ID, so visits, vitals, notes, orders and lab and pharmacy work attach
 to it as usual. It is marked `recordKind: "unknown"`, has no login, no NIN and
 no phone, and is found only at the facility that made it.
 
-### What 0146 changes
+### What 0145 changes
 
 - **Differs from the plan:** `identity.patients` gains no column. The record
   (the facility that made it, the label `U-0001` and up per facility, the
@@ -9894,7 +9894,7 @@ no phone, and is found only at the facility that made it.
   separate. `dateOfBirthEstimated` is true while it is unknown and has a date
   of birth. `identity.patient_record_kind(patientId)` answers the kind for the
   Identity runtime. So no identity table is locked against its readers when
-  0146 is applied.
+  0145 is applied.
 - An unknown record never has a login: a trigger on `identity.patients`
   refuses an account on it (`PATIENT_RECORD_UNKNOWN`).
 - 0131's `identity.own_facility_basis` gains `created_here`: made as unknown
@@ -9991,7 +9991,7 @@ until someone records the phone through the usual patient routes. That
 contact is covered:
 
 - an NDPA erasure or account deletion erases it (0114's eraser, replaced in
-  0146);
+  0145);
 - a cancel nulls it, with the held details;
 - ID-2's registration counts an identified record's held phone as a phone
   match, and a record in review whose held details match as an open
@@ -10049,7 +10049,7 @@ cancelled."
 | 409 | `UNKNOWN_PATIENT_CANCELLED` | "This record was cancelled." (not in the plan) |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | existing |
 | 412 | `VERSION_CONFLICT` | "Someone else changed this record. Reload it and try again." |
-| 503 | `UNKNOWN_PATIENT_UNAVAILABLE` | "Unknown patient records are not available right now." (a database without 0146) |
+| 503 | `UNKNOWN_PATIENT_UNAVAILABLE` | "Unknown patient records are not available right now." (a database without 0145) |
 
 Audit: the database writes one row per success and per not-found
 (`identity.unknown-patient.create`, `.list` plus one `.list.shown` per card,
@@ -10070,12 +10070,12 @@ phone, Health ID or the arrival note.
   basis and uses break-glass.
 - **Search, `patient-lookup`, the staff patient profile (staff chat) and the
   waiting list** gain `recordKind` (`standard` or `unknown`); Identity reads it
-  through `identity.patient_record_kind` where 0146 is applied. The
+  through `identity.patient_record_kind` where 0145 is applied. The
   waiting-list cards (EHR-C7) also gain
   `dateOfBirthEstimated`; ehr-api reads both from
-  `ehr.visit_queue_record_kinds` where 0146 is applied, and leaves them out
+  `ehr.visit_queue_record_kinds` where 0145 is applied, and leaves them out
   where it is not.
-- **ID-2 (0130's registration, replaced in 0146):** a record that is still
+- **ID-2 (0130's registration, replaced in 0145):** a record that is still
   unknown is never a candidate. A stated Health ID that is this facility's
   unknown record answers 409 `PATIENT_RECORD_UNKNOWN` ("This Health ID belongs
   to an unknown patient record at this facility. Identify that record

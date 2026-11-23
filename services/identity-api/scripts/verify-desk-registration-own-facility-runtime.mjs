@@ -276,7 +276,7 @@ try {
      where action = 'security.authorization' and outcome = 'denied' and actor_account_id = any($1::uuid[])`,
     [[members.desk.account, members.lab.account, members.pharmacist.account]])).rows[0].n;
   assert(guardDenials >= 4, 'Every refused member is audited');
-  // One row per registration and decision; 0146 (ID-7) also audits the registration's replay, as its own row.
+  // One row per registration and decision; 0145 (ID-7) also audits the registration's replay, as its own row.
   const registrationAudits = (await pool.query(`select count(*)::integer as n,
        count(*) filter (where details ? 'replayed')::integer as replays from audit.events
      where action in ('identity.registration.without-nin', 'identity.registration.without-nin.review')

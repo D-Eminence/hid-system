@@ -12,7 +12,7 @@ it('returns only the authorized staff lookup profile fields',async()=>{
   const s=setup();expect(await s.service.staffPatientProfile('patient-a',s.context)).toEqual({patientId:'patient-a',version:4,
     firstName:'Synthetic',lastName:'Patient',fullName:'Synthetic Patient',dateOfBirth:null,gender:null,recordKind:'standard'});
 });
-it('carries the record kind of an unknown patient record (0146, ID-7)',async()=>{
+it('carries the record kind of an unknown patient record (0145, ID-7)',async()=>{
   const s=setup();s.provider.lookupPatientId.mockResolvedValue({id:'patient-a',rowVersion:2,firstName:'Unknown',lastName:'U-0007',
     fullName:'Unknown patient U-0007',dateOfBirth:'1990-07-01',gender:'male',recordKind:'unknown'} as never);
   expect(await s.service.staffPatientProfile('patient-a',s.context)).toEqual(expect.objectContaining({recordKind:'unknown'}));
