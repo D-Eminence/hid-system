@@ -9920,9 +9920,9 @@ The receiving pharmacy reads a route-backed item, and so its notice, only
 while the route allows reads: until 14 days after the dispensing, and never
 more than 45 days after acceptance (0086). Entering the prescription in
 error after the dispensing ends that access at once: for a member without a
-consent grant of their own, the item leaves the list, a read answers 409
-`ORDER_ROUTE_CLOSED` "This prescription from another facility is closed:
-stop work on it", and the patient is told (`ORDER_ROUTE_CANCELLED`, 0086).
+consent grant of their own, the item leaves the list, a read answers 404
+`PHARMACY_WORK_ITEM_NOT_FOUND` (the item is no longer readable), and the
+patient is told (`ORDER_ROUTE_CANCELLED`, 0086).
 So such a member never sees "entered in error" on that item; a member with a
 consent grant of their own still reads the item and the notice. A hold, a
 cancellation, an edit or a resume after the dispensing leaves the route
@@ -10159,7 +10159,7 @@ after `dispensed_at` and a version above the item's.
 the hospital's doctor holds it, and the outside pharmacist reads `on_hold`,
 1, with `orderRoute.orderingFacilityName`, while the hospital's pharmacist
 reads nothing; entered in error, the item leaves the outside pharmacy's list
-and its read answers 409 `ORDER_ROUTE_CLOSED`; the same race through the
+and its read answers 404 `PHARMACY_WORK_ITEM_NOT_FOUND`; the same race through the
 route (the PATCH waiting in `prescriptions_order_routes_sync`) records one
 row; and, on the disposable database only, with the trigger renamed to sort
 before the route sync, the race records none (the name order matters), after

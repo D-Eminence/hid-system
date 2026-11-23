@@ -1471,6 +1471,41 @@ try {
   assert.equal(typeof rx9Progress.ownProgress.receivedAt, 'string');
   assert.deepEqual([rx9Progress.orderRoute?.id, rx9Progress.orderRoute?.receivingFacility?.name],
     [rx9Route.id, pharmacyFacility.name]);
+  // Q132 A (V5): after rx9's dispensing at the outside pharmacy, the hospital's doctor puts rx9 on hold. The outside
+  // pharmacist, who dispensed it, reads on_hold (one change) beside the route's card naming the ordering facility;
+  // the hospital's own item, sent elsewhere and never dispensed, shows nothing. Then the doctor marks rx9 entered
+  // in error: that closes the route at once (0086), so the item leaves the outside list and its read answers 404
+  // PHARMACY_WORK_ITEM_NOT_FOUND (the stated limit: a receiving pharmacy without a grant never sees "entered in
+  // error"); both changes are still recorded.
+  const rx9HeldAfter = expectStatus(await ehrCall(doctor, 'PATCH', `${enc}/prescriptions/${rx9.id}`,
+    { expectedRowVersion: Number(rx9Progress.rowVersion), status: 'on_hold',
+      changeReason: 'Synthetic hold after the outside dispensing' }), 200, 'hold rx9 after its outside dispensing');
+  const rx9OutsideHeld = expectStatus(await pharmacyCall(pharmacist, 'GET', `/work-items/${rx9Item.id}`), 200,
+    'rx9 at the outside pharmacy after the hold');
+  assert.deepEqual([rx9OutsideHeld.changedAfterDispensing?.change, rx9OutsideHeld.changedAfterDispensing?.changeCount,
+    typeof rx9OutsideHeld.changedAfterDispensing?.changedAt, rx9OutsideHeld.orderRoute?.orderingFacilityName],
+  ['on_hold', 1, 'string', hospital.name], `rx9's outside item after the hold: ${JSON.stringify(rx9OutsideHeld)}`);
+  const rx9OutsideListed = expectStatus(await pharmacyCall(pharmacist, 'GET', '/work-items'), 200,
+    'the outside list after the hold').items.find(item => item.id === rx9Item.id);
+  assert.equal(rx9OutsideListed?.changedAfterDispensing?.change, 'on_hold',
+    `rx9 on the outside list after the hold: ${JSON.stringify(rx9OutsideListed)}`);
+  const rx9OwnAfterHold = expectStatus(await pharmacyCall(hospitalPharmacist, 'GET', `/work-items/${rx9Own.id}`), 200,
+    'the hospital\'s rx9 item after the hold');
+  assert.equal(rx9OwnAfterHold.changedAfterDispensing, undefined,
+    `the hospital's undispensed rx9 item shows no change: ${JSON.stringify(rx9OwnAfterHold.changedAfterDispensing)}`);
+  expectStatus(await ehrCall(doctor, 'PATCH', `${enc}/prescriptions/${rx9.id}`,
+    { expectedRowVersion: Number(rx9HeldAfter.rowVersion), status: 'entered_in_error',
+      changeReason: 'Synthetic entry in error after the outside dispensing' }), 200, 'rx9 entered in error');
+  assert(!expectStatus(await pharmacyCall(pharmacist, 'GET', '/work-items'), 200, 'the outside list after the error')
+    .items.some(item => item.id === rx9Item.id), 'rx9 leaves the outside list once entered in error');
+  expectProblem(await pharmacyCall(pharmacist, 'GET', `/work-items/${rx9Item.id}`), 404, 'PHARMACY_WORK_ITEM_NOT_FOUND');
+  const rx9Changes = await all(`select status_before, status_after from pharmacy.prescription_changes_after_dispensing
+    where work_item_id = $1 order by prescription_version`, [rx9Item.id]);
+  assert.deepEqual(rx9Changes.map(row => [row.status_before, row.status_after]),
+    [['active', 'on_hold'], ['on_hold', 'entered_in_error']], `rx9's recorded changes: ${JSON.stringify(rx9Changes)}`);
+  const q132Route = { heldAfterOutsideDispensing: 'on_hold (1) with the ordering facility', hospitalItem: 'nothing',
+    enteredInError: 'route closed: left the outside list, read 404 PHARMACY_WORK_ITEM_NOT_FOUND; both changes recorded' };
+  step('Q132 A: a hold after the outside dispensing shows on the outside item; an entry in error closes the route');
   // rx10: sent to the hospital's pharmacy, then elsewhere, then declined there. It never comes back to the
   // hospital's pharmacy ("Send to pharmacy" answers routed); it can still be sent to another outside pharmacy.
   const rx10 = await newPrescription('active');
@@ -1491,7 +1526,7 @@ try {
     .items.some(item => item.sourceEhrPrescriptionId === rx10.id), 'rx10 came back to the hospital\'s list');
   assert.equal((await one(`select count(*)::int as n from pharmacy.work_items where source_ehr_prescription_id = $1
       and order_route_id is null`, [rx10.id])).n, 1, 'rx10 has one own item, withdrawn');
-  const sentElsewhere = { rx9: { route: 201, hospitalList: 'left out', readById: 'withdrawn, sent_elsewhere',
+  const sentElsewhere = { q132: q132Route, rx9: { route: 201, hospitalList: 'left out', readById: 'withdrawn, sent_elsewhere',
     dispense: `409 ${rx9OwnDispense.code} (sent_elsewhere)`, sendToPharmacyWhileRouted: 'PRESCRIPTION_ROUTED',
     outsidePharmacy: { accept: 201, dispense: 201 }, database: rx9Held, ownProgress: rx9Progress.ownProgress.status,
     ord4: { pharmacyStep: 'accepted, then dispensed', acceptedWith: 'order_route (the route\'s member, the item\'s time)',
