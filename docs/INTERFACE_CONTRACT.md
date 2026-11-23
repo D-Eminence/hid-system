@@ -9645,9 +9645,11 @@ hospital's item in the same transaction ("sent elsewhere"):
 - A prescription has one item of this hospital's own and at most one
   route-backed item. Once it is sent elsewhere, only the route-backed item
   can be dispensed.
-- The database allows at most one dispensing across the two pharmacies,
-  whichever image asks. It refuses to dispense an item sent elsewhere with
-  23514 `PRESCRIPTION_SOURCE_NOT_DISPENSABLE`, DETAIL `sent_elsewhere`.
+- The database allows dispensing at one of the two pharmacies only,
+  whichever image asks (with ORD-12, 0152, the hospital's own item may take
+  refills after its first fill; a route-backed item takes one fill). It
+  refuses to dispense an item sent elsewhere with 23514
+  `PRESCRIPTION_SOURCE_NOT_DISPENSABLE`, DETAIL `sent_elsewhere`.
 - The item stays withdrawn whatever happens to the route. If the outside
   pharmacy declines it, the route lapses, or the clinician or the patient
   withdraws it, the prescription does not come back to this hospital's
@@ -10429,19 +10431,18 @@ change after 0148 (no backfill).
   seen. No audit or outbox row, and no change to the progress call.
 - `pharmacyStep` (ORD-4) stays `dispensed` or `dispensing_reversed`;
   `status`, `acceptedAt`, `version` and `dispensing` keep their meaning.
-- With ORD-12 (refills, 0149-0150) "after dispensing" means after the first
-  fill, and `resumed` compares with the first fill's content. 0148 pins
-  `pharmacy.claim_prescription_dispensing()` (md5
+- With ORD-12 (refills, 0152, provisional) "after dispensing" means after
+  the first fill, and `resumed` compares with the first fill's content.
+  0148 pins `pharmacy.claim_prescription_dispensing()` (md5
   2c7f20d7c0df7c582bccc0291f452fdd), which sets `dispensed_at` only while it
-  is null and today refuses a second fill (23514
-  `PRESCRIPTION_SOURCE_NOT_DISPENSABLE`, DETAIL `not_claimed`), so ORD-12
-  replaces it, keeps `dispensed_at` as the first fill's and never clears it.
-  0148 merges before 0149-0150, or is pinned again if ORD-12 lands first.
-  ORD-12's create-only `refills_allowed` column is added to the
-  fingerprint's left-out fields by ORD-12, replacing the trigger function,
-  or the first resume after ORD-12 reads `edited`. After any change, 0101's
-  version check refuses the next refill; ORD-12 decides what a refill after
-  a change means.
+  is null and refuses a second fill (23514
+  `PRESCRIPTION_SOURCE_NOT_DISPENSABLE`, DETAIL `not_claimed`), so 0148 runs
+  before 0152, which replaces it and keeps `dispensed_at` as the first
+  fill's, never cleared. 0152's `refills_allowed` column is nullable, so it
+  changes no fingerprint and the trigger function is not replaced (an
+  owner's repair of the value after dispensing shows as `edited`). After any
+  change, 0101's version check refuses the next refill ("ORD-12. Prescription
+  refills" below).
 
 ### Work item answers
 
@@ -12105,3 +12106,168 @@ when `dateOfBirthEstimated`, and "NIN Not Verified". On `sent_for_review`
 show the message and nobody else's details. After `identified`, offer
 "Verify NIN" (ID-6). Never show `firstName`/`lastName` of a record whose
 `recordKind` is `unknown`.
+
+## ORD-12. Prescription refills (migration 0152, provisional; not live until signed)
+
+Owner decision Q131 A of 19 November 2026 ("yes to refills"), built to the
+clinical owner's design note on hid-system#258 (Ola, 23 November 2026). The
+planned contract's ORD-12 section is the spec. Migration 0152 needs
+0001-0146 and 0148 applied and checks that in its section 0; its number is
+provisional (the next after 0148-0151), and nothing here is live until the
+owner signs the declaration that names it. The services' part (ehr-api's
+`refillsAllowed`, pharmacy-api's fill number and refusals, the
+event-dispatcher's `fillNumber`, `@hid/api-client`) sits behind
+`PRESCRIPTION_REFILLS_ENABLED`, off by default, and is added to this section
+with its build; with the setting off every answer is today's. Release order:
+0147, 0148, 0149-0151, then 0152; then pharmacy-api, ehr-api and the
+website; the setting on last.
+
+What staff get: the prescriber sets refills 0-11 when writing the
+prescription (left out: none) and never edits it afterwards; this
+hospital's own pharmacy records up to 1 + refills fills on the one work item,
+and a reversed fill still counts; a refill needs the prescription still
+active, unchanged since the item was accepted, and its end date (the Lagos
+day) not past; a prescription sent to another facility's pharmacy gets one
+fill, as today. Any change after the first fill, a hold then resume
+included, ends the remaining refills (0101's version check, the owner
+decision at 0101:48-54).
+
+### The database (0152)
+
+- `ehr.prescriptions.refills_allowed smallint`, nullable, no default, with
+  the CHECK `prescriptions_refills_allowed_ck` (`refills_allowed is null or
+  refills_allowed between 0 and 11`). Null means none: every row written
+  before 0152 and every row an image without ORD-12 writes (they name their
+  columns). ehr-api sets it at creation only; its PATCH never names it. It is
+  nullable so that 0148's fingerprint (`jsonb_strip_nulls`, "The database
+  (0148)" above) changes for no existing prescription: a resume of an item
+  whose hold 0148 recorded before 0152 still reads `resumed` (proved on a
+  database taken from 0148 to 0152 by the runner), 0148's trigger function
+  is not replaced (its md5 f61173d77be391a9e9c96db494827e82 is checked
+  unchanged), and an owner's repair that sets the value after dispensing
+  shows as a change (`edited`). The EHR runtime's table-wide SELECT, INSERT
+  and UPDATE cover the column; no grant changes.
+- `pharmacy.dispensings.fill_number smallint not null default 1`, with the
+  CHECK `dispensings_fill_number_ck` (1-12): 1 is the first fill, 2 and above
+  refills. Every row recorded before 0152 reads 1 (0023's key allowed one
+  per item, and the rows are immutable); an INSERT that names no fill number
+  (Release A and B pharmacy-api, 0102's demo install) records fill 1, as
+  today. The Pharmacy runtime's table-wide SELECT and INSERT cover it.
+- `UNIQUE (work_item_id, fill_number)`, `dispensings_work_item_fill_number_key`,
+  replaces 0023's unnamed `UNIQUE (work_item_id)`. One row per fill number:
+  a second fill 1 (today's INSERT again) or two refills of one item with the
+  same number recorded at once meet it. Two refills at once both pass the
+  dispensing check (each holds the prescription FOR SHARE, which does not
+  wait for the other); the second waits on the key and, once the first
+  commits, fails 23505 under READ COMMITTED and 40001 under SERIALIZABLE
+  (pharmacy-api's isolation, after its read of the item's dispensings);
+  either way one fill is recorded. Fill numbers need not be contiguous in
+  the database; the bound is on how many rows an item can have.
+- `pharmacy.validate_dispensing()` (BEFORE INSERT, origin mode) is 0101's
+  text with one block before its RETURN (md5
+  61a927efcf0626ac434d2f894b319b4d; the body without the block is 0101's
+  17f7e8897bd2ab240332e4d2c9f757b7). The order-route branch, 0077's actor
+  and work-item check and 0101's prescription check answer first, as
+  before. Then, for `fill_number > 1` only: a route-backed item, or an own
+  item past `1 + coalesce(refills_allowed, 0)` fills, is refused 23514
+  `NO_REFILLS_LEFT`; an own item whose prescription's `ends_on` is before
+  today in Lagos (`(clock_timestamp() at time zone 'Africa/Lagos')::date`,
+  whatever the session's time zone; `ends_on` itself is the last day) is
+  refused 23514 `REFILL_PRESCRIPTION_ENDED`. A first fill is not checked
+  against `ends_on` (unchanged). The values are those of the prescription
+  row 0101 reads FOR SHARE, which must be active at the version the item
+  was accepted at, so a refill after any change is refused 23514
+  `PRESCRIPTION_SOURCE_NOT_DISPENSABLE`, as a first fill is. On a
+  route-backed item, a fill after the first is refused `ORDER_ROUTE_CLOSED`
+  first (the first fill completed the route).
+- `pharmacy.claim_prescription_dispensing()` (0133 D14, AFTER INSERT,
+  enabled always; md5 1a50612f5330a36c9b64d0d831c77812): fill 1 exactly as
+  0133 made it (the item's live, undispensed claim is marked dispensed);
+  fill 2 and above need the item's claim live, dispensed and its own (no
+  order route) and change nothing; else 23514
+  `PRESCRIPTION_SOURCE_NOT_DISPENSABLE` with DETAIL `sent_elsewhere` (the
+  claim was released by a send elsewhere) or `not_claimed`. `dispensed_at`
+  stays the first fill's for good, so 0133's and 0144's readers and 0148's
+  "after dispensing" mean after the first fill; an acceptance (0144) after
+  any fill is still refused `not_claimed` (refills need none). It reads only
+  the claims, never `ehr.prescriptions`, so 0133 D5's list of owner-run
+  functions that read prescriptions is unchanged.
+- Replica mode skips the dispensing check (origin mode), so the refill count
+  and the end date are not enforced there (the clinical owner's call: no
+  replica-mode writer records refills). What holds in every mode: the claim
+  function (no refill of an item never dispensed, sent elsewhere or
+  route-backed), the CHECK (at most 12 fills) and the key.
+- A reversal is unchanged (one per dispensing, by its id); the reversed fill
+  keeps its number, so it still counts.
+- Nothing else changes: no trigger, policy, grant, row-level security
+  setting or other function; `runtime-grants.sql` is unchanged. The readers
+  0133 and 0144 give pharmacy-api test whether a dispensing exists, so they
+  answer one row per item after refills.
+- Before anything is applied, section 0 reads the catalog only (55000;
+  42501 for the owner and the applier): 0001-0148 applied (0148's table and
+  functions, 0144's acceptances, 0133's claims); not applied yet ("0152:
+  already applied" when both bodies, both columns and the new key are
+  there; a run of the file on such a database changes nothing); no column or
+  constraint of its names; the columns the bodies read, by name and type;
+  the md5, attributes and ACL of the two bodies it replaces (0101's
+  17f7e8897bd2ab240332e4d2c9f757b7 and 0133's
+  2c7f20d7c0df7c582bccc0291f452fdd), 0133's work-item claim and 0148's
+  recorder; exactly one key on `pharmacy.dispensings` over `work_item_id`
+  alone; the five triggers on `pharmacy.dispensings` with their modes
+  (origin: the dispensing check, the immutability guard, 0086's route
+  return; always: 0133's claim and key guard); one owner of the tables and
+  functions, whom the applier is or may become; row-level security as 0133
+  left it; 0133 D5's premise. Post-checks pin both bodies (md5, owner,
+  attributes, ACL), both columns, both CHECKs (validated), the keys, the
+  five triggers, 0148's order of the AFTER UPDATE triggers on
+  `ehr.prescriptions`, that no other owner-run definer function changed,
+  and the two tables' owner, row-level security and ACL.
+- Locks: one attempt takes ACCESS SHARE NOWAIT on `pharmacy.work_items` and
+  `ehr.order_routes` (compiling the dispensing check resolves their row
+  types), then ACCESS EXCLUSIVE NOWAIT on `pharmacy.dispensings` and
+  `ehr.prescriptions`; a busy table fails the attempt at once, tried again
+  every 100 ms for 5 seconds, then 55P03 "0152: pharmacy.dispensings,
+  ehr.prescriptions, pharmacy.work_items or ehr.order_routes stayed busy for
+  5 seconds; nothing applied; run the release again at a quieter time"; one
+  attempt only, with "... is busy, and this transaction already holds an
+  earlier migration's locks, so it does not wait; nothing applied; ...",
+  when the transaction already holds an earlier migration's locks (the
+  runner's dry run). Both are texts the runner's dry run retries
+  (`dry-run-attempts.test.mjs` feeds it the file's own). The functions are
+  replaced after the locks. From the locks to commit every read and write
+  of prescriptions and dispensings waits; reads and writes of the work
+  items and the routes do not. Measured on 20,000 prescriptions, own work
+  items and dispensings, with a superuser applier and with a NOSUPERUSER
+  NOBYPASSRLS one: the file takes 36-56 ms and the hold 22-34 ms; behind an
+  open reader, a writer, a SHARE UPDATE EXCLUSIVE holder or DDL on either
+  altered table, or DDL on the work items or the routes, it stops after
+  4.98-5.01 seconds, nothing applied, and blocks nobody; through the runner,
+  a dry run refused that way passed on its next attempt, and an apply
+  refused that way recorded nothing and applied once the table was free.
+- Undo is by hand only, in 0152's header's order: the setting off; then,
+  to stop refills in the database for every image, 0101's and 0133's bodies
+  put back (0133's claim function refuses any dispensing of an item already
+  dispensed; recorded fills stay); 0023's one-fill key comes back only when
+  no row has `fill_number > 1` (counted with FORCE ROW LEVEL SECURITY lifted
+  for that transaction); `refills_allowed` can stay. The database suite
+  shows the first step: refills refused, first fills recorded, nothing lost.
+
+### Runtime proof
+
+The database suite `prescription-refills` holds the cases, through the EHR
+and Pharmacy runtimes with their exact statements and settings, under a
+superuser owner and a NOSUPERUSER NOBYPASSRLS one: the structure; fills 1
+to 1 + N for N = 0, 1, 2 and 11 and the next refused; null as one fill;
+`dispensed_at` the first fill's; the end date on its last day and the day
+after (a first fill after it still recorded), under far time zones; a
+route-backed item's one fill and its released own item; a refill after an
+edit, a hold then resume, and a completion; the key and the CHECKs; replica
+mode; a reversed fill; 0148's fingerprint before and after 0152 and an
+owner's repair; 0144's acceptance and 0133's and 0144's readers after
+refills; and the undo's first step. Each clause of the two functions and
+each constraint is shown to matter: a copy without it, applied after the
+suite's structure case, fails a named case (two clauses restate what the
+others already enforce; the commit message lists them). The suites that
+pinned the old bodies or the old key (`pharmacy-dispensing-source`,
+`prescription-dispensing-details`, `own-facility-pharmacy-lab-work`,
+`prescription-changes-after-dispensing` and the schema suite) pin 0152's.
