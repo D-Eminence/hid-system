@@ -1891,3 +1891,13 @@ revoke all on pharmacy.own_prescription_sends, pharmacy.prescription_item_claims
 -- The sealed QA tenant's pharmacist and lab scientist at QA Hospital (0134):
 -- its install is the owner's alone.
 revoke all on function identity.sealed_qa_hospital_work_staff_install() from public;
+
+-- A NIN verified later and linked at this facility's desk (0138, ID-6),
+-- exactly as 0138 grants: the precheck and the link to the Identity and
+-- schema test runtimes, no other; no grant on identity.patient_nin_links.
+grant execute on function identity.patient_nin_link_precheck(uuid, char, text, char),
+  identity.link_patient_nin(uuid, uuid, char, bytea, text, char, text, boolean, text, char)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function identity.patient_nin_link_precheck(uuid, char, text, char),
+  identity.link_patient_nin(uuid, uuid, char, bytea, text, char, text, boolean, text, char) from public;
+revoke all on identity.patient_nin_links from public;
