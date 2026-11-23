@@ -155,6 +155,15 @@ describe('PatientNinLinkService (ID-6, 0138)', () => {
     expect(event.resourceId).toBe(PATIENT);
   });
 
+  it('answers an unknown patient record (ID-7) 409 PATIENT_NOT_IDENTIFIED, with no NIN check', async () => {
+    const { service, registrations, audit } = harness({ precheck: { decision: 'unknown_record' } });
+    await expect(service.link(PATIENT, input(), KEY, context)).rejects.toMatchObject({ status: 409,
+      code: 'PATIENT_NOT_IDENTIFIED' });
+    expect(registrations.checkNinForLink).not.toHaveBeenCalled();
+    expect(auditDetails(audit)).toEqual([expect.objectContaining({ outcome: 'denied', patientId: PATIENT,
+      details: expect.objectContaining({ refusal: 'not_identified', qoreidCalled: false }) })]);
+  });
+
   it('answers the same NIN already on the record with no NIN check', async () => {
     const { service, registrations, audit } = harness({ precheck: { decision: 'already_linked' } });
     await expect(service.link(PATIENT, input(), KEY, context)).resolves.toEqual({

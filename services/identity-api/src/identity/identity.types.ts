@@ -13,6 +13,8 @@ export interface IdentityPatient {
   rowVersion: number;
   /** ID-0: the patient holds a checked NIN that has not been revoked. */
   ninVerified?: boolean;
+  /** 0145 (ID-7): an unknown patient record (placeholder names; show fullName, never first and last). */
+  recordKind?: 'standard' | 'unknown';
 }
 
 export interface AuthorizationRequest {

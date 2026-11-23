@@ -276,10 +276,13 @@ try {
      where action = 'security.authorization' and outcome = 'denied' and actor_account_id = any($1::uuid[])`,
     [[members.desk.account, members.lab.account, members.pharmacist.account]])).rows[0].n;
   assert(guardDenials >= 4, 'Every refused member is audited');
-  const registrationAudits = (await pool.query(`select count(*)::integer as n from audit.events
+  // One row per registration and decision; 0145 (ID-7) also audits the registration's replay, as its own row.
+  const registrationAudits = (await pool.query(`select count(*)::integer as n,
+       count(*) filter (where details ? 'replayed')::integer as replays from audit.events
      where action in ('identity.registration.without-nin', 'identity.registration.without-nin.review')
-       and facility_id = $1 and outcome = 'success'`, [ids.facA])).rows[0].n;
-  assert.equal(registrationAudits, 3);
+       and facility_id = $1 and outcome = 'success'`, [ids.facA])).rows[0];
+  assert.equal(registrationAudits.n - registrationAudits.replays, 3);
+  assert(registrationAudits.replays <= 1, 'At most the one replay is audited as a replay');
   assert(!answers.some(answer => /unverified/i.test(answer)), 'No answer says "unverified"');
 
   process.stdout.write(JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', role: 'hid_identity_api_runtime',

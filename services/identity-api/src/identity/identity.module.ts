@@ -8,6 +8,8 @@ import { IdentityController } from './identity.controller';
 import { NinRegistrationController } from './nin-registration.controller';
 import { RegistrationWithoutNinService } from './registration-without-nin.service';
 import { PatientNinLinkService } from './patient-nin-link.service';
+import { UnknownPatientsController } from './unknown-patients.controller';
+import { UnknownPatientsService } from './unknown-patients.service';
 import { PostgresIdentityProvider } from './postgres-identity.provider';
 import { IdentityService } from './identity.service';
 import { RecordAccessNoticeService } from './record-access-notice.service';
@@ -61,7 +63,7 @@ import { OutreachHealthIdService } from './outreach-health-id.service';
 @Module({
   // NinCheckOnceModule: every patient NIN check through QoreID, once per NIN (0137).
   imports: [AuthModule, TurnstileModule, IntegrationModule, NinCheckOnceModule],
-  controllers: [IdentityController, NinRegistrationController, QoreIdVerificationController,
+  controllers: [IdentityController, NinRegistrationController, UnknownPatientsController, QoreIdVerificationController,
     PublicOrganizationApplicationsController, PublicOrganizationProfileCompletionController,
     AdminOrganizationApplicationsController,
     PatientEnrollmentController,
@@ -89,6 +91,7 @@ import { OutreachHealthIdService } from './outreach-health-id.service';
     // ID-2 (0130): registration at the desk without a NIN.
     RegistrationWithoutNinService,
     PatientNinLinkService,
+    UnknownPatientsService,
     // ID-0: one NIN service breaker per process, shared by resolve and registration-capabilities.
     NinProviderBreaker,
     FacilityProfileService,
