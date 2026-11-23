@@ -567,8 +567,9 @@ select pg_temp.expect('6a a role row not as 0136 left it is refused, naming it',
   pg_temp.answer(:'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made());
 rollback to savepoint variant;
 
--- SX-4's change function not as Release B leaves it: a changed body, or
--- EXECUTE granted to PUBLIC. 0147 refuses before it changes anything.
+-- SX-4's change function not as Release B leaves it: a changed body,
+-- EXECUTE granted to PUBLIC, or another attribute (cost). 0147 refuses
+-- before it changes anything.
 do $$
 declare
   apply_oid regprocedure := 'identity.staff_role_change_apply(identity.staff_facility_memberships,bigint,text,text,'
@@ -579,7 +580,8 @@ end $$;
 :run0147
 select pg_temp.expect('6b SX-4''s change function with another body is refused',
   '55000 0147: identity.staff_role_change_apply is not as Release B leaves it (0139''s body, SECURITY INVOKER with its '
-  || 'search_path, EXECUTE for neither PUBLIC nor the Identity runtime); nothing applied | 0 roles, 0 rows, 0 grants, 0 audit rows',
+  || 'search_path and its other attributes, EXECUTE for neither PUBLIC nor the Identity runtime); nothing applied '
+  || '| 0 roles, 0 rows, 0 grants, 0 audit rows',
   pg_temp.answer(:'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made());
 rollback to savepoint variant;
 grant execute on function
@@ -588,7 +590,18 @@ grant execute on function
 :run0147
 select pg_temp.expect('6c SX-4''s change function executable by PUBLIC is refused',
   '55000 0147: identity.staff_role_change_apply is not as Release B leaves it (0139''s body, SECURITY INVOKER with its '
-  || 'search_path, EXECUTE for neither PUBLIC nor the Identity runtime); nothing applied | 0 roles, 0 rows, 0 grants, 0 audit rows',
+  || 'search_path and its other attributes, EXECUTE for neither PUBLIC nor the Identity runtime); nothing applied '
+  || '| 0 roles, 0 rows, 0 grants, 0 audit rows',
+  pg_temp.answer(:'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made());
+rollback to savepoint variant;
+alter function
+  identity.staff_role_change_apply(identity.staff_facility_memberships,bigint,text,text,text,text,text,text,uuid,uuid,text)
+  cost 50;
+:run0147
+select pg_temp.expect('6d SX-4''s change function with another attribute (cost) is refused before the counts',
+  '55000 0147: identity.staff_role_change_apply is not as Release B leaves it (0139''s body, SECURITY INVOKER with its '
+  || 'search_path and its other attributes, EXECUTE for neither PUBLIC nor the Identity runtime); nothing applied '
+  || '| 0 roles, 0 rows, 0 grants, 0 audit rows',
   pg_temp.answer(:'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made());
 rollback to savepoint variant;
 
@@ -833,8 +846,8 @@ rollback to savepoint sx4;
 
 do $$
 begin
-  if currval('q137b_passed') <> 54 then
-    raise exception '0147 narrow roles suite failed: % cases ran, 54 expected', currval('q137b_passed');
+  if currval('q137b_passed') <> 55 then
+    raise exception '0147 narrow roles suite failed: % cases ran, 55 expected', currval('q137b_passed');
   end if;
   raise notice '0147 narrow roles suite: % cases passed', currval('q137b_passed');
 end $$;

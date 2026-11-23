@@ -163,8 +163,10 @@
 -- at once. The preconditions, and the check whether this transaction already
 -- holds an earlier migration's locks, read the catalog (pg_proc, pg_language,
 -- pg_roles, pg_authid, pg_class, pg_database, pg_db_role_setting,
--- pg_description, pg_namespace, pg_locks) at ACCESS SHARE, kept until commit
--- (they conflict only with ACCESS EXCLUSIVE on a catalog). Those are not
+-- pg_namespace, pg_locks), and 3b and the post-checks read pg_description,
+-- at ACCESS SHARE, kept until commit (they conflict only with ACCESS
+-- EXCLUSIVE on a catalog); the check's (pg_class, pg_namespace, pg_database,
+-- pg_locks) are held from before the first attempt, across its retries. Those are not
 -- taken NOWAIT, as only DDL on that function, schema, type or language would
 -- make them wait, and no service runs DDL. (Measured with pg_locks before
 -- commit, at 9, 1 and 1 and at 0, 0 and 0, on a database 0147 had not
@@ -173,8 +175,14 @@
 -- EXCLUSIVE on identity.staff_facility_memberships, for the transaction:
 -- every membership change and every lock on a membership row (including the
 -- foreign key checks of rows that name a membership) waits until 0147
--- commits; plain reads go on. It keeps every counted membership as counted
--- until commit, and it is what makes D5 hold for an SX-4 change in flight.
+-- commits; plain reads go on. It keeps every counted membership row
+-- unchanged until commit, and it is what makes D5 hold for an SX-4 change
+-- in flight. The converse is the cost: 0147 gets the lock only at a moment
+-- when no transaction holds a membership row lock or has written a row that
+-- names a membership, and every audited staff request writes one (its audit
+-- row); under steady staff traffic all 50 attempts can fail, nothing
+-- applied, so run it at a quiet time (as Release B's 0145, which took ACCESS
+-- EXCLUSIVE on seven clinical tables, was run).
 -- An SX-4 command locks the member's membership row (FOR NO KEY UPDATE)
 -- before it calls SX-4's change function. One already in flight holds the
 -- table at ROW SHARE, so 0147's attempt fails and counts again once that
@@ -189,19 +197,25 @@
 -- subtransaction releases every lock the attempt took, so a change in flight
 -- (an SX-4 change, which also writes auth.account_roles, for example) goes on
 -- and finishes, and the next attempt counts again. The attempt is made 50
--- times, 100 ms apart (about 5 seconds), so the file never waits while
--- holding a table or row lock and no request queues behind a waiting lock;
--- then 55P03 (nothing applied; the release can run again). When this
+-- times, 100 ms apart (about 5 seconds), so the file never waits for one of
+-- its step-0 locks while holding the others, and no request queues behind
+-- such a wait; then 55P03 (nothing applied; the release can run again). When this
 -- transaction already holds an earlier migration's locks that stop other
 -- sessions' reads or writes (the runner's dry run applies every pending file
 -- in one transaction), one attempt and no sleep: 55P03 at once, nothing
--- applied, instead of keeping those locks while this file waits. Two waits
--- are not NOWAIT, and the runner's lock_timeout ends either at once (nothing
--- applied, not retried): an index or catalog that maintenance holds (a
--- REINDEX, for example) while the count is planned, and, at 9, 1 and 1 only,
--- a row of auth.accounts, identity.facilities, identity.outreach_organisations
--- or identity.organization_applications that another session holds FOR
--- UPDATE when the grants' foreign key checks and triggers lock it.
+-- applied, instead of keeping those locks while this file waits. Other
+-- waits are not NOWAIT, and the runner's lock_timeout ends each after 5
+-- seconds (55P03 lock timeout: not a busy refusal, so not retried; nothing
+-- applied). During such a wait 0147 keeps every step-0 lock, so staff writes
+-- that name a membership and role writes queue behind it until then. They
+-- are: an index or catalog that maintenance holds (a REINDEX, for example),
+-- at any step, until 0147 first opens it; a row of auth.permissions (the
+-- foreign key checks of the three new role rows, at any counts) that another
+-- session holds FOR UPDATE; and, at 9, 1 and 1, a row of auth.accounts or
+-- identity.facilities that another session holds FOR UPDATE, or of
+-- identity.outreach_organisations or identity.organization_applications that
+-- another session is updating or holds FOR UPDATE (the grants' foreign key
+-- checks and the triggers' FOR SHARE).
 --
 -- Undo (not in the ledger; a migration only if the owner signs it): mark both
 -- roles inactive (update auth.roles set active = false where code in
@@ -213,9 +227,11 @@
 --
 -- The whole file is one statement (do $q137b$), so whatever raises in it,
 -- however the file is run, applies nothing. Steps 0-2 are one attempt, made
--- again every 100 ms, 50 times, while a table is busy (one attempt when this
--- transaction holds an earlier file's locks;
--- then 55P03, nothing applied); the NOTICEs of the count follow them, once:
+-- up to 50 times, 100 ms apart, while a step-0 table is busy (one attempt
+-- when this transaction holds an earlier file's locks;
+-- then 55P03, nothing applied); the count's NOTICEs follow them, once (a
+-- stop prints the "0136 is not recorded" NOTICE, when it applies, just
+-- before it):
 -- 0. The locks.
 -- 1. Preconditions (each failure raises 55000 and nothing is applied):
 --    0001-0146 applied (one marker of each of 0137-0146); neither role code
@@ -365,7 +381,10 @@ begin
 
   -- SX-4's change function (0139) as Release B leaves it, which 3b replaces:
   -- its body, SECURITY INVOKER with 0139's search_path, plpgsql and volatile,
-  -- EXECUTE for neither PUBLIC nor the Identity runtime (0139's post-check),
+  -- parallel unsafe, not leakproof or strict, cost 100, an ordinary function
+  -- returning no set (the attributes CREATE OR REPLACE writes again, which
+  -- the post-check compares), EXECUTE for neither PUBLIC nor the Identity
+  -- runtime (0139's post-check),
   -- and an owner whose privileges this login has (CREATE OR REPLACE keeps
   -- the owner, and only it may replace the function).
   if to_regprocedure(apply_signature) is null
@@ -373,6 +392,8 @@ begin
         is distinct from '25ecccbb09f5118cf0e7f7c1e98c5479'
      or (select proc.prosecdef or proc.proconfig is distinct from array['search_path=pg_catalog, pg_temp']
                 or proc.provolatile <> 'v' or language_row.lanname <> 'plpgsql'
+                or proc.proparallel <> 'u' or proc.proleakproof or proc.proisstrict or proc.procost <> 100
+                or proc.prorows <> 0 or proc.proretset or proc.prokind <> 'f'
            from pg_proc proc join pg_language language_row on language_row.oid = proc.prolang
           where proc.oid = to_regprocedure(apply_signature))
      or has_function_privilege('public', apply_signature, 'EXECUTE')
@@ -380,7 +401,8 @@ begin
          and has_function_privilege('hid_identity_runtime', apply_signature, 'EXECUTE')) then
     raise exception using errcode = '55000',
       message = '0147: identity.staff_role_change_apply is not as Release B leaves it (0139''s body, SECURITY INVOKER '
-        || 'with its search_path, EXECUTE for neither PUBLIC nor the Identity runtime); nothing applied';
+        || 'with its search_path and its other attributes, EXECUTE for neither PUBLIC nor the Identity runtime); '
+        || 'nothing applied';
   end if;
   select pg_get_userbyid(proc.proowner) into missing
     from pg_proc proc
@@ -559,19 +581,20 @@ begin
     end if;
     if holding then
       raise exception using errcode = '55P03',
-        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, identity.staff_facility_memberships (a change to a staff membership in flight), audit.events or a table 0147 reads (the permissions, accounts, staff, facilities, organizations, outreach groups, applications, sealed member lists and migration ledger) is busy, and this transaction already holds an earlier migration''s '
+        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, identity.staff_facility_memberships (any staff request in flight that writes or locks a membership or a row naming one, such as a staff audit row), audit.events or a table 0147 reads (the permissions, accounts, staff, facilities, organizations, outreach groups, applications, sealed member lists and migration ledger) is busy, and this transaction already holds an earlier migration''s '
           || 'locks, so it does not wait; nothing applied; run the release again at a quieter time';
     end if;
     if attempt >= 50 then
       raise exception using errcode = '55P03',
-        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, identity.staff_facility_memberships (a change to a staff membership in flight), audit.events or a table 0147 reads (the permissions, accounts, staff, facilities, organizations, outreach groups, applications, sealed member lists and migration ledger) stayed busy for 5 seconds; nothing applied; run the release again at a '
+        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, identity.staff_facility_memberships (any staff request in flight that writes or locks a membership or a row naming one, such as a staff audit row), audit.events or a table 0147 reads (the permissions, accounts, staff, facilities, organizations, outreach groups, applications, sealed member lists and migration ledger) stayed busy for 5 seconds; nothing applied; run the release again at a '
           || 'quieter time';
     end if;
     perform pg_sleep(0.1);
   end;
   end loop;
 
-  -- The count's NOTICEs, once (the attempts above raise none).
+  -- The count's NOTICEs, once (an attempt raises none, except the "0136 is not
+  -- recorded" NOTICE just before a stop).
   if zero136_here then
     raise notice '0147: 0136 is not recorded in migration.schema_migrations, so it is being applied in this same transaction; this transaction''s start stands for its applied_at.';
   end if;
@@ -938,9 +961,19 @@ end
 $body$
 $apply$;
 
-  -- 4. Post-checks: exactly the two roles and their three rows; no other role's
-  -- row changed; each counted membership holds its new role once, through a
-  -- row with this file's reason, and nobody else holds either role.
+  -- 4. Post-checks. First, at 0, 0 and 0 (a fresh database; coordinator's
+  -- answer of 23 November on #258): zero assignments of either role and zero
+  -- audit rows of this file, checked on its own so its own message shows.
+  if (administrators, doctors, reading_doctors) = (0, 0, 0)
+     and ((select count(*) from auth.account_roles assignment_row
+            where assignment_row.role_code in ('work_list_reader', 'reading_starter')) <> 0
+       or (select count(*) from audit.events event_row
+            where event_row.correlation_id = '0147-narrow-roles-q137b') <> 0) then
+    raise exception using errcode = '55000', message = '0147: post-check failed (0, 0 and 0 must grant nothing)';
+  end if;
+  -- Then, at any counts: exactly the two roles and their three rows; no other
+  -- role's row changed; each counted membership holds its new role once,
+  -- through a row with this file's reason, and nobody else holds either role.
   if (select count(*) from auth.roles where code in ('work_list_reader', 'reading_starter') and active) <> 2
      or (select string_agg(grant_row.role_code || ' ' || grant_row.permission_code, ',' order by grant_row.permission_code)
            from auth.role_permissions grant_row where grant_row.role_code = 'work_list_reader')
@@ -983,16 +1016,6 @@ $apply$;
         is distinct from apply_before then
     raise exception using errcode = '55000',
       message = '0147: post-check failed (identity.staff_role_change_apply is not Release B''s body plus 0147''s lines)';
-  end if;
-
-  -- At 0, 0 and 0 (a fresh database; coordinator's answer of 23 November on
-  -- #258): zero new assignments of either role and zero audit rows.
-  if (administrators, doctors, reading_doctors) = (0, 0, 0)
-     and ((select count(*) from auth.account_roles assignment_row
-            where assignment_row.role_code in ('work_list_reader', 'reading_starter')) <> 0
-       or (select count(*) from audit.events event_row
-            where event_row.correlation_id = '0147-narrow-roles-q137b') <> 0) then
-    raise exception using errcode = '55000', message = '0147: post-check failed (0, 0 and 0 must grant nothing)';
   end if;
 
   if (administrators, doctors, reading_doctors) = (0, 0, 0) then
