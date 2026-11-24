@@ -151,6 +151,22 @@ export interface PatientOrders { patientId: string; items: readonly OrderItem[] 
 export interface OwnProgressOptions { signal?: AbortSignal; slots?: OwnProgressSlots }
 
 /**
+ * pharmacyForPatients and labForPatients also take `onAnswer`: told each
+ * id's progress as soon as it is known, with the id as the caller spelled
+ * it. A draft (never asked) is told at once, before any call; an asked id is
+ * told once, when its answer is read (its patient's entry in a batch answer,
+ * or that patient's own one-patient call) or when it turns unknown (its call
+ * failed, or the signal aborted). The map returned holds the same values.
+ * "Ordered by me" keeps each answer as it is told, so a page that stops
+ * waiting at its deadline keeps every patient that answered before it, not
+ * only a kind whose whole call had ended. Called synchronously; it must not
+ * throw.
+ */
+export interface OwnProgressPageOptions<Progress> extends OwnProgressOptions {
+  onAnswer?: (id: string, progress: Progress) => void;
+}
+
+/**
  * A limit on one-patient calls in flight at once, shared by whatever
  * invocations are given the same object ("Ordered by me" makes one per page
  * and gives it to both kinds, as #299's worker drained one queue across both
@@ -305,13 +321,13 @@ export class WorkItemProgressService {
    * Never throws.
    */
   pharmacyForPatients(context: DataAccessContext, patients: readonly PatientOrders[],
-    options: OwnProgressOptions = {}): Promise<Map<string, PharmacyOwnProgress>> {
+    options: OwnProgressPageOptions<PharmacyOwnProgress> = {}): Promise<Map<string, PharmacyOwnProgress>> {
     return this.forPatients(this.pharmacyKind, context, patients, options);
   }
 
   /** Each order's own laboratory progress for several patients, as pharmacyForPatients. Never throws. */
   labForPatients(context: DataAccessContext, patients: readonly PatientOrders[],
-    options: OwnProgressOptions = {}): Promise<Map<string, LabOwnProgress>> {
+    options: OwnProgressPageOptions<LabOwnProgress> = {}): Promise<Map<string, LabOwnProgress>> {
     return this.forPatients(this.labKind, context, patients, options);
   }
 
@@ -320,11 +336,12 @@ export class WorkItemProgressService {
    * id is asked once, under the first patient that names it, in calls of at
    * most 50 patients and 100 ids, one after another. Nothing is remembered
    * between invocations, so an image deployed or rolled back is seen at the
-   * next page.
+   * next page. Each id's progress is also told to `onAnswer` as soon as it
+   * is known (see OwnProgressPageOptions).
    */
   private async forPatients<Progress>(kind: ProgressKind<Progress>, context: DataAccessContext,
-    patients: readonly PatientOrders[], options: OwnProgressOptions): Promise<Map<string, Progress>> {
-    const { signal } = options;
+    patients: readonly PatientOrders[], options: OwnProgressPageOptions<Progress>): Promise<Map<string, Progress>> {
+    const { signal, onAnswer } = options;
     // The page's slots when it passes them (both kinds share one limit), else this invocation's own.
     const slots = options.slots ?? new OwnProgressSlots();
     const result = new Map<string, Progress>();
@@ -351,8 +368,16 @@ export class WorkItemProgressService {
     }
     const asked = [...merged.values()].filter((entry) => entry.ids.length > 0);
     const answer = (id: string, progress: Progress) => {
-      for (const spelling of spellings.get(id.toLowerCase()) ?? [id]) result.set(spelling, progress);
+      for (const spelling of spellings.get(id.toLowerCase()) ?? [id]) {
+        result.set(spelling, progress);
+        onAnswer?.(spelling, progress);
+      }
     };
+    // What is never asked (a draft) is known now; every other spelling is told once, through answer().
+    if (onAnswer) {
+      const told = new Set([...spellings.values()].flatMap((spelling) => [...spelling]));
+      for (const [id, progress] of result) if (!told.has(id)) onAnswer(id, progress);
+    }
     const unknown = (entries: readonly Asked[]) => {
       for (const entry of entries) for (const id of entry.ids) answer(id, kind.unknown);
     };

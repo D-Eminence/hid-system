@@ -7453,7 +7453,7 @@ transaction. The Lab request row `api.lab.work-item.progress.request` is
 written as for other Lab routes. lab-api also writes its own
 `identity.authorization.check` row for the patient on each lookup.
 
-### Several patients in one call (decision 4, 20 November; Release B, no migration)
+### Several patients in one call (decision 4, 20 November; no migration, not yet released)
 
 `POST /api/v1/pharmacy/work-items/progress/batch` and
 `POST /api/v1/lab/work-items/progress/batch` give the same read for several
@@ -7533,6 +7533,14 @@ both kinds, when the caller passes one `OwnProgressSlots` to both (as
 `pharmacyForPatients` or `labForPatients`. An ehr-api without this change
 keeps calling the one-patient routes, which do not change. Either image may
 be deployed, or rolled back, first.
+
+`pharmacyForPatients` and `labForPatients` also tell the caller each id's
+progress as soon as it is known (`onAnswer`): a draft at once, each
+patient when its entry in the batch answer, or its own one-patient call, is
+read. "Ordered by me" keeps each one, so at its page deadline only the
+patients not answered by then are `unknown`; on the one-patient fallback,
+one slow or stalled patient leaves the others answered, as before decision
+4, and a draft stays `not_received`.
 
 Runtime proof: `verify-order-routes-runtime.mjs` step 10c;
 `verify-own-facility-work-runtime.mjs` checks the header answers on this
@@ -11757,7 +11765,8 @@ works), and one sent with a different `since` is 400 `INVALID_CURSOR`.
   could not check, and whatever has not answered by then, is `unknown`.
   Against a pharmacy-api or lab-api without that form (`404`), ehr-api asks
   once per patient and kind, at most 6 at once across the page, within the
-  same 4 seconds.
+  same 4 seconds; each patient that answered by then keeps its answer, so
+  one slow or stalled patient is `unknown` alone. A draft is `not_received`.
 - `orderRoute`: the order's route summary (sections 21-24), `null` when it
   was read and there is none, and left out when it could not be read.
 - `patient`: the waiting-list card (EHR-C7); never a full Health ID.

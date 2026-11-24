@@ -1,12 +1,13 @@
-import { RequestMethod } from '@nestjs/common';
+import { Logger, RequestMethod } from '@nestjs/common';
 import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import type { PoolClient } from 'pg';
 import { REQUIRED_PERMISSIONS } from '../../common/decorators';
 import type { DataAccessContext } from '../../common/request-context';
+import { resetEnvironmentForTests } from '../../config/environment';
 import type { DatabaseService } from '../../database/database.service';
-import { OwnProgressSlots, type PatientOrders, type WorkItemProgressService } from '../../integrations/work-item-progress.service';
+import { OwnProgressSlots, type PatientOrders, WorkItemProgressService } from '../../integrations/work-item-progress.service';
 import type { OrderRouteReader } from '../order-routes/order-route-reader';
 import { MyOrdersController } from './my-orders.controller';
 import { MyOrdersQueryDto } from './my-orders.dto';
@@ -313,6 +314,26 @@ describe('MY-1: GET /ehr/my-orders', () => {
     expect(page.items.map((item) => item.ownProgress.status)).toEqual(['unknown', 'sample_collected', 'unknown']);
   });
 
+  it('an answer the client tells before the deadline stays, though its kind\'s call never ends', async () => {
+    const { service, progress } = harness([
+      row({}),
+      row({ kind: 'lab_request', order_id: '123e4567-e89b-42d3-a456-426614174201', patient_id: patientB }),
+      row({ order_id: '123e4567-e89b-42d3-a456-426614174103', patient_id: patientB }),
+    ]);
+    service.progressDeadlineMs = 50;
+    type Told = { onAnswer?: (id: string, value: unknown) => void };
+    // The pharmacy tells patient A's answer, then neither answers nor ends; the laboratory tells nothing and hangs.
+    progress.pharmacyForPatients.mockImplementation(async (_context: unknown, _patients: unknown, options?: unknown) => {
+      (options as Told).onAnswer?.('123e4567-e89b-42d3-a456-426614174101', { status: 'dispensed', receivedAt: null,
+        acceptedAt: null, dispensedAt: null, reversedAt: null });
+      return new Promise<Map<string, unknown>>(() => undefined);
+    });
+    progress.labForPatients.mockImplementation(async () => new Promise<Map<string, unknown>>(() => undefined));
+    const page = await service.list(context(BOTH), query(), now);
+    expect(page.items.map((item) => item.ownProgress.status)).toEqual(['dispensed', 'unknown', 'unknown']);
+    expect(typeof (progress.labForPatients.mock.calls[0]![2] as Told).onAnswer).toBe('function');
+  });
+
   it('each page has slots and a signal of its own (nothing is kept between pages)', async () => {
     const { service, progress } = harness();
     await service.list(context(BOTH), query(), now);
@@ -333,5 +354,87 @@ describe('MY-1: GET /ehr/my-orders', () => {
     progress.pharmacyForPatients.mockImplementationOnce(async () => { throw new Error('unexpected'); });
     const page = await service.list(context(BOTH), query(), now);
     expect(page.items.map((item) => item.ownProgress.status)).toEqual(['unknown', 'results_ready', 'unknown']);
+  });
+});
+
+describe('MY-1 with ORD-3\'s own client: what answered before the deadline stays', () => {
+  // The real WorkItemProgressService, with fetch standing in for pharmacy-api and lab-api.
+  const patientN = (n: number) => `123e4567-e89b-42d3-a456-4266141750${String(n).padStart(2, '0')}`;
+  const orderN = (n: number) => `123e4567-e89b-42d3-a456-4266141760${String(n).padStart(2, '0')}`;
+  const PHARMACY_BATCH_URL = 'https://pharmacy.example.test/api/v1/pharmacy/work-items/progress/batch';
+  const member = { ...context(BOTH), userCookie: 'hid_access=synthetic', origin: 'https://ehr.example.test' } as DataAccessContext;
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
+    { status, headers: { 'content-type': 'application/json' } });
+  /** A fetch that never answers; it rejects as fetch does once its signal aborts. */
+  const hanging = (init: RequestInit | undefined) => new Promise<Response>((_resolve, reject) => {
+    const abort = () => reject(new DOMException('This operation was aborted', 'AbortError'));
+    if (init?.signal?.aborted) abort();
+    init?.signal?.addEventListener('abort', abort);
+  });
+  const received = (id: string) => ({ sourceEhrPrescriptionId: id, status: 'received',
+    receivedAt: '2026-11-20T08:10:00.000Z', acceptedAt: null, dispensedAt: null, reversedAt: null });
+
+  beforeEach(() => {
+    Object.assign(process.env, {
+      NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost:5432/hid', DATABASE_SSL: 'false',
+      CORS_ORIGINS: 'http://localhost:3000', STORAGE_MODE: 'disabled',
+      PHARMACY_API_URL: 'https://pharmacy.example.test', LAB_API_URL: 'https://lab.example.test',
+      PHARMACY_SERVICE_IDENTITY_MODE: 'local-secret', LAB_SERVICE_IDENTITY_MODE: 'local-secret',
+      PHARMACY_INTERNAL_SERVICE_TOKEN: 's'.repeat(32), LAB_INTERNAL_SERVICE_TOKEN: 's'.repeat(32),
+    });
+    delete process.env.PHARMACY_EHR_WORKLOAD_TOKEN_FILE;
+    delete process.env.LAB_EHR_WORKLOAD_TOKEN_FILE;
+    resetEnvironmentForTests();
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  function realPage(rows: Record<string, unknown>[], deadlineMs: number) {
+    const { client } = harness(rows);
+    const database = { withTransaction: jest.fn(async (_context: unknown, operation: (client: PoolClient) => Promise<unknown>) =>
+      operation(client as unknown as PoolClient)) };
+    const routes = { summaries: jest.fn(async () => new Map()) };
+    const service = new MyOrdersService(database as unknown as DatabaseService, routes as unknown as OrderRouteReader,
+      new WorkItemProgressService({ authorization: jest.fn() } as never));
+    service.progressDeadlineMs = deadlineMs;
+    return service;
+  }
+
+  it('against a pharmacy-api without the batch form (404), one patient whose call hangs is unknown at the deadline; '
+    + 'every patient answered before it stays answered, and a draft-only patient stays not received', async () => {
+    const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      if (String(url) === PHARMACY_BATCH_URL) return json({ code: 'NOT_FOUND' }, 404);
+      const body = JSON.parse(String(init?.body)) as { patientId: string; sourceEhrPrescriptionIds: string[] };
+      if (body.patientId === patientN(3)) return hanging(init);
+      return json({ items: body.sourceEhrPrescriptionIds.map(received) });
+    });
+    const rows = [...Array.from({ length: 10 }, (_unused, index) => row({ order_id: orderN(index + 1),
+      patient_id: patientN(index + 1) })), row({ order_id: orderN(11), patient_id: patientN(11), status: 'draft' })];
+    const begun = Date.now();
+    const page = await realPage(rows, 200).list(member, query(), now);
+    expect(Date.now() - begun).toBeLessThan(1_500);
+    expect(page.items.map((item) => [item.orderId, item.ownProgress.status])).toEqual([
+      ...Array.from({ length: 10 }, (_unused, index) => [orderN(index + 1), index === 2 ? 'unknown' : 'received']),
+      [orderN(11), 'not_received'],
+    ]);
+    // One 404 for the batch form, then each patient with something sent once on the one-patient route (not the draft).
+    expect(fetch).toHaveBeenCalledTimes(11);
+    // The deadline ended the hanging call; it was not left to its own 3 seconds.
+    const singles = fetch.mock.calls.filter(([url]) => String(url) !== PHARMACY_BATCH_URL);
+    expect(singles.map(([, init]) => (JSON.parse(String(init?.body)) as { patientId: string }).patientId))
+      .toEqual(Array.from({ length: 10 }, (_unused, index) => patientN(index + 1)));
+    expect(singles.map(([, init]) => init?.signal?.aborted)).toEqual(Array.from({ length: 10 }, (_unused, index) => index === 2));
+  });
+
+  it('a draft-only patient stays not received when the rest of its kind misses the deadline', async () => {
+    jest.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => hanging(init));
+    const page = await realPage([row({ order_id: orderN(1), patient_id: patientN(1), status: 'draft' }),
+      row({ order_id: orderN(2), patient_id: patientN(2) }),
+      row({ kind: 'lab_request', order_id: orderN(3), patient_id: patientN(1), status: 'draft' }),
+      row({ kind: 'lab_request', order_id: orderN(4), patient_id: patientN(2) })], 100).list(member, query(), now);
+    expect(page.items.map((item) => [item.orderId, item.ownProgress.status])).toEqual([
+      [orderN(1), 'not_received'], [orderN(2), 'unknown'], [orderN(3), 'not_received'], [orderN(4), 'unknown'],
+    ]);
   });
 });

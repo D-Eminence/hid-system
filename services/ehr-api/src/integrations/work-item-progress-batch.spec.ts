@@ -823,3 +823,46 @@ describe('C10: one patient and one id once in a call', () => {
     expect([...progress.values()]).toEqual([PHARMACY_RECEIVED, PHARMACY_RECEIVED, PHARMACY_RECEIVED, PHARMACY_RECEIVED]);
   });
 });
+
+describe('C11: onAnswer, each id as soon as it is known', () => {
+  it('a draft before any call; each patient as its one-patient answer is read; a patient still waiting is unknown at '
+    + 'the abort; each id told once, as returned', async () => {
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const told: Array<[string, unknown]> = [];
+    const toldAtFirstFetch: Array<Array<[string, unknown]>> = [];
+    const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      if (toldAtFirstFetch.length === 0) toldAtFirstFetch.push([...told]);
+      if (String(url) === PHARMACY_BATCH_URL) return notFound();
+      return bodyOf(init).patientId === patient(2) ? hanging(url, init) : pharmacyEcho(url, init);
+    });
+    const page = new AbortController();
+    const pending = service().pharmacyForPatients(context, [...onePerPatient(3),
+      { patientId: patient(4), items: [{ id: order(4), status: 'draft' }] }],
+    { signal: page.signal, onAnswer: (id, progress) => told.push([id, progress]) });
+    while (told.length < 3) await nextTurn();
+    expect(toldAtFirstFetch).toEqual([[[order(4), PHARMACY_PROGRESS_NOT_RECEIVED]]]);
+    // Patients 1 and 3 are told while patient 2's call is still open.
+    expect(new Map(told)).toEqual(new Map<string, unknown>([[order(4), PHARMACY_PROGRESS_NOT_RECEIVED],
+      [order(1), PHARMACY_RECEIVED], [order(3), PHARMACY_RECEIVED]]));
+    expect(fetch).toHaveBeenCalledTimes(4);
+    page.abort();
+    const progress = await pending;
+    expect(told).toHaveLength(4);
+    expect(told[3]).toEqual([order(2), PHARMACY_PROGRESS_UNKNOWN]);
+    expect(new Map(told)).toEqual(progress);
+  });
+
+  it('in a batch answer, each spelling the page used is told once, with the value returned for it', async () => {
+    jest.spyOn(globalThis, 'fetch').mockImplementation(pharmacyEcho);
+    const told: Array<[string, unknown]> = [];
+    const progress = await service().pharmacyForPatients(context, [
+      { patientId: patient(1), items: [{ id: order(1), status: 'active' }, { id: order(5), status: 'draft' }] },
+      { patientId: patient(2), items: [{ id: order(2), status: 'active' }, { id: order(1).toUpperCase(), status: 'active' }] }],
+    { onAnswer: (id, value) => told.push([id, value]) });
+    expect(told.map(([id]) => id).sort()).toEqual([order(1), order(1).toUpperCase(), order(2), order(5)].sort());
+    expect(new Map(told)).toEqual(progress);
+    expect(progress.get(order(5))).toEqual(PHARMACY_PROGRESS_NOT_RECEIVED);
+    expect(progress.get(order(1).toUpperCase())).toEqual(PHARMACY_RECEIVED);
+  });
+});

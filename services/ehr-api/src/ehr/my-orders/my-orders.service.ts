@@ -212,9 +212,13 @@ export class MyOrdersService {
    * per kind with ORD-3's several-patient form, both kinds at once. The page
    * passes one OwnProgressSlots to both, so against an image without that
    * form (the client then asks once per patient) the page makes at most 6
-   * one-patient calls at once across both kinds. At the page's deadline its
-   * signal aborts, which ends both calls in the client, and whatever has not
-   * answered is unknown. Never throws.
+   * one-patient calls at once across both kinds. Each order's progress is
+   * kept as soon as the client knows it (onAnswer): a draft at once, each
+   * patient as its answer is read. At the page's deadline its signal aborts,
+   * which ends both calls in the client, and only what has not answered by
+   * then is unknown, patient by patient, as with the one-patient calls before
+   * decision 4 (one slow patient on the fallback leaves the others answered).
+   * Never throws.
    */
   private async ownProgress(context: DataAccessContext, rows: Array<MyOrderRow & { kind: OrderKind; order_id: string }>) {
     const out = new Map<string, LabOwnProgress | PharmacyOwnProgress>();
@@ -237,17 +241,22 @@ export class MyOrdersService {
       }, this.progressDeadlineMs);
       timer.unref?.();
     });
+    // Each answer as the client reads it, until the deadline; nothing after it.
+    const keep = (id: string, value: LabOwnProgress | PharmacyOwnProgress) => {
+      if (open) out.set(id, value);
+    };
     const ask = async (kind: OrderKind) => {
       if (byKind[kind].size === 0) return;
       let found: Map<string, LabOwnProgress | PharmacyOwnProgress>;
       try {
         found = kind === 'lab_request'
-          ? await this.progress.labForPatients(context, patientsOf(kind), { signal: page.signal, slots })
-          : await this.progress.pharmacyForPatients(context, patientsOf(kind), { signal: page.signal, slots });
+          ? await this.progress.labForPatients(context, patientsOf(kind), { signal: page.signal, slots, onAnswer: keep })
+          : await this.progress.pharmacyForPatients(context, patientsOf(kind), { signal: page.signal, slots,
+            onAnswer: keep });
       } catch {
         return;
       }
-      if (open) for (const [id, value] of found) out.set(id, value);
+      for (const [id, value] of found) keep(id, value);
     };
     await Promise.race([Promise.all([ask('prescription'), ask('lab_request')]), deadline]);
     open = false;
