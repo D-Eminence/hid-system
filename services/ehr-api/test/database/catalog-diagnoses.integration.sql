@@ -17,13 +17,23 @@
 --      (9A03.0)., (1A36.1). (Ola, round 3), while a word with the same
 --      punctuation is searched as before; titles and our other names
 --      split as q is: COVID-19, T-cell/histiocyte, glucose-6-phosphate and
---      HIV/TB, as typed (Rahman, #318 finding 1);
+--      HIV/TB, as typed (Rahman, #318 finding 1); a name typed with an
+--      apostrophe-s (straight or curly) finds the entry named, and when
+--      nothing matched a final s is dropped from words of 4 or more
+--      letters, while "X syndrome" eponyms answer as before (Rahman's
+--      re-review of #320, finding 1); a title or other name that is q
+--      comes right after the code ("ra", "urti", "prom"; nit 4); a code
+--      typed with spaces at its dot is that code, and a word with a space
+--      is searched as before (nit 5); our plain-letter other names for
+--      accented titles (nit 9g); a title with its own apostrophe-s is
+--      compared with q as q is, its 's dropped too;
 --   3. refusals: q of 1 or 101 characters, limit 0 or 26 (22023
 --      CATALOG_SEARCH_INVALID); brackets and operators answer nothing; an
 --      extension code, a bad chapter and a second active release are
 --      refused; a loaded entry never changes; a row for the live release,
 --      or for one replaced after it was live, is refused, and a release
---      still loading takes rows (Rahman, #318 finding 2);
+--      still loading takes rows (Rahman, #318 finding 2); a diagnosis row
+--      for a medicine list's version is refused (nit 7);
 --   4. the EHR runtime may search and read no table.
 -- Synthetic version ids: prefix c150. The codes and titles are ICD-11's
 -- (WHO, CC BY-ND 3.0 IGO), verbatim; the other names are ours.
@@ -110,6 +120,53 @@ insert into ehr.catalog_diagnoses (version_id, code, title, other_names, chapter
    'Haemolytic anaemia due to glucose-6-phosphate dehydrogenase deficiency', '', '03'),
   ('c1500000-0000-4000-8000-000000000001', '1C60', 'Human immunodeficiency virus disease associated with tuberculosis',
    'HIV/TB', '01');
+-- Names typed with an apostrophe-s (Rahman's re-review of #320, finding 1): WHO's eponyms have none ("Parkinson
+-- disease"), and before, the lone s of "parkinson's" had to start another word of the title.
+insert into ehr.catalog_diagnoses (version_id, code, title, chapter, residual) values
+  ('c1500000-0000-4000-8000-000000000001', '8A00', 'Parkinsonism', '08', false),
+  ('c1500000-0000-4000-8000-000000000001', '8A00.0', 'Parkinson disease', '08', false),
+  ('c1500000-0000-4000-8000-000000000001', '8A00.00', 'Sporadic Parkinson disease', '08', false),
+  ('c1500000-0000-4000-8000-000000000001', '8A00.0Y', 'Other specified Parkinson disease', '08', true),
+  ('c1500000-0000-4000-8000-000000000001', '2B30', 'Hodgkin lymphoma', '02', false),
+  ('c1500000-0000-4000-8000-000000000001', '2B30.10', 'Nodular sclerosis classical Hodgkin lymphoma', '02', false),
+  ('c1500000-0000-4000-8000-000000000001', 'DD70.3', 'Crohn disease of large intestine', '13', false),
+  ('c1500000-0000-4000-8000-000000000001', 'DD70.5', 'Crohn disease of both small and large intestine', '13', false),
+  ('c1500000-0000-4000-8000-000000000001', '8A20', 'Alzheimer disease', '08', false),
+  ('c1500000-0000-4000-8000-000000000001', '8B88.0', 'Bell palsy', '08', false),
+  ('c1500000-0000-4000-8000-000000000001', '8A01.10', 'Huntington disease', '08', false),
+  ('c1500000-0000-4000-8000-000000000001', '5C64.00', 'Wilson disease', '05', false),
+  ('c1500000-0000-4000-8000-000000000001', '5A70', 'Cushing syndrome', '05', false),
+  ('c1500000-0000-4000-8000-000000000001', '5A70.Z', 'Cushing syndrome, unspecified', '05', true),
+  -- WHO's own titles with an apostrophe-s.
+  ('c1500000-0000-4000-8000-000000000001', 'QC10', 'Procedure not carried out because of contraindication', '24', false),
+  ('c1500000-0000-4000-8000-000000000001', 'QC11',
+   'Procedure not carried out because of patient''s decision for reasons of belief or group pressure', '24', false),
+  ('c1500000-0000-4000-8000-000000000001', 'QC12',
+   'Procedure not carried out because of patient''s decision for reasons other than belief or group pressure', '24',
+   false);
+-- Abbreviations that are our other names, behind shorter titles that start with them (nit 4), and a parent with
+-- shorter child titles typed with spaces at its dot (nit 5).
+insert into ehr.catalog_diagnoses (version_id, code, title, other_names, chapter) values
+  ('c1500000-0000-4000-8000-000000000001', 'FA20', 'Rheumatoid arthritis', 'ra', '15'),
+  ('c1500000-0000-4000-8000-000000000001', 'ME66.6', 'Rash', '', '21'),
+  ('c1500000-0000-4000-8000-000000000001', 'MD32', 'Rales', '', '21'),
+  ('c1500000-0000-4000-8000-000000000001', '1C82', 'Rabies', '', '01'),
+  ('c1500000-0000-4000-8000-000000000001', '8B93', 'Radiculopathy', '', '08'),
+  ('c1500000-0000-4000-8000-000000000001', 'CA07.0', 'Acute upper respiratory infection, site unspecified', 'urti', '12'),
+  ('c1500000-0000-4000-8000-000000000001', 'EB00.0', 'Acute urticaria', '', '14'),
+  ('c1500000-0000-4000-8000-000000000001', 'EB05', 'Urticaria of unspecified type', '', '14'),
+  ('c1500000-0000-4000-8000-000000000001', 'JA89', 'Maternal care related to premature rupture of membranes', 'prom', '18'),
+  ('c1500000-0000-4000-8000-000000000001', 'MC88', 'Prominent veins', '', '21'),
+  ('c1500000-0000-4000-8000-000000000001', '5C50', 'Inborn errors of amino acid or other organic acid metabolism', '', '05'),
+  ('c1500000-0000-4000-8000-000000000001', '5C50.0', 'Phenylketonuria', '', '05'),
+  ('c1500000-0000-4000-8000-000000000001', '5C50.10', 'Alkaptonuria', '', '05'),
+  ('c1500000-0000-4000-8000-000000000001', '5C50.5', 'Disorders of the gamma-glutamyl cycle', '', '05'),
+  ('c1500000-0000-4000-8000-000000000001', '5C50.E', 'Organic aciduria', '', '05'),
+  -- Accented titles with our plain-letter other names, as the seed now gives them (nit 9g).
+  ('c1500000-0000-4000-8000-000000000001', '4A43.2', 'Sjögren syndrome', 'Sjogren syndrome', '04'),
+  ('c1500000-0000-4000-8000-000000000001', '2B02', 'Sézary syndrome', 'Sezary syndrome', '02'),
+  ('c1500000-0000-4000-8000-000000000001', '4A62', 'Behçet disease', 'Behcet disease', '04'),
+  ('c1500000-0000-4000-8000-000000000001', '8A45.43', 'Demyelination due to Behcet disease', '', '08');
 -- The switch: 2026-01 goes live and is sealed; 2025-01 stays loading (never live).
 update ehr.catalog_versions set active = true where id = 'c1500000-0000-4000-8000-000000000001';
 
@@ -129,7 +186,7 @@ select pg_temp.expect('2h limit and more', '1F4Z more=true', pg_temp.found('mala
 select pg_temp.expect('2i the answer carries the release', '2026-01 Malaria due to Plasmodium falciparum',
   (select format('%s %s', list_version, title) from ehr.search_catalog_diagnoses('1F40', 1)));
 select pg_temp.expect('2j the status counts what is offered, and the live release is sealed',
-  'diagnosis t 2026-01 25 sealed=true|2025-01 sealed=false',
+  'diagnosis t 2026-01 61 sealed=true|2025-01 sealed=false',
   (select format('%s %s %s %s', kind, available, list_version, offered) from ehr.catalog_status() where kind = 'diagnosis')
   || ' sealed=' || (select sealed::text from ehr.catalog_versions where id = 'c1500000-0000-4000-8000-000000000001')
   || '|' || (select version || ' sealed=' || sealed from ehr.catalog_versions
@@ -169,6 +226,50 @@ select pg_temp.expect('2o a title with a slash and with hyphens, as typed',
   pg_temp.found('T-cell/histiocyte', 10) || '|' || pg_temp.found('glucose-6-phosphate', 10));
 select pg_temp.expect('2p our other name with a slash, as typed, is found and named', '1C60(HIV/TB) more=false',
   pg_temp.found('HIV/TB', 10));
+-- Rahman's re-review of #320, finding 1. Before: 8A00.0 was missing ("s" had to start a word: sporadic, specified),
+-- DD70.3 too (small), Hodgkin lymphoma's own entry too (sclerosis), and the rest found nothing.
+select pg_temp.expect('2t a name typed with an apostrophe-s finds the entry named, first',
+  '8A00.0 8A00.00 8A00.0Y more=false|8A00.0 8A00.00 8A00.0Y more=false|2B30 2B30.10 more=false|'
+  || 'DD70.3 DD70.5 more=false|8A20 more=false|8B88.0 more=false|8A01.10 more=false|5C64.00 more=false|'
+  || '8A20 more=false|8B88.0 more=false',
+  pg_temp.found('Parkinson''s disease', 10) || '|' || pg_temp.found('parkinson’s disease', 10) || '|'
+  || pg_temp.found('hodgkin''s lymphoma', 10) || '|' || pg_temp.found('Crohn''s disease of large intestine', 10) || '|'
+  || pg_temp.found('alzheimer''s disease', 10) || '|' || pg_temp.found('bell''s palsy', 10) || '|'
+  || pg_temp.found('huntington''s disease', 10) || '|' || pg_temp.found('wilson''s disease', 10) || '|'
+  || pg_temp.found('ALZHEIMER’S DISEASE', 10) || '|' || pg_temp.found('Bell’S palsy', 10));
+select pg_temp.expect('2u nothing matched: once more with a final s dropped from words of 4 or more letters',
+  '8A00 8A00.0 8A00.00 8A00.0Y more=false|8A20 more=false|8A20 more=false',
+  pg_temp.found('parkinsons', 10) || '|' || pg_temp.found('alzheimers', 10) || '|'
+  || pg_temp.found('alzheimers disease', 10));
+-- A title with its own apostrophe-s is compared as q is, its 's dropped too: typed as written it is still q, and q
+-- cut at 100 characters (the first 6 words match all three) still starts it.
+select pg_temp.expect('2z a title with its own apostrophe-s, typed as written or cut at 100 characters, comes first',
+  'QC11 QC10 QC12 more=false|QC12 QC10 QC11 more=false|QC11 QC12 QC10 more=false',
+  pg_temp.found('Procedure not carried out because of patient''s decision for reasons of belief or group pressure', 10)
+  || '|' || pg_temp.found(left('Procedure not carried out because of patient''s decision for reasons other than belief or '
+                                || 'group pressure', 100), 10)
+  || '|' || pg_temp.found('procedure not carried out because of patient’s decision', 10));
+select pg_temp.expect('2v "X syndrome" eponyms answer as before, with or without the apostrophe',
+  '5A70 5A70.Z more=false|5A70 5A70.Z more=false|5A70 5A70.Z more=false',
+  pg_temp.found('cushing''s syndrome', 10) || '|' || pg_temp.found('Cushing’s syndrome', 10) || '|'
+  || pg_temp.found('cushing syndrome', 10));
+-- Nit 4. Before: FA20 came after every shorter title starting with ra, CA07.0 and JA89 after their shorter titles.
+select pg_temp.expect('2w a title or other name that is q comes right after the code',
+  'FA20(ra) ME66.6 MD32 1C82 8B93 RA01 RA02 RA01.0 more=false|CA07.0(urti) EB05 EB00.0 more=false|JA89(prom) MC88 more=false|'
+  || '8A00.0 8A00.00 8A00.0Y more=false',
+  pg_temp.found('ra', 10) || '|' || pg_temp.found('urti', 10) || '|' || pg_temp.found('prom', 10) || '|'
+  || pg_temp.found('parkinson disease', 10));
+-- Nit 5. Before: "5C50 5" was the words 5c50 and 5, so 5C50.5 came after every shorter title of its family.
+select pg_temp.expect('2x a code typed with spaces at its dot is that code; a word with a space is searched as before',
+  '5C50.5 5C50.10 5C50.0 5C50.E 5C50 more=false|5C50.5 5C50.10 5C50.0 5C50.E 5C50 more=false|'
+  || '5C50.5 5C50.10 5C50.0 5C50.E 5C50 more=false|5C50.5 5C50.10 5C50.0 5C50.E 5C50 more=false|'
+  || '9A03.0 more=false|5A11 more=false',
+  pg_temp.found('5C50 5', 10) || '|' || pg_temp.found('5C50. 5', 10) || '|' || pg_temp.found('5c50 .5', 10) || '|'
+  || pg_temp.found('(5C50 . 5)', 10) || '|' || pg_temp.found('9A03 0', 10) || '|' || pg_temp.found('type 2', 10));
+-- Nit 9g: the accented titles are found by plain letters through our other names.
+select pg_temp.expect('2y plain letters find the accented titles',
+  '4A43.2(Sjogren syndrome) more=false|2B02(Sezary syndrome) more=false|4A62(Behcet disease) 8A45.43 more=false',
+  pg_temp.found('sjogren', 10) || '|' || pg_temp.found('sezary', 10) || '|' || pg_temp.found('behcet', 10));
 
 -- 3. Refusals.
 select pg_temp.expect('3a q of 1 or 101 characters, limit 0 or 26', '22023 CATALOG_SEARCH_INVALID|22023 CATALOG_SEARCH_INVALID|'
@@ -203,6 +304,14 @@ select pg_temp.expect('3g a row for the live release is refused; a release still
     values ('c1500000-0000-4000-8000-000000000001', '1F41', 'Malaria due to Plasmodium vivax', '01')$q$)
   || '|' || pg_temp.refusal($q$insert into ehr.catalog_diagnoses (version_id, code, title, chapter)
     values ('c1500000-0000-4000-8000-000000000002', '1F4Z', 'Malaria, unspecified', '01')$q$));
+-- Nit 7: a diagnosis row for a version of another kind (a medicine list still loading) is refused.
+insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference, approvals_sha256, approved_at)
+  values ('c1500000-0000-4000-8000-000000000010', 'medicine', '2026.1', repeat('a', 64), 'synthetic medicine sign-off',
+          repeat('4', 64), now());
+select pg_temp.expect('3i a diagnosis row for a medicine list''s version is refused',
+  '55000 A diagnosis entry needs a diagnosis release, not the medicine list 2026.1',
+  pg_temp.refusal($q$insert into ehr.catalog_diagnoses (version_id, code, title, chapter)
+    values ('c1500000-0000-4000-8000-000000000010', '1F40', 'Malaria due to Plasmodium falciparum', '01')$q$));
 -- A next release (still loading) takes its entry, then replaces 2026-01; then 2026-01 is switched back for 4.
 insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference, approvals_sha256, approved_at)
   values ('c1500000-0000-4000-8000-000000000003', 'diagnosis', '2027-01', repeat('c', 64), 'synthetic next sign-off',
