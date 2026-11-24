@@ -310,14 +310,16 @@ describe('the product of a request (Origin host, exactly as turnstile.service.ts
 
 describe('the permission codes the gate reads are the database seeds\' (auth.role_permissions)', () => {
   // After 0136 (Q103 A): doctors and administrators hold neither work list,
-  // and doctors hold no Outreach code.
+  // and doctors hold no Outreach code. 0147 (Q137 B) adds the narrow roles
+  // work_list_reader (both work lists) and reading_starter (ocr.job.start),
+  // given only to the administrators and the doctor 0136 counted.
   it('every code is granted by the seeds, to the roles the owner named', () => {
     const holders = (code: string) => [...SEEDS.entries()].filter(([, set]) => set.has(code)).map(([role]) => role).sort();
     expect(holders('ehr.encounter.write')).toEqual(['clinician', 'doctor', 'nurse', 'receptionist']);
     expect(holders('organization.manage')).toEqual(['admin', 'org_admin']);
-    expect(holders('lab.work-item.read')).toEqual(['clinician', 'lab', 'nurse']);
+    expect(holders('lab.work-item.read')).toEqual(['clinician', 'lab', 'nurse', 'work_list_reader']);
     expect(holders('lab.work-item.accept')).toEqual(['clinician', 'doctor', 'lab', 'nurse']);
-    expect(holders('pharmacy.work-item.read')).toEqual(['clinician', 'nurse', 'pharmacist']);
+    expect(holders('pharmacy.work-item.read')).toEqual(['clinician', 'nurse', 'pharmacist', 'work_list_reader']);
     expect(holders('pharmacy.dispensing.read')).toEqual(['admin', 'clinician', 'doctor', 'nurse', 'pharmacist']);
     expect(holders('outreach.registration.read')).toEqual(['admin', 'clinician', 'nurse', 'org_admin',
       'org_admin_awaiting_review', 'outreach_organiser', 'outreach_volunteer', 'receptionist']);
@@ -326,7 +328,7 @@ describe('the permission codes the gate reads are the database seeds\' (auth.rol
     // Q111 A: doctors keep ocr.job.write (checking readings, confirming their
     // patient); starting a reading also needs ocr.job.start, which they lack.
     expect(holders('ocr.job.write')).toEqual(['clinician', 'doctor', 'nurse', 'receptionist']);
-    expect(holders('ocr.job.start')).toEqual(['clinician', 'nurse', 'receptionist']);
+    expect(holders('ocr.job.start')).toEqual(['clinician', 'nurse', 'reading_starter', 'receptionist']);
     // Q112 A: only the front desk holds the "own uploads" reads, and it holds
     // neither full read.
     expect(holders('ehr.document.read-own')).toEqual(['receptionist']);
@@ -369,6 +371,23 @@ describe('the permission codes the gate reads are the database seeds\' (auth.rol
       const facility = assignment([role], permissions);
       expect(PRODUCTS.filter((product) => facilityAdmittedOnProduct(facility, product))).toEqual(['ehr', 'migrate']);
     });
+
+  // 0147 (owner decision Q137 B): the narrow roles hold exactly their codes,
+  // and beside an administrator's or a doctor's role they change no site: the
+  // administrator keeps every site and the doctor ehr. and migrate. (Q97), as
+  // before 0136 took the codes away.
+  it('the narrow roles of Q137 B hold exactly their codes and add no site', () => {
+    expect(permissionsOf('work_list_reader')).toEqual(['lab.work-item.read', 'pharmacy.work-item.read']);
+    expect(permissionsOf('reading_starter')).toEqual(['ocr.job.start']);
+    const doctor = assignment(['doctor', 'reading_starter', 'work_list_reader'], [...new Set([...permissionsOf('doctor'),
+      ...permissionsOf('work_list_reader'), ...permissionsOf('reading_starter')])]);
+    expect(doctor.permissions).toEqual(expect.arrayContaining(['lab.work-item.read', 'pharmacy.work-item.read',
+      'ocr.job.write', 'ocr.job.start']));
+    expect(PRODUCTS.filter((product) => facilityAdmittedOnProduct(doctor, product))).toEqual(['ehr', 'migrate']);
+    const administrator = assignment(['admin', 'work_list_reader'], [...new Set([...permissionsOf('admin'),
+      ...permissionsOf('work_list_reader')])]);
+    expect(PRODUCTS.filter((product) => facilityAdmittedOnProduct(administrator, product))).toEqual(PRODUCTS);
+  });
 
   it('a membership holding both ehr.encounter.write and organization.manage (doctor and admin) fits every site', () => {
     const facility = assignment(['admin', 'doctor'], [...new Set([...permissionsOf('admin'), ...permissionsOf('doctor')])]);

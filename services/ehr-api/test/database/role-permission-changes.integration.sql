@@ -150,8 +150,9 @@ select pg_temp.expect('1i clinician (gains ocr.job.start only)', 'ehr.diagnosis.
   || 'ocr.validation.write outreach.campaign.read outreach.campaign.write outreach.registration.read '
   || 'outreach.registration.write pharmacy.dispensing.read pharmacy.import.read pharmacy.import.write '
   || 'pharmacy.work-item.read', pg_temp.role_line('clinician'));
+-- 0147 (Q137 B) gives ocr.job.start to its narrow role reading_starter too.
 select pg_temp.expect('1j who holds the new codes', 'ehr.document.read-own: receptionist | ocr.job.read-own: '
-  || 'receptionist | ocr.job.start: clinician nurse receptionist',
+  || 'receptionist | ocr.job.start: clinician nurse reading_starter receptionist',
   (select string_agg(code || ': ' || holders, ' | ' order by code)
      from (select permission_code as code, string_agg(role_code, ' ' order by role_code) as holders
              from auth.role_permissions

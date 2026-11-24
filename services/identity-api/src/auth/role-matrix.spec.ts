@@ -54,6 +54,25 @@ describe('Akos\'s role table against today\'s role rows (SX-1)', () => {
     }
   });
 
+  // Owner decision Q137 B (0147): the two narrow roles are no column of the
+  // table; each holds exactly the codes 0136 took from the roles it is held
+  // beside, and nothing else.
+  it('pins the narrow roles of Q137 B, which are no column and hold only what 0136 took', () => {
+    expect(FIXTURE.narrowRoles.roles.map((narrow) => [narrow.code, narrow.label, narrow.besides])).toEqual([
+      ['work_list_reader', 'Lab and pharmacy work lists', ['admin', 'doctor']],
+      ['reading_starter', 'Start a paper reading', ['doctor']],
+    ]);
+    for (const narrow of FIXTURE.narrowRoles.roles) {
+      expect(ROLES).not.toContain(narrow.code);
+      expect(permissionsOf(narrow.code)).toEqual(FIXTURE.todayRolePermissions[narrow.code]);
+      for (const role of narrow.besides) {
+        expect(permissionsOf(role).filter((code) => permissionsOf(narrow.code).includes(code))).toEqual([]);
+      }
+    }
+    expect(permissionsOf('work_list_reader')).toEqual(['lab.work-item.read', 'pharmacy.work-item.read']);
+    expect(permissionsOf('reading_starter')).toEqual(['ocr.job.start']);
+  });
+
   it('records P1-5 today: no clinical role sees the facility profile and staff, and a facility admin does', () => {
     expect(FIXTURE.todayDifferences.filter((difference) => difference.includes('Facility profile and staff'))).toEqual([]);
   });

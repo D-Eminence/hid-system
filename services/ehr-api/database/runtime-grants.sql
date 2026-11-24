@@ -2007,6 +2007,23 @@ grant execute on function pharmacy.own_work_item_steps(uuid[]) to hid_pharmacy_r
 revoke all on function pharmacy.own_work_item_steps(uuid[]), pharmacy.validate_work_item_acceptance() from public;
 revoke all on pharmacy.work_item_acceptances from public;
 
+-- A change after dispensing reaches the pharmacy (0148, Q132 A: owner
+-- decision Q132 A of 19 November 2026, coordinator decision 1 of 20 November
+-- 2026), exactly as 0148 grants it: the reader of the changes recorded after
+-- a work item's first dispensing,
+-- pharmacy.work_item_changes_after_dispensing (the latest shown change, its
+-- time and the number of shown changes, for the items the session may read),
+-- to the Pharmacy runtime and the schema test runtime. The trigger function
+-- pharmacy.prescription_change_after_dispensing is executed by no role: the
+-- trigger prescriptions_pharmacy_change_after_dispensing on ehr.prescriptions
+-- runs it as its owner (the owner of pharmacy.validate_dispensing). No role
+-- holds any privilege on pharmacy.prescription_changes_after_dispensing (it is
+-- in none of the table grants above): only those two owner-run functions
+-- write and read it, as 0133's sends and claims.
+grant execute on function pharmacy.work_item_changes_after_dispensing(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
+revoke all on function pharmacy.work_item_changes_after_dispensing(uuid[]), pharmacy.prescription_change_after_dispensing() from public;
+revoke all on pharmacy.prescription_changes_after_dispensing from public;
+
 -- The national medicine and lab-test lists (0149, ORD-7 of the Akos EHR
 -- plan, first slice; design note on hid-system#258, 23 November 2026, and
 -- Rahman's reviews), exactly as 0149 grants and revokes them: the two
