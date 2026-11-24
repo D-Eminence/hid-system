@@ -131,7 +131,17 @@
 // it reads closed ended with that day, lists as done work (0152's open
 // refills leave it out), and its refill is refused (409
 // PHARMACY_REFILL_PRESCRIPTION_ENDED with refillsEndedOn, the same day,
-// which is the database's own day for it). Then both
+// which is the database's own day for it, in the words "...ended on
+// <day>..."). A late fill: a prescription with 1 refill of 10-day fills,
+// filled once, its writing moved back 25 days and its fill 3, so its refill
+// opens on its last day: it reads not_yet with nextFillOn equal to endsOn,
+// and its refill is refused too soon (PHARMACY_REFILL_TOO_SOON, that day);
+// its writing moved back one more day, so its refill would open only the day
+// after its last day: it reads closed ended (nextFillOn null, endsOn today +
+// 4), lists as done work, and its refill is refused (409
+// PHARMACY_REFILL_PRESCRIPTION_ENDED with refillsEndedOn, in the words
+// "...end on <day>, before this refill would be due..."), no fill recorded.
+// Then both
 // services restart with the setting off (and ehr-api's details off again):
 // the item with three fills is still one row (its latest fill); a second
 // dispensing of an item with a refill open is refused exactly as before
@@ -1617,6 +1627,65 @@ try {
       + 'durations here); with 1 refill and a 1-day duration, once 3 days after the day written have passed, the item reads '
       + 'closed ended with endsOn, is done work, and its refill is refused (409 PHARMACY_REFILL_PRESCRIPTION_ENDED with '
       + 'refillsEndedOn, the database\'s own day)');
+
+    // A late fill (D9, the review of 24 November 2026): the next refill's day falls after the refills' last day, so no
+    // refill can be collected again and the refills end at once, though their last day has not come. pharmacy-api's
+    // words for the refusal depend on the day (the Lagos day, as the database's): past, "ended on"; today or later,
+    // "end on <day>, before this refill would be due". rxLate: 1 refill, 10-day fills, so its refills end 30 days
+    // after the day it was written and a refill opens 8 days after the latest fill. Written 25 days back and filled 3
+    // days back, its refill opens on its last day (today + 5): not yet, and too soon until then. Written one more day
+    // back, its last day is today + 4 and its refill would open on today + 5: ended now, done work, and refused with
+    // the day they end. The same fixture as rxEnds (the owner, replica mode, no version written).
+    assert.equal(endedRefusal.detail, `The refills on this prescription ended on ${endedOn}. Ask the prescriber for a new `
+      + 'one.', `the words after the last day: ${JSON.stringify(endedRefusal)}`);
+    const rxLate = await newPrescription('active', 'Synthetic amoxicillin 500 mg capsule',
+      { refillsAllowed: 1, durationValue: 10, durationUnit: 'day' });
+    assert.deepEqual(rxLate.pharmacyHandoff, SENT, 'rxLate is sent to the hospital\'s own pharmacy');
+    const lateWritten = lagosDay(0);
+    const itemLate = onlyRow(await ownList('the list with rxLate'), rxLate, 'the list with rxLate');
+    const lateFill = expectStatus(await dispenseFill(itemLate, { fillNumber: 1 }), 201, 'fill 1 of rxLate');
+    assert.deepEqual(await prescriptionWrittenEarlier(rxLate, 25), { written: plusDay(lateWritten, -25),
+      version: String(rxLate.rowVersion) }, 'rxLate written 25 days earlier, its version unchanged');
+    await fillRecordedEarlier(lateFill, 3);
+    const onLastDay = (await readItem(itemLate, 'rxLate\'s item, its refill opening on its last day')).refills;
+    assert.deepEqual(onLastDay, { allowed: 1, recorded: 1, open: false, closedReason: 'not_yet', nextFillOn: lagosDay(5),
+      endsOn: lagosDay(5) }, `a refill that opens on the last day is not yet, not ended: ${JSON.stringify(onLastDay)}`);
+    const lastDayTooSoon = refusedWith(await dispenseFill(itemLate, { fillNumber: 2 }), 409, 'PHARMACY_REFILL_TOO_SOON',
+      'a refill that opens on the last day, before that day');
+    assert.deepEqual([lastDayTooSoon.refillOpensOn, lastDayTooSoon.detail],
+      [lagosDay(5), `This refill is too early. It can be dispensed from ${lagosDay(5)}.`],
+      `too soon, with the day it opens: ${JSON.stringify(lastDayTooSoon)}`);
+    assert.deepEqual(await prescriptionWrittenEarlier(rxLate, 1), { written: plusDay(lateWritten, -26),
+      version: String(rxLate.rowVersion) }, 'rxLate written one more day earlier, its version unchanged');
+    const lateDb = await one(`select to_char(ehr.prescription_refills_end_on(created_at, refills_allowed, duration_value,
+        duration_unit, ends_on), 'YYYY-MM-DD') as day from ehr.prescriptions where id = $1`, [rxLate.id]);
+    assert.equal(lateDb.day, lagosDay(4), `rxLate's refills end in 4 days (the database's day): ${lateDb.day}`);
+    const lateRead = (await readItem(itemLate, 'rxLate\'s item after a late fill')).refills;
+    assert.deepEqual(lateRead, { allowed: 1, recorded: 1, open: false, closedReason: 'ended', nextFillOn: null,
+      endsOn: lagosDay(4) }, `a late fill ends the refills before their last day: ${JSON.stringify(lateRead)}`);
+    const lateList = await ownList('the list after rxLate\'s late fill');
+    oneRowEach(lateList, 'the list after rxLate\'s late fill');
+    const lateRow = onlyRow(lateList, rxLate, 'the list after rxLate\'s late fill');
+    assert.deepEqual([lateRow.refills, listClass(lateRow)], [lateRead, 2],
+      'an item after a late fill is done work (0152\'s open refills leave it out)');
+    assertListOrder(lateList, 'the list after rxLate\'s late fill');
+    const lateRefusal = refusedWith(await dispenseFill(itemLate, { fillNumber: 2 }), 409,
+      'PHARMACY_REFILL_PRESCRIPTION_ENDED', 'a refill after a late fill');
+    assert.deepEqual([lateRefusal.refillsEndedOn, lateRefusal.detail], [lagosDay(4), `The refills on this prescription `
+      + `end on ${lagosDay(4)}, before this refill would be due. Ask the prescriber for a new one.`],
+    `the refusal says the day they end and that the refill would come after it: ${JSON.stringify(lateRefusal)}`);
+    assert.deepEqual((await fillsOf(itemLate)).map(row => row.fill_number), [1], 'no refill recorded after a late fill');
+    evidence.ord12.lateFill = { rule: 'the next refill\'s day after the refills\' last day: ended at once (D9)',
+      onTheLastDay: 'not_yet with nextFillOn = endsOn; 409 PHARMACY_REFILL_TOO_SOON with refillOpensOn',
+      dayAfterTheLastDay: 'closed ended, nextFillOn null, endsOn today + 4; done work; refill 409 '
+        + 'PHARMACY_REFILL_PRESCRIPTION_ENDED with refillsEndedOn',
+      words: { past: endedRefusal.detail, late: lateRefusal.detail },
+      fixture: 'created_at moved back 25 then 1 more day, fill 1 back 3 days, as the owner in replica mode' };
+    step('ORD-12: a late fill (D9): a refill that opens on the refills\' last day is not yet (refused too soon, with the '
+      + 'day it opens); once the next refill would open only after the last day, the item reads closed ended with '
+      + 'endsOn (today or later), is done work, and its refill is refused (409 PHARMACY_REFILL_PRESCRIPTION_ENDED, '
+      + 'refillsEndedOn); the refusal\'s words say "end on <day>, before this refill would be due", and after the last '
+      + 'day "ended on <day>"');
 
     // ── ORD-12 with the setting off: ehr-api and pharmacy-api booted again, PRESCRIPTION_REFILLS_ENABLED=false (and
     // ehr-api with 0125's details off again, as before this section) ──

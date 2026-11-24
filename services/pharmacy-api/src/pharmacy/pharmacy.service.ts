@@ -156,7 +156,10 @@ const WORK_LIST_ORDER = `order by o.open_work desc,o.refill_open asc,case when o
  * the due items they answer (at most 200 passing), so their cost does not
  * grow with how many refills are open at once; what grows is the work items'
  * and the fills' own row-level security on the live refill prescriptions,
- * about 0.15 ms each. The whole request (listWorkItems, every reader on),
+ * about 0.15 ms each for a pharmacist on the own-work basis (a clinician or a
+ * nurse, who may list on consent alone, pays the consent test there instead,
+ * about 1.5-3.9 ms each: OPEN_REFILLS_TIMEOUT_MS). The whole request
+ * (listWorkItems, every reader on, a pharmacist),
  * measured on 20,000 own items, 11 loads, under a NOSUPERUSER NOBYPASSRLS
  * owner: with 200 refills open at once 3.7-4.3 s (8.2-9.8 s before D8; the
  * open refills 0.07-0.10 s, this query 2.8-3.4 s, the per-item reader
@@ -955,7 +958,11 @@ export class PharmacyService {
    *   the day it was written plus (refills + 2) fills' durations, and that day
    *   plus 365: the clinical owner's D9), 409
    *   PHARMACY_REFILL_PRESCRIPTION_ENDED with `refillsEndedOn`, that day;
-   *   before the refill interval has
+   *   when the refill's day would come after that day (a late fill: the
+   *   interval from the latest fill ends past the last day), the same 409
+   *   PHARMACY_REFILL_PRESCRIPTION_ENDED with `refillsEndedOn`, the last day
+   *   (today or later; "end on <day>, before this refill would be due"), not
+   *   TOO_SOON; otherwise, before the refill interval has
    *   passed (the Lagos day of the latest fill not reversed plus 3/4 of the
    *   prescription's duration), 409 PHARMACY_REFILL_TOO_SOON with
    *   `refillOpensOn`, the day it opens (no override: a clinician writes a new

@@ -54,7 +54,11 @@ export const WORK_ITEM_REFILLS_QUERY = `select work_item_id::text as work_item_i
  * prescriptions that allow refills, written in the last 365 Lagos days, whose
  * refills have not ended (0152's index on ehr.prescriptions), so a refill that
  * is open is found however many items were filled after it, and a
- * prescription leaves that set on its refills' last day at the latest.
+ * prescription leaves that set on its refills' last day at the latest. Under
+ * a NOSUPERUSER NOBYPASSRLS owner (production's kind) the index cannot leave
+ * the ended ones out: every one that allows refills and was written in the
+ * last 365 Lagos days is read, ended or not, its last day checked on each
+ * (about 10 microseconds a row; see OPEN_REFILLS_TIMEOUT_MS).
  * VOLATILE, as the per-item reader (the scan marker): a read-write
  * transaction. The list keeps its order among the open refills. Exported for
  * the tests.
@@ -79,11 +83,18 @@ export const OPEN_REFILLS_QUERY = `select work_item_id::text as work_item_id
  * due items answered (at most 200 passing), so the cost does not grow with
  * how many refills are open at once; what grows is the work items' and the
  * fills' own row-level security on the live refill prescriptions, about 0.15
- * ms each, so this limit would be reached at about 20,000. Measured at 20,000
- * items inside the whole list request (every reader on, 11 loads): with 200
- * refills open at once the open refills 0.07-0.10 s and the request 3.7-4.3 s
- * (8.2-9.8 s before D8); with 2,000, 0.32-0.37 s and 3.9-4.3 s; with 10,000,
- * 1.49-1.67 s and 5.0-5.5 s; no load past this limit. (Before the
+ * ms each for a pharmacist on the own-work basis, so this limit would be
+ * reached at about 20,000. Measured at 20,000 items inside the whole list
+ * request (every reader on, 11 loads, a pharmacist): with 200 refills open at
+ * once the open refills 0.07-0.10 s and the request 3.7-4.3 s (8.2-9.8 s
+ * before D8); with 2,000, 0.32-0.37 s and 3.9-4.3 s; with 10,000, 1.49-1.67 s
+ * and 5.0-5.5 s; no load past this limit. A session that may read only on
+ * consent (a clinician or a nurse: pharmacy.work-item.read, which this list
+ * needs, without pharmacy.order-route.receive) pays the consent test on those
+ * rows instead (the open refills alone: about 1.5-1.9 ms for each live refill
+ * prescription it may not read and about 3.4-3.9 ms for each it may), so for
+ * it this limit is reached at about 1,800 or about 800 of them and its list says
+ * `refillsUnavailable` (0152's header has the figures). (Before the
  * review of 24 November 2026 the open refills asked those policies of every
  * due item and grew about 2 ms for each refill open at once: they hit this
  * limit on every load from about 1,400-1,500 open at once.) Past the limit the list stops
