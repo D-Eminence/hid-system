@@ -158,7 +158,8 @@
 -- applied_at). That is every existing table this file locks, at the
 -- strongest mode it takes (pg_locks before commit, at 9, 1 and 1 and at 0, 0
 -- and 0; every table the new rows' and audit rows' foreign keys reference is
--- among them, so no foreign key check takes a table lock of its own). Besides tables it locks only
+-- among them at ROW SHARE or stronger, so no foreign key check waits for a
+-- table lock). Besides tables it locks only
 -- indexes, at ACCESS SHARE or ROW SHARE (planning and the foreign key
 -- checks), apart from pg_proc's TOAST index below, and, when it writes an
 -- audit row, ROW EXCLUSIVE on audit.events' identity sequence. Replacing
@@ -223,11 +224,14 @@
 -- are: an index or catalog that maintenance holds (a REINDEX, for example),
 -- at any step, until 0147 first opens it; a row of auth.permissions (the
 -- foreign key checks of the three new role rows, at any counts) that another
--- session holds FOR UPDATE; and, at 9, 1 and 1, a row of auth.accounts or
--- identity.facilities that another session holds FOR UPDATE, or of
--- identity.outreach_organisations or identity.organization_applications that
--- another session is updating or holds FOR NO KEY UPDATE or FOR UPDATE (the
--- grants' foreign key checks and the triggers' FOR SHARE).
+-- session holds FOR UPDATE; and, at 9, 1 and 1: DDL in flight on
+-- audit.events' identity sequence (ALTER SEQUENCE; the audit rows take their
+-- numbers from it, and LOCK TABLE cannot take a sequence NOWAIT); a row of
+-- auth.accounts or identity.facilities that another session holds FOR
+-- UPDATE; or a row of identity.outreach_organisations or
+-- identity.organization_applications that another session is updating or
+-- holds FOR NO KEY UPDATE or FOR UPDATE (the foreign key checks of the grants
+-- and of their audit rows, and the triggers' FOR SHARE).
 --
 -- Undo (not in the ledger; a migration only if the owner signs it): mark both
 -- roles inactive (update auth.roles set active = false where code in
@@ -595,12 +599,12 @@ begin
     end if;
     if holding then
       raise exception using errcode = '55P03',
-        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, identity.staff_facility_memberships (any staff request in flight that writes or locks a membership, or inserts a row naming one, such as a staff audit row), audit.events or a table 0147 reads (the permissions, accounts, staff, facilities, organizations, patients, outreach groups, applications, sealed member lists and migration ledger) is busy, and this transaction already holds an earlier migration''s '
+        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, identity.staff_facility_memberships (any staff request in flight that writes or locks a membership, or inserts a row naming one, such as a staff audit row), audit.events or a table 0147 reads or locks (the permissions, accounts, staff, facilities, organizations, patients, outreach groups, applications, sealed member lists and migration ledger) is busy, and this transaction already holds an earlier migration''s '
           || 'locks, so it does not wait; nothing applied; run the release again at a quieter time';
     end if;
     if attempt >= 50 then
       raise exception using errcode = '55P03',
-        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, identity.staff_facility_memberships (any staff request in flight that writes or locks a membership, or inserts a row naming one, such as a staff audit row), audit.events or a table 0147 reads (the permissions, accounts, staff, facilities, organizations, patients, outreach groups, applications, sealed member lists and migration ledger) stayed busy for 5 seconds; nothing applied; run the release again at a '
+        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, identity.staff_facility_memberships (any staff request in flight that writes or locks a membership, or inserts a row naming one, such as a staff audit row), audit.events or a table 0147 reads or locks (the permissions, accounts, staff, facilities, organizations, patients, outreach groups, applications, sealed member lists and migration ledger) stayed busy for 5 seconds; nothing applied; run the release again at a '
           || 'quieter time';
     end if;
     perform pg_sleep(0.1);
