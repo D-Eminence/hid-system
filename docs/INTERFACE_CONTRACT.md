@@ -12228,16 +12228,20 @@ writes no version, so it records nothing and ends no refill.
   the database; the bound is on how many rows an item can have.
 - `pharmacy.validate_dispensing()` (BEFORE INSERT, origin mode) is 0101's
   text with one block before its RETURN (md5
-  863016abdecb8806b9922ffc52522b57; the body without the block is 0101's
+  4a5e308ec3e9c0e020a7283bc9034026; the body without the block is 0101's
   17f7e8897bd2ab240332e4d2c9f757b7). The order-route branch, 0077's actor
   and work-item check and 0101's prescription check answer first, as
   before. Then, for `fill_number > 1` only: a route-backed item, or an own
   item past `1 + coalesce(refills_allowed, 0)` fills, is refused 23514
-  `NO_REFILLS_LEFT`; an own item whose prescription's `ends_on` is before
-  today in Lagos (`(clock_timestamp() at time zone 'Africa/Lagos')::date`,
-  whatever the session's time zone; `ends_on` itself is the last day) is
-  refused 23514 `REFILL_PRESCRIPTION_ENDED`; then the refill interval: a
-  refill before the Lagos day of the item's latest fill not reversed plus
+  `NO_REFILLS_LEFT`; an own item whose refills' last day,
+  `ehr.prescription_refills_end_on` (the earliest of `ends_on`, the Lagos
+  day written plus `(refills_allowed + 2)` fills' durations, and that day
+  plus 365; the clinical owner's D9, 24 November 2026), is before today in
+  Lagos (`(clock_timestamp() at time zone 'Africa/Lagos')::date`, whatever
+  the session's time zone; the last day itself counts) is refused 23514
+  `REFILL_PRESCRIPTION_ENDED`, DETAIL that day (`YYYY-MM-DD`); then the
+  refill interval: a refill before the Lagos day of the item's latest fill
+  not reversed plus
   `ceil(0.75 × the duration in days)` (a day 1, a week 7, a month 30; at
   least 1) is refused 23514 `REFILL_TOO_SOON`, DETAIL that day
   (`YYYY-MM-DD`); with every fill reversed there is no wait. The fills and
@@ -12259,9 +12263,10 @@ writes no version, so it records nothing and ends no refill.
   "after dispensing" mean after the first fill; an acceptance (0144) after
   any fill is still refused `not_claimed` (refills need none). It reads only
   the claims, never `ehr.prescriptions`.
-- `pharmacy.work_item_refills(uuid[])`, new (plpgsql, STABLE, SECURITY
-  DEFINER, the owner's, `search_path` `pg_catalog, pg_temp`, every name
-  schema-qualified; md5 9666b34515987cc73ac788215e08a099). EXECUTE to `hid_pharmacy_runtime` and
+- `pharmacy.work_item_refills(uuid[])`, new (plpgsql, VOLATILE: it writes
+  0152's refill scan marker, D8; SECURITY DEFINER, the owner's,
+  `search_path` `pg_catalog, pg_temp`, every name schema-qualified; md5
+  3f28a855510aa4a8c66e52a32eb65085). EXECUTE to `hid_pharmacy_runtime` and
   `hid_schema_test_runtime` only, here and in `runtime-grants.sql` (0152's
   block); PUBLIC has none. 0125's reader is not replaced. For at most 200
   requested work items (201, or a null array: 22023
@@ -12304,12 +12309,15 @@ writes no version, so it records nothing and ends no refill.
   owner. pharmacy-api asks it only for the own rows a list or a read shows
   (once per list, at most 200 ids); the list finds the items with a refill
   open through the next reader.
-- `pharmacy.open_refill_work_items()`, new (plpgsql, STABLE, SECURITY
-  DEFINER, the owner's, `search_path` `pg_catalog, pg_temp`, every name
-  schema-qualified; md5 b679f8534f17f7204edb36fea769e45b; EXECUTE as the
-  reader's, here and in `runtime-grants.sql`), with its index
+- `pharmacy.open_refill_work_items()`, new (plpgsql, VOLATILE, as the
+  reader; SECURITY DEFINER, the owner's, `search_path` `pg_catalog,
+  pg_temp`, every name schema-qualified; md5
+  fe4bd65dc8b29414a1be3815e1b8e214; EXECUTE as the reader's, here and in
+  `runtime-grants.sql`), with its index
   `ehr.prescriptions_refills_facility_idx` on `ehr.prescriptions
-  (facility_id) WHERE refills_allowed > 0` (built empty under the file's
+  (facility_id, created_at, ehr.prescription_refills_end_on(created_at,
+  refills_allowed, duration_value, duration_unit, ends_on)) WHERE
+  refills_allowed > 0` (built empty under the file's
   lock: the column is new). No ids: the ids (`work_item_id`) of the
   session's own items whose refill is open now, by the reader's rule exactly
   (the same session tests and read policies; `refill_open` as above, the
