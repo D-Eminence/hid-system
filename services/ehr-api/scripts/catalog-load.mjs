@@ -10,9 +10,10 @@
 // the version guard: SQLSTATE 55000, such as CATALOG_ID_CHANGED; a table
 // check: 23514), and 0150's for a diagnosis list, are refusals too, with the
 // database's message. A connection lost once the load's COMMIT is sent
-// (CommitOutcomeUnknown) is neither: the version may have committed, so its
-// line (COMMIT_UNKNOWN_LINE, exit 1) says so and asks for the same load
-// again, which settles it.
+// (CommitOutcomeUnknown) is neither: the version may have committed, so the
+// command ends with its own exit code (COMMIT_UNKNOWN_EXIT, 3) and a line
+// (COMMIT_UNKNOWN_LINE) that says so and asks for the same load again, which
+// settles it.
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { approvalFor, heldBackAndRetired, heldBackRetiredProblem, seedProblems, sha256 } from './catalog-seed.mjs';
@@ -39,7 +40,7 @@ export const BUSY = 'ehr.catalog_versions or another catalogue load stayed busy 
  * place. The server may have committed the version before the connection
  * went (a backend terminated while its commit waits for a synchronous
  * standby has already committed locally), so "nothing loaded" would not be
- * true. The command ends with COMMIT_UNKNOWN_LINE, exit 1. An ERROR reply to
+ * true. The command ends with COMMIT_UNKNOWN_LINE, exit 3. An ERROR reply to
  * COMMIT is a reply: the transaction rolled back, and that stays a refusal
  * or a failure with "nothing loaded".
  */
@@ -50,7 +51,13 @@ export class CommitOutcomeUnknown extends Error {
   }
 }
 
-/** The line a commit with no reply prints (stderr), which the deploy tool recognises (outcome unknown). */
+/**
+ * The exit code of a commit with no reply: its own, so the deploy tool reads the outcome as unknown from the code
+ * alone, without the log (exit 1 is a failure with nothing loaded, exit 2 a refusal).
+ */
+export const COMMIT_UNKNOWN_EXIT = 3;
+
+/** The line a commit with no reply prints (stderr), which the deploy tool shows. */
 export const COMMIT_UNKNOWN_LINE = 'load-catalog: the connection was lost during commit, so the load may have committed; '
   + 'ask for the same load again to settle it (it loads, or is refused as already loaded)';
 
