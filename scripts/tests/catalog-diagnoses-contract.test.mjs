@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import test from 'node:test'
 
-// ORD-9 (0150): the planned contract says what ehr-api sends for the diagnosis search's 503 (Rahman's re-review of
+// ORD-9 (0152): the planned contract says what ehr-api sends for the diagnosis search's 503 (Rahman's re-review of
 // #320, nit 9a). ProblemDetailsFilter replaces every 5xx detail with one text; the catalogue spec's HTTP test pins it
 // on the wire, and this test holds the contract's ORD-9 error row and its first slice to the same words. (A service
 // test may not read docs/: a change there would not select the service's tests.)

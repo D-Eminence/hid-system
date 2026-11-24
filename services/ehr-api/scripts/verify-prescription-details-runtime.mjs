@@ -674,9 +674,9 @@ try {
   step('ORD-7: short text, a Health ID, a NIN, an unknown form, a missing permission and a patient are refused and '
     + 'never kept; only refusals are audited, never with the search text');
 
-  // ── ORD-9 (0150), first slice: the ICD-11 diagnosis search ──
+  // ── ORD-9 (0152), first slice: the ICD-11 diagnosis search ──
   // Loaded as the governed loader loads it: the release (still loading, with the approvals file's sha256), its
-  // entries, then the switch, which seals it (0149, 0150).
+  // entries, then the switch, which seals it (0149, 0152).
   const icdNotice = 'Synthetic notice: ICD-11, World Health Organization, CC BY-ND 3.0 IGO.';
   const diagnosisVersion = randomUUID();
   await owner.query(`insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference,

@@ -2130,17 +2130,17 @@ facility, newest first. `limit` is 1-50, default 20.
 - The patient-evidence change (lane D edits `patient-records/` only for the
   ICD-11 split, agreed with lane C as FR-1 was).
 
-### First slice: the ICD-11 list and its search (0150, draft, not live)
+### First slice: the ICD-11 list and its search (0152, draft, not live)
 
 Built on 23 Nov 2026 (lane D), on ORD-7's tables and loader (#318, #319), as
-the design note on hid-system#258 (13:55 UTC) set out. The number 0150 is
+the design note on hid-system#258 (13:55 UTC) set out. The number 0152 is
 provisional. Nothing is loaded until the clinical lead signs the release
 file's seed in `docs/codes/catalog-approvals.json`.
 
-- **Database (0150):** `ehr.catalog_versions` takes the kind `diagnosis`
+- **Database (0152):** `ehr.catalog_versions` takes the kind `diagnosis`
   (ACCESS EXCLUSIVE on that small table, and in the same attempt ACCESS
-  SHARE on ORD-7's two lists, whose status 0150 replaces; NOWAIT for at
-  most 5 seconds, else 55P03 "0150: …", which a dry run retries).
+  SHARE on ORD-7's two lists, whose status 0152 replaces; NOWAIT for at
+  most 5 seconds, else 55P03 "0152: …", which a dry run retries).
   `ehr.catalog_diagnoses` holds one row per coded entry per release: code,
   WHO's title verbatim, our other names apart, chapter, and whether the
   entry is residual. It is append-only, and, as ORD-7's lists, a release
@@ -2151,7 +2151,7 @@ file's seed in `docs/codes/catalog-approvals.json`.
   condition, column list or arguments, and the sealed-release function's
   body.
   Instead of the planned `ehr.terminology_icd11`, the list shares ORD-7's
-  versions, loader and sign-off. The loader takes 0150's refusals as it
+  versions, loader and sign-off. The loader takes 0152's refusals as it
   takes 0149's: a sealed release (55000) or a table check (23514) ends the
   load as a refusal (exit 2) with the database's message, and nothing is
   loaded.
@@ -2240,7 +2240,7 @@ file's seed in `docs/codes/catalog-approvals.json`.
   - A `q` with a control character other than tab (U+0000 included) is 400
     `VALIDATION_FAILED` before the database, in all three catalogue
     searches.
-  - A schema without 0150, or any database failure, answers 503
+  - A schema without 0152, or any database failure, answers 503
     `CATALOG_UNAVAILABLE`, sent as "The service could not complete the
     request." (as every 5xx; the service's own words, "Diagnosis search is
     not available right now.", stay inside it). The catalogue status fills

@@ -1,7 +1,7 @@
 \set ON_ERROR_STOP on
--- 0150 (ORD-9, first slice): the ICD-11 diagnosis list and its search.
+-- 0152 (ORD-9, first slice): the ICD-11 diagnosis list and its search.
 -- Rollback-only.
---   1. after 0001-0150: the list is empty, the status answers for three
+--   1. after 0001-0152: the list is empty, the status answers for three
 --      lists, the versions take the kind 'diagnosis'; the table is the
 --      owner's only, the search the EHR and schema test runtimes' only;
 --   2. with a release loaded by hand as the governed loader loads it (the
@@ -66,7 +66,7 @@ create function pg_temp.found(q text, lim integer) returns text language sql as 
 $$;
 grant execute on function pg_temp.found(text, integer) to public;
 
--- 1. After 0001-0150.
+-- 1. After 0001-0152.
 select pg_temp.expect('1a the list is empty; the status answers for three lists', '0|diagnosis f, lab_test f, medicine f',
   (select count(*) from ehr.catalog_diagnoses) || '|'
   || (select string_agg(format('%s %s', kind, available), ', ' order by kind) from ehr.catalog_status()));
@@ -80,7 +80,7 @@ select pg_temp.expect('1c the table is the owner''s only; the search the EHR run
   || ' ' || has_function_privilege('hid_pharmacy_runtime', 'ehr.search_catalog_diagnoses(text,integer)', 'EXECUTE'));
 
 -- 2. A release loaded by hand, as the governed loader loads it: the releases (still loading), their entries, then
--- the switch, which seals the live one (0149's guard; 0150's insert trigger then refuses it any row).
+-- the switch, which seals the live one (0149's guard; 0152's insert trigger then refuses it any row).
 insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference, approvals_sha256, approved_at)
   values
   ('c1500000-0000-4000-8000-000000000001', 'diagnosis', '2026-01', repeat('d', 64), 'synthetic sign-off reference',
@@ -356,8 +356,8 @@ begin
   select string_agg(format('%s: expected [%s] got [%s]', name, expected, actual), E'\n' order by seq) into failures
     from diagnosis_cases where expected is distinct from actual;
   if failures is not null then
-    raise exception E'0150 diagnosis search suite failed:\n%', failures;
+    raise exception E'0152 diagnosis search suite failed:\n%', failures;
   end if;
-  raise notice '0150 diagnosis search suite: % cases passed', (select count(*) from diagnosis_cases);
+  raise notice '0152 diagnosis search suite: % cases passed', (select count(*) from diagnosis_cases);
 end $$;
 rollback;

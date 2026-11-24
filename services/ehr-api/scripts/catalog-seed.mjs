@@ -32,7 +32,7 @@ export const ATC_CODE = /^[A-Z][0-9]{2}[A-Z]{2}[0-9]{2}$/;
 export const SOURCE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export const ROUTE = /^[a-z][a-z -]{0,99}$/;
 export const SHA256 = /^[0-9a-f]{64}$/;
-/** An ICD-11 MMS code (0150): a stem of four, then up to two parts after dots; never an extension code (X...). */
+/** An ICD-11 MMS code (0152): a stem of four, then up to two parts after dots; never an extension code (X...). */
 export const ICD11_CODE = /^(?!X)[0-9A-Z]{4}(\.[0-9A-Z]{1,2}){0,2}$/;
 export const ICD11_CHAPTER = /^([0-9]{2}|[A-Z])$/;
 
@@ -168,7 +168,7 @@ export function labTestProblems(item) {
   return problems;
 }
 
-/** Why an ICD-11 entry would not load as 0150 makes the table, or [] when it would. */
+/** Why an ICD-11 entry would not load as 0152 makes the table, or [] when it would. */
 export function diagnosisProblems(item) {
   const problems = [];
   if (typeof item.code !== 'string' || !ICD11_CODE.test(item.code)) problems.push('the code is not an ICD-11 MMS code');

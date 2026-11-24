@@ -32,7 +32,7 @@ export interface CatalogListStatus {
 export interface CatalogStatus {
   medicines: CatalogListStatus;
   labTests: CatalogListStatus;
-  /** ORD-9 (0150): the ICD-11 release the diagnosis search uses, when one is loaded. */
+  /** ORD-9 (0152): the ICD-11 release the diagnosis search uses, when one is loaded. */
   diagnoses: { available: boolean; release: string | null; fileSha256: string | null };
   /** The name-only lab request (a later ORD-7 slice). */
   labTestNameOnly: false;
@@ -226,7 +226,7 @@ export function searchTextNotAllowed(list: 'catalogue' | 'diagnoses' = 'catalogu
  * An ICD-10 code as typed (planned contract, ORD-9): a letter, two digits or
  * a digit and a letter, then optionally a dot and up to 4 more. No ICD-11
  * code has this shape (an ICD-11 code's second character is a letter). As
- * for an ICD-11 code (0150), any run of characters that are neither letters
+ * for an ICD-11 code (0152), any run of characters that are neither letters
  * nor digits is taken off both ends first, so a code copied with punctuation
  * around it is still that code ("B50.9.", "(B50.9)"); its own dot stays
  * (Rahman's re-review of #320, nit 9d).
@@ -244,8 +244,8 @@ export function catalogUnavailable(): DomainProblem {
 
 /**
  * ORD-9's 503, the catalogue's code with words that are true in every case,
- * a schema without 0150 included, so they give no advice: trying again in a
- * minute does not help while 0150 is not there, and a diagnosis still needs
+ * a schema without 0152 included, so they give no advice: trying again in a
+ * minute does not help while 0152 is not there, and a diagnosis still needs
  * its code (clinical.dto.ts), so typing a name instead is not offered until
  * diagnoses by name only ship. These words stay in the service: on the wire,
  * ProblemDetailsFilter replaces every 5xx detail with "The service could not
@@ -361,7 +361,7 @@ export class CatalogService {
   }
 
   /**
-   * ORD-9 (0150): the active ICD-11 release's entries for q, in the
+   * ORD-9 (0152): the active ICD-11 release's entries for q, in the
    * contract's shape, and q as an ICD-10 code when it is shaped like one.
    */
   async searchDiagnoses(membershipKey: string, query: SearchCatalogLabTestsQueryDto): Promise<TerminologyDiagnosisAnswer> {

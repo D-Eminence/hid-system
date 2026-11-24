@@ -5,7 +5,7 @@ import { RecentDiagnosesService } from './recent-diagnoses.service';
 
 /**
  * ORD-7 (0149): the medicine and lab-test lists; ORD-9: the ICD-11 diagnosis
- * search (0150) and each member's recent diagnoses (0151).
+ * search (0152) and each member's recent diagnoses (0151).
  */
 @Module({
   controllers: [CatalogController, TerminologyController],

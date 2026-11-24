@@ -38,14 +38,14 @@ async function busyRefusalsOf(file) {
 
 // Rahman, #320 finding 1; and his re-review's finding 2: the attempt also takes ACCESS SHARE on both of 0149's lists
 // (the status's body check reads them), so both refusals name the three tables and are still retried.
-test('0150\'s two busy refusals, read from the file, name the versions table and both lists, and are retried', async () => {
-  const file = '0150_catalog_diagnoses.sql';
+test('0152\'s two busy refusals, read from the file, name the versions table and both lists, and are retried', async () => {
+  const file = '0152_catalog_diagnoses.sql';
   const refusals = await busyRefusalsOf(file);
   const tables = 'ehr.catalog_versions (a catalogue search or load), ehr.catalog_medicines or ehr.catalog_lab_tests';
   assert.deepEqual(refusals, [
-    `0150: ${tables} is busy and this transaction already holds an earlier migration's locks, so it does not wait; `
+    `0152: ${tables} is busy and this transaction already holds an earlier migration's locks, so it does not wait; `
       + `nothing applied; ${tail}`,
-    `0150: ${tables} stayed busy for 5 seconds; nothing applied; ${tail}`,
+    `0152: ${tables} stayed busy for 5 seconds; nothing applied; ${tail}`,
   ]);
   for (const message of refusals) {
     assert.match(message, /ehr\.catalog_medicines/);
