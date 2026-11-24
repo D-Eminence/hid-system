@@ -25,6 +25,15 @@ import type { CreatePrescriptionWithRefillsDto } from '../shared/clinical.dto';
  * first fill ends the remaining refills (0101's version check), and ehr-api
  * tells nobody that it did (0152 leaves ehr.withdraw_own_pharmacy_send and
  * 0133's steps as they are; the change is the prescriber's own).
+ * The refills also end on their last day (the clinical owner's decision D9,
+ * 24 November 2026; 0152's ehr.prescription_refills_end_on, the one place the
+ * day is computed): the earliest of the end date, the Lagos day the
+ * prescription was written (created_at, which ehr-api never changes) plus
+ * (refills + 2) times one fill's duration in days (a day 1, a week 7, a month
+ * 30), and that day plus 365. ehr-api checks nothing more for it and answers
+ * no new field: the prescribe form works the same day out from what it sends
+ * ("Refills can be collected until <date>"), and pharmacy-api answers it as
+ * `refills.endsOn`.
  */
 /**
  * REFILLS_NEED_DURATION's words. With refills above 0, the duration (0125's
