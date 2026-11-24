@@ -67,6 +67,8 @@ What is left out of the medicine files:
 
 13 tests have no code: no LOINC code clearly matched, and none is in `hid-lab-codes.json`. The reviewer decides whether each needs a new HID-LAB code.
 
+**No other name of one letter:** the pickers' search needs at least 2 characters, so a one-letter name could never be found. On 24 November 2026 potassium's (`LAB-0008`) "K" became "K+", and electrolytes' (`LAB-0060`) "E" was dropped, since "Serum electrolytes" is already among its other names.
+
 ## Sources
 
 | Source | Edition and date | Where it came from | Licence and terms |
