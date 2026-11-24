@@ -30,9 +30,18 @@ export interface RoleMatrixRow {
   notCompared?: string;
 }
 
+/** A narrow role of owner decision Q137 B (0147): not a column; it is held only beside the roles named. */
+export interface RoleMatrixNarrowRole {
+  code: string;
+  label: string;
+  besides: string[];
+  givesBack: string;
+}
+
 export interface RoleMatrixFixture {
   columns: RoleMatrixColumn[];
   rows: RoleMatrixRow[];
+  narrowRoles: { about: string; roles: RoleMatrixNarrowRole[] };
   todayRolePermissions: Record<string, string[]>;
   todayDifferences: string[];
 }

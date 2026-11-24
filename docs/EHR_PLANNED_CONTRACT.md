@@ -1519,6 +1519,102 @@ together, like section 46's setting.
 - ORD-2 (0133) and order routes for the name-only send paths.
 - SX-1 fixture for the new permission.
 
+### First slice: the lists and their search (0149, draft, not live)
+
+Built on 23 Nov 2026 (lane D) as the design note on hid-system#258 set
+out. The number 0149 is provisional and is given in merge order after
+Release B. Nothing is loaded: the lists stay empty until the clinical lead
+signs a version (Q124 A) and the governed loader (a later slice) loads it.
+
+- **Built:** `ehr.catalog_versions`, `ehr.catalog_medicines` and
+  `ehr.catalog_lab_tests`, the two searches and the status, as above.
+  `GET .../catalog/status`, `.../catalog/medicines` and
+  `.../catalog/lab-tests` work as the tables above say, with these
+  choices:
+  - The fixed codes are the combined list's ids (hid-system#312):
+    `MED-nnnnn` under `HID-MED`, and each test's LOINC or HID-LAB code.
+  - `display` is the generic name with a capital first letter, then the
+    strength, then the list's form words in lower case ("Amoxicillin 500
+    mg capsule"). `genericName` is the list's INN as written (lower case).
+  - `source` is the list's own value: `nigeria-eml-8`, `who-eml-24` or
+    `hid-common-tests` (#312).
+  - A lab test's `category` may also be `blood-bank`, `immunology` or
+    `histopathology`, which the combined list uses (twelve values in all).
+- **Fixed ids:** `ehr.catalog_retired_codes` keeps each id the loader
+  drops, and insert triggers refuse a retired id, an id whose medicine
+  (generic name, strength, dose form) or test (code system, code, name)
+  differs from an earlier version's, and a lab code another id held. So a
+  code is never changed or reused, in the database as well as in the seed
+  file's test.
+  - `atcCode` is always `null` until the WHOCC terms are settled, though
+    the table can hold the code.
+  - `attribution` is read from the active versions: each loaded version
+    records the notices its sources require (at most 5). A list that is
+    not available shows none.
+  - A list is `available` only when its active version offers at least one
+    item. `approvedAt` is the Lagos day of the sign-off, and `fileSha256`
+    (an addition to the shape above) is the sha256 of the signed seed file
+    the version was loaded from, so support can tell which list a clinician
+    searched; both are `null` when the list is not available.
+  - `listVersion` is `null` when nothing matched.
+  - A search matches when each word of `q` starts a word of the generic
+    name or of one other name. Words are split at anything that is not a
+    letter or digit, in `q` and in the names alike (the index and the
+    per-name checks use the search's own split), so "co-amox" finds
+    co-amoxiclav, "E/U/Cr" finds electrolytes, and "MTB/RIF", "HIV 1/2",
+    "COVID-19", "U/A" and "G&XM" find the tests named so. Only the first 6
+    words count, each cut to 40 characters;
+    `q` never reaches the query parser as typed, so brackets or operators
+    answer nothing, never an error. Brand names come with the loader (they
+    are other names).
+  - The order: names that start with `q` first, then by name in the "C"
+    collation, then strength and the list id, so it is the same on every
+    load.
+- **Immutability:** a loaded row never changes; a correction or a
+  withdrawal is a new version. Triggers refuse UPDATE, DELETE and TRUNCATE
+  on the two lists, and on a version anything but the loader's switch
+  (`active`, `loaded_at`, and `sealed` from false to true). The loader
+  switches the old version off, then the new one on, in one transaction
+  under SHARE ROW EXCLUSIVE on the versions.
+  - **Sealed versions:** a version is sealed when it goes live (an active
+    version is always sealed) and stays sealed. The lists' insert triggers
+    refuse a row for a sealed version (55000 `CATALOG_VERSION_SEALED`),
+    reading the version row FOR SHARE so an insert and a switch wait for
+    each other. So a live or replaced version never gains a row its signed
+    file did not hold; only a version still loading takes rows.
+  - Each version also records the sha256 of the approvals file that holds
+    the lead's sign-off (`approvals_sha256`), which never changes, like the
+    approval reference.
+- **Refusals:** `q` missing or under 2 characters gives
+  `CATALOG_SEARCH_TEXT_TOO_SHORT`. Characters are counted as the database
+  counts them (code points), so an emoji alone is too short. `q` over 100
+  characters, a bad `limit`,
+  `doseForm` or `route`, or a parameter given twice or unknown gives
+  `VALIDATION_FAILED`. `q` containing `HID-` and Health ID characters, a
+  six-character word of the Health ID alphabet mixing letters and digits,
+  or a run of 11 or more digits (spaces and hyphens ignored) gives
+  `CATALOG_SEARCH_TEXT_NOT_ALLOWED`, before any search.
+- **429:** 300 searches per 5 minutes per membership, counted in each
+  ehr-api instance, not across instances. Refused texts do not count.
+- **On a schema without 0149:** the status answers 404
+  `CATALOG_NOT_AVAILABLE` ("The medicine and lab-test lists are not
+  available yet."), so screens keep their built-in lists; the searches
+  answer 503 `CATALOG_UNAVAILABLE`. Any other database failure is 503
+  `CATALOG_UNAVAILABLE`, logged with its SQLSTATE only.
+- **Caching and audit:** `Cache-Control: private, max-age=60` is set only
+  on an answer; a refusal keeps `private, no-store`. Only refusals are
+  audited (the method and route, never `q`).
+- **Not in this slice:** facility items and `ehr.catalog.facility-item.write`,
+  lab requests by name only (`labTestNameOnly` stays `false`), the
+  loader and seed files (the loader records each id it drops in
+  `ehr.catalog_retired_codes`, which is in this slice),
+  `ehr.duplicate_class_rules`, and the screens.
+- **Checks:** the database suite `catalog-search` (59 cases), the ehr-api
+  spec (68 tests), and three steps in
+  `verify-prescription-details-runtime.mjs`: before a list, with a list
+  loaded by owner SQL (the doctor and the pharmacist search), and the
+  refusals and the audit rows.
+
 ### Target
 
 Release B (number given at merge).

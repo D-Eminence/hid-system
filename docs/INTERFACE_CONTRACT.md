@@ -9376,6 +9376,95 @@ and administrators; hide Outreach from doctors; hide visits and the Migrate
 desk from laboratory staff. Screens already follow the permissions list in the
 session, so most of this happens by itself.
 
+## 0147. Q137 B: two narrow roles for exactly the staff 0136 counted (migration 0147; not live until signed)
+
+Owner decision, verbatim (coordinator, 13:30 UTC 23 November 2026, on
+hid-system#258): "Q137 B: the restore gives access back only to the 9 admins
+and 1 doctor the guard counted, through narrow roles. Q103 A and Q111 A hold
+for everyone else." The stop at 0, 0 and 0 as well as 9, 1 and 1 is the
+amendment on #258, for the owner to confirm at signing.
+
+| Role code | Label | Permissions | Given to |
+| --- | --- | --- | --- |
+| `work_list_reader` | Lab and pharmacy work lists | `lab.work-item.read`, `pharmacy.work-item.read` | each administrator (0136's lines 19/20) and doctor (lines 13/14) 0136 counted |
+| `reading_starter` | Start a paper reading | `ocr.job.start` | the doctor of 0136's line 21 |
+
+- **Who:** active memberships at real facilities (not the sealed demo or QA
+  tenants) holding `admin` or `doctor` through an assignment granted before
+  0136 was applied and still not revoked, whom 0136's own rules count today:
+  no other role they hold gives the work list (or, for the reading, they
+  could start one before 0136 and cannot now). A membership in both work-list
+  counts gets one row.
+- **The stop:** 0147 applies only at exactly 9, 1 and 1 (administrators and
+  doctors for the work lists, doctors for the reading start), or at 0, 0 and
+  0 (a database without them: the two roles are created and given to nobody).
+  Any other counts: 55000 "0147 stopped, nothing was changed: the counts are
+  a, d and r ...", numbers only, nothing applied.
+- **Rows:** one `auth.account_roles` row per membership and role (grant
+  reason "Owner decision Q137 B (23 November 2026): access 0136 removed",
+  `granted_by` null) and one `identity.facility-staff.role-add` audit row each
+  (system actor; the facility and the membership only, with the role codes
+  before and after). No other role's row changes and no policy or grant
+  changes, so `runtime-grants.sql` is unchanged. One function is replaced:
+  SX-4's change (`identity.staff_role_change_apply`, see "SX-4 after 0147").
+- **What the members see:** from their next request, the counted
+  administrators and doctor pass `GET /lab/work-items`, `GET
+  /lab/work-items/:id`, `GET /pharmacy/work-items` and `GET
+  /pharmacy/work-items/:id` again, and the doctor `POST /ocr/jobs` and `POST
+  /ocr/jobs/:jobId/retry` (with the `ocr.job.write` doctors kept). Their sites
+  do not change: a doctor stays on ehr. and migrate. (Q97). Everyone else is
+  as 0136 left them.
+- **Not a staff role:** the codes are never offered for invitation, never
+  granted at support's review and never added or removed through SX-4
+  (`STAFF_ROLES` and 0139's lists stay the five hospital roles; requests
+  naming them answer 400 `VALIDATION_FAILED`). A staff profile (the Staff
+  page's `members[].roles`, support's staff view) lists them, and the
+  website shows the labels above. Neither ever becomes the membership's own
+  role columns, which the session's `roles` list; the session's
+  `permissions` include their codes.
+- **SX-4 after 0147.** 0147 replaces SX-4's change function as 0139 replaced
+  the openers: pinned to Release B's body, only lines marked `0147 (Q137 B)`
+  added (its post-check proves that taking them out gives Release B's body
+  back), owner, grants, comment and settings kept. With it:
+  - what SX-4 counts and checks leaves the two narrow roles out: "already
+    held" and "not held", the last role (409 `FACILITY_STAFF_LAST_ROLE`), and
+    the role that `membership_role` and `app_role` move to after a remove
+    (409 `FACILITY_STAFF_ROLE_COLUMN_CONFLICT` when none can) are among the
+    other roles only. So removing `doctor` from the counted doctor who holds
+    no other staff role is refused as the last role: end the membership
+    instead;
+  - naming either narrow role is refused in the database too (400
+    `STAFF_INVITATION_INVALID`), besides the DTOs' 400 `VALIDATION_FAILED`;
+  - removing `doctor` also revokes that membership's `reading_starter`, and
+    its `work_list_reader` unless it still holds `admin` (an administrator
+    who loses `doctor` keeps the work lists): revoked with `doctor`, by the
+    caller, with the remove's reason, and one
+    `identity.facility-staff.role-remove` audit row each (the administrator
+    as the staff actor, support as the system actor; the membership, the
+    narrow role, the role codes before and after, `cause` `role-removed`,
+    `removedRole` `doctor`). Adding `doctor` back does not give them back;
+  - `roles` in SX-4's answer (and `previousRoles` and `roles` in its audit
+    rows) still lists every active role, the narrow ones too, as SX-4's
+    "Answers" says; after a remove of `doctor` it no longer lists the ones
+    revoked with it.
+  Nothing else in SX-4 changes. Administrators are not otherwise affected
+  (SX-4 never removes `admin`).
+- **Ending:** the rows end with the membership, as every role does, or with
+  `doctor` as above. SX-4 cannot add or remove them by name.
+  - Two of 0086's commands also end them: the facility administrator's
+    "Change role", which counts every role held, and support's self-service
+    administrator role (S12), which compares only the latest role granted
+    other than `org_admin` (a narrow role after 0147). For a counted member
+    "Change role" revokes
+    every role held, and S12 every role but `org_admin`, the narrow roles with
+    them, and each grants the requested role again. Access is never widened.
+    But the same role and licence no longer answer "unchanged": S12 then makes
+    the change, so it also signs the member out (as every S12 grant does),
+    and its audit row names the latest narrow role as `previousRole`. Leaving
+    them out there is a follow-up.
+- **Undo:** mark both roles inactive (`auth.roles.active = false`); every
+  member is back where 0136 left them from their next request.
+
 ## ORD-2. This facility's own pharmacy and lab work; prescriptions sent to the hospital's own pharmacy (Akos Release A, migration 0133)
 
 Owner decisions of 18 November 2026: activated prescriptions go
