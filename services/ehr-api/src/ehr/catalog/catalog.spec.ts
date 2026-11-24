@@ -1,11 +1,14 @@
-import { Logger, RequestMethod } from '@nestjs/common';
+import { type INestApplication, Logger, Module, RequestMethod } from '@nestjs/common';
 import type { ArgumentMetadata } from '@nestjs/common';
 import { HEADERS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { Test } from '@nestjs/testing';
+import type { NextFunction, Request, Response } from 'express';
+import type { AddressInfo } from 'node:net';
 import { ANY_PERMISSIONS, AUDIT_FAILURES_ONLY, PATIENT_ALLOWED, REQUIRED_PERMISSIONS } from '../../common/decorators';
-import { DomainProblem } from '../../common/problem';
+import { DomainProblem, ProblemDetailsFilter } from '../../common/problem';
 import type { HidRequest } from '../../common/request-context';
 import { createValidationPipe } from '../../common/validation-pipe';
-import type { DatabaseService } from '../../database/database.service';
+import { DatabaseService } from '../../database/database.service';
 import { EhrModule } from '../ehr.module';
 import { CATALOG_CACHE_CONTROL, CatalogController, TerminologyController } from './catalog.controller';
 import {
@@ -353,6 +356,33 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
         [{ field: 'q', messages: ['q must be shorter than or equal to 100 characters'] }]]);
       expect(calls.map((call) => call.values[0])).toEqual([astral]);
     });
+
+    // Rahman's re-review of #320, nit 9c: U+0000 reached the database (22021) and answered 503.
+    it.each([
+      ['U+0000', 'amox\u0000'],
+      ['U+0001', '\u0001amox'],
+      ['a line feed', 'amox\nicillin'],
+      ['a carriage return', 'amox\ricillin'],
+      ['U+001F', 'amox\u001F'],
+    ])('q with %s is 400 VALIDATION_FAILED, and nothing is searched', async (_name, q) => {
+      const { database, calls } = fakeDatabase([]);
+      const service = new CatalogService(database);
+      for (const search of [service.searchMedicines(membershipA, medicines({ q })),
+        service.searchLabTests(membershipA, labTests({ q }))]) {
+        const problem = await problemOf(search);
+        expect([problem.getStatus(), problem.code, problem.errors]).toEqual([400, 'VALIDATION_FAILED',
+          [{ field: 'q', messages: ['q must not contain control characters'] }]]);
+      }
+      expect(calls).toEqual([]);
+    });
+
+    it('q with a tab, or with U+007F, is searched', async () => {
+      const { database, calls } = fakeDatabase([]);
+      const service = new CatalogService(database);
+      await service.searchMedicines(membershipA, medicines({ q: 'amox\tcap' }));
+      await service.searchLabTests(membershipA, labTests({ q: 'fbc\u007F' }));
+      expect(calls.map((call) => call.values[0])).toEqual(['amox\tcap', 'fbc\u007F']);
+    });
   });
 
   describe('300 searches per 5 minutes per membership', () => {
@@ -425,8 +455,26 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       ['5A11.Z', null],
       ['malaria', null],
       ['B50.91234', null],
+      // Punctuation around the code comes off, as for an ICD-11 code (Rahman's re-review of #320, nit 9d).
+      ['B50.9.', { codeSystem: 'ICD-10', code: 'B50.9' }],
+      ['(B50.9)', { codeSystem: 'ICD-10', code: 'B50.9' }],
+      ['(b50.9).', { codeSystem: 'ICD-10', code: 'B50.9' }],
+      ['B50.9,', { codeSystem: 'ICD-10', code: 'B50.9' }],
+      ['.A09', { codeSystem: 'ICD-10', code: 'A09' }],
+      ['"J45.909"', { codeSystem: 'ICD-10', code: 'J45.909' }],
+      ['B50. ', { codeSystem: 'ICD-10', code: 'B50' }],
+      ['(1F40)', null],
+      ['(malaria)', null],
+      ['B50.9.1', null],
     ])('q %j as an ICD-10 code: %j (accepted as typed; no ICD-10 title)', (q, expected) => {
       expect(typedIcd10(q)).toEqual(expected);
+    });
+
+    it('an ICD-10 code copied with punctuation is searched as typed and named as the code', async () => {
+      const { database, calls } = fakeDatabase([]);
+      await expect(new CatalogService(database).searchDiagnoses(membershipA, diagnoses('(B50.9).'))).resolves.toEqual({
+        release: null, more: false, results: [], typedIcd10: { codeSystem: 'ICD-10', code: 'B50.9' } });
+      expect(calls.map((call) => call.values[0])).toEqual(['(B50.9).']);
     });
 
     it('an ICD-10 code typed finds nothing in ICD-11 and says so', async () => {
@@ -435,13 +483,34 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
         release: null, more: false, results: [], typedIcd10: { codeSystem: 'ICD-10', code: 'B50.9' } });
     });
 
-    it('refuses as the catalogue does, with the diagnosis words for a Health ID or NIN', async () => {
+    // Rahman's re-review of #320, nit 9b: a code typed without its dot can have a Health ID's shape (2B6B2Y for
+    // 2B6B.2Y); the words say to type the dot.
+    it('refuses as the catalogue does, with the diagnosis words for a Health ID or NIN: type a code with its dot',
+      async () => {
+        const { database, calls } = fakeDatabase([]);
+        const service = new CatalogService(database);
+        expect((await problemOf(service.searchDiagnoses(membershipA, diagnoses('m')))).code)
+          .toBe('CATALOG_SEARCH_TEXT_TOO_SHORT');
+        for (const q of ['HID-7KQ2M9', '2B6B2Y', '12345678901']) {
+          const problem = await problemOf(service.searchDiagnoses(membershipA, diagnoses(q)));
+          expect([problem.getStatus(), problem.code, problem.message]).toEqual([400, 'CATALOG_SEARCH_TEXT_NOT_ALLOWED',
+            'Search by diagnosis name or code, and type a code with its dot (such as 2B6B.2Y). Do not type a Health ID '
+            + 'or NIN here.']);
+        }
+        // The medicine and lab-test searches keep their words.
+        expect((await problemOf(service.searchMedicines(membershipA, medicines({ q: '2B6B2Y' })))).message)
+          .toBe('Search by medicine or test name. Do not type a Health ID or NIN here.');
+        await service.searchDiagnoses(membershipA, diagnoses('2B6B.2Y'));
+        expect(calls.map((call) => call.values[0])).toEqual(['2B6B.2Y']);
+      });
+
+    it('a q with a control character other than tab is 400 VALIDATION_FAILED, never searched (nit 9c)', async () => {
       const { database, calls } = fakeDatabase([]);
       const service = new CatalogService(database);
-      expect((await problemOf(service.searchDiagnoses(membershipA, diagnoses('m')))).code).toBe('CATALOG_SEARCH_TEXT_TOO_SHORT');
-      const problem = await problemOf(service.searchDiagnoses(membershipA, diagnoses('HID-7KQ2M9')));
-      expect([problem.code, problem.message]).toEqual(['CATALOG_SEARCH_TEXT_NOT_ALLOWED',
-        'Search by diagnosis name or code. Do not type a Health ID or NIN here.']);
+      for (const q of ['malaria\u0000', '\u0000\u0000', 'mal\naria']) {
+        const problem = await problemOf(service.searchDiagnoses(membershipA, diagnoses(q)));
+        expect([problem.getStatus(), problem.code]).toEqual([400, 'VALIDATION_FAILED']);
+      }
       expect(calls).toEqual([]);
     });
 
@@ -491,6 +560,81 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
         diagnoses: { available: true, release: 'ICD-11 MMS 2026-01', fileSha256: 'd'.repeat(64) },
         medicines: { available: false }, attribution: [icd],
       });
+    });
+  });
+
+  // Rahman's re-review of #320, nit 9a: what is sent, through the app's ProblemDetailsFilter and validation pipe.
+  // scripts/tests/catalog-diagnoses-contract.test.mjs checks that the planned contract says the same.
+  describe('ORD-9 over HTTP: the status, code and detail actually sent', () => {
+    let app: INestApplication | undefined;
+    afterEach(async () => {
+      await app?.close();
+      app = undefined;
+    });
+
+    const start = async (answer: readonly Record<string, unknown>[] | Error) => {
+      const { database, calls } = fakeDatabase(answer);
+      @Module({ controllers: [CatalogController, TerminologyController],
+        providers: [CatalogService, { provide: DatabaseService, useValue: database }] })
+      class TestModule {}
+      const moduleRef = await Test.createTestingModule({ imports: [TestModule] }).compile();
+      app = moduleRef.createNestApplication({ logger: false });
+      app.use((request: Request & Record<string, unknown>, _response: Response, next: NextFunction) => {
+        request.actor = { subject: 'staff:test', facility: { membershipId: membershipA } };
+        request.facilityId = 'facility';
+        request.correlationId = 'correlation-123456';
+        next();
+      });
+      app.useGlobalPipes(createValidationPipe());
+      app.useGlobalFilters(new ProblemDetailsFilter());
+      await app.listen(0, '127.0.0.1');
+      const port = (app.getHttpServer().address() as AddressInfo).port;
+      const get = async (path: string) => {
+        const response = await fetch(`http://127.0.0.1:${port}${path}`);
+        return { status: response.status, type: response.headers.get('content-type'),
+          cacheControl: response.headers.get('cache-control'), body: await response.json() as Record<string, unknown> };
+      };
+      return { get, calls };
+    };
+
+    it.each(['42883', '42P01', '57014'])('a database failure (%s) is sent as 503 CATALOG_UNAVAILABLE with the filter\'s '
+      + 'words for every 5xx', async (code) => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const { get, calls } = await start(databaseError(code));
+      const answer = await get('/ehr/terminology/diagnoses?q=malaria');
+      expect([answer.status, answer.body.code, answer.body.detail]).toEqual([503, 'CATALOG_UNAVAILABLE',
+        'The service could not complete the request.']);
+      expect(answer.type).toMatch(/^application\/problem\+json/);
+      expect(answer.cacheControl).not.toBe('private, max-age=60');
+      // The service's own words stay inside it.
+      expect(answer.body.detail).not.toBe(diagnosisSearchUnavailable().message);
+      expect(calls).toHaveLength(1);
+      warn.mockRestore();
+    });
+
+    it('a 400 is sent with the service\'s own words: a Health ID shape, and a control character', async () => {
+      const { get, calls } = await start([]);
+      const shaped = await get('/ehr/terminology/diagnoses?q=2B6B2Y');
+      expect([shaped.status, shaped.body.code, shaped.body.detail]).toEqual([400, 'CATALOG_SEARCH_TEXT_NOT_ALLOWED',
+        'Search by diagnosis name or code, and type a code with its dot (such as 2B6B.2Y). Do not type a Health ID or NIN '
+        + 'here.']);
+      for (const path of ['/ehr/terminology/diagnoses?q=malaria%00', '/ehr/catalog/medicines?q=amox%00',
+        '/ehr/catalog/lab-tests?q=fbc%0A1']) {
+        const refused = await get(path);
+        expect([refused.status, refused.body.code, refused.body.errors]).toEqual([400, 'VALIDATION_FAILED',
+          [{ field: 'q', messages: ['q must not contain control characters'] }]]);
+      }
+      expect(calls).toEqual([]);
+    });
+
+    it('an answer is sent as the service gives it, kept a minute', async () => {
+      const { get } = await start([{ code: 'NB91', title: 'Injury of intra-abdominal organs', matched_name: null,
+        list_version: '2026-01', more: false }]);
+      const answer = await get('/ehr/terminology/diagnoses?q=(B50.9).');
+      expect([answer.status, answer.cacheControl, answer.body]).toEqual([200, 'private, max-age=60', {
+        release: 'ICD-11 MMS 2026-01', more: false, typedIcd10: { codeSystem: 'ICD-10', code: 'B50.9' },
+        results: [{ codeSystem: 'ICD-11', code: 'NB91', display: 'Injury of intra-abdominal organs', matchedName: null }],
+      }]);
     });
   });
 

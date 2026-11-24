@@ -1958,8 +1958,9 @@ Extension codes (X...) and blocks without a code are left out.
 Each word of `q` must start a word of the title or of one of our own other
 names. Those come from `DIAGNOSIS_SYNONYMS` in the same file (HTN, DM,
 "MP+", typhoid...), are kept apart from WHO's words, and contain no ICD-10
-content. A code typed exactly comes first, then exact title starts, then
-shorter titles.
+content. A code typed exactly comes first, then an entry whose title or
+one of our other names is `q` itself, then those whose title or other name
+starts with `q`, then shorter titles.
 
 Example for `q=falciparum`:
 
@@ -1988,8 +1989,10 @@ Example for `q=falciparum`:
 - When `q` looks like an ICD-10 code (a letter, two digits or a digit and a
   letter, then optionally a dot and up to 4 more characters, such as
   `B50.9`), `typedIcd10` is `{ "codeSystem": "ICD-10", "code": "B50.9" }`
-  (upper-cased). No ICD-10 title is shipped or looked up: we hold no ICD-10
-  licence (owner decision Q124 A, 19 Nov 2026).
+  (upper-cased). As for an ICD-11 code, any run of characters that are
+  neither letters nor digits is taken off both ends first, so "B50.9." and
+  "(B50.9)" are B50.9. No ICD-10 title is shipped or looked up: we hold no
+  ICD-10 licence (owner decision Q124 A, 19 Nov 2026).
 
 **Recent diagnoses.** These are the caller's own last picks at this
 facility, newest first. `limit` is 1-50, default 20.
@@ -2068,14 +2071,14 @@ facility, newest first. `limit` is 1-50, default 20.
 | HTTP | Code | Message |
 | --- | --- | --- |
 | 400 | `CATALOG_SEARCH_TEXT_TOO_SHORT` | "Type at least 2 letters to search." |
-| 400 | `CATALOG_SEARCH_TEXT_NOT_ALLOWED` | "Search by diagnosis name or code. Do not type a Health ID or NIN here." |
+| 400 | `CATALOG_SEARCH_TEXT_NOT_ALLOWED` | "Search by diagnosis name or code, and type a code with its dot (such as 2B6B.2Y). Do not type a Health ID or NIN here." (582 ICD-11 codes typed without their dot have a Health ID's shape, such as `2B6B2Y`) |
 | 400 | `DIAGNOSIS_CODE_INCOMPLETE` | "Diagnosis code and its code system must be supplied together." |
-| 400 | `VALIDATION_FAILED` | existing (a diagnosis with no code while the setting is off, unknown field, `null`, bad `limit`) |
+| 400 | `VALIDATION_FAILED` | existing (a diagnosis with no code while the setting is off, unknown field, `null`, bad `limit`); also a `q` over 100 characters, or with a control character other than tab (U+0000 included: "q must not contain control characters"), before the database |
 | 400 | `PURPOSE_OF_USE_REQUIRED`, `IDEMPOTENCY_KEY_REQUIRED` | existing, on the create route only |
 | 403 | existing permission refusal; `CONSENT_REQUIRED` on create as today | — |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | existing |
 | 429 | `CATALOG_SEARCH_LIMITED` | "Too many searches. Please wait a minute and try again." (shared with ORD-7's limit) |
-| 503 | `CATALOG_UNAVAILABLE` | "Diagnosis search is not available right now." (ORD-7's code; the same words for a schema without the diagnosis list and for any database failure, so no advice: trying again does not help while the list's migration is not there, and a name alone is not accepted until diagnoses by name only ship) |
+| 503 | `CATALOG_UNAVAILABLE` | sent as "The service could not complete the request." (ORD-7's code, for a schema without the diagnosis list and for any database failure; every 5xx detail is replaced by that text, so a screen reads the status and the code, never the words. The service's own words, "Diagnosis search is not available right now.", give no advice and stay inside it) |
 
 ### Screen notes
 
@@ -2121,12 +2124,17 @@ provisional. Nothing is loaded until the clinical lead signs the release
 file's seed in `docs/codes/catalog-approvals.json`.
 
 - **Database (0150):** `ehr.catalog_versions` takes the kind `diagnosis`
-  (ACCESS EXCLUSIVE on that small table, NOWAIT for at most 5 seconds, else
-  55P03 "0150: …"). `ehr.catalog_diagnoses` holds one row per coded entry
-  per release: code, WHO's title verbatim, our other names apart, chapter,
-  and whether the entry is residual. It is append-only, and, as ORD-7's
-  lists, a release that is or has been live takes no new entry (55000
-  `CATALOG_VERSION_SEALED`): only a release still loading takes entries.
+  (ACCESS EXCLUSIVE on that small table, and in the same attempt ACCESS
+  SHARE on ORD-7's two lists, whose status 0150 replaces; NOWAIT for at
+  most 5 seconds, else 55P03 "0150: …", which a dry run retries).
+  `ehr.catalog_diagnoses` holds one row per coded entry per release: code,
+  WHO's title verbatim, our other names apart, chapter, and whether the
+  entry is residual. It is append-only, and, as ORD-7's lists, a release
+  that is or has been live takes no new entry (55000
+  `CATALOG_VERSION_SEALED`): only a release still loading takes entries. A
+  version of another kind (a medicine or lab-test list) takes none either
+  (55000). The post-checks pin each trigger's events and the sealed-release
+  function's body.
   Instead of the planned `ehr.terminology_icd11`, the list shares ORD-7's
   versions, loader and sign-off. The loader takes 0150's refusals as it
   takes 0149's: a sealed release (55000) or a table check (23514) ends the
@@ -2136,59 +2144,109 @@ file's seed in `docs/codes/catalog-approvals.json`.
   `catalog:build-icd11-seed` from WHO's `SimpleTabulation-ICD-11-MMS-en.zip`
   (2026-01, sha256 `f1356588…`). That is the file
   `ocr-worker/src/reading/diagnosis-list.ts` checked its titles against,
-  and all 134 of that list's titles come out the same.
+  and all 134 of that list's titles come out the same. The seed's sha256
+  is `3662b1d7…`.
   - It holds 17,255 entries. Extension codes and blocks are left out, and
     so are chapter 26 (traditional medicine conditions, 1,120) and section
     V (functioning, 130). Neither is a diagnosis a clinician picks here
     (Ola, clinical owner). The seed lists both with why.
-  - Our other names are `DIAGNOSIS_SYNONYMS`' names for coded titles: 65
-    entries have one. Names pointing to a block (HTN, "MP+") are not
-    loaded, as this section says.
+  - Our other names are `DIAGNOSIS_SYNONYMS`' names for coded titles, a
+    name in double quotes included ("parkinson's disease" for 8A00.0
+    Parkinson disease, which the builder used to drop). Names pointing to
+    a block (HTN, "MP+") are not loaded, as this section says.
+  - A title with accented letters also has its plain-letter spelling as
+    one of our other names, so a search typed without the accents finds
+    it (Ola, clinical owner: the same names, in plain letters). The
+    2026-01 release has 10: 2B02 Sezary syndrome; 4A43.2 Sjogren
+    syndrome, 4A43.20 Primary, 4A43.21 Secondary and 4A43.22 Paediatric
+    onset Sjogren syndrome, 4A43.2Y Other specified sjogren syndrome,
+    4A43.2Z Sjogren syndrome, unspecified; 4A62 Behcet disease; 5C52.03
+    Sjogren-Larsson syndrome; 8A45.42 Demyelination due to Sjogren
+    disease. WHO's titles are unchanged.
+  - 76 entries have an other name.
 - **Search:** `GET /api/v1/ehr/terminology/diagnoses?q=&limit=` as above,
   with ORD-7's rules for `q` (6 words, never raw `to_tsquery`, no Health ID
-  or NIN shapes, never logged) and its 429 and cache.
+  or NIN shapes, never logged) and its 429 and cache. Only the active
+  release is read, through its own rows: a release kept after a newer one
+  went live costs nothing.
   - The code matches too, whole or in parts ("1F40", "1f40.z").
   - Titles and our other names are split into words as `q` is (lower case,
     at anything that is not a letter or a digit), as ORD-7's lists are. So
     a title typed as written is found: `COVID-19`, `T-cell/histiocyte`,
-    `glucose-6-phosphate`. With the 2026-01 release loaded, each of its
-    17,255 titles typed as written (cut to 100 characters at a word) is
-    among the answers at limit 25. Split by the default parser, 20 were
-    not found at all, among them RA01 "COVID-19" and the other COVID-19
-    entries.
-  - The entry whose code `q` is comes first: `q` upper-cased and trimmed,
-    with or without its dot ("9A03.0" or "9a030"), and found even without
-    the dot. A code copied with punctuation around it is still that code:
-    any run of characters that are neither letters nor digits is taken off
-    both ends before its shape is tested ("NB91.", "NB91,", "(NB91)",
-    "(NB91).", "NB91 .", ".NB91", "NB91,."); the code's own dot stays
-    ("(9A03.0)." is 9A03.0). So a parent code such as 9A03 comes before its
-    child codes, whose titles are shorter. Then entries whose title or one
-    of our other names starts with `q`, then shorter titles. With the
-    2026-01 release loaded, each of its 17,255 codes searched by itself
-    comes first: as written, with a full stop after it, in brackets, in
-    brackets with a full stop after them, with a space and a full stop
-    after it, with a full stop before it, and without its dot. Typed
-    without its dot, a code whose six characters have a Health ID's shape
-    (582 codes, such as `2B6B2Y`) is refused as a Health ID would be; with
-    its dot (`2B6B.2Y`) it is found.
+    `glucose-6-phosphate`. Split by the default parser, 20 were not found
+    at all, among them RA01 "COVID-19" and the other COVID-19 entries.
+  - A word-final 's or ’s is dropped from `q` first, so a name typed with
+    it finds the entry named: "Parkinson's disease" is 8A00.0 Parkinson
+    disease, first; "Crohn's disease of large intestine" is DD70.3;
+    "alzheimer's disease", "bell's palsy", "huntington's disease" and
+    "wilson's disease" find theirs (before, the lone s had to start another
+    word, so these found nothing). When nothing matched, the search runs
+    once more with a final s dropped from each word of 4 or more letters
+    ("parkinsons", "alzheimers").
+  - The order: the entry whose code `q` is; then an entry whose title or
+    one of our other names is `q` itself, as words ("ra" is FA20
+    Rheumatoid arthritis, whose other name is ra, before shorter titles
+    starting with ra; "urti" is CA07.0, "prom" JA89); then entries whose
+    title or other name starts with `q`; then shorter titles. A title's
+    own apostrophe-s is compared as `q`'s is.
+  - With the 2026-01 release loaded, each of its 16,883 titles of 2 to 100
+    characters, typed as written or in upper case, comes first. The 372
+    longer ones, cut to 100 characters, are each in the first 25.
+  - The code `q` is: `q` upper-cased and trimmed, with or without its dot
+    ("9A03.0" or "9a030"), and found even without the dot. A code copied
+    with punctuation around it is still that code: any run of characters
+    that are neither letters nor digits is taken off both ends before its
+    shape is tested ("NB91.", "NB91,", "(NB91)", "(NB91).", "NB91 .",
+    ".NB91", "NB91,."); the code's own dot stays ("(9A03.0)." is 9A03.0).
+    A code typed with spaces at its dot ("5C50 5", "5C50. 5", "5C50 .5")
+    is that code too, when such a code exists; otherwise its words are
+    searched as before. So a parent code such as 9A03 comes before its
+    child codes, whose titles are shorter. With the 2026-01 release
+    loaded, each of its 17,255 codes searched by itself comes first, in
+    each of 16 forms: as written, without its dot, in lower case with and
+    without the dot, with a full stop, a comma, a semicolon or a colon
+    after it, in brackets, square brackets or double quotes, in brackets
+    with a full stop after them, with a space and a full stop after it,
+    with a full stop before it, and with spaces or no-break spaces around
+    it; and each of its 12,913 dotted codes typed with spaces at the dot,
+    in the three forms above. Typed without its dot, a code whose six
+    characters have a Health ID's shape (582 codes, such as `2B6B2Y`) is
+    refused as a Health ID would be, and the refusal says to type the dot;
+    with its dot (`2B6B.2Y`) it is found.
   - `matchedName` is our other name when it is what matched, or when it
     starts with `q` and the title does not. So `q=falciparum` gives 1F40
     first, named "falciparum malaria", as the example above.
-  - `typedIcd10` is filled for a `q` shaped like an ICD-10 code.
+  - `typedIcd10` is filled for a `q` shaped like an ICD-10 code, with any
+    punctuation around it taken off ("(B50.9)." is B50.9).
+  - A `q` with a control character other than tab (U+0000 included) is 400
+    `VALIDATION_FAILED` before the database, in all three catalogue
+    searches.
   - A schema without 0150, or any database failure, answers 503
-    `CATALOG_UNAVAILABLE` "Diagnosis search is not available right now."
-    It gives no advice, so it is true in every case: trying again does not
-    help while 0150 is not there. The catalogue status fills
+    `CATALOG_UNAVAILABLE`, sent as "The service could not complete the
+    request." (as every 5xx; the service's own words, "Diagnosis search is
+    not available right now.", stay inside it). The catalogue status fills
     `diagnoses: { available, release, fileSha256 }`.
+  - Activate an ICD-11 release only once this slice's ehr-api is live: the
+    0149-era ehr-api takes the status's diagnosis row for a lab-test row,
+    so it would show WHO's notice while it says diagnoses are not
+    available.
 - **Measured** with the full release loaded on throwaway PostgreSQL 16
-  (median of 25 calls inside the server, as the EHR runtime): the load
-  takes about 0.4 s. A word or a code takes under 1 ms (`falciparum`,
-  `9A03`, `1f40.z`, `covid-19`). Two-letter `q` take longest: `di` (2,974
-  entries match) about 31 ms, and the broadest, `of` (6,715), about 74 ms
-  at limit 10 or 25, with single calls up to about 100 ms. Splitting each
-  title as `q` is costs these broad ones about 7–16 ms (`of` 58 to 74 ms,
-  side by side on one cluster); a word or a code costs nothing measurable.
+  (median of 25 calls inside the server, as the EHR runtime, from the
+  sixth call on a connection, when the generic plan is in use; the
+  host's 4 CPUs were shared, load average 2.3 to 2.8; this slice's
+  search and the one it replaced were called in turn in one session):
+  - The load takes under 1 s.
+  - A word or a code takes 1–2 ms (`malaria` 1.5 ms, `9A03` 1.3 ms, `NB91`
+    at limit 25 1.7 ms).
+  - Two-letter `q` take longest: `di` (2,974 entries match) about 49 ms,
+    `in` about 73 ms, and the broadest, `of` (6,715), about 115 ms at limit
+    10 and 121 ms at 25, with single calls up to about 185 ms.
+  - With a second release kept (2027-01 active and 2026-01 kept, as a new
+    WHO release leaves the old one), the times are the same, because only
+    the active release's rows are read: `of` 121 ms, `in` 74 ms, `di` 49
+    ms, `NB91` 1.7 ms. Before, the search read both releases' rows from the
+    sixth call on a connection: `of` 194 ms, `in` 119 ms, `di` 76 ms, `NB91`
+    2.7 ms.
 - **Not in this slice:** recent diagnoses (the next slice, below), and
   diagnoses by name only and `codeStatus`, which alter `ehr.diagnoses` and
   need a lock plan.

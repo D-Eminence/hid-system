@@ -5,8 +5,8 @@ import test from 'node:test'
 import { deflateRawSync } from 'node:zlib'
 import { seedProblems, seedText } from '../../services/ehr-api/scripts/catalog-seed.mjs'
 import {
-  ICD11_NOTICE, LEFT_OUT_CHAPTERS, TABULATION_MEMBER, buildIcd11Seed, otherNamesFrom, parseTabulation, verbatimTitle,
-  zipMember,
+  ICD11_NOTICE, LEFT_OUT_CHAPTERS, TABULATION_MEMBER, buildIcd11Seed, otherNamesFrom, parseTabulation, plainLetters,
+  verbatimTitle, zipMember,
 } from '../../services/ehr-api/scripts/icd11-seed.mjs'
 
 // ORD-9 (0150): the ICD-11 diagnosis seed from WHO's release file
@@ -97,6 +97,79 @@ test('our other names: only those naming a coded title, by code, sorted', () => 
   assert.throws(() => otherNamesFrom('no list here'), /no DIAGNOSIS_SYNONYMS/)
 })
 
+// Rahman's re-review of #320, finding 1: a key in double quotes (a name with an apostrophe) was dropped.
+test('our other names: a key or a title in double quotes is read, with its escapes', () => {
+  const source = `export const ICD11_TITLES = [
+  ['Parkinson disease', '8A00.0'],
+  ['Bell palsy', '8B88.0'],
+  ['Sjögren syndrome', '4A43.2'],
+];
+export const DIAGNOSIS_SYNONYMS: Readonly<Record<string, string>> = {
+  "parkinson's disease": 'Parkinson disease',
+  'parkinsons': "Parkinson disease",
+  "bell's palsy": "Bell palsy",
+  'sjogren\\'s syndrome': 'Sjögren syndrome',
+  "a \\"quoted\\" name": 'Bell palsy',
+};
+`
+  assert.deepEqual([...otherNamesFrom(source).entries()], [
+    ['8A00.0', ["parkinson's disease", 'parkinsons']],
+    ['8B88.0', ['a "quoted" name', "bell's palsy"]],
+    ['4A43.2', ["sjogren's syndrome"]],
+  ])
+})
+
+test('our other names: every entry of ocr-worker\'s DIAGNOSIS_SYNONYMS that names a coded title is read', () => {
+  const source = readFileSync(resolve(repository, 'services/ocr-worker/src/reading/diagnosis-list.ts'), 'utf8')
+  // An independent reading of both lists, line by line, in either quote.
+  const literal = String.raw`(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")`
+  const text = (single, double) => (single ?? double).replace(/\\(['"\\])/g, '$1')
+  const codes = new Map([...source.matchAll(new RegExp(String.raw`^\s*\[${literal}, (?:'([^']+)'|null)\],$`, 'gm'))]
+    .map((match) => [text(match[1], match[2]), match[3] ?? null]))
+  const block = source.slice(source.indexOf('export const DIAGNOSIS_SYNONYMS'), source.indexOf('\n};', source.indexOf('export const DIAGNOSIS_SYNONYMS')))
+  const lines = block.split('\n').slice(1).filter((line) => line.trim() !== '' && !line.trim().startsWith('//'))
+  const expected = new Map()
+  for (const line of lines) {
+    const match = new RegExp(String.raw`^\s*${literal}: ${literal},$`).exec(line)
+    assert.ok(match, `an entry this test cannot read: ${line}`)
+    const code = codes.get(text(match[3], match[4]))
+    if (code) expected.set(code, [...new Set([...(expected.get(code) ?? []), text(match[1], match[2])])].sort())
+  }
+  assert.deepEqual(otherNamesFrom(source), expected)
+  assert.deepEqual(otherNamesFrom(source).get('8A00.0'), ["parkinson's disease"])
+})
+
+// Ola (clinical owner), nit 9g of Rahman's re-review of #320: the plain-letter spelling of an accented title.
+test('a title with accented letters gets its plain-letter spelling as our other name; nothing else does', () => {
+  assert.equal(plainLetters('Sjögren syndrome'), 'Sjogren syndrome')
+  assert.equal(plainLetters('Sézary syndrome'), 'Sezary syndrome')
+  assert.equal(plainLetters('Behçet disease'), 'Behcet disease')
+  assert.equal(plainLetters('Other specified sjögren syndrome'), 'Other specified sjogren syndrome')
+  assert.equal(plainLetters('Malaria due to Plasmodium falciparum'), null)
+  assert.equal(plainLetters('Haemoglobin H disease (– α/– – included)'), null)
+  assert.equal(plainLetters('Unspecified infectious\u00a0disorders of eyelid'), null)
+  const tabulation = '\ufeff' + [HEADER.join('\t'),
+    line('4A43.2', '- - Sjögren syndrome', 'category', '04'),
+    line('4A62', '- Behçet disease', 'category', '04'),
+    line('3A50.02', '- - - Haemoglobin H disease (– α/– – included)', 'category', '03'),
+  ].join('\r\n') + '\r\n'
+  const source = `export const ICD11_TITLES = [
+  ['Behçet disease', '4A62'],
+];
+export const DIAGNOSIS_SYNONYMS: Readonly<Record<string, string>> = {
+  'behcets': 'Behçet disease',
+};
+`
+  const seed = buildIcd11Seed(parseTabulation(tabulation),
+    { release: '2026-01', releaseFile: RELEASE_FILE, otherNames: otherNamesFrom(source) })
+  assert.deepEqual(seed.items.map((item) => [item.code, item.title, item.otherNames]), [
+    ['3A50.02', 'Haemoglobin H disease (– α/– – included)', []],
+    ['4A43.2', 'Sjögren syndrome', ['Sjogren syndrome']],
+    ['4A62', 'Behçet disease', ['Behcet disease', 'behcets']],
+  ])
+  assert.deepEqual(seedProblems(seed), [])
+})
+
 test('the seed: coded entries only, verbatim titles, code order; no extension code, block, chapter 26 or section V', () => {
   const seed = buildIcd11Seed(parseTabulation(TABULATION),
     { release: '2026-01', releaseFile: RELEASE_FILE, otherNames: otherNamesFrom(SYNONYMS_SOURCE) })
@@ -148,6 +221,23 @@ test('the draft ICD-11 MMS 2026-01 seed in docs/codes/drafts loads as it stands'
   assert.deepEqual(seed.items.find((item) => item.code === '1F40'),
     { code: '1F40', title: 'Malaria due to Plasmodium falciparum', otherNames: ['falciparum malaria'], chapter: '01',
       residual: false })
+  // DIAGNOSIS_SYNONYMS' one double-quoted key, and the plain-letter spellings of the 10 accented titles (Ola).
+  const named = (code) => seed.items.find((item) => item.code === code).otherNames
+  assert.deepEqual(named('8A00.0'), ["parkinson's disease"])
+  assert.deepEqual(seed.items.filter((item) => plainLetters(item.title) !== null)
+    .map((item) => [item.code, named(item.code).filter((name) => name === plainLetters(item.title))[0]]), [
+    ['2B02', 'Sezary syndrome'],
+    ['4A43.2', 'Sjogren syndrome'],
+    ['4A43.20', 'Primary Sjogren syndrome'],
+    ['4A43.21', 'Secondary Sjogren syndrome'],
+    ['4A43.22', 'Paediatric onset Sjogren syndrome'],
+    ['4A43.2Y', 'Other specified sjogren syndrome'],
+    ['4A43.2Z', 'Sjogren syndrome, unspecified'],
+    ['4A62', 'Behcet disease'],
+    ['5C52.03', 'Sjogren-Larsson syndrome'],
+    ['8A45.42', 'Demyelination due to Sjogren disease'],
+  ])
+  assert.equal(seed.items.filter((item) => item.otherNames.length > 0).length, 76)
   const codes = seed.items.map((item) => item.code)
   assert.deepEqual(codes, [...codes].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)))
   assert.equal(seedText(seed), readFileSync(resolve(repository, 'docs/codes/drafts/icd11-mms-2026-01.json'), 'utf8'))

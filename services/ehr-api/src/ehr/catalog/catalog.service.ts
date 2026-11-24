@@ -196,20 +196,46 @@ export function searchTextTooLong(): DomainProblem {
   ]);
 }
 
+/**
+ * A C0 control character other than tab (U+0000 to U+0008, U+000A to U+001F).
+ * U+0000 is not a character PostgreSQL's text can hold (22021, answered as
+ * 503), and none is a search; refused as VALIDATION_FAILED before the
+ * database (Rahman's re-review of #320, nit 9c).
+ */
+const CONTROL_CHARACTER = /[\u0000-\u0008\u000A-\u001F]/;
+export function searchTextHasControlCharacter(): DomainProblem {
+  return new DomainProblem(400, 'VALIDATION_FAILED', 'One or more request fields are invalid.', [
+    { field: 'q', messages: ['q must not contain control characters'] },
+  ]);
+}
+
+/**
+ * The diagnosis search's words say what to do: a code typed without its dot
+ * can have a Health ID's shape (582 ICD-11 codes, such as 2B6B2Y for
+ * 2B6B.2Y), which the API cannot tell from a Health ID, so it asks for the
+ * dot (Rahman's re-review of #320, nit 9b). The medicine and lab-test
+ * searches keep their words.
+ */
 export function searchTextNotAllowed(list: 'catalogue' | 'diagnoses' = 'catalogue'): DomainProblem {
   return new DomainProblem(400, 'CATALOG_SEARCH_TEXT_NOT_ALLOWED', list === 'diagnoses'
-    ? 'Search by diagnosis name or code. Do not type a Health ID or NIN here.'
+    ? 'Search by diagnosis name or code, and type a code with its dot (such as 2B6B.2Y). Do not type a Health ID or NIN here.'
     : 'Search by medicine or test name. Do not type a Health ID or NIN here.');
 }
 
 /**
  * An ICD-10 code as typed (planned contract, ORD-9): a letter, two digits or
  * a digit and a letter, then optionally a dot and up to 4 more. No ICD-11
- * code has this shape (an ICD-11 code's second character is a letter).
+ * code has this shape (an ICD-11 code's second character is a letter). As
+ * for an ICD-11 code (0150), any run of characters that are neither letters
+ * nor digits is taken off both ends first, so a code copied with punctuation
+ * around it is still that code ("B50.9.", "(B50.9)"); its own dot stays
+ * (Rahman's re-review of #320, nit 9d).
  */
 const ICD10_CODE = /^[A-Za-z](?:[0-9]{2}|[0-9][A-Za-z])(?:\.[0-9A-Za-z]{1,4})?$/;
+const AROUND_A_CODE = /^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu;
 export function typedIcd10(q: string): { codeSystem: 'ICD-10'; code: string } | null {
-  return ICD10_CODE.test(q) ? { codeSystem: 'ICD-10', code: q.toUpperCase() } : null;
+  const code = q.replace(AROUND_A_CODE, '');
+  return ICD10_CODE.test(code) ? { codeSystem: 'ICD-10', code: code.toUpperCase() } : null;
 }
 
 export function catalogUnavailable(): DomainProblem {
@@ -221,7 +247,10 @@ export function catalogUnavailable(): DomainProblem {
  * a schema without 0150 included, so they give no advice: trying again in a
  * minute does not help while 0150 is not there, and a diagnosis still needs
  * its code (clinical.dto.ts), so typing a name instead is not offered until
- * diagnoses by name only ship.
+ * diagnoses by name only ship. These words stay in the service: on the wire,
+ * ProblemDetailsFilter replaces every 5xx detail with "The service could not
+ * complete the request.", so a client reads the status and the code
+ * (Rahman's re-review of #320, nit 9a).
  */
 export function diagnosisSearchUnavailable(): DomainProblem {
   return new DomainProblem(503, 'CATALOG_UNAVAILABLE', 'Diagnosis search is not available right now.');
@@ -352,12 +381,14 @@ export class CatalogService {
    * refused text does not count. Its length is counted in code points, as
    * the database's char_length counts it: an emoji or "𝔸" is one character,
    * not two UTF-16 units, so alone it is too short (400), never a database
-   * refusal answered as 503.
+   * refusal answered as 503. A control character other than tab (U+0000
+   * included) is VALIDATION_FAILED, never sent to the database.
    */
   private admit(membershipKey: string, q: string | undefined, list: 'catalogue' | 'diagnoses' = 'catalogue'): string {
     const characters = q === undefined ? 0 : [...q].length;
     if (q === undefined || characters < 2) throw searchTextTooShort();
     if (characters > CATALOG_SEARCH_MAX_LENGTH) throw searchTextTooLong();
+    if (CONTROL_CHARACTER.test(q)) throw searchTextHasControlCharacter();
     if (looksLikePersonIdentifier(q)) throw searchTextNotAllowed(list);
     const now = Date.now();
     let entry = this.searches.get(membershipKey);
