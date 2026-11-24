@@ -1,15 +1,15 @@
 \set ON_ERROR_STOP on
--- 0152 (ORD-12, owner decision Q131 A, 19 November 2026; the clinical
+-- 0154 (ORD-12, owner decision Q131 A, 19 November 2026; the clinical
 -- owner's design note on #258, 23 November 2026): prescription refills. The
 -- prescriber sets refills_allowed (0-11, null means none) at creation; this
 -- facility's own pharmacy records up to 1 + refills_allowed fills of the one
 -- work item (pharmacy.dispensings.fill_number, one row per fill number) while
 -- the prescription stays active and unchanged and its ends_on is not past
 -- (the Lagos day); a route-backed item takes one fill; a reversed fill still
--- counts. The pharmacy reads an own item's refills through 0152's reader,
+-- counts. The pharmacy reads an own item's refills through 0154's reader,
 -- pharmacy.work_item_refills (Ola's answers to Rahman's review, #258, 23
 -- November 2026), and its work list finds the own items whose refill is open
--- now through 0152's pharmacy.open_refill_work_items (R7), so a refill that
+-- now through 0154's pharmacy.open_refill_work_items (R7), so a refill that
 -- is open stays listed however many items were filled after it. The
 -- clinical owner's decisions of 24 November 2026: D8, both readers read
 -- ehr.prescriptions in one statement under a refill scan marker (R9, 0143
@@ -62,7 +62,7 @@
 --      count is not enforced there (stated);
 --   8. a reversed fill still counts;
 --   9. 0148: a null refills_allowed leaves 0148's fingerprint as it was
---      before 0152, so a hold recorded before 0152 is followed by a resume
+--      before 0154, so a hold recorded before 0154 is followed by a resume
 --      that reads 'resumed'; a set value is fingerprinted on both sides
 --      ('resumed' too); an owner repair of refills_allowed after dispensing
 --      reads 'edited' and ends the refills;
@@ -70,7 +70,7 @@
 --      (not_claimed), 0133's and 0144's readers answer one row per item;
 --  11. refills_allowed's CHECK: 0, 11 and null pass, -1 and 12 are refused
 --      on create and on update;
---  12. the undo of 0152's header, step 1 (0101's and 0133's bodies put
+--  12. the undo of 0154's header, step 1 (0101's and 0133's bodies put
 --      back): every refill is refused, first fills still pass;
 --  13. the reader, pharmacy.work_item_refills, through the Pharmacy runtime:
 --      one row per own item the session may read, never a route-backed
@@ -422,7 +422,7 @@ begin
   -- own-work basis (a pharmacist, about 0.15 ms per live refill
   -- prescription) and one that may read only on consent (a clinician or a
   -- nurse, which pays the consent test, about 1.5 to 3.9 ms per live refill
-  -- prescription, measured in 0152's header); the first figure alone was
+  -- prescription, measured in 0154's header); the first figure alone was
   -- given for both before.
   perform pg_temp.expect('1m R7''s comment gives its cost for own-work sessions and for sessions on consent alone',
     (select format('own-work=%s consent=%s',
@@ -529,7 +529,7 @@ update platform.control_settings set enabled = true
 set local session_replication_role = origin;
 select set_config('refills.attestation', (select text_row.version from ehr.order_route_attestation_texts text_row
   where text_row.kind = 'prescription' order by text_row.created_at desc, text_row.version desc limit 1), true);
--- The Lagos day, as 0152's validator computes it.
+-- The Lagos day, as 0154's validator computes it.
 select set_config('refills.lagos_today', ((clock_timestamp() at time zone 'Africa/Lagos')::date)::text, true);
 
 -- The session the services set (DatabaseService.withTransaction), with the
@@ -642,7 +642,7 @@ $f$;
 -- pharmacy-api's dispensing INSERT (PharmacyService.dispense) by the
 -- session's member; with a fill number, the new pharmacy-api's (fill_number
 -- named); without one, today's (the column left to its default, 1, and
--- dispensed_at to its default, now). The suite's clock: 0152 opens a refill
+-- dispensed_at to its default, now). The suite's clock: 0154 opens a refill
 -- 3/4 of the prescription's duration after the latest fill not reversed
 -- (the Lagos day), so a fill with a number is recorded as of `as_of`, or else
 -- 40 x (12 - its number) days ago: fill 1 440 days ago, fill 2 400 ... fill
@@ -786,7 +786,7 @@ begin
 end
 $f$;
 -- 0148's fingerprint of a prescription as it stands: as 0148's recorder
--- computes it, and as it computed it before 0152 added the column (the row
+-- computes it, and as it computed it before 0154 added the column (the row
 -- as jsonb had no refills_allowed key at all).
 create function pg_temp.fingerprints(n integer) returns text language sql security definer as $f$
   select encode(pg_catalog.sha256(pg_catalog.convert_to(pg_catalog.jsonb_strip_nulls(pg_catalog.to_jsonb(p)
@@ -955,19 +955,19 @@ select pg_temp.expect('8b rx15: fill 2 reversed too; still no fill 3; a reversed
   || pg_temp.fills(pg_temp.work_item_of(pg_temp.rx(15))), 'ok 23514 NO_REFILLS_LEFT / - 23505 1r 2r');
 
 -- 9. 0148's fingerprints (its recorder is not replaced). 9a: rx16 (null
--- refills_allowed) fingerprints as it did before 0152 added the column (the
+-- refills_allowed) fingerprints as it did before 0154 added the column (the
 -- row as jsonb then had no refills_allowed key; jsonb_strip_nulls removes a
 -- null one now); rx17 (2) does not, and needs no such equality: every row
--- recorded for it is from after 0152.
+-- recorded for it is from after 0154.
 select pg_temp.expect('9a a null refills_allowed changes no fingerprint; a set one is part of it',
   (select (split_part(pg_temp.fingerprints(16), ' ', 1) = split_part(pg_temp.fingerprints(16), ' ', 2))::text || ' '
      || (split_part(pg_temp.fingerprints(17), ' ', 1) = split_part(pg_temp.fingerprints(17), ' ', 2))::text),
   'true false');
--- 9b: a hold of rx16 recorded before 0152 (written here by the owner exactly
+-- 9b: a hold of rx16 recorded before 0154 (written here by the owner exactly
 -- as 0148's recorder wrote it then: the next version, active to on_hold,
 -- both fingerprints of the row without a refills_allowed key), then DR's
 -- hold (0148's recorder finds that version recorded: on conflict nothing)
--- and DR's resume after 0152: 'resumed', as before.
+-- and DR's resume after 0154: 'resumed', as before.
 select pg_temp.expect('9b fixtures: rx16 dispensed', pg_temp.fill(16, 1), 'ok');
 insert into pharmacy.prescription_changes_after_dispensing (work_item_id, facility_id, prescription_version, status_before,
   status_after, prior_content_sha256, content_sha256, changed_at)
@@ -976,9 +976,9 @@ select claim.work_item_id, claim.facility_id, prescription.row_version + 1, 'act
        clock_timestamp()
   from pharmacy.prescription_item_claims claim join ehr.prescriptions prescription on prescription.id = claim.prescription_id
  where claim.prescription_id = pg_temp.rx(16) and claim.dispensed_at is not null;
-select pg_temp.expect('9b rx16: a hold recorded before 0152, then held and resumed after it: resumed',
+select pg_temp.expect('9b rx16: a hold recorded before 0154, then held and resumed after it: resumed',
   pg_temp.dr(16, 'on_hold') || ' ' || pg_temp.dr(16, 'active') || ' ' || pg_temp.ph_reads(array[16]), 'ok ok rx16:resumed/2');
--- 9c: rx17 (refills 2), dispensed, held and resumed after 0152: the value is
+-- 9c: rx17 (refills 2), dispensed, held and resumed after 0154: the value is
 -- on both sides of the comparison: 'resumed'.
 select pg_temp.expect('9c rx17 (refills 2): dispensed, held, resumed: resumed',
   pg_temp.fill(17, 1) || ' ' || pg_temp.dr(17, 'on_hold') || ' ' || pg_temp.dr(17, 'active') || ' '
@@ -1030,7 +1030,7 @@ select pg_temp.expect('11b an UPDATE to 12 is refused',
   left(pg_temp.try(format('update ehr.prescriptions set refills_allowed = 12 where id = %L', pg_temp.rx(14))), 5), '23514');
 rollback to savepoint refills_check;
 
--- 12. The undo of 0152's header, step 1: 0101's and 0133's bodies put back
+-- 12. The undo of 0154's header, step 1: 0101's and 0133's bodies put back
 -- (no table lock). Every refill is then refused by 0133's claim (any image),
 -- a first fill still passes, and fill numbers stay as recorded.
 savepoint refills_undo;
@@ -1121,13 +1121,13 @@ select pg_temp.expect('12 undo step 1: the bodies are 0101''s and 0133''s; rx19'
   '2c7f20d7c0df7c582bccc0291f452fdd 17f7e8897bd2ab240332e4d2c9f757b7 ok '
   || '23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE / not_claimed 1 2 3');
 rollback to savepoint refills_undo;
-select pg_temp.expect('12 after the undo''s savepoint: 0152''s bodies again, and rx19 takes fills 1 and 2',
+select pg_temp.expect('12 after the undo''s savepoint: 0154''s bodies again, and rx19 takes fills 1 and 2',
   (select string_agg(md5(proc.prosrc), ' ' order by proc.proname) from pg_proc proc
     where proc.oid in ('pharmacy.validate_dispensing()'::regprocedure,
             'pharmacy.claim_prescription_dispensing()'::regprocedure)) || ' ' || pg_temp.fills_from(19, 1, 3),
   '1a50612f5330a36c9b64d0d831c77812 06be902c41bcd4ee65f7f840c120db8f ok,ok,23514 NO_REFILLS_LEFT / -');
 
--- 13. The reader, pharmacy.work_item_refills (0152's R6), through the
+-- 13. The reader, pharmacy.work_item_refills (0154's R6), through the
 -- Pharmacy runtime as the services call it. 'rxN:allowed/recorded/open/
 -- reason/next' for each row it answers ('-' for no reason; next is
 -- next_fill_on in days from today in Lagos, '-' for none), by
@@ -1326,7 +1326,7 @@ select pg_temp.expect('13l prescription ids give no row; no session facility, no
   pg_temp.refills_of_ids(array[pg_temp.rx(13), pg_temp.rx(21)]) || ' | ' || pg_temp.refills_without_facility(13),
   'rows=0 | rows=0');
 
--- 14. The open refills, pharmacy.open_refill_work_items (0152's R7),
+-- 14. The open refills, pharmacy.open_refill_work_items (0154's R7),
 -- through the Pharmacy runtime as pharmacy-api's work list calls it (no
 -- ids). Fixtures, as the suite runner in replica mode, as the services
 -- would leave them (pg_temp.install_bulk): at F1, for Bisi, each an active
@@ -1692,7 +1692,7 @@ reset role;
 -- never asked, so the cases that compare what the owner or the readers see
 -- hold there as well, trivially; the NOSUPERUSER NOBYPASSRLS build is the one
 -- they test. 'Before' is the same database with the policy dropped (undone
--- at once): what 0152 without the marker would show.
+-- at once): what 0154 without the marker would show.
 create function pg_temp.owner_name() returns text language sql as $f$
   select pg_get_userbyid(relation.relowner)::text from pg_class relation
    where relation.oid = 'ehr.prescriptions'::regclass
@@ -2262,7 +2262,7 @@ select pg_temp.expect('17e an edit, a hold and resume and a later end date do no
 -- owner, marker held), with sequential scans off (the suite's table is
 -- small, so unforced the planner reads it whole; this case shows the index
 -- can serve the statement, not that the planner picks it: the 20,000-row
--- measurement in 0152's header shows it picked, unforced, under both owner
+-- measurement in 0154's header shows it picked, unforced, under both owner
 -- kinds), range-scans ehr.prescriptions_refills_facility_idx by the
 -- facility and the time written (rule c as a leakproof range, so under
 -- either owner kind); under an owner that bypasses row-level security R8's

@@ -70,7 +70,7 @@ export class PrescriptionsService {
     private readonly orderRoutes: OrderRouteReader,
     private readonly details: PrescriptionDispensingDetails = PRESCRIPTION_DISPENSING_DETAILS_OFF,
     private readonly ownPharmacy: OwnPharmacySend = OWN_PHARMACY_SEND_OFF,
-    // ORD-12 (0152): refills, behind PRESCRIPTION_REFILLS_ENABLED; last, optional and off by default, so every
+    // ORD-12 (0154): refills, behind PRESCRIPTION_REFILLS_ENABLED; last, optional and off by default, so every
     // `new PrescriptionsService(...)` and every testing module built before it is unchanged.
     @Optional() private readonly refills: PrescriptionRefills = PRESCRIPTION_REFILLS_OFF,
   ) {}

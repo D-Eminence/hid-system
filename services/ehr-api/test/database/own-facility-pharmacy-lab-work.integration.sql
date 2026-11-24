@@ -31,12 +31,12 @@
 --      that fires after D8's (prescriptions_pharmacy_change_after_dispensing)
 --      and reads D14's claims, a table of its own and a reader; no policy,
 --      and no body that names ehr.prescriptions (S7 is unchanged by it).
---      0152 (ORD-12, refills) adds two owner-run definers that read
+--      0154 (ORD-12, refills) adds two owner-run definers that read
 --      ehr.prescriptions, the Pharmacy runtime's readers of own items'
 --      refills: pharmacy.work_item_refills (an item's refills) and
 --      pharmacy.open_refill_work_items (the items whose refill is open now)
 --      (S7's eleventh and twelfth; case 8). Each reads ehr.prescriptions in
---      one statement under 0152's refill scan marker (the policy
+--      one statement under 0154's refill scan marker (the policy
 --      prescriptions_scan_refills: while the marker is held, the owner reads
 --      every row, so their own conditions decide what they answer); its
 --      marker test, pharmacy.refill_scan_open, is an owner-run definer that
@@ -373,7 +373,7 @@ begin
       ('pharmacy.own_work_item_states(uuid[])', 'dd091ced7e74b0e6e2ffb9169a80aced', 's'),
       ('lab.own_work_item_bases(uuid[])', '19f42fb8eaabcdc98726e3929bf9ec3f', 's'),
       -- D14's claims (trigger functions) and reader, D15's list (trigger
-      -- function). The dispensing claim is 0152's (ORD-12): fill 1 as 0133
+      -- function). The dispensing claim is 0154's (ORD-12): fill 1 as 0133
       -- made it, a refill only on a live, dispensed, own claim.
       ('pharmacy.claim_prescription_work_item()', 'c60a03a6aed78900827fc4c7654dd593', 'v'),
       ('pharmacy.claim_prescription_dispensing()', '1a50612f5330a36c9b64d0d831c77812', 'v'),
@@ -492,11 +492,11 @@ begin
   -- identity.decide_unknown_patient only tests that a record has none, and
   -- only the Identity runtime may run it; 0144 added
   -- pharmacy.validate_work_item_acceptance, the acceptance's trigger
-  -- function; 0152 added pharmacy.work_item_refills and
+  -- function; 0154 added pharmacy.work_item_refills and
   -- pharmacy.open_refill_work_items, the Pharmacy runtime's readers of own
   -- items' refills, which answer only for items the session may read, as
   -- the prescription-refills suite's cases 13 and 14 show; they read
-  -- ehr.prescriptions under 0152's refill scan marker, so in their one
+  -- ehr.prescriptions under 0154's refill scan marker, so in their one
   -- statement that reads it the owner sees every row and their own
   -- conditions decide, as under a superuser owner, which that suite's case
   -- 16 shows changes no answer and no other read);
@@ -2254,7 +2254,7 @@ select pg_temp.expect('PH: the EHR runtime may not write a pharmacist acceptance
       'e1330002-0000-4000-8000-000000000002', 'e1330004-0000-4000-8000-000000000002', 'accept',
       'own-work-acceptance-probe-1', repeat('c', 64), 'own-work-acceptance-probe')$s$,
     pg_temp.work_item_of(pg_temp.rx(7)))), 5), '42501');
--- 0152's refills readers (the eleventh and twelfth) are the Pharmacy
+-- 0154's refills readers (the eleventh and twelfth) are the Pharmacy
 -- runtime's alone: the EHR runtime may run neither.
 select pg_temp.expect('PH: the EHR runtime may not run the refills readers', pg_temp.try(format(
   'select * from pharmacy.work_item_refills(array[%L]::uuid[])', pg_temp.work_item_of(pg_temp.rx(7)))) || ' | '

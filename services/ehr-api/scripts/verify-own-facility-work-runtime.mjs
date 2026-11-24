@@ -86,12 +86,12 @@
 // without a grant and then cancelled reads cancelled, 1, and is never
 // flagged withdrawn; a PATCH racing a dispensing in flight is recorded
 // once, after the dispensing.
-// ORD-12 (refills, 0152; owner decision Q131 A, with the clinical owner's
+// ORD-12 (refills, 0154; owner decision Q131 A, with the clinical owner's
 // answers to Rahman's review on #258 and her decisions of 24 November 2026):
 // ehr-api and pharmacy-api, the two services that read
 // PRESCRIPTION_REFILLS_ENABLED, boot with it on, so every step above also runs
 // with refills on; pharmacy-api answers ready (GET /health/ready, which needs
-// 0152's fill_number). The doctor writes active prescriptions with refills
+// 0154's fill_number). The doctor writes active prescriptions with refills
 // (0-11: 12 is refused, and a PATCH cannot set them); refills need a duration
 // (400 REFILLS_NEED_DURATION without one), which a create carries only with
 // 0125's details on, so ehr-api is booted again with those on. The
@@ -103,7 +103,7 @@
 // PHARMACY_REFILL_TOO_SOON with refillOpensOn); the clock is moved on as the
 // owner moves the fill back 8 days (replica mode; a fixture), and on its day
 // the refill is open and open work. A 4th is refused (409
-// PHARMACY_NO_REFILLS_LEFT, 0152's NO_REFILLS_LEFT mapped); a fill number
+// PHARMACY_NO_REFILLS_LEFT, 0154's NO_REFILLS_LEFT mapped); a fill number
 // already recorded, asked again with a new key and another body, is refused
 // (409 PHARMACY_FILL_NUMBER_CHANGED), as is a skipped number, and a key used
 // for another fill (409 IDEMPOTENCY_CONFLICT); the same key and body replays
@@ -120,7 +120,7 @@
 // fill 1 of another prescription closes its refills (changed) and shows
 // 0148's notice (edited, 1); a hold closes them (stopped; on_hold, 1); each
 // refused refill is 409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE. Every item's
-// refills carry endsOn, the refills' last day (0152's
+// refills carry endsOn, the refills' last day (0154's
 // ehr.prescription_refills_end_on, the clinical owner's decision D9 of 24
 // November 2026: the earliest of the end date, the Lagos day written plus
 // (refills + 2) fills' durations, and that day plus 365), whatever its state.
@@ -128,7 +128,7 @@
 // reads endsOn 3 days after the day it was written; once that day has passed
 // (the clock moved on as the owner moves its writing and its fill back 4
 // days, in replica mode, a fixture, which records no version and no change),
-// it reads closed ended with that day, lists as done work (0152's open
+// it reads closed ended with that day, lists as done work (0154's open
 // refills leave it out), and its refill is refused (409
 // PHARMACY_REFILL_PRESCRIPTION_ENDED with refillsEndedOn, the same day,
 // which is the database's own day for it, in the words "...ended on
@@ -190,7 +190,7 @@ const databaseUrl = role => {
 };
 // 0124's setting, left at its default (off): 0133's audit rows do not depend on it.
 const OWN_WORK_PATIENT_CARD_ENABLED = 'false';
-// ORD-12's setting (0152), on in ehr-api and pharmacy-api, the two services that read it; the last steps restart both
+// ORD-12's setting (0154), on in ehr-api and pharmacy-api, the two services that read it; the last steps restart both
 // with it off. PRESCRIPTION_REFILLS_ENABLED=false in the verifier's own environment boots both with it off from the
 // start: every step before ORD-12's must then pass unchanged, and ORD-12's steps check that nothing of refills shows.
 assert([undefined, 'true', 'false'].includes(process.env.PRESCRIPTION_REFILLS_ENABLED),
@@ -401,7 +401,7 @@ try {
     recorder: 'pharmacy.prescription_change_after_dispensing()',
     reader: 'pharmacy.work_item_changes_after_dispensing(uuid[])' }, `a database with Q132 A: ${JSON.stringify(q132)}`);
   evidence.database.q132 = Object.values(q132);
-  // ORD-12: 0152's two columns, its key on (work item, fill number) in place of 0023's, and the two refills readers
+  // ORD-12: 0154's two columns, its key on (work item, fill number) in place of 0023's, and the two refills readers
   // pharmacy-api asks (an image on a database without them could not record a refill or say one is open).
   const ord12 = await one(`select to_regprocedure('pharmacy.work_item_refills(uuid[])')::text as reader,
       to_regprocedure('pharmacy.open_refill_work_items()')::text as open_reader,
@@ -412,7 +412,7 @@ try {
   assert.deepEqual(ord12, { reader: 'pharmacy.work_item_refills(uuid[])', open_reader: 'pharmacy.open_refill_work_items()',
     columns: 2,
     keys: 'UNIQUE (facility_id, dispensed_by, idempotency_key); UNIQUE (work_item_id, fill_number)' },
-  `a database with ORD-12 (0152): ${JSON.stringify(ord12)}`);
+  `a database with ORD-12 (0154): ${JSON.stringify(ord12)}`);
   evidence.database.ord12 = [ord12.reader, ord12.open_reader, 'ehr.prescriptions.refills_allowed',
     'pharmacy.dispensings.fill_number', 'UNIQUE (work_item_id, fill_number)'];
   await new Promise(done => stub.listen(0, '127.0.0.1', done));
@@ -462,8 +462,8 @@ try {
       LAB_INTERNAL_SERVICE_TOKEN: tokens.lab, OWN_WORK_PATIENT_CARD_ENABLED }, labPort),
     boot('pharmacy-api', join(services, 'pharmacy-api'), pharmacyEnvironment, pharmacyPort),
   ]);
-  // ORD-12: pharmacy-api is ready only on a database with 0152's pharmacy.dispensings.fill_number (GET /health/ready).
-  expectStatus(await http(pharmacy, 'GET', '/health/ready'), 200, 'pharmacy-api ready on a database with 0152');
+  // ORD-12: pharmacy-api is ready only on a database with 0154's pharmacy.dispensings.fill_number (GET /health/ready).
+  expectStatus(await http(pharmacy, 'GET', '/health/ready'), 200, 'pharmacy-api ready on a database with 0154');
   step(`four services booted from their own code; lab-api and pharmacy-api with OWN_WORK_PATIENT_CARD_ENABLED=${OWN_WORK_PATIENT_CARD_ENABLED}; `
     + `ehr-api and pharmacy-api with PRESCRIPTION_REFILLS_ENABLED=${PRESCRIPTION_REFILLS_ENABLED}; pharmacy-api ready`);
 
@@ -1231,7 +1231,7 @@ try {
     labScientist: 'CONSENT_REQUIRED (encounter, the lab request)', patientAccessLog: 'both shown as views' };
   step('neither reads the chart; the patient\'s access log shows both as views');
 
-  // ── ORD-12: refills (0152) ──
+  // ── ORD-12: refills (0154) ──
   // Helpers for both settings. The pharmacist's list and items; a fill and a reversal through pharmacy-api.
   // Each of these lists must have read its refills: pharmacy-api says refillsUnavailable only when the open refills or
   // the per-item reader could not be read (never while off).
@@ -1354,7 +1354,7 @@ try {
     const rxChanged = await newPrescription('active', 'Synthetic losartan 50 mg tablet', { refillsAllowed: 2, ...tenDays });
     const rxStopped = await newPrescription('active', 'Synthetic simvastatin 20 mg tablet', { refillsAllowed: 1, ...tenDays });
     const rxOpen = await newPrescription('active', 'Synthetic metformin 850 mg tablet', { refillsAllowed: 1, ...tenDays });
-    // The refills' last day (0152's ehr.prescription_refills_end_on, D9): with no end date and a 10-day fill, the
+    // The refills' last day (0154's ehr.prescription_refills_end_on, D9): with no end date and a 10-day fill, the
     // Lagos day written plus (refills + 2) x 10 days: 40 days with 2 refills, 30 with 1 (each under 365).
     const written = lagosDay(0);
     const endsOnFor = allowed => plusDay(written, (allowed + 2) * 10);
@@ -1440,7 +1440,7 @@ try {
       'fill 3 on the day of fill 2').refillOpensOn, lagosDay(8), 'fill 3 opens 8 days after fill 2');
     assert.deepEqual((await fillsOf(itemR)).map(row => row.fill_number), [1, 2], 'two fills recorded, nothing more');
     await fillRecordedEarlier(fill2, 8);
-    // Fill 3: two presses at once, each under its own key, with the same body. One records it; the other meets 0152's
+    // Fill 3: two presses at once, each under its own key, with the same body. One records it; the other meets 0154's
     // key or a serialization failure, runs again and replays it (never a 500, never a second row).
     const presses = await Promise.all([dispenseFill(itemR, { fillNumber: 3 }), dispenseFill(itemR, { fillNumber: 3 })]);
     const [fill3, fill3Again] = presses.map((press, index) => expectStatus(press, 201,
@@ -1563,7 +1563,7 @@ try {
       patch: '400 (create only)', withoutDuration: '400 REFILLS_NEED_DURATION (details off, and on without a unit)' },
     interval: { rule: 'the latest fill not reversed, Lagos day, + ceil(3/4 x 10 days) = 8', beforeItsDay:
       'PHARMACY_REFILL_TOO_SOON with refillOpensOn; refills not_yet with nextFillOn; done work',
-    onItsDay: 'open, open work (0152\'s open refills)' },
+    onItsDay: 'open, open work (0154\'s open refills)' },
     fills: { recorded: 3, fillNumbers: [1, 2, 3], fourth: 'PHARMACY_NO_REFILLS_LEFT',
       sameFillNewKeyOtherBody: 'PHARMACY_FILL_NUMBER_CHANGED', skipped: 'PHARMACY_FILL_NUMBER_CHANGED',
       keyOfAnotherFill: 'IDEMPOTENCY_CONFLICT', sameKeySameBody: '201 replay', newKeySameBody: '201 replay',
@@ -1613,7 +1613,7 @@ try {
     oneRowEach(endedList, 'the list after rxEnds\'s refills ended');
     const endedRow = onlyRow(endedList, rxEnds, 'the list after rxEnds\'s refills ended');
     assert.deepEqual([endedRow.refills, listClass(endedRow)], [endedRead.refills, 2],
-      'an item whose refills ended is done work (0152\'s open refills leave it out)');
+      'an item whose refills ended is done work (0154\'s open refills leave it out)');
     assertListOrder(endedList, 'the list after rxEnds\'s refills ended');
     const endedRefusal = refusedWith(await dispenseFill(itemEnds, { fillNumber: 2 }), 409,
       'PHARMACY_REFILL_PRESCRIPTION_ENDED', 'a refill after the refills\' last day');
@@ -1667,7 +1667,7 @@ try {
     oneRowEach(lateList, 'the list after rxLate\'s late fill');
     const lateRow = onlyRow(lateList, rxLate, 'the list after rxLate\'s late fill');
     assert.deepEqual([lateRow.refills, listClass(lateRow)], [lateRead, 2],
-      'an item after a late fill is done work (0152\'s open refills leave it out)');
+      'an item after a late fill is done work (0154\'s open refills leave it out)');
     assertListOrder(lateList, 'the list after rxLate\'s late fill');
     const lateRefusal = refusedWith(await dispenseFill(itemLate, { fillNumber: 2 }), 409,
       'PHARMACY_REFILL_PRESCRIPTION_ENDED', 'a refill after a late fill');
@@ -1748,7 +1748,7 @@ try {
       + 'and refillsAllowed are unknown fields');
   } else {
     // ── ORD-12 with PRESCRIPTION_REFILLS_ENABLED off in every service from the start (the clinical owner's decision,
-    // 24 November 2026): every step above ran with it off and passed unchanged. Here: on a database with 0152, no
+    // 24 November 2026): every step above ran with it off and passed unchanged. Here: on a database with 0154, no
     // answer carries refills, lastFilledAt, a fill number or refillsAllowed; refillsAllowed and fillNumber are unknown
     // fields (400); a second dispensing of a dispensed item is refused as Release B refuses it; one row per item. ──
     const offList = await ownList('the list with refills off from the start');

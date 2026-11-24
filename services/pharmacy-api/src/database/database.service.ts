@@ -14,10 +14,10 @@ export const OWN_FACILITY_WORK = '0133';
 /**
  * ORD-12: the schema this image needs before it can serve anything. Its work
  * list, single reads, dispensing, reversal and progress statements name
- * pharmacy.dispensings.fill_number (migration 0152) whatever the setting, so
+ * pharmacy.dispensings.fill_number (migration 0154) whatever the setting, so
  * on a database without it every one of them would answer 500. A catalog read
  * (no table is opened, no privilege needed); GET /health/ready answers not
- * ready (503) while it is false, so a deploy before 0152 fails its health
+ * ready (503) while it is false, so a deploy before 0154 fails its health
  * check and the running tasks stay. Exported for the tests.
  */
 export const REQUIRED_SCHEMA_QUERY = `select exists (select 1 from pg_catalog.pg_attribute attribute

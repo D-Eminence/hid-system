@@ -497,9 +497,9 @@ export class CreatePrescriptionWithDetailsDto extends CreatePrescriptionDto {
 }
 
 /**
- * ORD-12 (refills, 0152): how many times the prescription may be dispensed
+ * ORD-12 (refills, 0154): how many times the prescription may be dispensed
  * again after the first fill, 0-11, at this hospital's own pharmacy. Left out
- * means none (stored as null, as every prescription written before 0152); an
+ * means none (stored as null, as every prescription written before 0154); an
  * explicit null, a fraction or a number outside 0-11 is refused. Set at
  * creation only: UpdatePrescriptionDto has no such field, so a PATCH naming it
  * is refused like any unknown field. Used only while

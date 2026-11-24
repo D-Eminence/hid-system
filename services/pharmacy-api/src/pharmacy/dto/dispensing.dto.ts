@@ -11,10 +11,10 @@ export class CreateDispensingDto {
 }
 
 /**
- * ORD-12 (refills, 0152), the body while PRESCRIPTION_REFILLS_ENABLED is on
+ * ORD-12 (refills, 0154), the body while PRESCRIPTION_REFILLS_ENABLED is on
  * (CreateDispensingBodyPipe): today's fields and `fillNumber`, the fill this
  * dispensing records: 1 for the first fill, 2 and above for refills, at most
- * 12 (0152's CHECK). Left out, it is the first fill, so today's clients keep
+ * 12 (0154's CHECK). Left out, it is the first fill, so today's clients keep
  * working. An explicit null is refused, as any other value outside 1-12.
  * Off, the body is CreateDispensingDto and `fillNumber` is refused like any
  * field the route does not take.

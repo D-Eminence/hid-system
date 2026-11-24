@@ -436,13 +436,13 @@ describe('ORD-4: accepted in the prescriber\'s progress', () => {
 });
 
 /*
- * ORD-12 (refills, 0152): an item may have several fills. The progress reads
+ * ORD-12 (refills, 0154): an item may have several fills. The progress reads
  * each item once (WORK_ITEM_PROGRESS_QUERY, setting on or off): `dispensedAt`
  * the first fill (0133's claim time); 'dispensed' while any fill stands (is
  * not reversed), and 'dispensing_reversed' with `reversedAt` (the latest
  * fill's reversal) only once every fill is reversed; and while
  * PRESCRIPTION_REFILLS_ENABLED is on `lastFilledAt`, the latest fill's time.
- * (The same statement was run against PostgreSQL 16 with 0152: one row for an
+ * (The same statement was run against PostgreSQL 16 with 0154: one row for an
  * item with two fills, the first and the latest times; the verifier reads it
  * through ehr-api after a refill is reversed.)
  */

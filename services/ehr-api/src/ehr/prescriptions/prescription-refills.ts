@@ -4,7 +4,7 @@ import type { CreatePrescriptionWithRefillsDto } from '../shared/clinical.dto';
 /**
  * Refills on prescriptions (ORD-12; owner decision Q131 A, 19 November 2026;
  * the clinical owner's design note on hid-system#258, Rahman's review of it
- * and the clinical owner's answers, 23 November 2026; migration 0152, which
+ * and the clinical owner's answers, 23 November 2026; migration 0154, which
  * adds `ehr.prescriptions.refills_allowed`, nullable, CHECK 0-11).
  *
  * Behind PRESCRIPTION_REFILLS_ENABLED (off by default), separate from 0125's
@@ -21,12 +21,12 @@ import type { CreatePrescriptionWithRefillsDto } from '../shared/clinical.dto';
  * - the list says `refills: true`, so the website sends the field only to a
  *   backend that takes it.
  * The prescriber sees the refills allowed. How many are left, and whether one
- * is open, is the pharmacy's (pharmacy-api, 0152's reader): a change after the
+ * is open, is the pharmacy's (pharmacy-api, 0154's reader): a change after the
  * first fill ends the remaining refills (0101's version check), and ehr-api
- * tells nobody that it did (0152 leaves ehr.withdraw_own_pharmacy_send and
+ * tells nobody that it did (0154 leaves ehr.withdraw_own_pharmacy_send and
  * 0133's steps as they are; the change is the prescriber's own).
  * The refills also end on their last day (the clinical owner's decision D9,
- * 24 November 2026; 0152's ehr.prescription_refills_end_on, the one place the
+ * 24 November 2026; 0154's ehr.prescription_refills_end_on, the one place the
  * day is computed): the earliest of the end date, the Lagos day the
  * prescription was written (created_at, which ehr-api never changes) plus
  * (refills + 2) times one fill's duration in days (a day 1, a week 7, a month
@@ -39,7 +39,7 @@ import type { CreatePrescriptionWithRefillsDto } from '../shared/clinical.dto';
  * REFILLS_NEED_DURATION's words. With refills above 0, the duration (0125's
  * `durationValue` and `durationUnit`) is how long ONE fill lasts, not the
  * whole course: each refill opens 3/4 of it after the latest fill not
- * reversed (0152), so a course length entered there would hold every refill
+ * reversed (0154), so a course length entered there would hold every refill
  * back for weeks after the supply ran out. Exported for the tests.
  */
 export const REFILLS_NEED_DURATION_MESSAGE = 'A prescription with refills needs the duration of each fill: how long '
@@ -62,13 +62,13 @@ export class PrescriptionRefills {
 
   /**
    * The clinical owner's rule (24 November 2026): a prescription with refills
-   * carries a duration, from which the refill interval comes (0152: a refill
+   * carries a duration, from which the refill interval comes (0154: a refill
    * opens on the Lagos day of the latest fill not reversed plus 3/4 of the
    * duration in days, rounded up). With refills, the duration is how long one
    * fill lasts (a 30-day supply refilled from day 23), and the refusal says
    * so (REFILLS_NEED_DURATION_MESSAGE). `refillsAllowed` above 0 without 0125's
    * `durationValue` and `durationUnit` is 400 REFILLS_NEED_DURATION before
-   * anything is written; 0152's CHECK refuses it in the database too. A create
+   * anything is written; 0154's CHECK refuses it in the database too. A create
    * carries a duration only while PRESCRIPTION_DISPENSING_DETAILS_ENABLED is
    * on as well, so with that setting off only 0 refills can be written.
    * Nothing while off.

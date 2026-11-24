@@ -103,7 +103,7 @@ create function pg_temp.untouched_bodies() returns text language sql as $f$
            order by expected.proc)
     from (values
       ('pharmacy.validate_work_item()', array['e2411539ee8c95a02dad46c03e24db05']),
-      -- 0101's body, or 0152's (ORD-12: 0101's with a refill block before
+      -- 0101's body, or 0154's (ORD-12: 0101's with a refill block before
       -- its RETURN; it still reads the row through %ROWTYPE).
       ('pharmacy.validate_dispensing()', array['17f7e8897bd2ab240332e4d2c9f757b7', '06be902c41bcd4ee65f7f840c120db8f']),
       -- 0098's body, or 0123's (the sealed QA tenant: 0098's plus one clause),

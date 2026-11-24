@@ -2024,9 +2024,9 @@ grant execute on function pharmacy.work_item_changes_after_dispensing(uuid[]) to
 revoke all on function pharmacy.work_item_changes_after_dispensing(uuid[]), pharmacy.prescription_change_after_dispensing() from public;
 revoke all on pharmacy.prescription_changes_after_dispensing from public;
 
--- Prescription refills (0152, ORD-12: owner decision Q131 A of 19 November
+-- Prescription refills (0154, ORD-12: owner decision Q131 A of 19 November
 -- 2026; the clinical owner's answers to Rahman's review on hid-system#258,
--- 23 November 2026), exactly as 0152 grants it: the reader of an own work
+-- 23 November 2026), exactly as 0154 grants it: the reader of an own work
 -- item's refills, pharmacy.work_item_refills (refills allowed, fills
 -- recorded, whether a refill is open and why not, for the own items the
 -- session may read), and the reader of the own items whose refill is open
@@ -2043,13 +2043,13 @@ revoke all on pharmacy.prescription_changes_after_dispensing from public;
 grant execute on function pharmacy.work_item_refills(uuid[]), pharmacy.open_refill_work_items()
   to hid_pharmacy_runtime, hid_schema_test_runtime;
 revoke all on function pharmacy.work_item_refills(uuid[]), pharmacy.open_refill_work_items() from public;
--- The refills' last day (0152 R8, the clinical owner's decision D9 of 24
+-- The refills' last day (0154 R8, the clinical owner's decision D9 of 24
 -- November 2026), ehr.prescription_refills_end_on: to the two runtimes that
 -- may write ehr.prescriptions (the EHR runtime and the schema test runtime),
 -- because PostgreSQL runs the expression of the open refills' index
 -- (ehr.prescriptions_refills_facility_idx) as the role that inserts or
 -- updates a prescription with refills; nothing to PUBLIC. The refill scan
--- marker (0152 R9, decision D8), as 0143's: the table pharmacy.refill_scans
+-- marker (0154 R9, decision D8), as 0143's: the table pharmacy.refill_scans
 -- is the owner's only; its test pharmacy.refill_scan_open() is run by every
 -- role that reads ehr.prescriptions (the policy prescriptions_scan_refills
 -- calls it), so PUBLIC may execute it.

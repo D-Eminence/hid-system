@@ -12,7 +12,7 @@ describe('HealthController', () => {
     expect(database.requiredSchemaPresent).toHaveBeenCalledTimes(1);
   });
 
-  it('ORD-12: is not ready (503) on a database without 0152\'s fill_number, while still live', async () => {
+  it('ORD-12: is not ready (503) on a database without 0154\'s fill_number, while still live', async () => {
     const database = { healthCheck: jest.fn().mockResolvedValue(undefined),
       requiredSchemaPresent: jest.fn().mockResolvedValue(false) };
     const controller = new HealthController(database as never);

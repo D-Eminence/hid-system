@@ -19,7 +19,7 @@ import { DuplicateMedicineChecker, DuplicateMedicinesController } from './duplic
       useFactory: () => new PrescriptionDispensingDetails(getEnvironment().PRESCRIPTION_DISPENSING_DETAILS_ENABLED) },
     // Activated prescriptions go to this hospital's own pharmacy (0133): always on; a schema without 0133 sends nothing.
     { provide: OwnPharmacySend, useFactory: () => new OwnPharmacySend(true) },
-    // Refills on new prescriptions (ORD-12, 0152), on only while PRESCRIPTION_REFILLS_ENABLED is true; separate from
+    // Refills on new prescriptions (ORD-12, 0154), on only while PRESCRIPTION_REFILLS_ENABLED is true; separate from
     // 0125's setting.
     { provide: PrescriptionRefills, useFactory: () => new PrescriptionRefills(getEnvironment().PRESCRIPTION_REFILLS_ENABLED) }],
 })

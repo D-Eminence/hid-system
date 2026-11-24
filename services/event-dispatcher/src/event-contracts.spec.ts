@@ -88,7 +88,7 @@ describe('HID event envelope v1', () => {
     });
 
 
-  it('admits a refill\'s MedicationDispensed with its fill number (ORD-12, 0152), and nowhere else', () => {
+  it('admits a refill\'s MedicationDispensed with its fill number (ORD-12, 0154), and nowhere else', () => {
     const dispensed = { ...event, producer: 'pharmacy' as const, eventType: 'MedicationDispensed',
       aggregateType: 'medication-dispensing', aggregateVersion: 1, payload: { dispensingId: event.aggregateId,
         workItemId: '70000000-0000-4000-8000-000000000001', status: 'dispensed' } };

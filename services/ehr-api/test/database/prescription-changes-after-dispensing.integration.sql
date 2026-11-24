@@ -18,7 +18,7 @@
 --      UPDATE triggers; the two functions (md5, owner, SECURITY DEFINER,
 --      volatility, language, search_path, not STRICT) and who may execute
 --      them; no 0148 body names ehr.prescriptions or the sends table, and
---      0133's S7 list is unchanged by 0148 (0152's refills reader joins it);
+--      0133's S7 list is unchanged by 0148 (0154's refills reader joins it);
 --      ehr.prescriptions' columns in order (a
 --      migration that adds one decides the fingerprint's left-out keys);
 --      pharmacy.work_items' read policies are the two the reader repeats;
@@ -217,13 +217,13 @@ begin
   -- each of which sees D5's rows in a pharmacist's session) is unchanged by
   -- 0148: the ten 0133's suite pins on Release B (0143's ehr.list_my_orders,
   -- 0144's acceptance trigger function and 0145's
-  -- identity.decide_unknown_patient among them), and, once 0152 (ORD-12,
+  -- identity.decide_unknown_patient among them), and, once 0154 (ORD-12,
   -- refills) is applied, its two readers pharmacy.work_item_refills and
   -- pharmacy.open_refill_work_items (the prescription-refills suite, cases
-  -- 13, 14 and 16: they read ehr.prescriptions under 0152's refill scan
+  -- 13, 14 and 16: they read ehr.prescriptions under 0154's refill scan
   -- marker; its test, pharmacy.refill_scan_open, names no
   -- ehr.prescriptions).
-  perform pg_temp.expect('1g no 0148 body names ehr.prescriptions or the sends table; 0133''s S7 list (with 0152''s readers)',
+  perform pg_temp.expect('1g no 0148 body names ehr.prescriptions or the sends table; 0133''s S7 list (with 0154''s readers)',
     (select count(*) from pg_proc proc
       where proc.oid in ('pharmacy.work_item_changes_after_dispensing(uuid[])'::regprocedure,
               'pharmacy.prescription_change_after_dispensing()'::regprocedure)
@@ -247,7 +247,7 @@ begin
   -- numeric(14,6) turns 1.0000 into 1.000000), or renames or drops a column
   -- that holds values, meets this case too: that also changes every later
   -- fingerprint, and the first resume after it reads 'edited' (the safe
-  -- side). 0152 (ORD-12) added
+  -- side). 0154 (ORD-12) added
   -- refills_allowed smallint, nullable and without a default: null in every
   -- older row, so no fingerprint changes and the trigger function stays
   -- 0148's (its md5 is pinned in 1e); a value an owner sets after

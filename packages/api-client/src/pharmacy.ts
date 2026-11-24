@@ -109,7 +109,7 @@ export interface PharmacyWorkItem {
   version: number;
   /**
    * The item's dispensing, or null before any. With refills (ORD-12, database
-   * 0152) an item can have several fills, and this is the latest (the highest
+   * 0154) an item can have several fills, and this is the latest (the highest
    * fill number): `reversed` is whether that fill was reversed, and its id is
    * the one a reversal names (only the latest fill can be reversed; an earlier
    * one answers 409 PHARMACY_DISPENSING_NOT_LATEST_FILL). `fillNumber` (1 for

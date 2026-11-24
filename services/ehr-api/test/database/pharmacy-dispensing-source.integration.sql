@@ -14,7 +14,7 @@
 -- it is missing, belongs to another patient, facility or encounter, is not
 -- active, or is at another version than the one accepted.
 -- Cases:
---   1. structure: the body is 0101's with 0152's refill block (ORD-12) added
+--   1. structure: the body is 0101's with 0154's refill block (ORD-12) added
 --      before its RETURN, and without that block byte for byte 0101's; the
 --      order-route branch and the existing actor and work-item check are
 --      byte for byte 0086's, and the refill block comes after 0101's check;
@@ -54,15 +54,15 @@ declare
   body text := (select prosrc from pg_proc where oid = 'pharmacy.validate_dispensing()'::regprocedure);
   mismatch text;
 begin
-  -- 0152 (ORD-12) added one block before 0101's RETURN: refills, checked
+  -- 0154 (ORD-12) added one block before 0101's RETURN: refills, checked
   -- only for a fill_number above 1. Without it the body is 0101's.
   if md5(body) <> '06be902c41bcd4ee65f7f840c120db8f' then
-    raise exception 'pharmacy.validate_dispensing is not 0152''s (md5 %)', md5(body);
+    raise exception 'pharmacy.validate_dispensing is not 0154''s (md5 %)', md5(body);
   end if;
   if md5(substr(body, 1, position(E'  -- Refills (ORD-12)' in body) - 1)
          || substr(body, position(E'  return new;\n' in body))) <> '17f7e8897bd2ab240332e4d2c9f757b7'
      or position(E'  -- Refills (ORD-12)' in body) < position(E'  if parent_row.order_route_id is null then\n' in body) then
-    raise exception 'pharmacy.validate_dispensing without 0152''s refill block is not 0101''s, or the block is not last';
+    raise exception 'pharmacy.validate_dispensing without 0154''s refill block is not 0101''s, or the block is not last';
   end if;
   -- 0086's order-route branch (the 353 characters after its IF) and 0086's
   -- actor and work-item check (from "if parent_row.id is null" to its END IF).

@@ -30,7 +30,7 @@ import { PharmacyWorkItemProgressService } from './work-item-progress.service';
     // Q132 A (0148): the notice on a dispensed item whose prescription changed afterwards: always on, with no
     // environment setting (0133 D12's rule); a schema without 0148 answers no notice (42883), as before.
     { provide: PharmacyChangesAfterDispensing, useFactory: () => new PharmacyChangesAfterDispensing(true) },
-    // Recording refills (ORD-12, 0152), on only while PRESCRIPTION_REFILLS_ENABLED is true; separate from 0125's
+    // Recording refills (ORD-12, 0154), on only while PRESCRIPTION_REFILLS_ENABLED is true; separate from 0125's
     // setting. One row per item, the replay and the latest-fill reversal rule do not depend on it.
     { provide: PharmacyRefills, useFactory: () => new PharmacyRefills(getEnvironment().PRESCRIPTION_REFILLS_ENABLED) }] })
 export class PharmacyModule {}

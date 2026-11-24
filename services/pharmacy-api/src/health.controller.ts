@@ -12,9 +12,9 @@ export class HealthController {
 
   /**
    * Ready when the database answers and has the schema this image needs
-   * (ORD-12: migration 0152's pharmacy.dispensings.fill_number, which every
+   * (ORD-12: migration 0154's pharmacy.dispensings.fill_number, which every
    * work-item statement names); otherwise 503, so a deploy that reaches a
-   * database without 0152 fails its health check instead of answering 500.
+   * database without 0154 fails its health check instead of answering 500.
    */
   @Get('ready') async ready() {
     await this.database.healthCheck();

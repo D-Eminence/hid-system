@@ -200,10 +200,10 @@ describe('PharmacyService.listWorkItems order: open work first', () => {
     // ORD-12: or an own item with a refill open ($2, empty while refills are off), after the items with no fill.
     expect(WORK_LIST_QUERY.replace(/\s+/g, ' ')).toContain('cross join lateral (select d.id is null or w.id=any($2::uuid[]) '
       + 'as open_work, d.id is not null and w.id=any($2::uuid[]) as refill_open) o');
-    // A reversed dispensing is done unless a refill is open: a reversed fill still counts (0152).
+    // A reversed dispensing is done unless a refill is open: a reversed fill still counts (0154).
     expect(WORK_LIST_QUERY).not.toMatch(/r\.id is not null as open_work/);
     const order = WORK_LIST_QUERY.slice(WORK_LIST_QUERY.lastIndexOf('order by'));
-    // ORD-12: the refills open in $2's order (0152's open refills: the refill that opened first first).
+    // ORD-12: the refills open in $2's order (0154's open refills: the refill that opened first first).
     expect(order.replace(/\s+/g, ' ')).toBe('order by o.open_work desc,o.refill_open asc,'
       + 'case when o.refill_open then array_position($2::uuid[],w.id) end asc, '
       + 'case when o.open_work then w.accepted_at end asc,'

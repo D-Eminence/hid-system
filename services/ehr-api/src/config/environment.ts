@@ -111,7 +111,7 @@ const environmentSchema = z
     OFFLINE_ESCROW_KEYS: optionalString,
     // Prescription strength, form, duration, quantity and priority (0125): off by default, off is exactly as before.
     PRESCRIPTION_DISPENSING_DETAILS_ENABLED: booleanString,
-    // Refills on new prescriptions (ORD-12, needs 0152): off by default, separate from 0125's setting; off is exactly
+    // Refills on new prescriptions (ORD-12, needs 0154): off by default, separate from 0125's setting; off is exactly
     // as before (refillsAllowed refused like any field the route does not take).
     PRESCRIPTION_REFILLS_ENABLED: booleanString,
   })

@@ -38,7 +38,7 @@ interface WorkItemRow extends QueryResultRow {
   reversal_id?: string | null;
   /** Set when the work item came from another facility's order route (P4c). */
   order_route_id?: string | null;
-  /** ORD-12 (0152): the latest fill's number and time, and how many fills the item has (reversed ones included). */
+  /** ORD-12 (0154): the latest fill's number and time, and how many fills the item has (reversed ones included). */
   dispensing_fill_number?: number | string | null;
   last_filled_at?: Date | null;
   fills_recorded?: number | string | null;
@@ -50,7 +50,7 @@ interface DispensingRow extends QueryResultRow {
   quantity_dispensed: string; quantity_unit: string; status: 'dispensed'; dispensed_by: string;
   dispensed_at: Date; row_version: string; created_at: Date; request_sha256?: string;
   reversal_id?: string | null; reversed_at?: Date | null;
-  /** 0152: 1 for the first fill, 2 and above for refills. */
+  /** 0154: 1 for the first fill, 2 and above for refills. */
   fill_number?: number | string | null;
   /** DISPENSING_REPLAY_QUERY: recorded under this member's Idempotency-Key here. */
   by_key?: boolean;
@@ -72,16 +72,16 @@ interface ImportRow extends QueryResultRow {
 }
 
 /**
- * A work item, once, whatever its number of fills (ORD-12, 0152: one
+ * A work item, once, whatever its number of fills (ORD-12, 0154: one
  * dispensing per fill, so a plain join would answer the item once per fill):
  * its latest fill (the highest fill number) as `dispensing_id`,
  * `dispensing_status` and `reversal_id` (that fill's reversal), with its
  * number and time, and `fills_recorded`, how many fills it has, a reversed
- * fill included. One probe of 0152's key per item; one reversal per
+ * fill included. One probe of 0154's key per item; one reversal per
  * dispensing (0023), so the reversal join adds no rows. Unconditional: it
  * does not depend on PRESCRIPTION_REFILLS_ENABLED, because a fill recorded
- * while the setting was on stays when it is turned off. It needs 0152's
- * `fill_number` (0152 comes before this image; once any refill is recorded,
+ * while the setting was on stays when it is turned off. It needs 0154's
+ * `fill_number` (0154 comes before this image; once any refill is recorded,
  * pharmacy-api must not roll back below it). Exported for the tests.
  */
 export const WORK_ITEM_SELECT = `select w.*,d.id::text as dispensing_id,d.status as dispensing_status,
@@ -103,7 +103,7 @@ const WORK_LIST_WINDOW = `(o.open_work or w.accepted_at >= ($1::date::timestamp 
  * Open work first, oldest first, then done work, newest first; 200 rows. The same for both list queries. Among the
  * open work, items waiting for their first fill (oldest received first) come before items with a refill open
  * (ORD-12), so a pharmacy with many refills open still sees every new prescription first; the refills in `$2`'s
- * order, 0152's open refills' (the refill that opened first first). With refills off no item has a refill open.
+ * order, 0154's open refills' (the refill that opened first first). With refills off no item has a refill open.
  */
 const WORK_LIST_ORDER = `order by o.open_work desc,o.refill_open asc,case when o.refill_open then array_position($2::uuid[],w.id) end asc,
   case when o.open_work then w.accepted_at end asc,case when o.open_work then null else w.accepted_at end desc,
@@ -113,10 +113,10 @@ const WORK_LIST_ORDER = `order by o.open_work desc,o.refill_open asc,case when o
  * The work list (200 rows, as before): open work of any age, and done work
  * received on or after the day in `$1` (WORK_LIST_WINDOW, Q123 A). A work
  * item is open while it has no dispensing, or (ORD-12, refills on) while it is
- * one of `$2`, the own items 0152's open refills
+ * one of `$2`, the own items 0154's open refills
  * (pharmacy.open_refill_work_items) names; `$2` is empty while refills are
  * off. A reversed dispensing counts as done unless a
- * refill is open: a reversed fill still counts as a fill (0152), so a reversed
+ * refill is open: a reversed fill still counts as a fill (0154), so a reversed
  * item with no refill open cannot be dispensed again and would otherwise stay
  * at the top for good (owner, 2026-11-02). Open work comes first, oldest
  * first, so new and waiting prescriptions always show however much is done,
@@ -139,11 +139,11 @@ const WORK_LIST_ORDER = `order by o.open_work desc,o.refill_open asc,case when o
  * policy once (the reader joins the snapshot by its key, so the prescription
  * history does not add to it): 1.0-1.7 s for 200 rows, against 0.4-0.7 s for
  * reading the same rows under row-level security (INTERFACE_CONTRACT.md §46).
- * With PRESCRIPTION_REFILLS_ENABLED on (ORD-12, 0152), each list load also
+ * With PRESCRIPTION_REFILLS_ENABLED on (ORD-12, 0154), each list load also
  * asks pharmacy.open_refill_work_items once before this query, under its own
  * 3-second limit (OPEN_REFILLS_TIMEOUT_MS, kept as a guard), and
  * pharmacy.work_item_refills once after it, for the own rows shown (at most
- * 200). Both read ehr.prescriptions under 0152's refill scan marker (the
+ * 200). Both read ehr.prescriptions under 0154's refill scan marker (the
  * clinical owner's D8, 24 November 2026), so that table's read policies no
  * longer run per row under a NOBYPASSRLS owner (about 10 ms a row before).
  * The open refills read the facility's prescriptions that allow refills and
@@ -226,7 +226,7 @@ const DISPENSING_SELECT = `select d.*,r.id::text as reversal_id,r.reversed_at
 /**
  * A dispensing request's replay (ORD-12): what this member's Idempotency-Key
  * recorded here ($1 facility, $2 account, $3 key; 0023's key), `by_key`, and
- * the fill this request asks to record ($4 work item, $5 fill number; 0152's
+ * the fill this request asks to record ($4 work item, $5 fill number; 0154's
  * key). At most two rows, the key's first. Exported for the tests.
  */
 export const DISPENSING_REPLAY_QUERY = `select d.*,r.id::text as reversal_id,r.reversed_at,
@@ -235,7 +235,7 @@ export const DISPENSING_REPLAY_QUERY = `select d.*,r.id::text as reversal_id,r.r
   where (d.facility_id=$1 and d.dispensed_by=$2 and d.idempotency_key=$3) or (d.work_item_id=$4 and d.fill_number=$5)
   order by by_key desc`;
 
-/** The fill this request records ($17, 0152), after today's columns. Exported for the tests. */
+/** The fill this request records ($17, 0154), after today's columns. Exported for the tests. */
 export const INSERT_DISPENSING = `insert into pharmacy.dispensings (
         id,work_item_id,work_item_version,patient_id,facility_id,medication_code_system,medication_code,
         medication_display,quantity_dispensed,quantity_unit,dispensed_by,dispensed_by_membership_id,
@@ -340,7 +340,7 @@ interface AcceptanceRow extends QueryResultRow {
 // same-facility dispensing's, holds its EHR prescription FOR SHARE until
 // commit, so the EHR cannot change it under the acceptance or the dispensing.
 // Unique constraints allow one own work item and at most one route-backed item
-// per prescription (0133), one dispensing per work item and fill number (0152;
+// per prescription (0133), one dispensing per work item and fill number (0154;
 // one per work item before it), one reversal per dispensing, one import per
 // publication and one row per idempotency key; the SERIALIZABLE transaction cancels the loser of a
 // race (40001 or 23505), and DatabaseService runs it again, when it replays
@@ -505,7 +505,7 @@ export class PharmacyService {
     // provider for it, and Nest then passes undefined, which takes the default. PharmacyModule always
     // provides it on (no environment setting, 0133 D12's rule); a test pins that.
     @Optional() private readonly dispensedChanges: PharmacyChangesAfterDispensing = CHANGES_AFTER_DISPENSING_OFF,
-    // ORD-12 (0152): recording refills, behind PRESCRIPTION_REFILLS_ENABLED; last, optional and off by default for the
+    // ORD-12 (0154): recording refills, behind PRESCRIPTION_REFILLS_ENABLED; last, optional and off by default for the
     // same reasons. PharmacyModule provides it from the setting. One row per item, the replay and the latest-fill
     // reversal rule do not depend on it.
     @Optional() private readonly refills: PharmacyRefills = REFILLS_OFF) {}
@@ -607,19 +607,19 @@ export class PharmacyService {
    * move the row (it keeps its place in the done work, by the day it was
    * received, Q123 A).
    *
-   * ORD-12 (0152): one row per item, whatever its number of fills, setting on
+   * ORD-12 (0154): one row per item, whatever its number of fills, setting on
    * or off (WORK_ITEM_SELECT). While PRESCRIPTION_REFILLS_ENABLED is on, the
-   * list first asks 0152's open refills which own items have a refill open
+   * list first asks 0154's open refills which own items have a refill open
    * now (PharmacyRefills.openForList, at most 200, however many items were
    * filled after them), and those are open work of any age, after the items
-   * waiting for their first fill; each own row then carries `refills` (0152's
+   * waiting for their first fill; each own row then carries `refills` (0154's
    * per-item reader, asked once, for the own rows shown), and each row
    * `dispensing.fillNumber` and `lastFilledAt` once dispensed. The open
    * refills run under their own time limit (OPEN_REFILLS_TIMEOUT_MS, a
    * guard), and past it the list answers without them rather than not at
    * all. When either reader fails, the answer says `refillsUnavailable: true`
    * (logged as an error), so a due refill missing from the open work is shown
-   * as such ("Refills could not be loaded"). Both readers write 0152's refill
+   * as such ("Refills could not be loaded"). Both readers write 0154's refill
    * scan marker (D8), so this transaction is READ COMMITTED and read-write
    * (DatabaseService's default; never readOnly: a READ ONLY one would refuse
    * them, 25006). Off, nothing is asked and nothing added.
@@ -648,7 +648,7 @@ export class PharmacyService {
       // the audit rows (the notice shows no new person, so it adds none); a failure answers no notice.
       const changed = await this.dispensedChanges.changes(client, result.rows.filter((row) => row.dispensing_id)
         .map((row) => row.id), context.correlationId);
-      // ORD-12 (refills on): 0152's per-item reader for the own rows shown, and only those (no audit row: no new
+      // ORD-12 (refills on): 0154's per-item reader for the own rows shown, and only those (no audit row: no new
       // person is shown); a failure leaves `refills` out, and the list says refillsUnavailable.
       const refills = await this.refills.read(client, ownIds, context.correlationId);
       const receiving = await this.routeCards.receiving(client, context);
@@ -763,8 +763,8 @@ export class PharmacyService {
       // cannot be read). The read's audit row above already names the item and the patient.
       const changed = row.dispensing_id
         ? await this.dispensedChanges.changes(client, [row.id], context.correlationId) : undefined;
-      // ORD-12 (refills on): an own item's refills (0152's reader; none when it cannot be read). The reader writes
-      // 0152's scan marker, so this transaction stays read-write (READ COMMITTED, DatabaseService's default).
+      // ORD-12 (refills on): an own item's refills (0154's reader; none when it cannot be read). The reader writes
+      // 0154's scan marker, so this transaction stays read-write (READ COMMITTED, DatabaseService's default).
       const refills = row.order_route_id ? undefined : await this.refills.read(client, [row.id], context.correlationId);
       return this.projectWorkItem(row, cards?.get(row.id), own?.get(row.id),
         this.prescriptionDetails.forRow(row, details?.get(row.id)), states?.get(row.id), changed?.get(row.id),
@@ -924,7 +924,7 @@ export class PharmacyService {
   }
 
   /**
-   * A dispensing: one fill of a work item (ORD-12, 0152), in one SERIALIZABLE
+   * A dispensing: one fill of a work item (ORD-12, 0154), in one SERIALIZABLE
    * transaction, in this order:
    * - the item (one row whatever its fills, WORK_ITEM_SELECT): one this
    *   session cannot see answers as before (a route-backed item hidden by its
@@ -953,7 +953,7 @@ export class PharmacyService {
    *   route: 409 PHARMACY_NO_REFILLS_LEFT (one fill);
    * - only a first fill accepts a received item (ORD-4); a refill never does;
    * - the insert names the fill number; the database decides the rest
-   *   (0152): past 1 + the prescription's refills, 409 PHARMACY_NO_REFILLS_LEFT;
+   *   (0154): past 1 + the prescription's refills, 409 PHARMACY_NO_REFILLS_LEFT;
    *   after the refills' last day (the Lagos day; the earliest of its end date,
    *   the day it was written plus (refills + 2) fills' durations, and that day
    *   plus 365: the clinical owner's D9), 409
@@ -968,7 +968,7 @@ export class PharmacyService {
    *   `refillOpensOn`, the day it opens (no override: a clinician writes a new
    *   prescription); changed, held, stopped or sent
    *   elsewhere, 409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE as before. Two
-   *   requests for the same fill at once: the loser meets 0152's key (23505)
+   *   requests for the same fill at once: the loser meets 0154's key (23505)
    *   or a serialization failure (40001) and DatabaseService runs it again,
    *   when the replay above answers it. Should a run meet a key again (the
    *   winner hidden from this member by row-level security), it is a 409 as
@@ -983,7 +983,7 @@ export class PharmacyService {
     const digest = requestDigest('pharmacy.dispensing.create', { workItemId, ...dispensingDigestInput(input) });
     const alreadyDispensed = () => new DomainProblem(409, 'PHARMACY_WORK_ITEM_ALREADY_DISPENSED',
       'A full dispensing is already recorded for this work item; partial dispensing is not supported');
-    // The inserts that met 0152's key or this member's key, counted over every run of this request.
+    // The inserts that met 0154's key or this member's key, counted over every run of this request.
     let fillKeyTaken = 0;
     let memberKeyTaken = 0;
     return this.database.withTransaction(context, async (client) => {
@@ -1055,7 +1055,7 @@ export class PharmacyService {
   }
 
   /**
-   * A dispensing's reversal, as before, with one rule more (ORD-12, 0152,
+   * A dispensing's reversal, as before, with one rule more (ORD-12, 0154,
    * setting on or off): only the item's latest fill can be reversed. A
    * reversal of an earlier fill, once its replay is ruled out, is 409
    * PHARMACY_DISPENSING_NOT_LATEST_FILL, so the item's `dispensing` (its latest
@@ -1306,7 +1306,7 @@ export class PharmacyService {
    * `dispensed` or `dispensing_reversed`; `status`, `acceptedAt`, `version`
    * and `dispensing` keep their meaning.
    *
-   * ORD-12 (0152): `dispensing` is the item's latest fill, and `reversed`
+   * ORD-12 (0154): `dispensing` is the item's latest fill, and `reversed`
    * that fill's (so `pharmacyStep` keeps its meaning), setting on or off.
    * While PRESCRIPTION_REFILLS_ENABLED is on, `dispensing` also carries its
    * `fillNumber`; a dispensed item carries `lastFilledAt` (the latest fill's
@@ -1356,7 +1356,7 @@ export class PharmacyService {
         display: row.medication_display }, quantityDispensed: Number(row.quantity_dispensed),
       quantityUnit: row.quantity_unit, dispensedAt: row.dispensed_at,
       reversalId: row.reversal_id ?? null, version: Number(row.row_version),
-      // ORD-12 (refills on): which fill this is (0152; a dispensing recorded before 0152 is the first).
+      // ORD-12 (refills on): which fill this is (0154; a dispensing recorded before 0154 is the first).
       ...(this.refills.enabled ? { fillNumber: Number(row.fill_number ?? 1) } : {}) };
   }
 

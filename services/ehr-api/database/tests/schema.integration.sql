@@ -1804,7 +1804,7 @@ begin
     raise exception 'Explicit dispensing did not preserve accepted work separately';
   end if;
 
-  -- One dispensing per fill number (0152, ORD-12): an INSERT that names no
+  -- One dispensing per fill number (0154, ORD-12): an INSERT that names no
   -- fill number (today's pharmacy-api) is fill 1 again and meets the key on
   -- (work_item_id, fill_number)...
   begin
@@ -2018,7 +2018,7 @@ begin
 end
 $$;
 
--- Refills (0152, ORD-12): a prescription written with one refill allowed
+-- Refills (0154, ORD-12): a prescription written with one refill allowed
 -- (and a duration, which a refill needs: 30 days) takes two fills on its
 -- one work item, the second numbered 2, and refuses a third. Fill 1 is
 -- recorded as of 40 days ago, so the refill interval (3/4 of the duration

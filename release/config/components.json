@@ -95,7 +95,7 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0152",
+    "last": "0154",
     "count": 149,
     "files": [
       {
@@ -691,8 +691,8 @@
         "sha256": "69477c2a632aebb0df08aae14c3e5a0250cc08e375b3b8594f884466bf00657c"
       },
       {
-        "name": "0152_prescription_refills.sql",
-        "sha256": "af1025c6c572ed2dbed688f577a48689b48e110a559c71200aca4afaae039a18"
+        "name": "0154_prescription_refills.sql",
+        "sha256": "41884977afeea4848db0069c7af11ebe5294c2c364e85125bb0034b26fc63483"
       }
     ]
   },

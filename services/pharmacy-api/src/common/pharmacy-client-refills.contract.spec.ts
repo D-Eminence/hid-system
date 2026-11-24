@@ -1,7 +1,7 @@
 import { PharmacyApiClient, type CreatePharmacyDispensingInput, type PharmacyDispensing,
   type PharmacyWorkItem, type PharmacyWorkItemRefills, type PharmacyWorkQueue } from '@hid/api-client';
 
-// ORD-12 (refills, 0152): a work item's `refills` (`endsOn` among them, the refills' last day: the clinical owner's
+// ORD-12 (refills, 0154): a work item's `refills` (`endsOn` among them, the refills' last day: the clinical owner's
 // D9 of 24 November 2026), `lastFilledAt` and its dispensing's `fillNumber`, and a
 // dispensing's `fillNumber`, as packages/api-client parses them, and the dispensing body's `fillNumber` as it sends
 // it. Lenient: absent (an older pharmacy-api, or PRESCRIPTION_REFILLS_ENABLED off) or malformed, each is left out and

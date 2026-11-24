@@ -176,7 +176,7 @@ describe('ORD-12: the schema this image needs (readiness)', () => {
     return { database, query };
   };
 
-  it('reads the catalog for 0152\'s pharmacy.dispensings.fill_number, opening no table', async () => {
+  it('reads the catalog for 0154\'s pharmacy.dispensings.fill_number, opening no table', async () => {
     const { database, query } = withPool([{ present: true }]);
     await expect(database.requiredSchemaPresent()).resolves.toBe(true);
     expect(query).toHaveBeenCalledWith(REQUIRED_SCHEMA_QUERY);
@@ -186,7 +186,7 @@ describe('ORD-12: the schema this image needs (readiness)', () => {
     expect(flat).not.toMatch(/from pharmacy\./);
   });
 
-  it('is false on a database without the column (a schema before 0152)', async () => {
+  it('is false on a database without the column (a schema before 0154)', async () => {
     await expect(withPool([{ present: false }]).database.requiredSchemaPresent()).resolves.toBe(false);
     await expect(withPool([]).database.requiredSchemaPresent()).resolves.toBe(false);
   });

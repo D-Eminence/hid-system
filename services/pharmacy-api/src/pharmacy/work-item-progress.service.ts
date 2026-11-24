@@ -18,7 +18,7 @@ import { PharmacyRefills, REFILLS_OFF } from './prescription-refills';
  *   (accept-ehr-prescription), when it was accepted as it was made;
  * - dispensed: it was dispensed (dispensedAt);
  * - dispensing_reversed: it was dispensed and the dispensing was reversed;
- *   with refills (ORD-12, 0152), 'dispensed' while any fill of the item stands
+ *   with refills (ORD-12, 0154), 'dispensed' while any fill of the item stands
  *   (is not reversed), and 'dispensing_reversed', with `reversedAt` (the
  *   latest fill's reversal), only once every fill is reversed; `dispensedAt`
  *   stays the first fill's (0133's claim time);
@@ -95,12 +95,12 @@ interface ProgressRow extends QueryResultRow {
  * out (their progress is on the route). Row-level security applies as well:
  * the clinician reads under their own consent grant (pharmacy.work_item_allows
  * and pharmacy.context_allows), never the pharmacist's. One row per work
- * item, whatever its number of fills (ORD-12, 0152, setting on or off): the
+ * item, whatever its number of fills (ORD-12, 0154, setting on or off): the
  * first fill's time (`dispensed_at`, 0133's claim time), the latest fill's
  * (`last_filled_at`) and the latest fill's reversal (one per dispensing,
  * 0023), each by fill number, and whether any fill of the item stands (has no
  * reversal), so that a refill reversed after an earlier fill that stands
- * still reads dispensed. It needs 0152's `fill_number`. Exported for the
+ * still reads dispensed. It needs 0154's `fill_number`. Exported for the
  * tests.
  */
 export const WORK_ITEM_PROGRESS_QUERY = `select w.id::text as work_item_id,

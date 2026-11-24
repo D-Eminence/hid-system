@@ -16,7 +16,7 @@ import { PrescriptionsService } from './prescriptions.service';
 /*
  * ORD-12 (refills; owner decision Q131 A, 19 November 2026; the clinical
  * owner's design note on hid-system#258, Rahman's review and the clinical
- * owner's answers, 23 November 2026; migration 0152): the prescriber sets
+ * owner's answers, 23 November 2026; migration 0154): the prescriber sets
  * refills 0-11 when writing, behind PRESCRIPTION_REFILLS_ENABLED (separate
  * from 0125's setting). Off, the create body, the statements, the answers and
  * the list are exactly as before; on, a create may carry `refillsAllowed`, it
@@ -183,7 +183,7 @@ describe('refills: on', () => {
       expect(insert.sql).toContain('refills_allowed as "refillsAllowed"');
     });
 
-  it('E8 stores null when left out (none, as every prescription before 0152)', async () => {
+  it('E8 stores null when left out (none, as every prescription before 0154)', async () => {
     const { service, statements } = harness(true);
     await create(service, await pipe(true).transform({ ...body }));
     expect(insertOf(statements).values.at(-1)).toBeNull();
