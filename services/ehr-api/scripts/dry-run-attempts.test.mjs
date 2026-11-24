@@ -195,7 +195,7 @@ test('0154\'s two busy refusals, read from the file, are ones the dry run retrie
   for (const message of messages) {
     assert.equal(isBusyRefusal(new MigrationFileError(file, databaseError('55P03', message))), true, message);
     // Under another file's name, or another SQLSTATE, it is not this file's busy refusal.
-    assert.equal(isBusyRefusal(new MigrationFileError('0153_recent_diagnoses.sql', databaseError('55P03', message))), false);
+    assert.equal(isBusyRefusal(new MigrationFileError('0153_clinician_recent_diagnoses.sql', databaseError('55P03', message))), false);
     assert.equal(isBusyRefusal(new MigrationFileError(file, databaseError('57014', message))), false);
   }
 });
