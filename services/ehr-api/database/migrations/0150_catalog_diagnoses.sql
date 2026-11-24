@@ -338,12 +338,20 @@ begin
     -- "Is q": q as searched, as words (lower case, split as q is).
     exact := btrim(regexp_replace(lower(searched), '[^[:alnum:]]+', ' ', 'g'));
     return query
-      with found as (
-        select diagnosis.code, diagnosis.title, compared.title as compared_title,
-               coalesce(diagnosis.code = typed_code, false) as code_hit,
-               to_tsvector('simple'::regconfig, regexp_replace(lower(diagnosis.code || ' ' || diagnosis.title),
-                 '[^[:alnum:]]+', ' ', 'g')) @@ query as title_hit,
-               (select other.name from unnest(string_to_array(diagnosis.other_names, '; ')) as other(name)
+      with candidates as materialized (
+        -- The release's rows whose words match, or whose code q is; each title split into words once, as q is.
+        select diagnosis.code, diagnosis.title, diagnosis.other_names,
+               regexp_replace(lower(diagnosis.title), '[^[:alnum:]]+', ' ', 'g') as title_words
+          from ehr.catalog_diagnoses diagnosis
+         where diagnosis.version_id = release_id
+           and (diagnosis.search_terms @@ query or diagnosis.code = typed_code)),
+      found as (
+        select candidate.code, candidate.title, compared.title as compared_title,
+               coalesce(candidate.code = typed_code, false) as code_hit,
+               -- The code and the title, split as q is (a code is A-Z, 0-9 and dots only).
+               to_tsvector('simple'::regconfig, replace(lower(candidate.code), '.', ' ') || ' ' || candidate.title_words)
+                 @@ query as title_hit,
+               (select other.name from unnest(string_to_array(candidate.other_names, '; ')) as other(name)
                  where other.name <> ''
                    and to_tsvector('simple'::regconfig, regexp_replace(lower(other.name), '[^[:alnum:]]+', ' ', 'g'))
                        @@ query
@@ -351,21 +359,23 @@ begin
                            like starts escape '\') desc, lower(other.name) collate "C", other.name collate "C"
                  limit 1) as other_hit,
                -- The title or one of our other names is q, as words.
-               (btrim(regexp_replace(compared.title, '[^[:alnum:]]+', ' ', 'g')) = exact
-                or (diagnosis.other_names <> ''
-                    and exists (select 1 from unnest(string_to_array(diagnosis.other_names, '; ')) as other(name)
+               (compared.words = exact
+                or (candidate.other_names <> ''
+                    and exists (select 1 from unnest(string_to_array(candidate.other_names, '; ')) as other(name)
                                  where btrim(regexp_replace(lower(regexp_replace(other.name,
                                          '([[:alnum:]])[''’][sS](?![[:alnum:]])', '\1', 'g')), '[^[:alnum:]]+', ' ',
                                          'g')) = exact))) as name_is_q
-          from ehr.catalog_diagnoses diagnosis
+          from candidates candidate
           -- The title as q is compared with it: lower case, a word-final 's dropped as from q (only a title with an
-          -- apostrophe changes; the 2026-01 release has 4).
+          -- apostrophe changes; the 2026-01 release has 4), and as words.
           cross join lateral (
-            select lower(case when strpos(diagnosis.title, '''') > 0 or strpos(diagnosis.title, '’') > 0
-                              then regexp_replace(diagnosis.title, '([[:alnum:]])[''’][sS](?![[:alnum:]])', '\1', 'g')
-                              else diagnosis.title end) as title) as compared
-         where diagnosis.version_id = release_id
-           and (diagnosis.search_terms @@ query or diagnosis.code = typed_code)),
+            select case when strpos(candidate.title, '''') > 0 or strpos(candidate.title, '’') > 0
+                        then lower(regexp_replace(candidate.title, '([[:alnum:]])[''’][sS](?![[:alnum:]])', '\1', 'g'))
+                        else lower(candidate.title) end as title,
+                   case when strpos(candidate.title, '''') > 0 or strpos(candidate.title, '’') > 0
+                        then btrim(regexp_replace(lower(regexp_replace(candidate.title,
+                               '([[:alnum:]])[''’][sS](?![[:alnum:]])', '\1', 'g')), '[^[:alnum:]]+', ' ', 'g'))
+                        else btrim(candidate.title_words) end as words) as compared),
       named as (
         select found.*,
                lower(regexp_replace(found.other_hit, '([[:alnum:]])[''’][sS](?![[:alnum:]])', '\1', 'g'))
