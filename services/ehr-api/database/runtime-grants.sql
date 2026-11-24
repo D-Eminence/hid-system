@@ -2006,3 +2006,41 @@ revoke all on function
 grant execute on function pharmacy.own_work_item_steps(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
 revoke all on function pharmacy.own_work_item_steps(uuid[]), pharmacy.validate_work_item_acceptance() from public;
 revoke all on pharmacy.work_item_acceptances from public;
+
+-- A change after dispensing reaches the pharmacy (0148, Q132 A: owner
+-- decision Q132 A of 19 November 2026, coordinator decision 1 of 20 November
+-- 2026), exactly as 0148 grants it: the reader of the changes recorded after
+-- a work item's first dispensing,
+-- pharmacy.work_item_changes_after_dispensing (the latest shown change, its
+-- time and the number of shown changes, for the items the session may read),
+-- to the Pharmacy runtime and the schema test runtime. The trigger function
+-- pharmacy.prescription_change_after_dispensing is executed by no role: the
+-- trigger prescriptions_pharmacy_change_after_dispensing on ehr.prescriptions
+-- runs it as its owner (the owner of pharmacy.validate_dispensing). No role
+-- holds any privilege on pharmacy.prescription_changes_after_dispensing (it is
+-- in none of the table grants above): only those two owner-run functions
+-- write and read it, as 0133's sends and claims.
+grant execute on function pharmacy.work_item_changes_after_dispensing(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
+revoke all on function pharmacy.work_item_changes_after_dispensing(uuid[]), pharmacy.prescription_change_after_dispensing() from public;
+revoke all on pharmacy.prescription_changes_after_dispensing from public;
+
+-- The national medicine and lab-test lists (0149, ORD-7 of the Akos EHR
+-- plan, first slice; design note on hid-system#258, 23 November 2026, and
+-- Rahman's reviews), exactly as 0149 grants and revokes them: the two
+-- searches and the status to the EHR runtime and the schema test runtime;
+-- no privilege for any runtime on the four tables (the versions, the two
+-- lists and the retired ids), the query helper, the versions' guard or the
+-- two lists' insert trigger functions (fixed ids and sealed versions), which
+-- their triggers run as the inserting role, the tables' owner.
+grant execute on function ehr.search_catalog_medicines(text, integer, text, text),
+  ehr.search_catalog_lab_tests(text, integer),
+  ehr.catalog_status() to hid_ehr_runtime, hid_schema_test_runtime;
+revoke all on function ehr.search_catalog_medicines(text, integer, text, text),
+  ehr.search_catalog_lab_tests(text, integer),
+  ehr.catalog_status(),
+  ehr.catalog_search_query(text),
+  ehr.catalog_versions_guard(),
+  ehr.catalog_medicine_id_fixed(),
+  ehr.catalog_lab_test_id_fixed() from public;
+revoke all on ehr.catalog_versions, ehr.catalog_medicines, ehr.catalog_lab_tests, ehr.catalog_retired_codes
+  from public;

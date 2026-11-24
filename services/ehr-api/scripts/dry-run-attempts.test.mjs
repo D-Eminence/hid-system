@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +27,32 @@ test('a file\'s own busy refusals are retried, in each wording the files use', (
   // 0128 is first in Release A and has no one-attempt branch; its wording has no "nothing applied".
   assert.equal(isBusyRefusal(new MigrationFileError('0128_patient_access_pin_notice_and_named_requester.sql',
     databaseError('55P03', `0128: identity.outbox_events stayed busy for 5 seconds; ${tail}`))), true);
+});
+
+// Q132 A (0148, number provisional): the file's own busy refusals, read from the file itself, each with
+// PostgreSQL's lock message where a post-check probe puts sqlerrm. Every 55P03 the file raises is read here, so a new
+// one, or a reworded one, meets this test.
+test('0148\'s own busy refusals, read from the file, are each retried', async () => {
+  const directory = path.join(scripts, '..', 'database', 'migrations');
+  const [file, ...others] = (await readdir(directory)).filter(name => /^\d{4}_prescription_changes_after_dispensing\.sql$/.test(name));
+  assert.ok(file, 'the migration file of Q132 A');
+  assert.deepEqual(others, []);
+  const sql = await readFile(path.join(directory, file), 'utf8');
+  const sqlerrm = 'could not obtain lock on relation "work_items"';
+  const literal = "'(?:[^']|'')*'";
+  const raises = [...sql.matchAll(new RegExp(`errcode = '55P03',\\s*message = ((?:${literal}|sqlerrm)(?:\\s*\\|\\|\\s*(?:${literal}|sqlerrm))*);`, 'g'))];
+  assert.equal(raises.length, (sql.match(/'55P03'/g) ?? []).length, 'every 55P03 the file raises has a message read here');
+  // Section 1 (the 5-second bound and the one-attempt branch) and the three post-check probes.
+  assert.equal(raises.length, 5);
+  const texts = raises.map(([, expression]) => expression.split(/\s*\|\|\s*/)
+    .map(part => (part === 'sqlerrm' ? sqlerrm : part.slice(1, -1).replaceAll("''", "'"))).join(''));
+  assert.equal(texts.filter(text => text.includes(sqlerrm)).length, 3, 'the three probes name the lock they met');
+  for (const text of texts) {
+    assert.ok(text.startsWith(`${file.slice(0, 4)}: `), text);
+    assert.equal(isBusyRefusal(new MigrationFileError(file, databaseError('55P03', text))), true, text);
+    // The same words under another SQLSTATE are not a busy refusal.
+    assert.equal(isBusyRefusal(new MigrationFileError(file, databaseError('55000', text))), false, text);
+  }
 });
 
 test('anything else is not retried', () => {

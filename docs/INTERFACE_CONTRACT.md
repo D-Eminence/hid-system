@@ -9461,6 +9461,95 @@ and administrators; hide Outreach from doctors; hide visits and the Migrate
 desk from laboratory staff. Screens already follow the permissions list in the
 session, so most of this happens by itself.
 
+## 0147. Q137 B: two narrow roles for exactly the staff 0136 counted (migration 0147; not live until signed)
+
+Owner decision, verbatim (coordinator, 13:30 UTC 23 November 2026, on
+hid-system#258): "Q137 B: the restore gives access back only to the 9 admins
+and 1 doctor the guard counted, through narrow roles. Q103 A and Q111 A hold
+for everyone else." The stop at 0, 0 and 0 as well as 9, 1 and 1 is the
+amendment on #258, for the owner to confirm at signing.
+
+| Role code | Label | Permissions | Given to |
+| --- | --- | --- | --- |
+| `work_list_reader` | Lab and pharmacy work lists | `lab.work-item.read`, `pharmacy.work-item.read` | each administrator (0136's lines 19/20) and doctor (lines 13/14) 0136 counted |
+| `reading_starter` | Start a paper reading | `ocr.job.start` | the doctor of 0136's line 21 |
+
+- **Who:** active memberships at real facilities (not the sealed demo or QA
+  tenants) holding `admin` or `doctor` through an assignment granted before
+  0136 was applied and still not revoked, whom 0136's own rules count today:
+  no other role they hold gives the work list (or, for the reading, they
+  could start one before 0136 and cannot now). A membership in both work-list
+  counts gets one row.
+- **The stop:** 0147 applies only at exactly 9, 1 and 1 (administrators and
+  doctors for the work lists, doctors for the reading start), or at 0, 0 and
+  0 (a database without them: the two roles are created and given to nobody).
+  Any other counts: 55000 "0147 stopped, nothing was changed: the counts are
+  a, d and r ...", numbers only, nothing applied.
+- **Rows:** one `auth.account_roles` row per membership and role (grant
+  reason "Owner decision Q137 B (23 November 2026): access 0136 removed",
+  `granted_by` null) and one `identity.facility-staff.role-add` audit row each
+  (system actor; the facility and the membership only, with the role codes
+  before and after). No other role's row changes and no policy or grant
+  changes, so `runtime-grants.sql` is unchanged. One function is replaced:
+  SX-4's change (`identity.staff_role_change_apply`, see "SX-4 after 0147").
+- **What the members see:** from their next request, the counted
+  administrators and doctor pass `GET /lab/work-items`, `GET
+  /lab/work-items/:id`, `GET /pharmacy/work-items` and `GET
+  /pharmacy/work-items/:id` again, and the doctor `POST /ocr/jobs` and `POST
+  /ocr/jobs/:jobId/retry` (with the `ocr.job.write` doctors kept). Their sites
+  do not change: a doctor stays on ehr. and migrate. (Q97). Everyone else is
+  as 0136 left them.
+- **Not a staff role:** the codes are never offered for invitation, never
+  granted at support's review and never added or removed through SX-4
+  (`STAFF_ROLES` and 0139's lists stay the five hospital roles; requests
+  naming them answer 400 `VALIDATION_FAILED`). A staff profile (the Staff
+  page's `members[].roles`, support's staff view) lists them, and the
+  website shows the labels above. Neither ever becomes the membership's own
+  role columns, which the session's `roles` list; the session's
+  `permissions` include their codes.
+- **SX-4 after 0147.** 0147 replaces SX-4's change function as 0139 replaced
+  the openers: pinned to Release B's body, only lines marked `0147 (Q137 B)`
+  added (its post-check proves that taking them out gives Release B's body
+  back), owner, grants, comment and settings kept. With it:
+  - what SX-4 counts and checks leaves the two narrow roles out: "already
+    held" and "not held", the last role (409 `FACILITY_STAFF_LAST_ROLE`), and
+    the role that `membership_role` and `app_role` move to after a remove
+    (409 `FACILITY_STAFF_ROLE_COLUMN_CONFLICT` when none can) are among the
+    other roles only. So removing `doctor` from the counted doctor who holds
+    no other staff role is refused as the last role: end the membership
+    instead;
+  - naming either narrow role is refused in the database too (400
+    `STAFF_INVITATION_INVALID`), besides the DTOs' 400 `VALIDATION_FAILED`;
+  - removing `doctor` also revokes that membership's `reading_starter`, and
+    its `work_list_reader` unless it still holds `admin` (an administrator
+    who loses `doctor` keeps the work lists): revoked with `doctor`, by the
+    caller, with the remove's reason, and one
+    `identity.facility-staff.role-remove` audit row each (the administrator
+    as the staff actor, support as the system actor; the membership, the
+    narrow role, the role codes before and after, `cause` `role-removed`,
+    `removedRole` `doctor`). Adding `doctor` back does not give them back;
+  - `roles` in SX-4's answer (and `previousRoles` and `roles` in its audit
+    rows) still lists every active role, the narrow ones too, as SX-4's
+    "Answers" says; after a remove of `doctor` it no longer lists the ones
+    revoked with it.
+  Nothing else in SX-4 changes. Administrators are not otherwise affected
+  (SX-4 never removes `admin`).
+- **Ending:** the rows end with the membership, as every role does, or with
+  `doctor` as above. SX-4 cannot add or remove them by name.
+  - Two of 0086's commands also end them: the facility administrator's
+    "Change role", which counts every role held, and support's self-service
+    administrator role (S12), which compares only the latest role granted
+    other than `org_admin` (a narrow role after 0147). For a counted member
+    "Change role" revokes
+    every role held, and S12 every role but `org_admin`, the narrow roles with
+    them, and each grants the requested role again. Access is never widened.
+    But the same role and licence no longer answer "unchanged": S12 then makes
+    the change, so it also signs the member out (as every S12 grant does),
+    and its audit row names the latest narrow role as `previousRole`. Leaving
+    them out there is a follow-up.
+- **Undo:** mark both roles inactive (`auth.roles.active = false`); every
+  member is back where 0136 left them from their next request.
+
 ## ORD-2. This facility's own pharmacy and lab work; prescriptions sent to the hospital's own pharmacy (Akos Release A, migration 0133)
 
 Owner decisions of 18 November 2026: activated prescriptions go
@@ -9617,7 +9706,9 @@ other on it.
     was sent to another pharmacy, so it can no longer be dispensed here",
     with the problem member `"withdrawnReason": "sent_elsewhere"`.
 
-  An item already dispensed never carries either. `GET /pharmacy/work-items`
+  An item already dispensed never carries either. From Q132 A
+  (Release B, 0148) a dispensed item whose prescription changed afterwards
+  carries `changedAfterDispensing` instead. `GET /pharmacy/work-items`
   leaves out an item sent elsewhere: it is the outside pharmacy's work now.
   It lists a `changed` item, marked, with the done work (newest first),
   never in the open work at the top, because it can never be dispensed; as
@@ -9683,7 +9774,10 @@ nothing is left to dispense, so the `PATCH` answers no `pharmacyHandoff` and
 records no `pharmacySendWithdrawn`, "Send to pharmacy" and a replay of the
 create as active answer "already has" (`sent`), never the "earlier version"
 row, `ownProgress` stays `dispensed` (or `dispensing_reversed`), and the
-pharmacy's list does not mark the item withdrawn. The database marks it on
+pharmacy's list does not mark the item withdrawn. From Q132 A
+(Release B, 0148) the pharmacy's list and read show it on the item as
+`changedAfterDispensing`; the prescriber's side stays as here. The database
+marks it on
 the change itself (a trigger on the prescription), so a change made by any
 ehr-api image (an older one during a rolling deploy or after a rollback
 included) marks it too; undoing 0133 by hand must drop that trigger, and the
@@ -9830,7 +9924,9 @@ reads `withdrawn`; the withdrawn items are listed with the done work, after
 a new open item; an edit
 after the dispensing answers no `pharmacyHandoff`, "Send to pharmacy" then
 answers "already has", and the item stays unmarked (`ownProgress` stays
-`dispensed`); the list carries `ownPharmacyStaffed: true`; the lab runtime,
+`dispensed`); on a database with 0148 the pharmacy's list and read show
+that edit as `changedAfterDispensing` (Q132 A's runtime proof); the list
+carries `ownPharmacyStaffed: true`; the lab runtime,
 asking the database directly, gets `false` for a patient with no own lab
 work there and is refused (42501) the pharmacy question; neither member
 reads the chart, each probed with a chart read its role permits (the
@@ -9930,7 +10026,9 @@ hold keeps `pharmacyStep: "accepted"` and its acceptance, and reads
 `withdrawn: true`, `withdrawnReason: "changed"`. A hand-off item is never
 flagged on a hold, a cancellation, an entry in error or an edit, because
 0133 D8 marks automatic sends only; it is flagged only when it is sent to
-an outside pharmacy (`sent_elsewhere`, 0133 D14). The work list's order is
+an outside pharmacy (`sent_elsewhere`, 0133 D14). After a dispensing, a
+change shows on every item, a hand-off item included, as Q132 A's
+`changedAfterDispensing` (Release B, 0148). The work list's order is
 unchanged (Q123 A): an accepted item that is neither dispensed nor withdrawn
 stays in the open work at the top.
 
@@ -10410,6 +10508,536 @@ included); next to a known step, `pharmacistAcceptance` missing or neither
 `acceptedWith`, `acceptedAt` or `acceptedByMembershipId` not a non-empty
 string (pharmacy-api always sends both: they come from NOT NULL columns).
 pharmacy-api's `pharmacy-client-steps.contract.spec.ts` pins these rules.
+
+## Q132 A. A change after dispensing reaches the pharmacy (Release B, migration 0148, not live until signed)
+
+Owner decision Q132 A of 19 November 2026 (asked in the review of ORD-2,
+#280): "it reaches the pharmacy. If a prescription is held, cancelled,
+entered in error or edited after the pharmacy dispensed it, the dispensed
+item shows a clear notice (for example 'Changed after dispensing: cancelled
+by the prescriber'), so the pharmacist can contact the patient. Built in
+Release B; it does not change 0133 or block Release A." Its shape is the
+coordinator's decision 1 on hid-system#258 of 20 November 2026: the work
+item list and read gain `changedAfterDispensing: { change, changedAt,
+changeCount }`, the latest change first; the changes shown are on hold,
+cancelled, entered in error, edited and resumed; no acknowledgement, no
+change on the prescriber's side, and no backfill. Built in #<PR, to come> on
+Release B (0001-0146, staging `926b1c58`), where ORD-4 (#303, 0144) and
+Q123 A (#298) are live; it was first written on ORD-4's branch over Release
+A. Migration 0148 needs 0001-0137 and checks that in its section 0; 0138-0146
+changed nothing it pins or reads. Its number is provisional: Release B holds
+0138-0146, and later numbers are given in merge order. Nothing in this
+section is live until the owner signs Release B's declaration, which names
+0148 and `runtime-grants.sql` with their sha256; until then the screens
+follow the "Before this ships" note of the planned contract's Q132 A section
+([EHR_PLANNED_CONTRACT.md](EHR_PLANNED_CONTRACT.md)), whose text is
+corrected to match this build.
+
+Since 0133 a change made after the pharmacy dispensed an item is recorded on
+the automatic send but reported nowhere (ORD-2, "EHR API:
+`pharmacyHandoff`"): the item stays `dispensed` (ORD-4's `pharmacyStep`) and
+is never marked `withdrawn`; an item a pharmacist brought in by hand has no
+send at all; and an item from another facility gets a route event
+(`order_changed_after_completion`, 0086) whose reason is only
+`order_changed` or `entered_in_error`, which no pharmacy screen shows. So a
+pharmacist who handed over a medicine that was then cancelled was not told.
+Q132 A shows the change on the pharmacy's dispensed item, so the pharmacist
+can contact the patient.
+
+### What the pharmacy sees
+
+A dispensed work item gains `changedAfterDispensing` (below) once its
+prescription changes after the dispensing. Each recorded change is labelled
+by the first of these that holds, so a stop always wins over an edit sent in
+the same change (status codes are `ehr.prescriptions.status`):
+
+| Order | `change` | When (status before and after; content) |
+| --- | --- | --- |
+| 1 | `entered_in_error` | after is `entered_in_error`, before is not |
+| 2 | `cancelled` | after is `cancelled`, before is not |
+| 3 | `on_hold` | after is `on_hold`, before is not (also when an edit came in the same change) |
+| 4 | `edited` | `on_hold` to `active`, and the content now differs from what was dispensed: resumed with new instructions, or resumed after an edit made during the hold or before it |
+| 5 | `resumed` | `on_hold` to `active`, and the content is what was dispensed (the coordinator's decision adds `resumed`; the owner named four changes) |
+| 6 | `edited` | `active` to `active`, and the content differs from the version just before |
+
+Not shown and not counted: `completed`; a version with no change of content
+or status (ehr-api raises the version on a PATCH that sends a value
+unchanged); an edit while the prescription stays `on_hold` (it shows at the
+resume, as `edited`); a status this build does not know. Not recorded at
+all: any change after the prescription was completed, cancelled or entered
+in error (ehr-api accepts edits of such a prescription: it checks a
+transition only when `status` changes), so a later edit can never hide a
+stop.
+
+"Content" is the prescription row without its status, version and two times
+(the fingerprint, "The database (0148)" below). "What was dispensed" is the
+content before the item's first recorded change. That is the dispensed
+version: an own item is dispensed only at the version the pharmacy holds
+(0101), and any change of a route-backed item's prescription before its
+dispensing cancels the accepted route (0086), so the first version after the
+dispensing is the first change recorded. For an item already changed before
+0148 ran, the comparison starts from its content just before its first
+change after 0148 (no backfill).
+
+- Which items: every dispensed item, however it reached the pharmacy: this
+  hospital's own items sent automatically (0133), own items a pharmacist
+  brought in by hand, and items from another facility's order route.
+  `withdrawn` (ORD-2) marks automatic sends only, and only before a
+  dispensing; the two never meet on one item.
+- "After dispensing" means the item's first dispensing (0133's claim, its
+  `dispensed_at`) committed before the change. The database decides it by
+  commit order, which its locks enforce, not by comparing times. An own
+  item's dispensing reads the prescription FOR SHARE until it commits (0101)
+  and ehr-api's PATCH takes it FOR UPDATE first, so a change made first
+  makes the dispensing refuse, and a change made after it waits for it. A
+  route-backed item's dispensing holds its route FOR UPDATE, on which the
+  change's route sync (`prescriptions_order_routes_sync`, 0086) waits, and
+  the recording trigger fires after that trigger. A clock rule would be
+  wrong for route-backed items: the version and `updated_at` are stamped
+  before that wait, so a change could carry a time earlier than the
+  dispensing's. `changedAt` is the time the recording trigger ran, after any
+  wait.
+- A reversed dispensing still counts: the claim keeps `dispensed_at` after a
+  reversal, and the item shows `dispensing.reversed: true` beside the
+  notice. A change between the dispensing and its reversal stays shown after
+  it.
+- No backfill: only changes made after 0148 runs are recorded, for items
+  dispensed at any time (0133 gave every work item its claim). No
+  acknowledgement: the notice stays on the item, and nobody can mark it
+  seen. No audit or outbox row, and no change to the progress call.
+- `pharmacyStep` (ORD-4) stays `dispensed` or `dispensing_reversed`;
+  `status`, `acceptedAt`, `version` and `dispensing` keep their meaning.
+- With ORD-12 (refills, 0152, provisional) "after dispensing" means after
+  the first fill, and `resumed` compares with the first fill's content. 0148
+  pins `pharmacy.claim_prescription_dispensing()` (md5
+  2c7f20d7c0df7c582bccc0291f452fdd), which sets `dispensed_at` only while it
+  is null and today refuses a second fill (23514
+  `PRESCRIPTION_SOURCE_NOT_DISPENSABLE`, DETAIL `not_claimed`), so ORD-12
+  replaces it, keeps `dispensed_at` as the first fill's and never clears it.
+  0148 merges before 0152, or is pinned again if ORD-12 lands first. Its
+  refills column follows the fingerprint's rule (below): a NOT NULL or
+  defaulted refills column must be left out; a nullable one needs nothing.
+  ORD-12 adds `refills_allowed` as a nullable column, so the trigger
+  function stays as it is. After any change, 0101's version check refuses
+  the next refill; ORD-12 decides what a refill after a change means.
+
+### Work item answers
+
+`GET /api/v1/pharmacy/work-items` and `GET
+/api/v1/pharmacy/work-items/:workItemId` gain, as the item's last field
+(after `withdrawn` and `withdrawnReason`), on a dispensed item (reversed or
+not) with at least one shown change (the replay of `accept-ehr-prescription`
+answers it too, but almost never carries it in practice: see the last point
+of this list):
+
+```json
+{ "changedAfterDispensing": { "change": "cancelled", "changedAt": "2026-11-20T09:15:00.000Z", "changeCount": 2 } }
+```
+
+- `change` and `changedAt` are the latest shown change's (the highest
+  prescription version, which rises strictly under the prescription's row
+  lock), not a list. `changedAt` is an ISO time in UTC. `changeCount` is how
+  many shown changes the item has (1 or more).
+- Absent when the item has no dispensing or no shown change; from a Release
+  A pharmacy-api; on a database without 0148 (the reader answers 42883, or
+  42P01 on a half-undone one: no warning); when the reader fails in any
+  other way (pharmacy-api logs "Changes after dispensing could not be read"
+  with the SQLSTATE and the correlation id, and answers the list and the
+  read without the field); and on one item whose row does not read cleanly
+  (a time that is not a time, or a count that is not a whole number of 1 or
+  more: "A change after dispensing could not be read", naming that work item
+  id only). A notice is never guessed, and a failure of the reader never
+  fails the list or the read. A serialization failure or deadlock (40001,
+  40P01) is passed on, not swallowed, so the hand-off's SERIALIZABLE replay
+  runs again.
+- `change` may be absent from a notice that is present: pharmacy-api keeps
+  the notice without `change` when the database answers a code it does not
+  know (one warning per call), and `@hid/api-client` does the same for a
+  code it does not know. Clients must accept that.
+- The list asks once, for its dispensed rows only (own and route-backed),
+  after its other readers (the steps and the prescription details) and
+  before it builds the items; a read and the replay ask for their one item
+  when it is dispensed. 200 ids a statement, in one savepoint
+  (`pharmacy_changes_after_dispensing`); when any statement fails, no item
+  of the answer carries the field.
+- It adds no prescription id, version, encounter or name. A route-backed
+  item still carries none of the other facility's ids (PRIV P4.3) and keeps
+  its `orderRoute` card.
+- No audit row is added: no new person is shown (0125's rule). The list's
+  rows and the read's row are unchanged and already name the item and the
+  patient. The change itself is audited where it is made: ehr-api's
+  `ehr.prescription.update` row and the `ehr.record_versions` row, and for a
+  route-backed item also the route event `order_changed_after_completion`
+  and the system row `ehr.order-route.order-changed` at the receiving
+  facility. What the pharmacy was shown at a time can be rebuilt from 0148's
+  append-only table and the reader's text at that time.
+- No new error: the list and the read keep theirs.
+- The notice reaches the pharmacist on the list and the read. The hand-off
+  replay is not a path that carries it in practice. A replay answers the
+  stored item only when its request digest matches the first hand-off's,
+  and the digest covers the prescription's `row_version`. Any change after
+  the dispensing raises that version, and ehr-api's `POST
+  .../prescriptions/:prescriptionId/pharmacy-work-item` sends the current
+  one, so a hand-off after a change answers 409 `IDEMPOTENCY_CONFLICT`
+  before the reader runs. Only `@hid/api-client`'s single immediate retry of
+  the same request could see a notice, if a dispensing and a change both
+  commit inside it. pharmacy-api's W6 and W8 replay the first hand-off's own
+  input to pin where the field sits on that answer and that a 40001 from the
+  reader reruns the replay; real traffic does not send that input after a
+  change. ehr-api passes pharmacy-api's answer through unchanged (it calls
+  it through `@hid/api-client`, whose command checks only `id`).
+
+### Who sees it
+
+Exactly the pharmacy staff who see the item. The reader answers only for
+work items at the session's facility that the session may read by
+`pharmacy.work_items`' two read policies, repeated in it as conditions:
+`pharmacy_work_items_read` (0086: the member's own consent grant, or the
+item's order route) and 0133's `staff_own_work_read` (the own-work basis,
+for this hospital's own items only). It answers only when the session holds
+`pharmacy.work-item.read`: the route checks that first, and the reader
+checks it again, as 0125's reader does, because the consent branch of
+`pharmacy.work_item_allows` checks no permission. A superuser owner bypasses
+row-level security, so these conditions decide; under production's
+NOSUPERUSER NOBYPASSRLS owner the table's own policies give the same answer.
+So an emergency session, a member with a deny directive, a session without
+the own-work switch, a member of another facility (also when it names this
+facility) and a session with no facility each read the notices of exactly
+the items they may read, and a member without `pharmacy.work-item.read`
+reads none. An own-work session never reads a route-backed item's notice.
+
+### Items from another facility (a stated limit)
+
+The receiving pharmacy reads a route-backed item, and so its notice, only
+while the route allows reads: until 14 days after the dispensing, and never
+more than 45 days after acceptance (0086). Entering the prescription in
+error after the dispensing ends that access at once: for a member without a
+consent grant of their own, the item leaves the list, a read answers 404
+`PHARMACY_WORK_ITEM_NOT_FOUND` (the item is no longer readable), and the
+patient is told (`ORDER_ROUTE_CANCELLED`, 0086).
+So such a member never sees "entered in error" on that item; a member with a
+consent grant of their own still reads the item and the notice. A hold, a
+cancellation, an edit or a resume after the dispensing leaves the route
+readable, and the route event `order_changed_after_completion` is still
+written. This is a limit of Release B: changing it needs a change to 0086's
+route rules, which Q132 A does not make.
+
+### Unchanged
+
+- The prescriber's side: `ownProgress` stays `dispensed` (or
+  `dispensing_reversed`); ORD-3's progress call, its two headers and
+  ehr-api's prescription answers are unchanged (after a dispensing the PATCH
+  answers no `pharmacyHandoff` and "Send to pharmacy" answers "already has",
+  as ORD-2 says); 0133 D8 still marks the send once. No notice and no outbox
+  event is sent (ORD-11 notifies dispensings and reversals only). ehr-api's
+  code does not change.
+- The work list's order and window (Q123 A): a changed item keeps its place
+  in the done work, by the day it was received, and leaves the list 90 days
+  after that day; a change does not move it up or bring it back. A read by
+  its id still answers it, with the notice.
+- The dispensing and its reversal, ORD-4's Accept and steps, the order-route
+  routes, and the readers today's pharmacy-api calls
+  (`own_work_item_states`, `own_withdrawn_work_items`,
+  `own_work_access_for`, the cards, the list queries).
+
+### The database (0148)
+
+- `pharmacy.prescription_changes_after_dispensing`: one row per prescription
+  version after a work item's first dispensing, with `work_item_id`,
+  `facility_id` (the work item's; for a route-backed item the receiving
+  facility), `prescription_version`, `status_before`, `status_after`,
+  `prior_content_sha256`, `content_sha256` and `changed_at`, all NOT NULL.
+  Primary key `(work_item_id, prescription_version)`: the reader's index,
+  and what makes the recording idempotent per version. Facts only: no actor,
+  reason, prescription id or field value. No CHECK (a status list here would
+  make a later status fail every prescription change), no foreign key, no
+  sequence. Rows are never updated or deleted:
+  `prescription_changes_after_dispensing_immutable` calls 0023's
+  `pharmacy.reject_immutable_evidence()` before every UPDATE or DELETE.
+  Row-level security enabled, not forced, no policy and no grant: the
+  owner's only, as 0133's claims.
+- The trigger `prescriptions_pharmacy_change_after_dispensing`: AFTER UPDATE
+  on `ehr.prescriptions`, for each row, `when (old.status in ('active',
+  'on_hold'))`, in origin mode (as `prescriptions_versioned` and 0133 D8's).
+  So it skips drafts (never dispensed; also `ehr.send_order_route`'s
+  SERIALIZABLE activation) and every change after completed, cancelled or
+  entered in error, and a change made in replica mode is not recorded (it
+  writes no `ehr.record_versions` row either). AFTER triggers on one event
+  fire in name order (C collation): its name sorts after
+  `prescriptions_order_routes_sync` (0086) and
+  `prescriptions_own_pharmacy_send_withdrawn` (0133 D8), so it fires after
+  the route sync has waited for a dispensing in flight. 0148 checks that no
+  trigger on `ehr.prescriptions`, internal ones included, sorts after it.
+- Its function `pharmacy.prescription_change_after_dispensing()` (plpgsql,
+  VOLATILE, SECURITY DEFINER, `search_path` `pg_catalog, pg_temp`, owned by
+  the owner of `pharmacy.work_items` and of
+  `pharmacy.validate_dispensing()`, executed by no role) is one statement:
+  for each claim of the prescription (0133 D14: one per work item, own or
+  route-backed) whose `dispensed_at` is set, it inserts a row, `on conflict
+  do nothing`. It reads only 0133's claims and writes only the new table;
+  both have row-level security on and not forced, so the owner is never
+  filtered in the prescriber's session, whether the owner is a superuser or
+  production's NOSUPERUSER NOBYPASSRLS role. It never reads
+  `pharmacy.work_items` or `pharmacy.dispensings` (forced: under such an
+  owner they would show only what the prescriber's session may read). It
+  never refuses the change it follows: no CHECK, no foreign key, a key
+  already there ignored, every value NOT NULL from a NOT NULL source, and
+  the owner owns both tables. Each UPDATE from active or on hold costs one
+  call and one probe of the claims'
+  `prescription_item_claims_prescription_idx`; the two SHA-256s and the
+  insert run only when the prescription has a dispensed item. `changed_at`
+  is `clock_timestamp()` taken in the trigger, never `updated_at` or
+  `ehr.record_versions.recorded_at` (both stamped before the route sync's
+  wait).
+- The fingerprint (`prior_content_sha256`, `content_sha256`) is SHA-256 of
+  the row as jsonb without `status`, `row_version`, `created_at` and
+  `updated_at`, with null-valued keys removed. It names no column, so a
+  later DROP or RENAME COLUMN cannot break prescription writes. jsonb prints
+  dates and numbers the same whatever DateStyle or locale is, and the two
+  `timestamptz` columns, whose text depends on the session's TimeZone, are
+  left out. SHA-256, not MD5, because MD5 is refused where FIPS mode is on,
+  and in a trigger that would fail every prescription change. A later
+  nullable column (null in old rows) changes no fingerprint. A later column
+  that is NOT NULL or has a default changes every later fingerprint, so the
+  first resume after that migration reads `edited` (the safe side) unless
+  that migration adds the column's name to the left-out keys by replacing
+  the function (CREATE OR REPLACE FUNCTION takes no lock on
+  `ehr.prescriptions`); a later `timestamptz` or `interval` column must be
+  left out. A later ALTER COLUMN TYPE that changes a column's jsonb text
+  (`numeric(12,4)` to `numeric(14,6)` turns `1.0000` into `1.000000`), or a
+  RENAME or DROP of a column that holds values, also changes every later
+  fingerprint, so the first resume after it reads `edited` too (the safe
+  side). The database suite pins `ehr.prescriptions`' columns and their
+  types, so such a migration meets a failing case.
+- The reader
+  `pharmacy.work_item_changes_after_dispensing(requested_work_item_ids
+  uuid[])` returns `(work_item_id, change, changed_at, change_count)`
+  (plpgsql, STABLE, SECURITY DEFINER, `search_path` `pg_catalog, pg_temp`,
+  the same owner). At most 200 ids: a null array or more answers 22023
+  `WORK_ITEM_CHANGES_AFTER_DISPENSING_INVALID`. With no session facility, or
+  without `pharmacy.work-item.read`, it answers no rows. It starts from the
+  recorded rows of the requested items at the session's facility (usually
+  none), keeps the items the session may read ("Who sees it"), labels each
+  row by the table above, and answers for each item the latest shown row's
+  label and time and the number of shown rows. The labels are set here, from
+  the recorded facts, not when a row is written: a later rule (a replaced
+  reader) then applies to rows already recorded, and an edit made during a
+  hold can show at the resume, which a label fixed when the edit was written
+  could not. Lock cost is not the reason: replacing the trigger function's
+  body takes no lock on `ehr.prescriptions` either; only a change to the
+  trigger itself does. The reader never reads `ehr.prescriptions`,
+  `ehr.record_versions`, `pharmacy.own_prescription_sends` or
+  `pharmacy.dispensings`. No 0148 function body names `ehr.prescriptions` or
+  the sends table, so 0133's list of owner-run functions that read
+  prescriptions is unchanged and 0133 D5's two prescription policies are not
+  widened.
+- Grants, in 0148 and in `runtime-grants.sql` (a block after 0144's):
+  EXECUTE on the reader to `hid_pharmacy_runtime` and
+  `hid_schema_test_runtime` only, and the trigger function to nobody; both
+  functions and the table are revoked from PUBLIC; no runtime holds any
+  privilege on the table.
+- Isolation: pharmacy-api's list and read run READ COMMITTED. The
+  hand-off's replay runs SERIALIZABLE, but the table's rows are written by
+  READ COMMITTED transactions (ehr-api's PATCH), and PostgreSQL tracks
+  read-write conflicts only between SERIALIZABLE transactions, so these
+  rows cause no 40001. A prescription UPDATE in a REPEATABLE READ or
+  SERIALIZABLE transaction would see an older snapshot of the claims; no
+  path makes one after a dispensing (the PATCH is READ COMMITTED, and
+  `ehr.send_order_route` activates drafts only, which the trigger skips).
+- Before anything is applied, section 0 reads the catalog (55000; 42501 for
+  the owner and the applier): 0001-0137 applied (0144's markers; "0148:
+  0001-0137 must be applied first"); not applied yet ("0148: already
+  applied"); every column it reads, by name and type, and a btree index on
+  the claims led by `prescription_id`; the md5 of every function it relies
+  on (0133's two claim functions, 0086's route sync, 0101's
+  `pharmacy.validate_dispensing()`, the version bump, the work items'
+  read-policy functions and the functions they call, the permission test,
+  the immutability function and the six session readers); 0133's two claim
+  triggers enabled always; one owner of `pharmacy.work_items`,
+  `ehr.prescriptions`, the claims, `pharmacy.validate_dispensing()` and the
+  policy functions, whom the applier is or may become and of whom no `hid_`
+  role is a member; the claims' row-level security enabled and not forced,
+  and `ehr.prescriptions`' and the work items' forced. Under its locks it
+  checks the claims' CHECK (a dispensed claim is never released), the
+  claims' two triggers, `prescriptions_order_routes_sync` exactly as 0086
+  made it, that no trigger on `ehr.prescriptions` sorts after the new one,
+  and that `pharmacy.work_items`' read policies are exactly the two the
+  reader repeats. Its post-checks pin both functions (md5, owner,
+  attributes, ACL), the table (columns, key, no other constraint, row-level
+  security, ACL, its one trigger), the new trigger (definition, origin mode,
+  last of the AFTER UPDATE row triggers), and 0133's definer list and
+  policies unchanged; they probe the reader (more than 200 ids and null
+  refused; no session, and a synthetic session facility, answer no row) and
+  leave the table empty.
+- Locks, measured with `pg_locks` before commit, with a superuser applier and
+  with a NOSUPERUSER NOBYPASSRLS one: ACCESS SHARE on `pharmacy.work_items`
+  and `pharmacy.prescription_item_claims`, and on the nine tables on which the
+  post-check probe of the reader plans queries through
+  `auth.membership_has_permission(...)` (`auth.accounts`,
+  `auth.account_roles`, `auth.roles`, `auth.role_permissions`,
+  `auth.permissions`, `identity.staff_facility_memberships`, `identity.staff`,
+  `identity.facilities` and `identity.organizations`), and on the indexes of
+  all eleven; then, last, SHARE ROW EXCLUSIVE on `ehr.prescriptions` (what
+  CREATE TRIGGER needs; no policy is added, so not ACCESS EXCLUSIVE), held to
+  commit; no other application table but the new one. Section 0 takes no table
+  lock. They are taken in one attempt, NOWAIT (an index waits at most 10 ms),
+  tried again every 100 ms for at most 50 attempts (5 to 5.5 seconds), else
+  55P03 with nothing applied; only one attempt when the transaction already
+  holds an earlier migration's locks, as in the runner's dry run (with an
+  earlier file pending first there, 0148 takes one attempt). A post-check
+  probe that meets a busy lock stops the file with 55P03 in the same wording
+  ("... is busy (...), so it does not wait; nothing applied; run the release
+  again at a quieter time"), so the dry run's retry (`isBusyRefusal`) treats
+  it as busy, as it does section 1's refusals; `npm run db:test-runner` reads
+  all five of 0148's busy texts from the file and checks each. From the SHARE
+  ROW EXCLUSIVE to commit every prescription INSERT and UPDATE waits
+  (ehr-api's create and PATCH, `ehr.send_order_route`'s activation, the
+  owner-only installs); reads, `FOR UPDATE` and `FOR SHARE` (0101's
+  dispensing, 0144's acceptance) are not blocked, and nothing fails. An
+  autovacuum or ANALYZE of `ehr.prescriptions` (SHARE UPDATE EXCLUSIVE) makes
+  an attempt fail, so one still running after the last attempt stops the file,
+  nothing applied. In the dry run the lock lasts until the dry run ends. On
+  Release B (0001-0146 with its runtime roles) with 20,000 prescriptions, work
+  items and claims, the file took 32 to 60 ms to commit, of which the hold
+  from the SHARE ROW EXCLUSIVE to commit was 15 to 31 ms, in ten runs with
+  each applier (on the earlier base, 0001-0137 and 0144, 44 to 78 ms and 20 to
+  26 ms).
+- Undo is by hand only, in the order 0148's header gives, each step leaving
+  every image working. (1) `set lock_timeout = '100ms'; drop trigger
+  prescriptions_pharmacy_change_after_dispensing on ehr.prescriptions;`,
+  repeated until it succeeds: DROP TRIGGER takes ACCESS EXCLUSIVE on
+  `ehr.prescriptions`, so while it waits every read of the table queues
+  behind it (0101's FOR SHARE included), and the 100 ms bound limits that.
+  If it keeps timing out, `alter table ehr.prescriptions disable trigger
+  prescriptions_pharmacy_change_after_dispensing;` (SHARE ROW EXCLUSIVE:
+  writes wait, reads do not), then steps 2 and 4, and the trigger and its
+  function are dropped later in a quiet window. (2) Drop the reader
+  (pharmacy-api then reads 42883 and answers no field). (3) Drop the trigger
+  function. (4) Drop the table (the recorded changes go with it; export them
+  first if the owner wants them). The trigger comes first: plpgsql records
+  no dependency on the table, so with the table dropped under a live trigger
+  every change of an active or on-hold prescription fails (42P01) for every
+  image. 0148's undo does not depend on 0144's and comes before any step of
+  0133's undo: the reader calls 0133's own-work functions (D1), and the
+  trigger function reads 0133's claims, which 0133's own undo keeps. Its row
+  in `migration.schema_migrations` stays, so the runner counts it as
+  applied; while any of its objects remain the file refuses to apply again
+  ("0148: already applied"), and a later migration brings the objects back.
+
+### Older and newer images
+
+Release B images (the live ones) on a database with 0148: each change of an
+active or on-hold prescription by today's ehr-api fires the trigger, which
+finds no dispensed claim (one index probe) or records a row; nothing ehr-api
+reads or answers changes (its PATCH audit and 0133 D8's marking of the send
+are unchanged). Today's pharmacy-api calls nothing new, and 0148 replaces no
+function it calls; changes recorded meanwhile show once the new pharmacy-api
+serves. New pharmacy-api on a database without 0148: the reader answers 42883
+and no item carries the field; every ORD-4 field answers as before. No header
+is needed: the list and the read are browser calls and the field is optional,
+ehr-api never reads them (it only passes the hand-off's replay through), and
+Release B's `@hid/api-client` builds the item from the fields it knows and
+drops this one. Either image may be deployed, or rolled back, first.
+
+### Runtime proof
+
+`services/ehr-api/scripts/verify-own-facility-work-runtime.mjs` (run by the
+TUF staging rehearsal) on a database with 0148: 0148's table and two
+functions are present next to 0144's; after the doctor edits rx1 after its
+dispensing, the pharmacist without a consent grant lists and reads
+`changedAfterDispensing` with `change: "edited"` and `changeCount: 1`, and
+after the doctor then holds rx1, `on_hold` and 2, while the prescriber's
+side stays as ORD-2 says (no `pharmacyHandoff`, "already has", `ownProgress`
+`dispensed`): the change is shown on the pharmacy's item, not on the
+prescriber's side; a second dispensed item whose prescription did not
+change (rx4's) carries no notice beside rx1's; a hand-off item put on hold
+before any dispensing is not flagged `withdrawn` (0133 D8 marks automatic
+sends only); a hand-off item dispensed by a pharmacist without a grant
+and then cancelled by the doctor reads `cancelled`, 1; and a change racing a
+dispensing (the dispensing inserted and held uncommitted on one connection,
+the PATCH's UPDATE run on another until `pg_stat_activity` shows it waiting
+on a lock, then the dispensing committed) records one row, with `changed_at`
+after `dispensed_at` and a version above the item's.
+`verify-order-routes-runtime.mjs`: after the outside pharmacy dispenses rx9,
+the hospital's doctor holds it, and the outside pharmacist reads `on_hold`,
+1, with `orderRoute.orderingFacilityName`, while rx2's item, dispensed
+(and reversed) at the same outside pharmacy for the same patient and never
+changed, carries no notice on the same list; entered in error, the item
+leaves the outside pharmacy's list
+and its read answers 404 `PHARMACY_WORK_ITEM_NOT_FOUND`; the same race through the
+route (the PATCH waiting in `prescriptions_order_routes_sync`) records one
+row; and, on the disposable database only, with the trigger renamed to sort
+before the route sync, the race records none (the name order matters), after
+which its name is put back.
+
+The database suite `prescription-changes-after-dispensing` holds the rest,
+through the EHR and Pharmacy runtimes with their exact statements and
+settings, under a superuser owner and a NOSUPERUSER NOBYPASSRLS one: the
+structure (the table, the trigger and its place, both functions, the grants,
+no 0148 body naming `ehr.prescriptions`, `ehr.prescriptions`' columns, the
+work items' read policies); the recording (nothing before a dispensing; one
+row per version after it, with no actor, reason, id or value, and
+`changed_at` after `dispensed_at`); every label and count in the table
+above, the latest by version and not by time; a hand-off item; route-backed
+items (the outside pharmacy reads them and the hospital's own pharmacy does
+not; past `access_ends_at` nothing; after an entry in error only a member
+with a grant); the reader's items equal to the items the same session
+selects from `pharmacy.work_items` for nine kinds of session, nothing
+without `pharmacy.work-item.read`, and 22023 for 201 ids and for null; never
+refusing a change (every transition, a row already at the version, a draft's
+activation, replica mode, an owner's update of a 0125 column, a status it
+does not know); Release A's readers and D8 unchanged; the undo order; the
+fingerprint under other DateStyles and time zones and with a new nullable
+column; reversed and released items; and a last check that every recorded
+version is above its item's version. Each clause of the trigger function and
+of the reader is shown to matter: a copy lacking it, applied in a savepoint,
+fails a named case. 0133's suite undoes 0148 first in its undo case, and
+shows that 0133's header undo order, with 0148 left in place, still lets a
+prescription change go through. pharmacy-api's
+`changes-after-dispensing.spec.ts` and
+`pharmacy-changes-after-dispensing.spec.ts` pin the reader's savepoint,
+batches, errors and warnings, and where the field sits on the list, a read
+and the replay.
+
+Screen change (Akos frontend branch), as the planned contract's screen
+notes. The API answers codes; the screen builds the words, keeps them in its
+strings file, and never shows the code, a version or an id:
+
+| `change` | Own item | Item from another facility |
+| --- | --- | --- |
+| `on_hold` | Changed after dispensing: put on hold by the prescribing team | Changed after dispensing: put on hold by {orderingFacilityName} |
+| `cancelled` | Changed after dispensing: cancelled by the prescribing team | Changed after dispensing: cancelled by {orderingFacilityName} |
+| `entered_in_error` | Changed after dispensing: entered in error by the prescribing team | Changed after dispensing: entered in error by {orderingFacilityName} |
+| `edited` | Changed after dispensing: edited by the prescribing team | Changed after dispensing: edited by {orderingFacilityName} |
+| `resumed` | Changed after dispensing: resumed by the prescribing team | Changed after dispensing: resumed by {orderingFacilityName} |
+| absent | Changed after dispensing by the prescribing team | Changed after dispensing by {orderingFacilityName} |
+
+`{orderingFacilityName}` is the item's `orderRoute.orderingFacilityName`;
+with no card or no name, "the ordering facility". With `changeCount` above 1
+add " (changed n times)". Then the time in Lagos time ("Last change: 20 Nov
+2026, 09:15" for a `changedAt` of `2026-11-20T08:15:00.000Z`) and the next
+step, "Contact the patient." "By the prescribing team", not "by the
+prescriber": any member with `ehr.prescription.write` and write consent at
+the prescribing facility may change the prescription; the owner's "cancelled
+by the prescriber" is an example of the notice, not its words. No "Dismiss"
+or "Seen". With no field, show nothing, as on Release A. `withdrawn` keeps
+ORD-2's words; the two never meet.
+
+`packages/api-client`: `PharmacyWorkItem` gains `changedAfterDispensing?:
+PharmacyChangedAfterDispensing` (`{ change?, changedAt, changeCount }`),
+after `pharmacistAcceptance`; `PharmacyChangeAfterDispensing` and
+`PharmacyChangedAfterDispensing` are exported from `@hid/api-client`. It is
+lenient for a value and strict for a type: an absent field is left out; a
+value that is not an object (`null` and arrays included), a `changedAt` that
+is not a non-empty string, a `changeCount` that is not a whole number of 1
+or more, or a `change` that is present and not a string answers 502
+(`malformedField('changedAfterDispensing')`); a `change` it does not know
+keeps the notice without `change` (unlike ORD-4's steps, which are dropped:
+a safety notice is better shown without its reason than not at all); other
+keys are dropped. pharmacy-api's `pharmacy-client-changes.contract.spec.ts`
+pins these rules for own items and for a route-backed item (no source ids,
+its `orderRoute` card built by pharmacy-api's own `orderRouteCard()`): the
+client accepts route-backed items since `2a9aa2f3`, which is in Release B.
 
 ## QA-1. QA Hospital pharmacist and lab scientist (sealed QA only; Akos Release A, migration 0134)
 
