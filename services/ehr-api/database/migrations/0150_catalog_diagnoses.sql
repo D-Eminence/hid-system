@@ -56,7 +56,12 @@
 --    "Parkinson disease" (0149's rules alone made it parkinson, s and
 --    disease, and the lone s had to start another word of the title). When
 --    nothing matched, the search runs once more with a final s dropped from
---    each word of 4 or more letters ("parkinsons", "alzheimers"). The order:
+--    each word of 4 or more letters ("parkinsons", "alzheimers"), and keeps
+--    only the entries where each word it shortened is a whole word of the
+--    title or of one of our other names: so "fits" offers nothing, where the
+--    shortened fit, matched as the start of a word, offered only "Fitting or
+--    adjustment of ..." entries, and "gallstones" finds what "gallstone"
+--    finds (found in our own review of this pass). The order:
 --    a. The entry whose code q is, found even when q is the code without its
 --       dot. For that test q is trimmed and upper-cased, and any run of
 --       characters that are neither letters nor digits, full stops
@@ -142,9 +147,14 @@
 -- 1. The lock and the kind. 2-5. As above. 6. Post-checks: owners, grants
 --    and search_path; each trigger's events (pg_trigger.tgtype: 27 before
 --    update or delete for each row, 34 before truncate, 7 before insert for
---    each row) and function, and the sealed-release function's body (its
---    md5); the kind check; an empty list. (0149's post-checks have the
---    same gap for its own triggers; 0149 is signed and left as it is.)
+--    each row), that it has no WHEN condition (tgqual), no column list
+--    (UPDATE OF: tgattr) and no arguments (tgnargs), and its function; the
+--    sealed-release function's body (its md5); the kind check; an empty
+--    list. A trigger with a WHEN condition or UPDATE OF keeps its tgtype, so
+--    the type alone let such an edit through (found in our own review of
+--    this pass). (0149's post-checks have the same gaps for its own
+--    triggers, the type, the condition, the columns and the body; 0149 is
+--    signed and left as it is.)
 
 -- 0. Preconditions.
 do $$
@@ -302,6 +312,8 @@ declare
   typed_code text;
   release_id uuid;
   release_label text;
+  -- On the second attempt only: the words of q that it shortened, each of which must be a whole word of the entry.
+  shortened text[];
 begin
   if trimmed is null or length(trimmed) < 2 or length(trimmed) > 100
      or requested_limit is null or requested_limit < 1 or requested_limit > 25 then
@@ -346,7 +358,8 @@ begin
          where diagnosis.version_id = release_id
            and (diagnosis.search_terms @@ query or diagnosis.code = typed_code)),
       found as (
-        select candidate.code, candidate.title, compared.title as compared_title,
+        select candidate.code, candidate.title, candidate.title_words, candidate.other_names,
+               compared.title as compared_title,
                coalesce(candidate.code = typed_code, false) as code_hit,
                -- The code and the title, split as q is (a code is A-Z, 0-9 and dots only).
                to_tsvector('simple'::regconfig, replace(lower(candidate.code), '.', ' ') || ' ' || candidate.title_words)
@@ -381,7 +394,13 @@ begin
                lower(regexp_replace(found.other_hit, '([[:alnum:]])[''’][sS](?![[:alnum:]])', '\1', 'g'))
                  as compared_other
           from found
-         where found.code_hit or found.title_hit or found.other_hit is not null),
+         where (found.code_hit or found.title_hit or found.other_hit is not null)
+           -- On the second attempt, each word whose final s was dropped is a whole word of the title or of one of
+           -- our other names, not only the start of one ("fits" is not "Fitting or adjustment of ...").
+           and (shortened is null
+                or not exists (select 1 from unnest(shortened) as word(shortened_word)
+                                where word.shortened_word <> all (string_to_array(btrim(found.title_words || ' '
+                                        || regexp_replace(lower(found.other_names), '[^[:alnum:]]+', ' ', 'g')), ' '))))),
       shown as (
         select named.*,
                -- Our other name is named when it is what matched, or when it starts with q and the title does not.
@@ -405,9 +424,12 @@ begin
       return;
     end if;
     -- Nothing matched: once more with a final s dropped from each word of 4 or more letters ("parkinsons" is
-    -- parkinson, "alzheimers" alzheimer), when that changes q.
+    -- parkinson, "alzheimers" alzheimer), when that changes q; each word so shortened must then be a whole word.
     fewer_s := regexp_replace(searched, '(?<![[:alnum:]])([[:alpha:]]{3,})[sS](?![[:alnum:]])', '\1', 'g');
     exit when fewer_s = searched;
+    shortened := array(select lower(shortened_match[1])
+                         from regexp_matches(searched, '(?<![[:alnum:]])([[:alpha:]]{3,})[sS](?![[:alnum:]])', 'g')
+                              as shortened_match);
     searched := fewer_s;
   end loop;
 end;
@@ -453,7 +475,7 @@ $$;
 comment on table ehr.catalog_diagnoses is
   '0150 (ORD-9): the coded entries of an ICD-11 MMS release, one row per entry per version, WHO''s titles verbatim (ICD-11, World Health Organization, CC BY-ND 3.0 IGO) and our own other names apart; no extension codes, no blocks. Loaded by ORD-7''s governed loader. No patient data.';
 comment on function ehr.search_catalog_diagnoses(text, integer) is
-  '0150 (ORD-9): the active ICD-11 release''s entries whose code and title or one other name has a word starting with each word of q (a word-final ''s dropped from q; when nothing matched, once more with a final s dropped from words of 4 or more letters); the entry whose code q is (with or without its dot, or with spaces at its dot, and with any run of characters that are neither letters nor digits taken off both ends; its own dot stays) first, then a title or other name that is q, then names starting with q, then shorter titles, then A to Z; at most limit (1-25) and whether more matched. 22023 CATALOG_SEARCH_INVALID for q outside 2-100 characters or a limit outside 1-25.';
+  '0150 (ORD-9): the active ICD-11 release''s entries whose code and title or one other name has a word starting with each word of q (a word-final ''s dropped from q; when nothing matched, once more with a final s dropped from words of 4 or more letters, each word so shortened then a whole word of the title or of one other name); the entry whose code q is (with or without its dot, or with spaces at its dot, and with any run of characters that are neither letters nor digits taken off both ends; its own dot stays) first, then a title or other name that is q, then names starting with q, then shorter titles, then A to Z; at most limit (1-25) and whether more matched. 22023 CATALOG_SEARCH_INVALID for q outside 2-100 characters or a limit outside 1-25.';
 comment on function ehr.catalog_status() is
   '0149 (ORD-7), 0150 (ORD-9): per kind (diagnosis, lab_test, medicine): whether an active version exists, its label, when it was approved, how many rows it offers, the notices its sources require and the sha256 of its seed file.';
 
@@ -479,20 +501,25 @@ begin
     raise exception using errcode = '55000', message = '0150: a catalogue function is not as made';
   end if;
   -- Each trigger's events as made (pg_trigger.tgtype: 1 for each row, 2 before, 4 insert, 8 delete, 16 update,
-  -- 32 truncate): 27 before update or delete for each row, 34 before truncate.
+  -- 32 truncate): 27 before update or delete for each row, 34 before truncate. With no WHEN condition (tgqual), no
+  -- column list (UPDATE OF: tgattr) and no arguments, which leave tgtype as it is. (A BEFORE trigger can have no
+  -- transition table and cannot be a constraint trigger.)
   if (select count(*) from pg_trigger trigger_row
        where not trigger_row.tgisinternal and trigger_row.tgenabled = 'O'
          and trigger_row.tgrelid = 'ehr.catalog_diagnoses'::regclass
          and trigger_row.tgfoid = 'platform.reject_mutation()'::regprocedure
+         and trigger_row.tgqual is null and trigger_row.tgattr = ''::int2vector and trigger_row.tgnargs = 0
          and ((trigger_row.tgname = 'catalog_diagnoses_append_only' and trigger_row.tgtype = 27)
               or (trigger_row.tgname = 'catalog_diagnoses_no_truncate' and trigger_row.tgtype = 34))) <> 2 then
     raise exception using errcode = '55000', message = '0150: the diagnosis list is missing its append-only triggers';
   end if;
-  -- 7: before insert for each row; and the function's body as this file makes it.
+  -- 7: before insert for each row, with no WHEN condition, column list or arguments; and the function's body as this
+  -- file makes it.
   if not exists (select 1 from pg_trigger trigger_row
                   where not trigger_row.tgisinternal and trigger_row.tgenabled = 'O'
                     and trigger_row.tgrelid = 'ehr.catalog_diagnoses'::regclass
                     and trigger_row.tgname = 'catalog_diagnoses_not_sealed' and trigger_row.tgtype = 7
+                    and trigger_row.tgqual is null and trigger_row.tgattr = ''::int2vector and trigger_row.tgnargs = 0
                     and trigger_row.tgfoid = 'ehr.catalog_diagnosis_not_sealed()'::regprocedure)
      or not exists (select 1 from pg_proc proc
                      where proc.oid = 'ehr.catalog_diagnosis_not_sealed()'::regprocedure and not proc.prosecdef
