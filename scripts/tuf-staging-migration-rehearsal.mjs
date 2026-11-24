@@ -294,7 +294,18 @@ try {
     ['--format=custom', '--file', upgradeBackup, 'hid_upgrade']);
   await artifact('pre-schema-upgrade.dump');
   migration('existing baseline schema upgrade dry run', 'apply-migrations.mjs', 'hid_upgrade', {}, 0, ['--dry-run']);
-  assert.deepEqual(await snapshot('hid_upgrade'), upgradeBefore, 'Upgrade dry run must preserve all historical rows');
+  // Migration 0150 (owner decision Q141 B) writes one audit row at any data,
+  // so the dry run takes one number from audit.events' identity sequence:
+  // sequences are not transactional, so the rollback leaves that one number
+  // unused (a gap, as any rolled-back audited request leaves; nothing reads
+  // the numbers as gap-free). Every row, and every other sequence, is as
+  // before.
+  const auditSequence = 'sequence:audit.events_sequence_id_seq';
+  const advanced = (sequence, by) => ({ last_value: String(Number(sequence.last_value) + by - (sequence.is_called ? 0 : 1)),
+    is_called: true });
+  assert.deepEqual(await snapshot('hid_upgrade'),
+    { ...upgradeBefore, [auditSequence]: advanced(upgradeBefore[auditSequence], 1) },
+    'Upgrade dry run must preserve all historical rows');
   migration('existing baseline schema upgrade', 'apply-migrations.mjs', 'hid_upgrade');
   migration('upgraded baseline role bootstrap', 'bootstrap-database-roles.mjs', 'hid_upgrade');
   assert.match(migration('upgraded baseline rerun', 'apply-migrations.mjs', 'hid_upgrade'), /^0 pending migration\(s\)/);
@@ -414,6 +425,9 @@ try {
     [{ actor_type: 'system', action: 'auth.role-permission.add', outcome: 'success', resource_type: 'role-permission',
       resource_id: 'doctor/ocr.job.start', provenance: 'migration', source_system: 'hid-0150', actor_account_id: null,
       facility_id: null, patient_id: null }], 'Migration 0150 must write exactly its one audit row');
+    // The dry run's number and the apply's.
+    assert.deepEqual(upgradeAfter[auditSequence], advanced(upgradeBefore[auditSequence], 2),
+      'Only 0150 takes numbers from audit.events\' identity sequence (one in the dry run, one in the apply)');
   });
   const expectedChanged = new Set([
     'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
