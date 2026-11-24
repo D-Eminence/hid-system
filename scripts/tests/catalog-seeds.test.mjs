@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { EventEmitter } from 'node:events'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -358,6 +359,100 @@ test('the builder refuses a retired id that it holds back, with one plain line (
   } finally { rmSync(folder, { recursive: true, force: true }) }
 })
 
+// The files in a builder folder, for "nothing built" and "no temporary file left".
+const folderFiles = (folder) => readdirSync(folder).sort()
+const FOLDER_INPUTS = ['brands.mjs', 'list.csv', 'retired.json', 'wave-zero.json']
+
+test('everything the builder reads is inside its one-line handling: a broken CSV is one plain line (exit 2), nothing built', () => {
+  const cases = [
+    // An unclosed quote, and a row with the wrong number of fields (round 4 of #319, point 2a).
+    ['list.csv', `${FIXTURE}MED-00006,medicine,"an unclosed quote\n`, (folder) => `the combined list ${join(folder, 'list.csv')}: `
+      + 'CSV: a quoted field is not closed'],
+    ['list.csv', `${FIXTURE}MED-00006,medicine,three fields\n`, (folder) => `the combined list ${join(folder, 'list.csv')}: `
+      + 'CSV row 12: 3 fields where the header has 18'],
+    ['list.csv', 'id,list,name,source\nMED-00001,medicine,amoxicillin,nigeria-eml-8\n', (folder) => `the combined list `
+      + `${join(folder, 'list.csv')} has no dose_form column`],
+    ['retired.json', '{"MED-00003": ', (folder) => `the retired ids file ${join(folder, 'retired.json')} is not JSON`],
+    ['retired.json', '["MED-00003"]', (folder) => `the retired ids file ${join(folder, 'retired.json')} is not an object of `
+      + 'retired ids, each with why'],
+    ['wave-zero.json', '{"codes": "none"}', (folder) => `the Wave 0 codes file ${join(folder, 'wave-zero.json')} has no list of `
+      + 'codes, each with its name'],
+    ['brands.mjs', 'export const BRAND_ROWS = [', (folder) => `the brand names file ${join(folder, 'brands.mjs')} cannot be read `
+      + '(Unexpected end of input)'],
+    ['brands.mjs', 'export const rows = []\n', (folder) => `the brand names file ${join(folder, 'brands.mjs')} has no BRAND_ROWS and `
+      + 'isActiveBrandRow'],
+  ]
+  for (const [file, text, line] of cases) {
+    const folder = builderFolder()
+    try {
+      writeFileSync(join(folder, file), text)
+      const result = runBuilder(folder)
+      assert.equal(result.stderr, `${line(folder)}; nothing built\n`, `${file}: ${text.slice(-40)}`)
+      assert.equal(result.status, 2, file)
+      assert.equal(result.stdout, '', file)
+      assert.deepEqual(folderFiles(folder), FOLDER_INPUTS, `${file}: nothing built`)
+    } finally { rmSync(folder, { recursive: true, force: true }) }
+  }
+  // A file that is not there is one line too.
+  const folder = builderFolder()
+  try {
+    rmSync(join(folder, 'retired.json'))
+    const result = runBuilder(folder)
+    assert.equal(result.stderr, `the retired ids file ${join(folder, 'retired.json')} cannot be read (ENOENT); nothing built\n`)
+    assert.equal(result.status, 2)
+  } finally { rmSync(folder, { recursive: true, force: true }) }
+})
+
+test('the builder writes both seeds or neither: a bad lab-test list leaves no new medicine file behind', () => {
+  // LAB-0002's HID-LAB code is not one of Wave 0's: the lab-test seed would not load. The medicines are good.
+  const badLab = FIXTURE.replace(',HID-LAB,WIDAL,', ',HID-LAB,WIDAL-2,')
+  assert.notEqual(badLab, FIXTURE)
+  const refusal = 'hid-lab-tests.json: LAB-0002: the HID-LAB code WIDAL-2 is not one of Wave 0\'s (docs/codes/hid-lab-codes.json); '
+    + 'nothing built\n'
+  const folder = builderFolder()
+  try {
+    // A first build: neither seed is written.
+    writeFileSync(join(folder, 'list.csv'), badLab)
+    let result = runBuilder(folder)
+    assert.equal(result.stderr, refusal)
+    assert.equal(result.status, 2)
+    assert.equal(result.stdout, '')
+    assert.deepEqual(folderFiles(folder), FOLDER_INPUTS, 'no medicine file, no lab-test file, no temporary file')
+    // Seeds already there (a good build) stay exactly as they were when a changed list is refused.
+    writeFileSync(join(folder, 'list.csv'), FIXTURE)
+    assert.equal(runBuilder(folder).status, 0)
+    const before = ['hid-medicines.json', 'hid-lab-tests.json'].map((file) => readFileSync(join(folder, file)))
+    writeFileSync(join(folder, 'list.csv'), badLab.replace('prussian blue', 'prussian blue (ferric hexacyanoferrate)'))
+    result = runBuilder(folder)
+    assert.equal(result.stderr, refusal)
+    assert.equal(result.status, 2)
+    assert.deepEqual(['hid-medicines.json', 'hid-lab-tests.json'].map((file) => readFileSync(join(folder, file))), before)
+    assert.deepEqual(folderFiles(folder), [...FOLDER_INPUTS, 'hid-lab-tests.json', 'hid-medicines.json'].sort())
+  } finally { rmSync(folder, { recursive: true, force: true }) }
+})
+
+test('a seed file the builder cannot write is one plain line (exit 1); no temporary file is left', () => {
+  const folder = builderFolder()
+  try {
+    // No such output folder: nothing is written.
+    const missing = join(folder, 'no-such-folder')
+    let result = spawnSync(process.execPath, [builderScript, '--csv', join(folder, 'list.csv'), '--retired', join(folder, 'retired.json'),
+      '--wave-zero', join(folder, 'wave-zero.json'), '--version', '2026.1', '--out', missing, '--brands', join(folder, 'brands.mjs')],
+    { encoding: 'utf8', env: { PATH: process.env.PATH } })
+    assert.equal(result.stderr, `the seed files could not be written to ${missing} (ENOENT); nothing built\n`)
+    assert.equal(result.status, 1)
+    assert.equal(result.stdout, '')
+    // The lab-test file's name taken by a folder: the medicine file is renamed into place first, and the line says so.
+    mkdirSync(join(folder, 'hid-lab-tests.json'))
+    result = runBuilder(folder)
+    assert.equal(result.stderr, `hid-medicines.json was written to ${folder} but the other seed file could not be (EISDIR); `
+      + 'run the builder again\n')
+    assert.equal(result.status, 1)
+    assert.deepEqual(folderFiles(folder), [...FOLDER_INPUTS, 'hid-lab-tests.json', 'hid-medicines.json'].sort(),
+      'no temporary file left')
+  } finally { rmSync(folder, { recursive: true, force: true }) }
+})
+
 test('the builder needs Node 22.18 (type stripping) and says so plainly before it reads anything', () => {
   for (const version of ['22.17.1', '22.0.0', '20.19.4', '23.5.0', '18.20.8']) {
     assert.match(typeStrippingProblem(version), new RegExp(`needs Node 22\\.18 or later; this is Node ${version.replaceAll('.', '\\.')}; nothing built$`))
@@ -671,6 +766,187 @@ test('a connection dropped mid-load (a terminated backend, a failover) is one pl
         assert.deepEqual(server.statements, ['begin', "set local lock_timeout = '5s'"])
       } finally { await server.close() }
     }
+  } finally { rmSync(folder, { recursive: true, force: true }) }
+})
+
+// The loader's line when its COMMIT was sent and no reply came (round 4 of #319, point 1); the deploy tool matches it
+// word for word (scripts/test_production_deployment_ecs.py).
+const COMMIT_UNKNOWN = 'load-catalog: the connection was lost during commit, so the load may have committed; ask for the same '
+  + 'load again to settle it (it loads, or is refused as already loaded)'
+
+test('COMMIT sent and no reply (the connection lost, or a fatal error) leaves the outcome unknown, never "nothing loaded"', async () => {
+  const seed = build(FIXTURE, { version: '2026.2' }).medicine
+  const approval = { approvalReference: 'Synthetic sign-off reference', approvedAt: '2026-12-02T09:00:00+01:00' }
+  const load = (client, options = {}) => loadSeed(client, { seed, fileSha256: 'a'.repeat(64), approval,
+    approvalsSha256: 'b'.repeat(64), ...options })
+  // No reply: the socket closed (pg's own words), or a FATAL in the reply's place (a terminated backend).
+  for (const error of [new Error('Connection terminated unexpectedly'),
+    Object.assign(new Error('terminating connection due to administrator command'), { code: '57P01', severity: 'FATAL' })]) {
+    const client = new StandInClient({ failOn: { sql: 'commit', error } })
+    let thrown
+    await assert.rejects(load(client), (caught) => { thrown = caught; return true })
+    assert.equal(thrown.name, 'CommitOutcomeUnknown', error.message)
+    assert.equal(thrown.cause, error, 'the lost connection is kept as the cause')
+    assert.ok(!(thrown instanceof LoadRefusal))
+    assert.equal(client.statements.at(-1).sql, 'commit', 'no rollback is asked of a connection that is gone')
+  }
+  // An ERROR reply to COMMIT is a reply: the transaction rolled back, so it stays a failure, or a refusal, nothing loaded.
+  const serialization = Object.assign(new Error('could not serialize access'), { code: '40001', severity: 'ERROR' })
+  const failed = new StandInClient({ failOn: { sql: 'commit', error: serialization } })
+  await assert.rejects(load(failed), (caught) => caught === serialization)
+  assert.equal(failed.statements.at(-1).sql, 'rollback')
+  const check = Object.assign(new Error('violates check constraint'), { code: '23514', severity: 'ERROR' })
+  await assert.rejects(load(new StandInClient({ failOn: { sql: 'commit', error: check } })), (caught) => caught instanceof LoadRefusal
+    && refusalLine(caught) === 'load-catalog: the database refused the load: violates check constraint (23514); nothing loaded')
+  // A dry run sends no COMMIT: its rollback losing the connection leaves nothing.
+  const lostRollback = new Error('Connection terminated unexpectedly')
+  await assert.rejects(load(new StandInClient({ failOn: { sql: 'rollback', error: lostRollback } }), { dryRun: true }),
+    (caught) => caught === lostRollback)
+  // The connection lost before COMMIT is asked for (the client's 'error' event came first): pg refuses the query
+  // without sending it, so nothing can have committed and it stays a failure. loadSeed takes its listeners off after.
+  class LosingClient extends StandInClient {
+    events = new EventEmitter()
+    on(name, listener) { this.events.on(name, listener); return this }
+    off(name, listener) { this.events.off(name, listener); return this }
+    async query(sql, params) {
+      if (this.gone) throw new Error('Client has encountered a connection error and is not queryable')
+      const result = await super.query(sql, params)
+      if (sql.includes('set active = true')) {
+        this.gone = true
+        this.events.emit('error', Object.assign(new Error('terminating connection due to administrator command'), { code: '57P01',
+          severity: 'FATAL' }))
+        this.events.emit('end')
+      }
+      return result
+    }
+  }
+  const losing = new LosingClient()
+  losing.on('error', () => {})
+  await assert.rejects(load(losing), (caught) => caught.name !== 'CommitOutcomeUnknown'
+    && caught.message === 'Client has encountered a connection error and is not queryable')
+  assert.ok(!losing.statements.some(({ sql }) => sql === 'commit'), 'COMMIT never sent')
+  assert.equal(losing.events.listenerCount('error'), 1, 'only the caller\'s own listener is left')
+  assert.equal(losing.events.listenerCount('end'), 0)
+})
+
+/**
+ * A stand-in PostgreSQL server that answers the whole load (simple and extended protocol, from the statement's
+ * text), then ends the connection: drop "commit-fatal" answers the loader's COMMIT with FATAL 57P01 and closes the
+ * socket; "commit-silent" closes it with no message, as a backend terminated while its commit waits for a
+ * synchronous standby does (on a real database in the PR's evidence; it has committed locally) and as a failover
+ * does; "before-commit" sends FATAL 57P01 straight after the reply to the load's last statement, before the loader
+ * can send COMMIT; "none" answers COMMIT too. `statements` records what the loader sent.
+ */
+async function loadingServer({ drop, items }) {
+  const message = (type, body = Buffer.alloc(0)) => {
+    const header = Buffer.alloc(5)
+    header.write(type)
+    header.writeInt32BE(body.length + 4, 1)
+    return Buffer.concat([header, body])
+  }
+  const text = (value) => Buffer.from(`${value}\0`)
+  const fatal = message('E', Buffer.from('SFATAL\0VFATAL\0C57P01\0Mterminating connection due to administrator command\0\0'))
+  // RowDescription and DataRow for to_regclass's one boolean column, "ready", true.
+  const ready = (() => {
+    const field = Buffer.alloc(18)
+    field.writeInt32BE(0, 0); field.writeInt16BE(0, 4); field.writeInt32BE(16, 6); field.writeInt16BE(1, 10)
+    field.writeInt32BE(-1, 12); field.writeInt16BE(0, 16)
+    const count = Buffer.alloc(2)
+    count.writeInt16BE(1)
+    const value = Buffer.alloc(6)
+    value.writeInt16BE(1, 0); value.writeInt32BE(1, 2)
+    return [message('T', Buffer.concat([count, text('ready'), field])), message('D', Buffer.concat([value, Buffer.from('t')]))]
+  })()
+  const tag = (sql) => {
+    if (sql === 'begin') return 'BEGIN'
+    if (sql === 'rollback') return 'ROLLBACK'
+    if (sql.startsWith('set ')) return 'SET'
+    if (sql.startsWith('lock ')) return 'LOCK TABLE'
+    if (/insert into ehr\.catalog_(medicines|lab_tests)/.test(sql)) return `INSERT 0 ${items}`
+    if (sql.includes('insert into ehr.catalog_versions')) return 'INSERT 0 1'
+    if (sql.includes('insert into ehr.catalog_retired_codes')) return 'INSERT 0 0'
+    if (sql.includes('set active = true')) return 'UPDATE 1'
+    if (sql.includes('set active = false')) return 'UPDATE 0'
+    if (sql.includes('to_regclass') || sql.includes('pg_advisory_xact_lock')) return 'SELECT 1'
+    return 'SELECT 0'
+  }
+  const statements = []
+  const server = createServer((socket) => {
+    let buffer = Buffer.alloc(0)
+    let started = false
+    let parsed = ''
+    socket.on('error', () => {})
+    const answer = (sql, extended) => {
+      statements.push(sql)
+      if (sql === 'commit' && drop.startsWith('commit-')) {
+        if (drop === 'commit-fatal') socket.end(fatal)
+        else socket.destroy()
+        return
+      }
+      const rows = sql.includes('to_regclass') ? ready : []
+      const reply = Buffer.concat([...(extended ? [message('1'), message('2')] : []),
+        ...(rows.length > 0 ? rows : extended ? [message('n')] : []), message('C', text(sql === 'commit' ? 'COMMIT' : tag(sql))),
+        message('Z', Buffer.from(sql === 'commit' || sql === 'rollback' ? 'I' : 'T'))])
+      if (drop === 'before-commit' && sql.includes('set active = true')) socket.end(Buffer.concat([reply, fatal]))
+      else socket.write(reply)
+    }
+    socket.on('data', (chunk) => {
+      buffer = Buffer.concat([buffer, chunk])
+      for (;;) {
+        if (!started) {
+          if (buffer.length < 4 || buffer.length < buffer.readInt32BE(0)) return
+          buffer = buffer.subarray(buffer.readInt32BE(0))
+          started = true
+          socket.write(Buffer.concat([message('R', Buffer.alloc(4)), message('Z', Buffer.from('I'))]))
+          continue
+        }
+        if (buffer.length < 5 || buffer.length < buffer.readInt32BE(1) + 1) return
+        const type = String.fromCharCode(buffer[0])
+        const body = buffer.subarray(5, buffer.readInt32BE(1) + 1)
+        buffer = buffer.subarray(buffer.readInt32BE(1) + 1)
+        if (type === 'Q') answer(body.subarray(0, body.length - 1).toString(), false)
+        else if (type === 'P') parsed = body.subarray(body.indexOf(0) + 1, body.indexOf(0, body.indexOf(0) + 1)).toString()
+        else if (type === 'S') answer(parsed, true)
+        else if (type === 'X') socket.end()
+      }
+    })
+  })
+  await new Promise((done) => server.listen(0, '127.0.0.1', done))
+  return { port: server.address().port, statements, close: () => new Promise((done) => server.close(done)) }
+}
+
+test('the loader cut off once its COMMIT is sent says the load may have committed (exit 1), not "nothing loaded"', async () => {
+  const seed = build().medicine
+  const { folder, seedPath, approvalsPath } = signedFiles(seed)
+  try {
+    for (const [drop, line] of [
+      ['commit-fatal', COMMIT_UNKNOWN],
+      ['commit-silent', COMMIT_UNKNOWN],
+      // Lost before COMMIT could be sent: the load rolled back, so "nothing loaded" is true and stays.
+      ['before-commit', 'load-catalog: terminating connection due to administrator command (57P01); nothing loaded']]) {
+      const server = await loadingServer({ drop, items: seed.items.length })
+      try {
+        const result = await runLoaderAsync(['--seed', seedPath, '--approvals', approvalsPath], { NODE_ENV: 'test',
+          DATABASE_URL: `postgresql://nobody@127.0.0.1:${server.port}/none` })
+        assert.equal(result.stderr, line, drop)
+        assert.equal(result.status, 1, drop)
+        assert.equal(result.stdout, '', drop)
+        assert.equal(server.statements[0], 'begin', drop)
+        assert.ok(server.statements.some((sql) => sql.includes('set active = true')), `${drop}: the whole load was answered`)
+        assert.equal(server.statements.includes('commit'), drop !== 'before-commit', drop)
+      } finally { await server.close() }
+    }
+    // The same stand-in, never dropping, loads: the stand-in answers the load as a database would.
+    const server = await loadingServer({ drop: 'none', items: seed.items.length })
+    try {
+      const result = await runLoaderAsync(['--seed', seedPath, '--approvals', approvalsPath], { NODE_ENV: 'test',
+        DATABASE_URL: `postgresql://nobody@127.0.0.1:${server.port}/none` })
+      assert.equal(result.status, 0, result.stderr)
+      assert.deepEqual(JSON.parse(result.stdout), { status: 'loaded', kind: 'medicine', version: '2026.1',
+        fileSha256: sha256(readFileSync(seedPath)), approvalsSha256: sha256(readFileSync(approvalsPath)), items: seed.items.length,
+        newRetiredIds: [], replaced: null, heldBack: 1 })
+      assert.equal(server.statements.at(-1), 'commit')
+    } finally { await server.close() }
   } finally { rmSync(folder, { recursive: true, force: true }) }
 })
 
