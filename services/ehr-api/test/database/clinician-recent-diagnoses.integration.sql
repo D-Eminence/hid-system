@@ -19,17 +19,20 @@
 -- membership's recording lock taken skips its record) needs two sessions,
 -- which no suite here holds (none uses dblink or a second connection). The
 -- runtime verifier (services/ehr-api/scripts/verify-prescription-details-
--- runtime.mjs) checks it: one session records a pick and stays open, the
--- other records for the same membership with lock_timeout 1500 ms and must
--- come back at once, recording nothing and raising nothing. Here 1c checks
--- the record takes the lock, and 1f checks only the function's text as
--- stored: the try-lock call pg_try_advisory_xact_lock(7409,
+-- runtime.mjs) checks it: one session records 1F40, a pick the doctor
+-- already has, and stays open, holding the membership's recording lock and
+-- 1F40's row; the other, with lock_timeout 1500 ms, records the same pick
+-- and then a different one for the same membership, and each must come
+-- back in under 500 ms, recording nothing and raising nothing. Here 1c
+-- checks the record takes the lock, and 1f checks only the function's text
+-- as stored: the try-lock call pg_try_advisory_xact_lock(7409,
 -- hashtext(membership_value::text)) with its early return, before the
 -- insert and the delete, and no plain pg_advisory_lock or
 -- pg_advisory_xact_lock call. The early return dropped, or a blocking
--- pg_advisory_xact_lock written plainly, fails 1f; a wait added another way
--- (a row lock before the try, a quoted function name) passes 1f and fails
--- the verifier.
+-- pg_advisory_xact_lock written plainly before the try, fails 1f. A FOR
+-- UPDATE row lock on the pick, or on all the membership's picks, taken
+-- before the try, or a blocking "pg_advisory_xact_lock" (its name quoted)
+-- taken before the try, passes 1f and fails the verifier.
 -- Synthetic values only: uuid prefix 151, example.invalid addresses.
 set plpgsql.variable_conflict = error;
 begin;

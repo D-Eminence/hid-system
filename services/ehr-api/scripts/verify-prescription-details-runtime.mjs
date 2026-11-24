@@ -748,11 +748,17 @@ try {
 
   // ── ORD-9 (0151): the record never waits, with two sessions ──
   // Two connections as ehr-api connects (its runtime URL and role), each with the doctor's settings as a
-  // diagnosis save sets them. Session A records a pick the doctor already has and keeps its transaction open,
-  // so it holds the membership's recording lock and that pick's row. Session B, with lock_timeout 1500 ms,
-  // records another pick for the same membership: it must come back at once (under 500 ms), record nothing and
-  // raise nothing. Once A commits, B's next record is kept. A record that waits for A in any way (a row lock
-  // taken before the try, a waiting advisory lock) fails here after 1500 ms with 55P03.
+  // diagnosis save sets them. Session A records 1F40, a pick the doctor already has, and keeps its transaction
+  // open. Checked: A then holds the membership's recording lock (in pg_locks) and 1F40's row (the owner's
+  // FOR UPDATE NOWAIT on that row is refused with 55P03). Session B, with lock_timeout 1500 ms, then records for
+  // the same membership, each in a transaction of its own, first the same pick, 1F40, then a different one,
+  // KA64.20, which has no row yet: each must come back in under 500 ms, record nothing and raise nothing. Once
+  // A commits, B records both in one transaction and both are kept.
+  // B recording A's pick first is what catches a record that waits on A's row: a FOR UPDATE row lock on the
+  // pick, or on all the membership's picks, taken before the try, or the try's result ignored (the upsert then
+  // waits for A's row), raises 55P03 after about 1500 ms here; so does a blocking "pg_advisory_xact_lock" on
+  // the membership's key taken before the try. KA64.20 catches a record that ignores the try's result and
+  // skips only a pick whose row is locked: it records KA64.20 while A is open.
   const doctorMember = await one(`select account.subject, membership.id::text as membership_id
     from auth.accounts account join identity.staff_facility_memberships membership on membership.account_id = account.id
     where account.id = $1 and membership.facility_id = $2 and membership.active`, [doctor.accountId, hospital.facilityId]);
@@ -765,8 +771,37 @@ try {
   [doctorMember.subject, hospital.facilityId, `verifier-recent-${randomUUID()}`, doctorMember.membership_id]);
   const recordPick = (client, code, display) => client.query('select ehr.record_recent_diagnosis($1, $2, $3)',
     ['ICD-11', code, display]);
+  const rowLockRefusal = async code => {
+    try {
+      await one(`select 1 from ehr.clinician_recent_diagnoses where membership_id = $1 and code_system = 'ICD-11'
+        and code = $2 for update nowait`, [doctorMember.membership_id, code]);
+      return 'none';
+    } catch (error) {
+      return error.code;
+    }
+  };
   const sessionA = new Client({ connectionString: databaseUrl('hid_ehr_api_runtime'), query_timeout: 15_000 });
   const sessionB = new Client({ connectionString: databaseUrl('hid_ehr_api_runtime'), query_timeout: 15_000 });
+  // B records one pick in a transaction of its own while A is open: at once, nothing recorded, no error.
+  const recordAsBWhileAOpen = async (code, display) => {
+    await sessionB.query('begin');
+    await asDoctorInSave(sessionB);
+    const started = performance.now();
+    let failed;
+    try {
+      await recordPick(sessionB, code, display);
+    } catch (error) {
+      failed = error;
+    }
+    const tookMs = Math.round(performance.now() - started);
+    await sessionB.query(failed ? 'rollback' : 'commit');
+    assert.equal(failed, undefined, `while A is open, B's record of ${code} raised ${failed?.code} after ${tookMs} ms `
+      + `(${failed?.message}): the record waited for A`);
+    assert(tookMs < 500, `while A is open, B's record of ${code} took ${tookMs} ms: the record waited for A`);
+    assert.deepEqual(await picksHeld(), { '1A07': 1, '1F40': 2 },
+      `B recorded nothing of ${code} while A held the lock`);
+    return { code, returnedAfterMs: tookMs, error: null, recorded: false };
+  };
   try {
     await sessionA.connect();
     await sessionB.connect();
@@ -784,39 +819,32 @@ try {
       and lock_row.locktype = 'advisory' and lock_row.granted and lock_row.classid = 7409 and lock_row.objsubid = 2
       and lock_row.objid::bigint = (hashtext($2)::bigint & 4294967295)`, [roleA.pid, doctorMember.membership_id]);
     assert.equal(heldByA.n, 1, 'session A, still open, holds the membership\'s recording lock');
+    assert.equal(await rowLockRefusal('1F40'), '55P03', 'session A, still open, holds 1F40\'s row');
 
-    await sessionB.query('begin');
-    await asDoctorInSave(sessionB);
-    const started = performance.now();
-    let failedB;
-    try {
-      await recordPick(sessionB, 'KA64.20', 'Congenital falciparum malaria');
-    } catch (error) {
-      failedB = error;
-    }
-    const tookMs = Math.round(performance.now() - started);
-    await sessionB.query(failedB ? 'rollback' : 'commit');
-    assert.equal(failedB, undefined, `while A is open, B's record raised ${failedB?.code} after ${tookMs} ms `
-      + `(${failedB?.message}): the record waited for A`);
-    assert(tookMs < 500, `while A is open, B's record took ${tookMs} ms: the record waited for A`);
-    assert.deepEqual(await picksHeld(), { '1A07': 1, '1F40': 2 }, 'B recorded nothing while A held the lock');
+    const samePick = await recordAsBWhileAOpen('1F40', 'Malaria due to Plasmodium falciparum');
+    const otherPick = await recordAsBWhileAOpen('KA64.20', 'Congenital falciparum malaria');
 
     await sessionA.query('commit');
     assert.deepEqual(await picksHeld(), { '1A07': 1, '1F40': 3 }, 'A\'s pick is kept once A commits');
     await sessionB.query('begin');
     await asDoctorInSave(sessionB);
+    await recordPick(sessionB, '1F40', 'Malaria due to Plasmodium falciparum');
     await recordPick(sessionB, 'KA64.20', 'Congenital falciparum malaria');
     await sessionB.query('commit');
-    assert.deepEqual(await picksHeld(), { '1A07': 1, '1F40': 3, 'KA64.20': 1 }, 'after A commits, B\'s next record is kept');
+    assert.deepEqual(await picksHeld(), { '1A07': 1, '1F40': 4, 'KA64.20': 1 },
+      'after A commits, B\'s records of the same pick and the other are kept');
     evidence.recentNeverWaits = { sessions: 'two, as hid_ehr_api_runtime', lockTimeoutMs: 1500,
-      whileAOpen: { returnedAfterMs: tookMs, error: null, recorded: false }, afterACommits: { recorded: 'KA64.20' } };
+      heldByA: ['recording lock', '1F40 row'], whileAOpen: [samePick, otherPick],
+      afterACommits: { recorded: ['1F40', 'KA64.20'] } };
   } finally {
     await sessionA.end().catch(() => {});
     await sessionB.end().catch(() => {});
   }
-  step(`ORD-9: the record never waits: while one save of the doctor's holds the recording lock, another records for `
-    + `the same membership at once (${evidence.recentNeverWaits.whileAOpen.returnedAfterMs} ms, lock_timeout 1500 ms), `
-    + 'without recording and without an error; once the first commits, the next record is kept');
+  const [samePickMs, otherPickMs] = evidence.recentNeverWaits.whileAOpen.map(pick => pick.returnedAfterMs);
+  step(`ORD-9: the record never waits: while one save of the doctor's holds the recording lock and the row of the `
+    + `pick it recorded, another records that same pick (${samePickMs} ms) and then a different one `
+    + `(${otherPickMs} ms) for the same membership at once (lock_timeout 1500 ms), without recording and without `
+    + 'an error; once the first commits, both are kept');
 
   evidence.elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
   evidence.status = 'passed';

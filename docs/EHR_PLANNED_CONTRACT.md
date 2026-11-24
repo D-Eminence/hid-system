@@ -2137,11 +2137,12 @@ live table is altered.
     may skip its record. The runtime verifier
     (`verify-prescription-details-runtime.mjs`) checks this with two
     sessions as the EHR runtime: while one save of the doctor's has
-    recorded a pick and is still open, another records for the same
-    membership with `lock_timeout` 1500 ms; it must come back in under
-    500 ms, record nothing and raise nothing, and once the first commits
-    its next record is kept. The database suite's case 1f only checks the
-    function as written (the try-lock call and the early return).
+    recorded a pick and is still open (holding the recording lock and that
+    pick's row), another, with `lock_timeout` 1500 ms, records the same
+    pick and then a different one for the same membership; each must come
+    back in under 500 ms, record nothing and raise nothing, and once the
+    first commits both are kept. The database suite's case 1f only checks
+    the function as written (the try-lock call and the early return).
   - `ehr.recent_diagnoses(limit)` gives the session's membership's picks at
     its facility, newest first, and none without the permission. 22023
     `RECENT_DIAGNOSES_INVALID` outside 1-50.
