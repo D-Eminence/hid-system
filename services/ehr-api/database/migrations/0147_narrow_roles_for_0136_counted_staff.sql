@@ -145,16 +145,20 @@
 -- invitation accepted or a membership ended; every reader goes on), so no
 -- role or assignment changes between the count and the grants; EXCLUSIVE on
 -- identity.staff_facility_memberships (below); ROW EXCLUSIVE on audit.events;
--- ROW SHARE on auth.permissions, auth.accounts and identity.facilities (the
--- foreign key checks of the new rows) and on identity.outreach_organisations
--- and identity.organization_applications (FOR SHARE in two of
+-- ROW SHARE on auth.permissions, auth.accounts, identity.facilities,
+-- identity.organizations and identity.patients (the foreign key checks of
+-- the new rows and of their audit rows, which open every table they
+-- reference at ROW SHARE even for a null key; identity.organizations is also
+-- read by the count) and on identity.outreach_organisations and
+-- identity.organization_applications (FOR SHARE in two of
 -- auth.account_roles' triggers, 0115's outreach fence and 0086's review gate;
--- its sealed-tenant triggers fire only for platform rows); and
--- ACCESS SHARE on the tables the count reads (identity.staff,
--- identity.organizations and the sealed demo and QA member lists) and on
--- migration.schema_migrations (0136's applied_at). That is every existing
--- table this file locks (pg_locks before commit, at 9, 1 and 1 and at 0, 0
--- and 0), at the strongest mode it takes. Besides tables it locks only
+-- its sealed-tenant triggers fire only for platform rows); and ACCESS SHARE
+-- on the other tables the count reads (identity.staff and the sealed demo
+-- and QA member lists) and on migration.schema_migrations (0136's
+-- applied_at). That is every existing table this file locks, at the
+-- strongest mode it takes (pg_locks before commit, at 9, 1 and 1 and at 0, 0
+-- and 0; every table the new rows' and audit rows' foreign keys reference is
+-- among them, so no foreign key check takes a table lock of its own). Besides tables it locks only
 -- indexes, at ACCESS SHARE or ROW SHARE (planning and the foreign key
 -- checks), apart from pg_proc's TOAST index below, and, when it writes an
 -- audit row, ROW EXCLUSIVE on audit.events' identity sequence. Replacing
@@ -313,10 +317,10 @@ begin
     in exclusive mode nowait;
   lock table audit.events
     in row exclusive mode nowait;
-  lock table auth.permissions, auth.accounts, identity.facilities,
+  lock table auth.permissions, auth.accounts, identity.facilities, identity.organizations, identity.patients,
              identity.outreach_organisations, identity.organization_applications
     in row share mode nowait;
-  lock table identity.staff, identity.organizations, identity.sealed_demo_members, identity.sealed_qa_members,
+  lock table identity.staff, identity.sealed_demo_members, identity.sealed_qa_members,
              migration.schema_migrations
     in access share mode nowait;
   -- From here on a lock wait is not one of these NOWAIT locks (see the handler).
@@ -591,12 +595,12 @@ begin
     end if;
     if holding then
       raise exception using errcode = '55P03',
-        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, identity.staff_facility_memberships (any staff request in flight that writes or locks a membership, or inserts a row naming one, such as a staff audit row), audit.events or a table 0147 reads (the permissions, accounts, staff, facilities, organizations, outreach groups, applications, sealed member lists and migration ledger) is busy, and this transaction already holds an earlier migration''s '
+        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, identity.staff_facility_memberships (any staff request in flight that writes or locks a membership, or inserts a row naming one, such as a staff audit row), audit.events or a table 0147 reads (the permissions, accounts, staff, facilities, organizations, patients, outreach groups, applications, sealed member lists and migration ledger) is busy, and this transaction already holds an earlier migration''s '
           || 'locks, so it does not wait; nothing applied; run the release again at a quieter time';
     end if;
     if attempt >= 50 then
       raise exception using errcode = '55P03',
-        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, identity.staff_facility_memberships (any staff request in flight that writes or locks a membership, or inserts a row naming one, such as a staff audit row), audit.events or a table 0147 reads (the permissions, accounts, staff, facilities, organizations, outreach groups, applications, sealed member lists and migration ledger) stayed busy for 5 seconds; nothing applied; run the release again at a '
+        message = '0147: auth.roles, auth.role_permissions, auth.account_roles, identity.staff_facility_memberships (any staff request in flight that writes or locks a membership, or inserts a row naming one, such as a staff audit row), audit.events or a table 0147 reads (the permissions, accounts, staff, facilities, organizations, patients, outreach groups, applications, sealed member lists and migration ledger) stayed busy for 5 seconds; nothing applied; run the release again at a '
           || 'quieter time';
     end if;
     perform pg_sleep(0.1);

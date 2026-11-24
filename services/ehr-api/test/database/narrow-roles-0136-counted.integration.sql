@@ -474,7 +474,8 @@ insert into declared_locks values
   ('auth.permissions', 'RowShareLock'), ('auth.accounts', 'RowShareLock'),
   ('identity.staff_facility_memberships', 'ExclusiveLock'), ('identity.facilities', 'RowShareLock'),
   ('identity.outreach_organisations', 'RowShareLock'), ('identity.organization_applications', 'RowShareLock'),
-  ('identity.staff', 'AccessShareLock'), ('identity.organizations', 'AccessShareLock'),
+  ('identity.organizations', 'RowShareLock'), ('identity.patients', 'RowShareLock'),
+  ('identity.staff', 'AccessShareLock'),
   ('identity.sealed_demo_members', 'AccessShareLock'), ('identity.sealed_qa_members', 'AccessShareLock'),
   ('migration.schema_migrations', 'AccessShareLock');
 create function pg_temp.strength(mode text) returns integer language sql immutable as $$
