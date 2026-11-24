@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0146",
-    "count": 147,
+    "last": "0147",
+    "count": 148,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -685,6 +685,10 @@
       {
         "name": "0146_document_guard_without_ocr_schema_lookup.sql",
         "sha256": "b50d4250743c171709828dc59c7839c594ff729b4f64d14124c2909dbd830612"
+      },
+      {
+        "name": "0147_narrow_roles_for_0136_counted_staff.sql",
+        "sha256": "f7156465b90f5781451b45e2a57f61625f50568aff3b9d8eb77936063e5c936b"
       }
     ]
   },
