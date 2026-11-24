@@ -43,7 +43,9 @@ export const RECENT_DIAGNOSES_SQL = `select code_system, code, display, last_use
  * failure, is 503 CATALOG_UNAVAILABLE with the diagnosis search's words
  * ("Diagnosis search is not available right now.", no advice: trying again
  * does not help while 0151 is not there, and a name alone is not accepted
- * yet), on which the screen shows the empty field as before.
+ * yet), on which the screen shows the empty field as before. Those words
+ * stay inside: ProblemDetailsFilter sends every 5xx as "The service could
+ * not complete the request."
  */
 @Injectable()
 export class RecentDiagnosesService {

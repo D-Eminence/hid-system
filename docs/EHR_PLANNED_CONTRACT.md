@@ -2315,10 +2315,12 @@ live table is altered.
     `{ resultCount }` only) commit in one transaction. A read whose audit
     row cannot be written is refused.
   - A schema without 0151, or any database failure, answers 503
-    `CATALOG_UNAVAILABLE` "Diagnosis search is not available right now.",
-    the search's words, with no advice (trying again does not help while
-    0151 is not there, and a name alone is not accepted yet). The screen
-    then shows the empty field as before.
+    `CATALOG_UNAVAILABLE`, sent as "The service could not complete the
+    request." (as every 5xx, as for the search; the service's own words,
+    "Diagnosis search is not available right now.", the search's, give no
+    advice and stay inside it: trying again does not help while 0151 is
+    not there, and a name alone is not accepted yet). The screen reads the
+    status and the code, and shows the empty field as before.
   - A refusal is audited by the interceptor, as for the search.
 - **Not in this slice:** diagnoses by name only and `codeStatus`.
 
