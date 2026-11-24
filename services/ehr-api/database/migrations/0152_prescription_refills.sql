@@ -95,7 +95,9 @@
 --    is refused REFILL_PRESCRIPTION_ENDED at once, DETAIL R8's day (today or
 --    later), not REFILL_TOO_SOON with a day on which it would be refused
 --    (the review of 24 November 2026; refills close after the last
---    day, the owner's D9). No override: a clinician writes a new
+--    day, the owner's D9; this reading, and the screens' words "Refills end
+--    on <date>, before the next one is due", confirmed by the clinical
+--    owner the same day). No override: a clinician writes a new
 --    prescription. The fills and reversals are read as the owner, matched on
 --    the item. The values are the prescription row 0101 already reads FOR
 --    SHARE, so a refill needs it active and unchanged since the item was
@@ -198,28 +200,45 @@
 --    allows refills and was written in the last 365 days, ended or not, R8
 --    checked on each (under the marker, about 10 microseconds a row): a
 --    narrower bound than D9 asked ("only the facility's prescriptions whose
---    refills have not ended are read"), stated to the clinical owner (a
---    stored column for R8's day would make it exact under this owner kind,
---    but adding one rewrites ehr.prescriptions under its lock); under an
---    owner that bypasses row-level
---    security the index's third column, R8's day, leaves the ended ones out
---    inside the index as well. Either way its cost no longer grows with the
+--    refills have not ended are read"), accepted by the clinical owner (24
+--    November 2026, with no stored column: one for R8's day would make it
+--    exact under this owner kind, but adding one rewrites ehr.prescriptions
+--    under its lock); under an owner that bypasses row-level security the
+--    index's third column, R8's day, leaves the ended ones out inside the
+--    index as well. Either way its cost no longer grows with the
 --    facility's history: a prescription leaves R7's set on R8's day at the
 --    latest (one fill's length after its course should have finished, or a
 --    year), however its refills ended (used up, changed, never collected).
 --    The rows it then reads (the work items, then each item's fills and
 --    reversals, found by the item) stay under their tables' own row-level
---    security: about 0.15 ms per live refill prescription under the
---    NOSUPERUSER NOBYPASSRLS owner (1.4-1.5 s at 10,000 open at once,
---    measured below), so its 3-second limit would be reached at about
---    20,000 at once. The work items' two read policies (the own-work half
---    first) are asked only of the due items it answers, in its order, until
---    200 pass: asked of every due item before the sort, with the consent
---    test (about 2 ms a call) first, R7 grew about 2 ms for each refill open
---    at once and reached the 3-second limit at about 1,400-1,500 open at
---    once, after which every list load would have said refillsUnavailable
---    (the review of 24 November 2026). A session that may read
---    few of the due items (on consent alone) asks the policies of more. A
+--    security. For a session on the own-work basis (a pharmacist: each
+--    table's own-work policy holds before the consent test is asked) that
+--    is about 0.15 ms per live refill prescription under the NOSUPERUSER
+--    NOBYPASSRLS owner (1.4-1.5 s at 10,000 open at once, measured below),
+--    so its 3-second limit would be reached at about 20,000 at once. The
+--    work items' two read policies (the own-work half first) are asked
+--    only of the due items it answers, in its order, until 200 pass: asked
+--    of every due item before the sort, with the consent test (about 2 ms a
+--    call) first, R7 grew about 2 ms for each refill open at once and
+--    reached the 3-second limit at about 1,400-1,500 open at once, after
+--    which every list load would have said refillsUnavailable (the review
+--    of 24 November 2026). Those figures are for own-work sessions only. A
+--    session that may read only on consent (a clinician or a nurse:
+--    pharmacy.work-item.read without pharmacy.order-route.receive, so
+--    identity.facility_work_session_membership is null for it, and
+--    GET /pharmacy/work-items lets it in) pays the consent test (about 1.5
+--    to 2 ms a call) instead: under the NOSUPERUSER NOBYPASSRLS owner the
+--    work items' own policy asks it of every live refill prescription's
+--    item, and the fills' asks it again of each item it may read, so R7
+--    grows about 1.5-1.9 ms for each live refill prescription it may not
+--    read and about 3.4-3.9 ms for each it may, and reaches the 3-second
+--    limit at about 1,800 or about 800 of them (measured below; past the limit the
+--    list answers without open refills and says refillsUnavailable, so the
+--    answer stays correct); under an owner that bypasses row-level
+--    security only R7's own check asks it, of the due items until 200
+--    pass, so it grows only with the due items it may not read. The
+--    clinical owner's gate measures the hospital's numbers (24 November
+--    2026); a work list opened by such a session costs that much more. A
 --    session without a facility or without pharmacy.work-item.read writes
 --    no marker and gets no row. Its text names ehr.prescriptions, so it
 --    joins 0133's S7 list too. VOLATILE, as R6, and called only by
@@ -552,6 +571,23 @@
 --   reads all 20,000 and checks R8 on each, about 10 microseconds a row; the
 --   planner reads the table, as they are all of it) and 0.016-0.029 s under
 --   a superuser owner (R8 a condition on R7's index: 304 rows read);
+--   R7 as a clinician of the same facility, who may read only on consent
+--   (pharmacy.work-item.read without pharmacy.order-route.receive), K
+--   refills open at once as above, 3 calls at each K (the review of 24
+--   November 2026, fifth round): without a consent grant (it may read none
+--   of the items; R7 answers none), under the NOSUPERUSER NOBYPASSRLS owner
+--   0.29-0.31 s at 200, 0.75-0.78 s at 500, 1.41-1.51 s at 1,000 and
+--   3.12-3.67 s at 2,000 (the consent test asked once for each live item,
+--   by the work items' own policy), under a superuser owner 0.29-0.37 s,
+--   0.71-0.85 s, 1.41-1.59 s and 3.23-3.47 s (asked by R7's own check of
+--   every due item, none passing); with a read grant for every patient (it
+--   may read them all; R7 answers 200), under the NOSUPERUSER NOBYPASSRLS
+--   owner 0.89-0.94 s, 1.85-1.92 s, 3.45-3.94 s and 6.79-6.88 s (the work
+--   items' consent test once for each live item, the fills' once more, R7's
+--   own check 200 times), under a superuser owner 0.33-0.51 s at each K
+--   (R7's own check 200 times); the pharmacist in the same runs 0.05-0.06 s,
+--   0.09-0.15 s, 0.18-0.25 s and 0.30-0.35 s (NOSUPERUSER NOBYPASSRLS), the
+--   consent test asked 0 times;
 --   a whole work-list request with the setting on (pharmacy-api's own list
 --   code, every reader on: R7, the list statement, R6 on the 200 rows shown,
 --   0124's cards, 0125's details, 0133's states, 0148's changes and the
@@ -1798,7 +1834,7 @@ $$;
 comment on function pharmacy.work_item_refills(uuid[]) is
   '0152 ORD-12: for each requested own work item (no order route) the session may read (its facility, pharmacy.work-item.read, and pharmacy.work_items'' two read policies repeated), refills_allowed (null as 0), fills_recorded (reversed fills included), refill_open (a fill recorded, fewer than 1 + refills_allowed, the prescription active at the accepted version, its refills'' last day not past in Lagos, and next_fill_on today or before; PRESCRIPTION_REFILLS_ENABLED is pharmacy-api''s to add), closed_reason (none_left, stopped, changed or ended (the refills'' last day has passed, or the next refill would open only after it: a late fill), or not_yet while the refill interval runs; null while open and before the first fill), next_fill_on (the Lagos day the next fill may be recorded: the latest fill not reversed plus 3/4 of the duration in days, rounded up, at least 1, or the latest reversal''s day when every fill is reversed; null before the first fill and once closed for a reason other than not_yet) and refills_end_on (the last Lagos day a refill can be collected, ehr.prescription_refills_end_on: the earliest of ends_on, the Lagos day written plus (refills_allowed + 2) fills'' durations, and that day plus 365; null without refills). At most 200 ids, else 22023 WORK_ITEM_REFILLS_INVALID. Reads ehr.prescriptions in one statement under a refill scan marker (pharmacy.refill_scans), so it is VOLATILE and needs a transaction that may write.';
 comment on function pharmacy.open_refill_work_items() is
-  '0152 ORD-12: the ids of the session''s own work items whose refill is open now, by pharmacy.work_item_refills'' rule (its facility, pharmacy.work-item.read and pharmacy.work_items'' two read policies; at least one fill and fewer than 1 + refills_allowed; the prescription active at the accepted version and encounter; its refills'' last day not past in Lagos; the refill interval passed), the refill that opened first first (then the id), at most 200. It reads the facility''s prescriptions that allow refills written in the last 365 Lagos days (ehr.prescriptions_refills_facility_idx), in one statement under a refill scan marker (pharmacy.refill_scans), and keeps the active ones whose refills have not ended: under an owner that bypasses row-level security the index leaves the ended ones out, under a NOSUPERUSER NOBYPASSRLS owner (production''s kind) every one written in those 365 days is read and its last day checked (about 10 microseconds a row). It then reads the work items and fills of those it keeps, one item at a time, and asks the work items'' read policies only of the due items it answers, in its order, until 200 pass; so its cost grows with the facility''s live refill prescriptions (about 0.15 ms each under the NOSUPERUSER NOBYPASSRLS owner), not with its history or with how many refills are open at once. VOLATILE, and needs a transaction that may write.';
+  '0152 ORD-12: the ids of the session''s own work items whose refill is open now, by pharmacy.work_item_refills'' rule (its facility, pharmacy.work-item.read and pharmacy.work_items'' two read policies; at least one fill and fewer than 1 + refills_allowed; the prescription active at the accepted version and encounter; its refills'' last day not past in Lagos; the refill interval passed), the refill that opened first first (then the id), at most 200. It reads the facility''s prescriptions that allow refills written in the last 365 Lagos days (ehr.prescriptions_refills_facility_idx), in one statement under a refill scan marker (pharmacy.refill_scans), and keeps the active ones whose refills have not ended: under an owner that bypasses row-level security the index leaves the ended ones out, under a NOSUPERUSER NOBYPASSRLS owner (production''s kind) every one written in those 365 days is read and its last day checked (about 10 microseconds a row). It then reads the work items and fills of those it keeps, one item at a time, and asks the work items'' read policies only of the due items it answers, in its order, until 200 pass; so its cost grows with the facility''s live refill prescriptions, not with its history or with how many refills are open at once. For a session on the own-work basis (a pharmacist) about 0.15 ms per live refill prescription under the NOSUPERUSER NOBYPASSRLS owner, so pharmacy-api''s 3-second limit would be reached at about 20,000. A session that may read only on consent (a clinician or a nurse: pharmacy.work-item.read without pharmacy.order-route.receive) pays the consent test instead: under the NOSUPERUSER NOBYPASSRLS owner the work items'' own policy asks it of every live refill prescription''s item and the fills'' asks it again of each item it may read, about 1.5-1.9 ms for each live refill prescription it may not read and about 3.4-3.9 ms for each it may, so the limit is reached at about 1,800 or about 800 of them; under an owner that bypasses row-level security only of the due items until 200 pass. VOLATILE, and needs a transaction that may write.';
 
 -- 7. Post-checks (still under the locks).
 do $$

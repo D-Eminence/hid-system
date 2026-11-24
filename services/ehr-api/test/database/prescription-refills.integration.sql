@@ -38,7 +38,8 @@
 --      duration is how long one fill lasts; R8 exactly and who may execute
 --      it (the two runtimes that may write prescriptions); R9's table, test
 --      and policy exactly, the policy the last read policy by name and 0143's
---      prescriptions_scan_my_orders the one before it;
+--      prescriptions_scan_my_orders the one before it; R7's comment giving
+--      its cost for own-work sessions and for sessions on consent alone;
 --   2. fills 1 to 1 + N pass for N = 0, 1, 2 and 11, and fill N + 2 is
 --      refused NO_REFILLS_LEFT; null refills_allowed is one fill; the
 --      claim's dispensed_at stays the first fill's;
@@ -416,6 +417,21 @@ begin
     || 'acl=PUBLIC:EXECUTE | policy cmd=r permissive=t roles=t qual=98487317d1007ee3de2a0b8b5055f317 check=f | '
     || 'read policies after it=0 | the two last by name=prescriptions_scan_my_orders,prescriptions_scan_refills | '
     || 'hid_ members of the owner=0');
+  -- 1m. R7's comment gives its cost for both kinds of session that may read
+  -- the work items (the review of 24 November 2026, fifth round): one on the
+  -- own-work basis (a pharmacist, about 0.15 ms per live refill
+  -- prescription) and one that may read only on consent (a clinician or a
+  -- nurse, which pays the consent test, about 1.5 to 3.9 ms per live refill
+  -- prescription, measured in 0152's header); the first figure alone was
+  -- given for both before.
+  perform pg_temp.expect('1m R7''s comment gives its cost for own-work sessions and for sessions on consent alone',
+    (select format('own-work=%s consent=%s',
+              (position('For a session on the own-work basis (a pharmacist) about 0.15 ms per live refill prescription'
+                        in description) > 0)::text,
+              (position('A session that may read only on consent (a clinician or a nurse: pharmacy.work-item.read '
+                        || 'without pharmacy.order-route.receive) pays the consent test instead' in description) > 0)::text)
+       from obj_description('pharmacy.open_refill_work_items()'::regprocedure, 'pg_proc') description),
+    'own-work=true consent=true');
 end $$;
 
 -- Fixtures. Organization O (e1520000...01) with facility F1 "Refills Test
