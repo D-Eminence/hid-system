@@ -7529,7 +7529,7 @@ Deploying: an image without these routes answers `404 NOT_FOUND` before any
 check, and ehr-api then asks that service once per patient on the
 one-patient route: at most 6 one-patient calls at once for the page, across
 both kinds, when the caller passes one `OwnProgressSlots` to both (as
-"Ordered by me" is to); otherwise at most 6 at once for each call of
+"Ordered by me" does); otherwise at most 6 at once for each call of
 `pharmacyForPatients` or `labForPatients`. An ehr-api without this change
 keeps calling the one-patient routes, which do not change. Either image may
 be deployed, or rolled back, first.
@@ -7563,9 +7563,9 @@ the lab fields above (`status`, `receivedAt`, `collectedAt`, `lastResultAt`).
   because of it.
 
 ehr-api asks once per page (at most 100 ids per call), after its own read
-and audit, with the clinician's own credentials. "Ordered by me" (MY-1) is
-to ask with the several-patient form, one call per kind for its page (its
-switch lands with MY-1). Nothing else in these answers changes.
+and audit, with the clinician's own credentials. "Ordered by me" (MY-1) asks
+with the several-patient form, one call per kind for its page. Nothing else
+in these answers changes.
 
 Screen change (Akos frontend branch): show `ownProgress` on each order row,
 for example "Received 10:40", "Dispensed 11:05", "Sample taken 09:30",
@@ -11751,9 +11751,13 @@ works), and one sent with a different `since` is 400 `INVALID_CURSOR`.
 
 - `display`: the stored test or medicine name. `priority`: the lab request's;
   a prescription's 0125 priority when set, else `null`.
-- `ownProgress`: ORD-3's shapes and statuses, asked once per patient and kind
-  on the page (audited by ORD-3 as today), at most 6 calls at once and all
-  within 4 seconds; whatever has not answered by then is `unknown`.
+- `ownProgress`: ORD-3's shapes and statuses, asked once per kind for the
+  page with ORD-3's several-patient form (both kinds at once; audited per
+  patient by ORD-3), all within 4 seconds; a patient Identity refused or
+  could not check, and whatever has not answered by then, is `unknown`.
+  Against a pharmacy-api or lab-api without that form (`404`), ehr-api asks
+  once per patient and kind, at most 6 at once across the page, within the
+  same 4 seconds.
 - `orderRoute`: the order's route summary (sections 21-24), `null` when it
   was read and there is none, and left out when it could not be read.
 - `patient`: the waiting-list card (EHR-C7); never a full Health ID.
