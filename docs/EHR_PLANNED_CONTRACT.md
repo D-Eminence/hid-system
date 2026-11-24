@@ -1940,8 +1940,10 @@ exist and will not be built (owner decision Q124 A, 19 Nov 2026).
 ### Routes
 
 ehr-api `ehr/terminology/`. `X-Facility-Id` is required, and there is no
-purpose header (no patient data). `q` follows the ORD-7 rules: no Health ID
-or NIN shapes, never logged.
+purpose header: neither route reads a patient's record or returns a patient
+id (the recent list's `display` is the clinician's own text, which may name
+a patient). `q` follows the ORD-7 rules: no Health ID or NIN shapes, never
+logged.
 
 | Method and path | Who may call | Permission |
 | --- | --- | --- |
@@ -2009,8 +2011,9 @@ facility, newest first. `limit` is 1-50, default 20.
   written in the same transaction as a diagnosis with a code this member
   saves, and a save may skip it while the diagnosis still saves: when
   another save of the same membership, or of a membership whose id has
-  the same `hashtext` value (even at another facility), is recording at
-  that moment, or when the record fails (the second slice, below).
+  the same `hashtext` value (even at another facility), has recorded a
+  pick in a transaction that is still open, or when the record fails (the
+  second slice, below).
 - It holds **no patient id**, so it stays usable after a grant ends. Its
   display is the clinician's own text, which may name a patient.
 - Picks are kept as saved across an ICD-11 release switch: a code the new
@@ -2356,13 +2359,22 @@ live table is altered.
   `display` as saved, the old title included. 0151 is not changed for
   this.
   - **Booked:** the `codeStatus` slice, which alters `ehr.diagnoses`
-    anyway, replaces `ehr.recent_diagnoses` (`create or replace`; no grant
-    is needed: the function keeps its owner and grants, and one owner, the
-    migration owner, owns the recent table, `ehr.catalog_versions` and
-    `ehr.catalog_diagnoses`). The new read returns the active release's
-    current title with an in-list flag, or leaves dropped codes out, and
-    the database suite gains a case for a release switch. That slice
-    ships before any second ICD-11 release is loaded.
+    anyway, replaces the read, `ehr.recent_diagnoses`, so that it returns
+    the active release's current title, with an in-list flag, or leaves
+    dropped codes out, and the database suite gains a case for a release
+    switch. That slice ships before any second ICD-11 release is loaded.
+    - Returning the current title, or leaving dropped codes out, keeps the
+      read's columns, so `create or replace` keeps its owner and grants
+      and no grant is needed (one owner, the migration owner, owns the
+      recent table, `ehr.catalog_versions` and `ehr.catalog_diagnoses`).
+      The new definition restates SECURITY DEFINER and its `search_path`,
+      which `create or replace` would otherwise drop.
+    - An in-list flag is a new column, which `create or replace` refuses
+      ("cannot change return type of existing function"). So the read is
+      then dropped and made again, with EXECUTE granted again to the EHR
+      runtime and the schema test runtime (in that migration and in
+      `runtime-grants.sql`) and checked again by its post-checks, or the
+      flag goes in a new function.
   - No second ICD-11 release can go live until the clinical lead signs a
     WHO update: nothing is loaded until the lead signs the release file's
     seed in `docs/codes/catalog-approvals.json` (the first slice, above;

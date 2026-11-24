@@ -119,12 +119,14 @@ export class DiagnosesService {
    * ORD-9 (0151): the member's recent diagnoses, written in the save's own
    * transaction (the route's and EHR-C5's consultation's). It is a
    * best-effort side record. What it guarantees: the record never waits for
-   * another save of the same membership (it skips the record while one, or
-   * a membership whose id has the same hashtext value, holds the recording
-   * lock). It reads the auth role tables (auth.membership_has_permission),
-   * so a DDL lock there can hold the save at the record up to the statement
-   * timeout (15 s, DatabaseService's pool), after which the error (57014) is
-   * rolled back to the savepoint as below and the save goes on.
+   * another save of the same membership (it skips the record while another
+   * open transaction of the membership, or of a membership whose id has the
+   * same hashtext value, holds the recording lock, which lasts to the end of
+   * that transaction). It reads the auth role tables
+   * (auth.membership_has_permission), so a DDL lock there can hold the save
+   * at the record up to the statement timeout (15 s, DatabaseService's
+   * pool), after which the error (57014) is rolled back to the savepoint as
+   * below and the save goes on.
    * ehr.record_recent_diagnosis records only for a membership holding
    * ehr.diagnosis.write at the session's facility, and nothing with no code;
    * it holds no patient id (its display is the clinician's own text, which
