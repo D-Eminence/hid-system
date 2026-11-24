@@ -27,19 +27,28 @@ PROTECT_POOL = 4
 ROLLOUT_POLL_SECONDS = 5
 SKIPPED_PLAN_AFTER = "PLAN_BEFORE_FOUND_ZERO_PENDING"
 # ORD-7's governed catalogue load, opt-in (CATALOG_LOAD): the signed seed files where the migration image carries
-# them (services/ehr-api/Dockerfile copies them by name to /app/docs/codes), and the loader's two kinds of last line:
-# its evidence line when it loaded (exit 0), its one line when it loaded nothing (a refusal, exit 2, or a failure).
+# them (services/ehr-api/Dockerfile copies them by name to /app/docs/codes), and the loader's three kinds of last line:
+# its evidence line when it loaded (exit 0), its one line when it loaded nothing (a refusal, exit 2, or a failure),
+# and its line when the connection was lost once its COMMIT was sent (exit 1): the version may have committed.
 CATALOG_SEEDS = {"medicine":"/app/docs/codes/hid-medicines.json","lab_test":"/app/docs/codes/hid-lab-tests.json"}
 CATALOG_LOADED = re.compile(r'\{"status":"loaded",.*\}')
 CATALOG_NOT_LOADED = re.compile(r"load-catalog: .*; nothing loaded(?:; run the release again at a quieter time)?")
+CATALOG_COMMIT_UNKNOWN = re.compile(re.escape("load-catalog: the connection was lost during commit, so the load may have "
+    "committed; ask for the same load again to settle it (it loads, or is refused as already loaded)"))
+CATALOG_LAST_LINE = re.compile(CATALOG_NOT_LOADED.pattern+"|"+CATALOG_COMMIT_UNKNOWN.pattern)
+OUTCOME_UNKNOWN = "outcome unknown"
 EVIDENCE_PENDING = "evidence pending"
 EVIDENCE_LINE_MISSING = "evidence line missing"
 EVIDENCE_UNREADABLE = "evidence unreadable"
 # The operator's next step after a failure that follows a load: the loaded version stays loaded and asking for it again
-# is refused. An unreconciled release (the lease lost, or a rollback that could not be confirmed) is reconciled first.
+# is refused. After a load whose outcome is unknown, the same load is asked for again, which settles it: it loads, or
+# it is refused as already loaded. An unreconciled release (the lease lost, or a rollback that could not be confirmed)
+# is reconciled first.
 NEXT_AFTER_LOAD = "dispatch the release again with catalog_load none"
-NEXT_AFTER_LOAD_UNRECONCILED = ("reconcile this release first (it ended unreconciled and keeps the deployment lease), "
-                                "then dispatch the release again with catalog_load none")
+RECONCILE_FIRST = "reconcile this release first (it ended unreconciled and keeps the deployment lease), then "
+NEXT_AFTER_LOAD_UNRECONCILED = RECONCILE_FIRST+NEXT_AFTER_LOAD
+NEXT_AFTER_UNKNOWN = ("dispatch the release again with catalog_load {} to settle it (it loads, or is refused as already "
+                      "loaded; once refused, dispatch again with catalog_load none)")
 PHASES = frozenset({"approval","lease","snapshot-before","receipt-started","migration","catalog","register-services",
     "rollout-services","register-gateway","rollout-gateway","snapshot-after","index-and-receipt","notify",
     "rollback-rollout","rollback-snapshot","rollback-index"})
@@ -468,7 +477,9 @@ class ECS:
         sha256 from the checkout, "evidence pending"), before its log is read. Then its evidence line replaces that
         entry; without one, the entry says "evidence line missing" and the release stops with
         CATALOG_LOAD_EVIDENCE_MISSING; if the log cannot be read (throttling, the lease check), it says "evidence
-        unreadable" and the release stops with that error."""
+        unreadable" and the release stops with that error. A loader whose last line says the connection was lost
+        during its commit may have loaded: the checks name the seed as "outcome unknown" (kind, version and sha256
+        from the checkout) and the release stops with CATALOG_LOAD_OUTCOME_UNKNOWN."""
         self.catalog_checks = []
         for kind, seed in seeds.items():
             self.lease.assert_owned()
@@ -508,7 +519,15 @@ class ECS:
                 self.catalog_checks[-1] = outcome
                 continue
             # Any other exit: the loader's last line (its refusal or failure line, else whatever it printed last).
-            line, last = self.catalog_line(task_arn,CATALOG_NOT_LOADED)
+            line, last = self.catalog_line(task_arn,CATALOG_LAST_LINE)
+            if line is not None and CATALOG_COMMIT_UNKNOWN.fullmatch(line):
+                # The connection was lost once the loader's COMMIT was sent: the version may have committed. The checks
+                # (and the failed receipt) name the seed so; asking for the same load again settles it.
+                self.catalog_checks.append({"kind":kind,"status":OUTCOME_UNKNOWN,"version":seed["version"],
+                                            "file_sha256":seed["file_sha256"]})
+                print(json.dumps({"release_id":release_id,"catalog_load":OUTCOME_UNKNOWN,"kind":kind,"exit_codes":codes,
+                    "message":line}), flush=True)
+                raise ReleaseError("CATALOG_LOAD_OUTCOME_UNKNOWN")
             refused = 2 in codes
             print(json.dumps({"release_id":release_id,"catalog_load":"refused" if refused else "failed","kind":kind,
                 "exit_codes":codes,"message":line if line is not None else last}), flush=True)
@@ -685,7 +704,8 @@ def deploy(mode="deploy", rollback_id=None):
                 store.put(receipt_key+"failed.json",{"schema":"hid.release-receipt/v1","kind":"backend",
                     "status":"failed-rolled-back","error_code":str(error) if isinstance(error,ReleaseError) else "CONTROLLER_FAILED",
                     "before":previous,"after":after,
-                    # A catalogue version loaded before the failure stays loaded (each seed is its own transaction).
+                    # A catalogue version loaded before the failure stays loaded (each seed is its own transaction);
+                    # a seed whose commit lost its connection is named with its outcome unknown.
                     **({"catalog_checks":ecs.catalog_checks} if ecs.catalog_checks else {})})
                 reconciled = True
                 phases.mark("rollback-index")
@@ -694,12 +714,18 @@ def deploy(mode="deploy", rollback_id=None):
                 reconciled = False
         if not started: reconciled = True
         try:
-            loaded = [{"kind":k["kind"],"version":k["version"]} for k in (ecs.catalog_checks or []) if k.get("status") == "loaded"]
-            if loaded:
-                # The runbook (planned contract, ORD-7): a loaded version stays loaded and loading it again is refused.
-                # Unreconciled (the lease lost, or a rollback that could not be confirmed), the release is reconciled first.
-                print(json.dumps({"release_id":candidate["release_id"],"catalog_loaded_before_failure":loaded,
-                    "next":NEXT_AFTER_LOAD if reconciled else NEXT_AFTER_LOAD_UNRECONCILED}), flush=True)
+            checks = ecs.catalog_checks or []
+            loaded = [{"kind":k["kind"],"version":k["version"]} for k in checks if k.get("status") == "loaded"]
+            unknown = [{"kind":k["kind"],"version":k["version"]} for k in checks if k.get("status") == OUTCOME_UNKNOWN]
+            if loaded or unknown:
+                # The runbook (planned contract, ORD-7): a loaded version stays loaded and loading it again is refused;
+                # a load whose outcome is unknown is asked for again (only that seed), which settles it. Unreconciled
+                # (the lease lost, or a rollback that could not be confirmed), the release is reconciled first.
+                step = NEXT_AFTER_UNKNOWN.format(",".join(k["kind"] for k in unknown)) if unknown else NEXT_AFTER_LOAD
+                print(json.dumps({"release_id":candidate["release_id"],
+                    **({"catalog_loaded_before_failure":loaded} if loaded else {}),
+                    **({"catalog_outcome_unknown":unknown} if unknown else {}),
+                    "next":step if reconciled else RECONCILE_FIRST+step}), flush=True)
         except Exception: pass
         try: notify(aws,candidate,"failed-rolled-back" if reconciled and started else "reconciliation-required")
         except Exception: pass
