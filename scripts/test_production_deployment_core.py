@@ -235,7 +235,7 @@ class CoreTests(unittest.TestCase):
             with self.assertRaisesRegex(c.ReleaseError,'RUNTIME_GRANTS_NEED_A_MIGRATION'): c.schema_contract(root,[grants])
             declare(migration,suite)
             # A suite is never part of the schema change, so declaring one is still refused.
-            with self.assertRaisesRegex(c.ReleaseError,'EXACT_SCHEMA_CHANGE_DECLARATION_REQUIRED'):
+            with self.assertRaisesRegex(c.ReleaseError,'SCHEMA_DECLARATION_BEYOND_RELEASED_BASE'):
                 c.schema_contract(root,[migration,suite])
 
     def test_schema_ignores_database_test_suites_that_change_with_a_migration(self):
@@ -252,7 +252,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(c.migration_files(contract),[migration])
             self.assertEqual(c.schema_contract(root,[suite]),{'changed':False})
             other='services/ehr-api/database/seed.sql'; (root/other).write_text('select 2;')
-            with self.assertRaisesRegex(c.ReleaseError,'EXACT_SCHEMA_CHANGE_DECLARATION_REQUIRED'):
+            with self.assertRaisesRegex(c.ReleaseError,'SCHEMA_DECLARATION_MISSES_THIS_PUSH_CHANGE'):
                 c.schema_contract(root,[migration,suite,other])
 
     def test_schema_carries_only_a_complete_reviewed_declaration_when_the_diff_has_no_schema_change(self):

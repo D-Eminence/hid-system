@@ -35,6 +35,7 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       has_changes: ${{ steps.matrix.outputs.has_changes }}
+      released_base: ${{ steps.matrix.outputs.released_base }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -297,6 +298,12 @@ jobs:
         id: candidate
         env:
           SELECTED_COMPONENTS: ${{ needs.select.outputs.matrix }}
+          # Two bases: this push's change (the push's before, HEAD^ for a dispatch) must be
+          # declared, and the declaration may also name files earlier pushes left pending
+          # since the select job's released base (the last run that deployed), each a new
+          # file since then; production's plan then binds the declaration to what is pending.
+          # With no released base (a dispatch, an API error) the push's before is the only base.
+          RELEASED_BASE_SHA: ${{ needs.select.outputs.released_base }}
           EVENT_BASE_SHA: ${{ github.event.before }}
         run: |
           export BASE_SHA="${EVENT_BASE_SHA:-$(git rev-parse HEAD^)}"
