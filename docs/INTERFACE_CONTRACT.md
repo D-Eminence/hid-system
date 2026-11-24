@@ -5347,6 +5347,8 @@ per role:
 | `pharmacy@healthidentitydirectory.com` | pharmacist at QA Pharmacy |
 | `admin@healthidentitydirectory.com` | org_admin at QA Hospital, QA Laboratory and QA Pharmacy |
 | `outreach@healthidentitydirectory.com` | no membership: starts the QA Outreach group |
+| `frontdesk@healthidentitydirectory.com` | receptionist (front desk) at QA Hospital; added by 0151 (QA-2, below) |
+| `nurse@healthidentitydirectory.com` | nurse at QA Hospital; added by 0151 (QA-2, below) |
 
 Two patient logins: `patient1@healthidentitydirectory.com` (`HID-ZQAAAAA2`, QA
 Patient One) and `patient2@healthidentitydirectory.com` (`HID-ZQAAAAA3`, QA Patient
@@ -11013,6 +11015,57 @@ gain a second membership, at QA Hospital (pharmacist and lab roles; not
 primary). Pick QA Hospital when signing in. Written only where 0123 installed
 the sealed QA tenant (Amazon RDS: production and staging); on every other
 database (CI, acceptance, rehearsals) nothing is written. No API change.
+
+## QA-2. QA Hospital front desk and nurse logins (sealed QA only; migration 0151; not live until signed)
+
+Owner decision of 24 November 2026, verbatim: "Q141 B and add front-desk or
+nurse login" (0150 is the Q141 B part), then "yes both receive mail" for
+`frontdesk@healthidentitydirectory.com` and `nurse@healthidentitydirectory.com`,
+then "go ahead". A QA facility administrator cannot invite a new login
+(section 52's known limits), so 0151
+(`0151_sealed_qa_front_desk_and_nurse_logins.sql`) seeds both exactly as 0123
+seeded its seven staff logins:
+
+| Login | Name | Role | Account, staff record, membership |
+| --- | --- | --- | --- |
+| `frontdesk@healthidentitydirectory.com` | QA Front Desk | receptionist at QA Hospital | `c0a00003-…0008`, `c0a00004-…0008`, `c0a00005-…0081` |
+| `nurse@healthidentitydirectory.com` | QA Nurse | nurse at QA Hospital | `c0a00003-…0009`, `c0a00004-…0009`, `c0a00005-…0091` |
+
+- Each is a sealed QA account (`identity.sealed_qa_members`), `pending_reset`
+  with no password (none is in any file), its email verified, with a verified
+  staff record and exactly one membership (QA Hospital, primary) and one
+  facility role (the membership's id, as 0123's). No platform role.
+- What each can do is its role's codes, unchanged: the receptionist's 17 as
+  0136 C1 leaves them (scan paper records and start and follow its own
+  readings, vitals read, registration, consent, encounters, outreach) and the
+  nurse's 38 as Release C and 0150 leave them. 0151 pins both lists (md5) and
+  refuses if either differs. Both sign in on `ehr.` (and `migrate.`), like
+  every hospital role (section 53).
+- The seal (section 52) holds: neither can be given a membership at a real or
+  demo facility (42501 `SEALED_QA_MEMBERSHIP_REFUSED`) or a platform role
+  (42501 `SEALED_QA_PLATFORM_ROLE_REFUSED`); at QA Hospital they read QA
+  patients only.
+- Written only where 0123 installed the sealed QA tenant (QA Hospital is a QA
+  facility: Amazon RDS, production and staging). On every other database (CI,
+  acceptance, rehearsals) nothing is written, not even an audit row, and a
+  NOTICE says so.
+- Refused (55000, nothing written, the release stops) when either address
+  belongs to another account (not deleted) or staff record, is the first
+  administrator of an open organization application or the invitee of a
+  pending staff invitation, any case (`0151: SEALED_QA_ADDRESS_TAKEN`, 0123's
+  rule), or when a fixed id is held by another row
+  (`0151: SEALED_QA_ID_TAKEN`). A second run answers `0151: already applied`.
+- One audit row per login: `identity.sealed-qa.staff-login-add`, the system
+  actor, resource `staff-membership` (the membership id), facility QA
+  Hospital, correlation id `0151-sealed-qa-front-desk-nurse`; no account,
+  address, name, organization or patient.
+- Activation, by the owner, for each address: on `ehr.healthidentitydirectory.com`
+  (staging: `ehr.staging.healthidentitydirectory.com`) choose Forgot password,
+  enter the address, enter the code from the reset email that arrives in that
+  mailbox and choose a password; sign in and pick QA Hospital. The live
+  recovery hold applies as for any login (section 52).
+- No function, policy, grant, role or table changes; `runtime-grants.sql` is
+  unchanged. No API change.
 
 
 ## ID-6. Verify a NIN later and link it (Release B, migration 0138; not live until signed)
