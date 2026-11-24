@@ -56,7 +56,9 @@ describe('Akos\'s role table against today\'s role rows (SX-1)', () => {
 
   // Owner decision Q137 B (0147): the two narrow roles are no column of the
   // table; each holds exactly the codes 0136 took from the roles it is held
-  // beside, and nothing else.
+  // beside, and nothing else. Owner decision Q141 B (0150) gives the doctor
+  // role ocr.job.start again, so reading_starter's one code is now the
+  // doctor's own too (the role stays as 0147 made it); nothing else overlaps.
   it('pins the narrow roles of Q137 B, which are no column and hold only what 0136 took', () => {
     expect(FIXTURE.narrowRoles.roles.map((narrow) => [narrow.code, narrow.label, narrow.besides])).toEqual([
       ['work_list_reader', 'Lab and pharmacy work lists', ['admin', 'doctor']],
@@ -66,7 +68,8 @@ describe('Akos\'s role table against today\'s role rows (SX-1)', () => {
       expect(ROLES).not.toContain(narrow.code);
       expect(permissionsOf(narrow.code)).toEqual(FIXTURE.todayRolePermissions[narrow.code]);
       for (const role of narrow.besides) {
-        expect(permissionsOf(role).filter((code) => permissionsOf(narrow.code).includes(code))).toEqual([]);
+        const sinceQ141B = narrow.code === 'reading_starter' && role === 'doctor' ? ['ocr.job.start'] : [];
+        expect(permissionsOf(role).filter((code) => permissionsOf(narrow.code).includes(code))).toEqual(sinceQ141B);
       }
     }
     expect(permissionsOf('work_list_reader')).toEqual(['lab.work-item.read', 'pharmacy.work-item.read']);

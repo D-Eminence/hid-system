@@ -9171,7 +9171,7 @@ else (the nurse role gives `ocr.job.start`), and is undone by a row.
 | Role | Before 0136 | After 0136 |
 | --- | --- | --- |
 | `receptionist` (front desk) | none of these | `ehr.document.write`, `ehr.document.read-own`, `ocr.job.write`, `ocr.job.start`, `ocr.job.read-own`, `ehr.vital.read`. Not `ehr.document.read`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write` |
-| `doctor` | `ocr.job.write`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write`; `outreach.campaign.read`, `outreach.campaign.write`, `outreach.registration.read`, `outreach.registration.write`; `lab.work-item.read`, `pharmacy.work-item.read` | `ocr.job.write`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write` (all kept, Q111 A); no `ocr.job.start`; no Outreach code; neither work list |
+| `doctor` | `ocr.job.write`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write`; `outreach.campaign.read`, `outreach.campaign.write`, `outreach.registration.read`, `outreach.registration.write`; `lab.work-item.read`, `pharmacy.work-item.read` | `ocr.job.write`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write` (all kept, Q111 A); no `ocr.job.start`; no Outreach code; neither work list (0150, Q141 B, gives every doctor `ocr.job.start` again) |
 | `nurse` | `ocr.job.write`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write` | the same, plus `ocr.job.start` |
 | `clinician` | the same as the nurse | the same, plus `ocr.job.start` |
 | `lab` | `ehr.encounter.read`, `ocr.job.read`, `ocr.job.write`, `ocr.validation.write` | none of these |
@@ -9461,6 +9461,61 @@ amendment on #258, for the owner to confirm at signing.
     them out there is a follow-up.
 - **Undo:** mark both roles inactive (`auth.roles.active = false`); every
   member is back where 0136 left them from their next request.
+
+## 0150. Q141 B: every doctor starts paper readings again (migration 0150; not live until signed)
+
+Owner decision, verbatim (24 November 2026): "Q141 B and add front-desk or
+nurse login". 0150 is the "Q141 B" part only. It reverses one part of
+Q111 A as 0136 applied it: 0136 did not give doctors the new code
+`ocr.job.start` (its C4), so since Release A a doctor checks readings and
+confirms their patient but cannot start or retry one. 0136's line 21 counted
+1 such doctor at real facilities, whom 0147 (Q137 B) gave the narrow role
+`reading_starter`. Q141 B gives the code back to the `doctor` role itself.
+
+| Role code | Before 0150 | After 0150 |
+| --- | --- | --- |
+| `doctor` | `ocr.job.write`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write`; no `ocr.job.start` | the same, plus `ocr.job.start` |
+
+- **Who:** every doctor, at every facility (the sealed demo and QA tenants'
+  fictional doctors too), from the doctor's next request; nobody is signed
+  out. Every file and reading still needs the patient's access (a consent
+  grant, or records processing), as for anyone else.
+- **What the doctors see:** `POST /ocr/jobs` and `POST /ocr/jobs/:jobId/retry`
+  (which ask for `ocr.job.write` and `ocr.job.start`, unchanged since 0136)
+  answer as for a nurse instead of 403, and the session's `permissions` list
+  `ocr.job.start`. The websites already offer starting and retrying a reading
+  to anyone holding `ocr.job.write` (the EHR's scanned-record workspace, the
+  OCR app), so for doctors those actions, which answered 403 since Release A,
+  work again. No route, answer shape, website or service image changes.
+- **Unchanged:** everything else 0136 left doctors (no Outreach code, neither
+  work list; they keep `lab.work-item.accept`, the order reads and the OCR
+  checking codes); every other role's rows; 0147's two narrow roles, their
+  rows and their assignments (the counted doctor holds the code through both
+  roles, which changes nothing; SX-4 still revokes `reading_starter` with
+  `doctor`). No function, policy or grant changes, so `runtime-grants.sql` is
+  unchanged.
+- **Rows:** one `auth.role_permissions` row (`doctor`, `ocr.job.start`) and
+  one audit row: system actor, `auth.role-permission.add`, resource
+  `role-permission` `doctor/ocr.job.start`, reason "Owner decision Q141 B (24
+  November 2026): every doctor starts paper readings again", no account,
+  membership, facility or patient.
+- **Safety:** locks first, NOWAIT (SHARE ROW EXCLUSIVE on
+  `auth.role_permissions`, ROW EXCLUSIVE on `audit.events`, ROW SHARE on the
+  tables the two rows' foreign keys reference), retried for about 5 seconds,
+  or refused at once inside the runner's dry run when an earlier file holds
+  locks; both busy refusals are 55P03 starting `0150: `, which the dry run
+  retries (#306). Preconditions (55000, nothing applied): 0001-0149 applied;
+  the doctor's 35 codes exactly as Release C leaves them (md5-pinned);
+  `ocr.job.start` held by exactly `clinician`, `nurse`, `reading_starter` and
+  `receptionist`; `auth.membership_has_permission` as Release C leaves it
+  (md5-pinned). A second run answers `0150: already applied`. Post-checks:
+  the doctor's codes are the pinned ones plus `ocr.job.start`, no other row
+  changed, one audit row.
+- **Undo:** take the one row back out of `auth.role_permissions` (a
+  migration only if the owner signs it); doctors are then back where 0136 and
+  0147 left them from their next request.
+- **Not in 0150:** the front-desk and nurse logins at QA Hospital (the second
+  half of the owner's message) are a separate change.
 
 ## ORD-2. This facility's own pharmacy and lab work; prescriptions sent to the hospital's own pharmacy (Akos Release A, migration 0133)
 

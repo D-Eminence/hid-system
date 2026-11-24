@@ -399,10 +399,26 @@ try {
     [{ id: ocrWorkerSeed.role, role_code: 'ocr_worker', scope_type: 'platform', membership_id: null, facility_id: null,
       granted_by: null, revoked_at: null }], 'Migration 0106 must add exactly its declared OCR worker role');
   });
+  // Migration 0150 (owner decision Q141 B) writes exactly one audit row, the
+  // system actor's auth.role-permission.add for doctor/ocr.job.start; every
+  // historical audit row is unchanged.
+  await withClient('hid_upgrade', async client => {
+    await client.query("set timezone = 'UTC'");
+    const kept = (await client.query(`select to_jsonb(t)::text as value from audit.events t
+      where correlation_id <> '0150-doctors-start-readings-q141b' order by to_jsonb(t)::text collate "C"`)).rows;
+    assert.deepEqual({ rows: kept.length, sha256: sha256(kept.map(row => row.value).join('\n')) },
+      upgradeBefore['audit.events'], 'Upgrade changed a historical audit.events row');
+    assert.deepEqual((await client.query(`select actor_type, action, outcome, resource_type, resource_id, provenance,
+        source_system, actor_account_id, facility_id, patient_id
+      from audit.events where correlation_id = '0150-doctors-start-readings-q141b'`)).rows,
+    [{ actor_type: 'system', action: 'auth.role-permission.add', outcome: 'success', resource_type: 'role-permission',
+      resource_id: 'doctor/ocr.job.start', provenance: 'migration', source_system: 'hid-0150', actor_account_id: null,
+      facility_id: null, patient_id: null }], 'Migration 0150 must write exactly its one audit row');
+  });
   const expectedChanged = new Set([
     'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
     'auth.permissions', 'auth.role_permissions', 'identity.purpose_of_use_codes', 'auth.roles',
-    'auth.accounts', 'auth.account_roles',
+    'auth.accounts', 'auth.account_roles', 'audit.events', 'sequence:audit.events_sequence_id_seq',
   ]);
   for (const [name, value] of Object.entries(upgradeBefore)) {
     if (!expectedChanged.has(name)) assert.deepEqual(upgradeAfter[name], value, `Upgrade changed historical ${name}`);
