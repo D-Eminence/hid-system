@@ -334,6 +334,26 @@ describe('MY-1: GET /ehr/my-orders', () => {
     expect(typeof (progress.labForPatients.mock.calls[0]![2] as Told).onAnswer).toBe('function');
   });
 
+  it('an answer told after the deadline does not change the progress the page was given', async () => {
+    const { service, progress } = harness();
+    service.progressDeadlineMs = 20;
+    type Told = { onAnswer?: (id: string, value: unknown) => void };
+    let tell: Told['onAnswer'];
+    // The pharmacy never ends, and tells its answer only once the page has stopped waiting.
+    progress.pharmacyForPatients.mockImplementation(async (_context: unknown, _patients: unknown, options?: unknown) => {
+      tell = (options as Told).onAnswer;
+      return new Promise<Map<string, unknown>>(() => undefined);
+    });
+    // The map list() reads its items from, as ownProgress hands it over at the deadline.
+    const ownProgress = (service as unknown as { ownProgress: (context: DataAccessContext, rows: unknown[]) =>
+      Promise<Map<string, { status: string }>> }).ownProgress.bind(service);
+    const given = await ownProgress(context(BOTH), [row({})]);
+    expect(given.get('123e4567-e89b-42d3-a456-426614174101')?.status).toBe('unknown');
+    tell!('123e4567-e89b-42d3-a456-426614174101', { status: 'dispensed', receivedAt: null, acceptedAt: null,
+      dispensedAt: null, reversedAt: null });
+    expect(given.get('123e4567-e89b-42d3-a456-426614174101')?.status).toBe('unknown');
+  });
+
   it('each page has slots and a signal of its own (nothing is kept between pages)', async () => {
     const { service, progress } = harness();
     await service.list(context(BOTH), query(), now);
