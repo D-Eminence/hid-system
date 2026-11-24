@@ -12,7 +12,9 @@
 // Every coded entry is kept but extension codes (X...) and the two
 // supplementary parts that are not diagnoses for a clinician's picker
 // (LEFT_OUT_CHAPTERS); blocks and chapters have no code and are left out. Our other names are kept apart from WHO's
-// words, and only where they name a coded title.
+// words, and only where they name a coded title. A title with accented letters also gets its plain-letter spelling
+// as one of our other names ("Sjogren syndrome" for "Sjögren syndrome"; Ola, clinical owner), so a search typed
+// without the accents finds it; the title itself is never changed.
 import { inflateRawSync } from 'node:zlib';
 import { SEED_FORMAT } from './catalog-seed.mjs';
 
@@ -113,28 +115,46 @@ export function parseTabulation(text) {
 /** WHO's title without the tabulation's indent marks ("- - - Cholera" is "Cholera"). */
 export const verbatimTitle = (title) => title.replace(/^(- )+/, '');
 
+/** A TypeScript string literal's text: '...' or "...", with its backslash escapes of quotes and backslashes read. */
+const literalText = (single, double) => (single ?? double).replace(/\\(['"\\])/g, '$1');
+
 /**
  * Our own other names from ocr-worker's diagnosis-list.ts: DIAGNOSIS_SYNONYMS
  * maps a name to a title, ICD11_TITLES gives each title's code (null for a
- * block). Only names whose title has a code are returned, by code.
+ * block). Only names whose title has a code are returned, by code. A key or
+ * a title may be in single or double quotes (a name with an apostrophe,
+ * such as "parkinson's disease", is written in double quotes).
  */
 export function otherNamesFrom(diagnosisListSource) {
   const titles = new Map();
   for (const match of diagnosisListSource.matchAll(/\['((?:[^'\\]|\\.)*)', (?:'([^']+)'|null)\]/g)) {
-    titles.set(match[1].replace(/\\'/g, "'"), match[2] ?? null);
+    titles.set(literalText(match[1]), match[2] ?? null);
   }
   const start = diagnosisListSource.indexOf('export const DIAGNOSIS_SYNONYMS');
   const end = diagnosisListSource.indexOf('\n};', start);
   if (start === -1 || end === -1) throw new Error('diagnosis-list.ts: no DIAGNOSIS_SYNONYMS');
   const byCode = new Map();
-  for (const match of diagnosisListSource.slice(start, end).matchAll(/^\s*'((?:[^'\\]|\\.)*)': '((?:[^'\\]|\\.)*)',/gm)) {
-    const name = match[1].replace(/\\'/g, "'");
-    const code = titles.get(match[2].replace(/\\'/g, "'"));
+  const entry = /^\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"): (?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"),/gm;
+  for (const match of diagnosisListSource.slice(start, end).matchAll(entry)) {
+    const name = literalText(match[1], match[2]);
+    const code = titles.get(literalText(match[3], match[4]));
     if (!code || name.includes(';')) continue;
     byCode.set(code, [...(byCode.get(code) ?? []), name]);
   }
   for (const [code, names] of byCode) byCode.set(code, [...new Set(names)].sort());
   return byCode;
+}
+
+/**
+ * A title's plain-letter spelling: its accents taken off (each letter in its
+ * canonical decomposition, the combining marks dropped), nothing else
+ * changed; null when the title has no accented letter. "Sjögren syndrome"
+ * is "Sjogren syndrome"; a dash, a Greek letter or a no-break space stays as
+ * it is, so it gives no other name.
+ */
+export function plainLetters(title) {
+  const plain = title.normalize('NFD').replace(/[\u0300-\u036f]/g, '').normalize('NFC');
+  return plain === title ? null : plain;
 }
 
 /**
@@ -153,8 +173,10 @@ export function buildIcd11Seed(rows, { release, releaseFile, otherNames = new Ma
     if (seen.has(code)) throw new Error(`tabulation: the code ${code} appears twice`);
     seen.add(code);
     if (row.ChapterNo in LEFT_OUT_CHAPTERS) { leftOut[row.ChapterNo] += 1; continue; }
-    items.push({ code, title: verbatimTitle(row.Title), otherNames: otherNames.get(code) ?? [], chapter: row.ChapterNo,
-      residual: row.IsResidual === 'True' });
+    const title = verbatimTitle(row.Title);
+    const plain = plainLetters(title);
+    items.push({ code, title, otherNames: [...new Set([...(otherNames.get(code) ?? []), ...(plain ? [plain] : [])])].sort(),
+      chapter: row.ChapterNo, residual: row.IsResidual === 'True' });
   }
   items.sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
   const unused = [...otherNames.keys()].filter((code) => !items.some((item) => item.code === code));
