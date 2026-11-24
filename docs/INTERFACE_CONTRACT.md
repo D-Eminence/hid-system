@@ -9150,7 +9150,7 @@ a staff member's next request; nobody is signed out. Pharmacists and
 
 | Code | Gives | Held by |
 | --- | --- | --- |
-| `ocr.job.start` | starting or retrying a reading (`POST /ocr/jobs`, `POST /ocr/jobs/:jobId/retry`), together with `ocr.job.write` | receptionist, nurse, clinician |
+| `ocr.job.start` | starting or retrying a reading (`POST /ocr/jobs`, `POST /ocr/jobs/:jobId/retry`), together with `ocr.job.write` | receptionist, nurse, clinician (0147 adds `reading_starter`; 0150, Q141 B, gives it to every doctor again) |
 | `ocr.job.read-own` | following the readings of documents this login uploaded at the facility (`GET /ocr/jobs/:jobId`, `GET /ocr/jobs?documentId=`, `GET /ocr/job-list`, which then lists only the readings it started), and letting ocr-api read such a document to start its reading. Never the text: extractions, validations and publications still need `ocr.job.read` | receptionist |
 | `ehr.document.read-own` | listing and opening only the documents this login uploaded at the facility (`GET /ehr/documents`, `GET /ehr/documents/:id/download`) | receptionist |
 
@@ -9161,7 +9161,7 @@ through any role keeps the full read; the "-own" codes narrow nobody.
 run under records processing, and records processing needs `ocr.job.write` at
 each use (0104 D8, 0108, 0113), so the doctor's `ocr.job.write` row has to
 stay. Starting a reading therefore needs a second code that doctors do not
-hold. A permission row (rather than a check on the role's name in ocr-api) is
+hold (until 0150, Q141 B, gives it back to every doctor). A permission row (rather than a check on the role's name in ocr-api) is
 read the same way by every service and screen, shows in the role table the
 owner reviews, applies to a doctor who is also a nurse exactly as to anyone
 else (the nurse role gives `ocr.job.start`), and is undone by a row.
@@ -9218,7 +9218,7 @@ asserted: `admin` `identity.registration.approve`, `workforce.manage`,
 
 | Who | Routes (under `/api/v1`) |
 | --- | --- |
-| Doctor | `POST /ocr/jobs`, `POST /ocr/jobs/:jobId/retry` (no `ocr.job.start`); every Outreach route of outreach-api (campaigns, registrations, screening, exports, Health ID steps) and `GET`/`POST /identity/outreach-invitations` and its revoke; `GET /lab/work-items`, `GET /lab/work-items/:id`; `GET /pharmacy/work-items`, `GET /pharmacy/work-items/:id` |
+| Doctor | `POST /ocr/jobs`, `POST /ocr/jobs/:jobId/retry` (no `ocr.job.start`; from 0150, Q141 B, doctors hold `ocr.job.start` again and these two routes answer them as for a nurse); every Outreach route of outreach-api (campaigns, registrations, screening, exports, Health ID steps) and `GET`/`POST /identity/outreach-invitations` and its revoke; `GET /lab/work-items`, `GET /lab/work-items/:id`; `GET /pharmacy/work-items`, `GET /pharmacy/work-items/:id` |
 | Laboratory staff | `GET /ehr/patients/:patientId/encounters`, `.../encounters/open-today`, `.../encounters/:encounterId`; every `ocr/*` route (`ocr/jobs`, `ocr/job-list`, validations, extractions) |
 | Hospital administrator | `GET /lab/work-items`, `GET /lab/work-items/:id`; `GET /pharmacy/work-items`, `GET /pharmacy/work-items/:id` |
 | Front desk | `GET /ocr/jobs/:jobId/extractions`, `GET /ocr/jobs/:jobId/validations`, `GET /ocr/validations/:validationId/publications`, `POST /ocr/jobs/:jobId/validation(s)`, `POST /ocr/jobs/:jobId/patient-confirmation`, `POST /ocr/validations/:validationId/publications`, and every note, diagnosis, prescription and lab-request read |
@@ -9366,7 +9366,7 @@ with OCR", the job list) and vitals to the front desk, with the document and
 reading lists showing its own uploads only (`ehr.document.read-own`,
 `ocr.job.read-own`) and no extracted text, checking or publishing; show "start
 reading" only to staff holding `ocr.job.start` (front desk, nurses,
-clinicians), and keep doctors' "check reading" and "confirm patient" (they
+clinicians; from 0150, Q141 B, doctors too), and keep doctors' "check reading" and "confirm patient" (they
 hold `ocr.job.write` and `ocr.validation.write`); hide the Laboratory and
 Pharmacy department pages (work list, results, prescriptions) from doctors
 and administrators; hide Outreach from doctors; hide visits and the Migrate
