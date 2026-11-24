@@ -42,6 +42,13 @@ const vitalsSwitchValue = (calls: Call[]) => {
   const parameter = VITALS_SWITCH.exec(settings.sql);
   return parameter ? settings.values[Number(parameter[1]) - 1] : undefined;
 };
+/** The value a transaction-local set_config of app.<name> is given, from its parameter; undefined when it is not set. */
+const staffSetting = (calls: Call[], name: string) => {
+  const pattern = new RegExp(`set_config\\('app\\.${name}',\\s*\\$(\\d+),\\s*true\\)`);
+  const settings = calls.find((call) => pattern.test(call.sql));
+  const parameter = settings && pattern.exec(settings.sql);
+  return settings && parameter ? settings.values[Number(parameter[1]) - 1] : undefined;
+};
 
 describe('EHR DatabaseService staff session (0133 D13 and D14, owner\'s Q120 B and Q121 A)', () => {
   it('sets app.own_facility_work to 0133 in every staff transaction, beside the staff context', async () => {
@@ -73,6 +80,24 @@ describe('EHR DatabaseService staff session (0133 D13 and D14, owner\'s Q120 B a
     await database.withTransaction(context, async () => 'read', { readOnly: true });
     expect(VITALS_STATUS_AWARE).toBe('0142');
     expect(connections.map(vitalsSwitchValue)).toEqual(['0142', '0142']);
+  });
+
+  it('sets the membership and no purpose of use in a staff transaction (ORD-9\'s recent diagnoses, 0151)', async () => {
+    // 0151's record and read find the caller by app.membership_id (and app.facility_id and app.actor_subject); the
+    // recent list reads no patient, so withStaffTransaction sets no purpose of use (Rahman's re-review of #321, nit 5).
+    const { database, connections } = service();
+    await database.withStaffTransaction({ subject: 'synthetic:doctor', facilityId: 'facility', membershipId: 'membership',
+      correlationId: 'correlation-staff' }, async () => 'read');
+    expect(connections).toHaveLength(1);
+    const calls = connections[0]!;
+    expect(calls[0]!.sql).toBe('BEGIN');
+    expect(calls.at(-1)!.sql).toBe('COMMIT');
+    expect(staffSetting(calls, 'membership_id')).toBe('membership');
+    expect(staffSetting(calls, 'facility_id')).toBe('facility');
+    expect(staffSetting(calls, 'actor_subject')).toBe('synthetic:doctor');
+    expect(staffSetting(calls, 'correlation_id')).toBe('correlation-staff');
+    expect(calls.some((call) => /purpose_of_use/.test(call.sql))).toBe(false);
+    expect(calls.flatMap((call) => call.values)).not.toContain('direct-care');
   });
 
   it('never sets either switch in a patient-self, system or workload transaction', async () => {
