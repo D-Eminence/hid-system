@@ -44,7 +44,7 @@ What is left out of the medicine files:
 | `strength` | As the list gives it. A pack size is kept only where it defines the product. Empty for medical gases. |
 | `dose_form` | One of the contract's values: `tablet`, `capsule`, `liquid`, `injection`, `cream`, `inhaler`, `drops`, `other`. |
 | `dose_form_text` | The list's own words for the form, for example "Oral liquid". |
-| `route` | Plain words: `oral`, `intravenous`, `topical` and so on. `injection` where the list does not say which. |
+| `route` | Plain words: `oral`, `intravenous`, `topical` and so on. `injection` where the list does not say which. A row may hold two routes, separated by `; ` (two rows read `oral; injection`); the loader splits the column on `; `. |
 | `atc_code` | The WHO ATC code, **only where checked**. Every one of the 539 distinct codes in the Nigeria file (and the 83 more in the WHO gap file) was looked up on the WHOCC ATC index (atcddd.fhi.no) on 22 Nov 2026, and its substance matches the row. Blank where no code could be confirmed (118 rows). |
 | `source` | `nigeria-eml-8`. The planned contract's example says `nigeria-eml-7`; the 8th edition replaces it (see Sources). |
 | `source_section`, `source_list` | The list's section number, and `main` or `restricted`. |
