@@ -770,9 +770,11 @@ test('a connection dropped mid-load (a terminated backend, a failover) is one pl
 })
 
 // The loader's line when its COMMIT was sent and no reply came (round 4 of #319, point 1); the deploy tool matches it
-// word for word (scripts/test_production_deployment_ecs.py).
+// word for word (scripts/test_production_deployment_ecs.py). It comes with the loader's own exit code, 3 (round 5),
+// which the deploy tool reads as "outcome unknown" without the log: exit 1 is a failure with nothing loaded.
 const COMMIT_UNKNOWN = 'load-catalog: the connection was lost during commit, so the load may have committed; ask for the same '
   + 'load again to settle it (it loads, or is refused as already loaded)'
+const COMMIT_UNKNOWN_EXIT = 3
 
 test('COMMIT sent and no reply (the connection lost, or a fatal error) leaves the outcome unknown, never "nothing loaded"', async () => {
   const seed = build(FIXTURE, { version: '2026.2' }).medicine
@@ -915,21 +917,22 @@ async function loadingServer({ drop, items }) {
   return { port: server.address().port, statements, close: () => new Promise((done) => server.close(done)) }
 }
 
-test('the loader cut off once its COMMIT is sent says the load may have committed (exit 1), not "nothing loaded"', async () => {
+test('the loader cut off once its COMMIT is sent says the load may have committed (exit 3), not "nothing loaded"', async () => {
   const seed = build().medicine
   const { folder, seedPath, approvalsPath } = signedFiles(seed)
   try {
-    for (const [drop, line] of [
-      ['commit-fatal', COMMIT_UNKNOWN],
-      ['commit-silent', COMMIT_UNKNOWN],
-      // Lost before COMMIT could be sent: the load rolled back, so "nothing loaded" is true and stays.
-      ['before-commit', 'load-catalog: terminating connection due to administrator command (57P01); nothing loaded']]) {
+    for (const [drop, line, status] of [
+      // Its own exit code, never 1: the deploy tool records the seed as outcome unknown from the code alone.
+      ['commit-fatal', COMMIT_UNKNOWN, COMMIT_UNKNOWN_EXIT],
+      ['commit-silent', COMMIT_UNKNOWN, COMMIT_UNKNOWN_EXIT],
+      // Lost before COMMIT could be sent: the load rolled back, so "nothing loaded" (exit 1) is true and stays.
+      ['before-commit', 'load-catalog: terminating connection due to administrator command (57P01); nothing loaded', 1]]) {
       const server = await loadingServer({ drop, items: seed.items.length })
       try {
         const result = await runLoaderAsync(['--seed', seedPath, '--approvals', approvalsPath], { NODE_ENV: 'test',
           DATABASE_URL: `postgresql://nobody@127.0.0.1:${server.port}/none` })
         assert.equal(result.stderr, line, drop)
-        assert.equal(result.status, 1, drop)
+        assert.equal(result.status, status, drop)
         assert.equal(result.stdout, '', drop)
         assert.equal(server.statements[0], 'begin', drop)
         assert.ok(server.statements.some((sql) => sql.includes('set active = true')), `${drop}: the whole load was answered`)
