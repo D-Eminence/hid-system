@@ -56,7 +56,7 @@ declare
 begin
   -- 0152 (ORD-12) added one block before 0101's RETURN: refills, checked
   -- only for a fill_number above 1. Without it the body is 0101's.
-  if md5(body) <> '61a927efcf0626ac434d2f894b319b4d' then
+  if md5(body) <> '863016abdecb8806b9922ffc52522b57' then
     raise exception 'pharmacy.validate_dispensing is not 0152''s (md5 %)', md5(body);
   end if;
   if md5(substr(body, 1, position(E'  -- Refills (ORD-12)' in body) - 1)

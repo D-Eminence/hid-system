@@ -31,9 +31,11 @@
 --      that fires after D8's (prescriptions_pharmacy_change_after_dispensing)
 --      and reads D14's claims, a table of its own and a reader; no policy,
 --      and no body that names ehr.prescriptions (S7 is unchanged by it).
---      0152 (ORD-12, refills) adds one owner-run definer that reads
---      ehr.prescriptions, pharmacy.work_item_refills, the Pharmacy
---      runtime's reader of an own item's refills (S7's eleventh; case 8);
+--      0152 (ORD-12, refills) adds two owner-run definers that read
+--      ehr.prescriptions, the Pharmacy runtime's readers of own items'
+--      refills: pharmacy.work_item_refills (an item's refills) and
+--      pharmacy.open_refill_work_items (the items whose refill is open now)
+--      (S7's eleventh and twelfth; case 8);
 --   2. the send: the prescriber's activated prescription becomes a work item
 --      accepted by the prescriber with the fixed reason, one event, one
 --      outbox event with pharmacy-api's own four payload keys (what the event
@@ -485,9 +487,10 @@ begin
   -- identity.decide_unknown_patient only tests that a record has none, and
   -- only the Identity runtime may run it; 0144 added
   -- pharmacy.validate_work_item_acceptance, the acceptance's trigger
-  -- function; 0152 added pharmacy.work_item_refills, the Pharmacy runtime's
-  -- reader of an own item's refills, which answers only for items the
-  -- session may read, as the prescription-refills suite's case 13 shows);
+  -- function; 0152 added pharmacy.work_item_refills and
+  -- pharmacy.open_refill_work_items, the Pharmacy runtime's readers of own
+  -- items' refills, which answer only for items the session may read, as
+  -- the prescription-refills suite's cases 13 and 14 show);
   -- case 8 shows each gives the pharmacist nothing more (the two
   -- validators in cases 3 and 5, and 0144's in its own suite,
   -- pharmacy-work-item-acceptance, too). A new one must be
@@ -504,8 +507,8 @@ begin
        || 'ehr.patient_list_order_routes() ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,'
        || 'character) ehr.send_prescription_to_own_pharmacy(uuid,bigint) ehr.withdraw_own_pharmacy_send(uuid) '
        || 'identity.decide_unknown_patient(uuid,text,bigint,text,text,text) '
-       || 'identity.demo_story_install(text) pharmacy.validate_dispensing() pharmacy.validate_work_item() '
-       || 'pharmacy.validate_work_item_acceptance() pharmacy.work_item_refills(uuid[])' then
+       || 'identity.demo_story_install(text) pharmacy.open_refill_work_items() pharmacy.validate_dispensing() '
+       || 'pharmacy.validate_work_item() pharmacy.validate_work_item_acceptance() pharmacy.work_item_refills(uuid[])' then
     raise exception 'own facility work: the owner-run definer functions that read ehr.prescriptions changed: %',
       (select string_agg(proc.oid::regprocedure::text, ' ' order by proc.oid::regprocedure::text) from pg_proc proc
         where proc.prosecdef and proc.prosrc ~* 'ehr\.prescriptions');
@@ -2242,11 +2245,12 @@ select pg_temp.expect('PH: the EHR runtime may not write a pharmacist acceptance
       'e1330002-0000-4000-8000-000000000002', 'e1330004-0000-4000-8000-000000000002', 'accept',
       'own-work-acceptance-probe-1', repeat('c', 64), 'own-work-acceptance-probe')$s$,
     pg_temp.work_item_of(pg_temp.rx(7)))), 5), '42501');
--- 0152's refills reader (the eleventh) is the Pharmacy runtime's alone: the
--- EHR runtime may not run it.
-select pg_temp.expect('PH: the EHR runtime may not run the refills reader', pg_temp.try(format(
-  'select * from pharmacy.work_item_refills(array[%L]::uuid[])', pg_temp.work_item_of(pg_temp.rx(7)))),
-  '42501 permission denied for schema pharmacy');
+-- 0152's refills readers (the eleventh and twelfth) are the Pharmacy
+-- runtime's alone: the EHR runtime may run neither.
+select pg_temp.expect('PH: the EHR runtime may not run the refills readers', pg_temp.try(format(
+  'select * from pharmacy.work_item_refills(array[%L]::uuid[])', pg_temp.work_item_of(pg_temp.rx(7)))) || ' | '
+  || pg_temp.try('select * from pharmacy.open_refill_work_items()'),
+  '42501 permission denied for schema pharmacy | 42501 permission denied for schema pharmacy');
 reset role;
 -- Through the Pharmacy runtime it answers only for a work item the session
 -- may read: prescription ids instead of work items give nothing.

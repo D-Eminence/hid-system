@@ -23,8 +23,15 @@
 --
 -- WHAT IT DOES
 -- R1 ehr.prescriptions.refills_allowed smallint, NULLABLE, no default, with
---    the CHECK prescriptions_refills_allowed_ck (null, or 0-11). Null means
---    none: every existing row and every row an image without ORD-12 writes.
+--    the CHECK prescriptions_refills_allowed_ck (null, or 0-11, and 1-11 only
+--    with 0125's duration_value and duration_unit: a refill's interval comes
+--    from the duration, the clinical owner's rule of 24 November 2026; 0125's
+--    own CHECK gives the two together or neither). A CHECK and not a test in
+--    R4, because it fits 0125's model (the details are fixed at creation, as
+--    this column is) and refuses the prescription when it is written, not
+--    the pharmacy at the counter; ehr-api refuses it first (400
+--    REFILLS_NEED_DURATION). Null means none: every existing row and every
+--    row an image without ORD-12 writes.
 --    ehr-api sets it at creation only and never changes it (its PATCH SET
 --    list does not name it), as for 0125's columns. Nullable on purpose:
 --    0148's recorder (C2) fingerprints the row as jsonb with null-valued
@@ -64,7 +71,14 @@
 --    0095 compute the Lagos day; ends_on is the last day, inclusive, as
 --    ehr-api reads it). A first fill is not checked against ends_on
 --    (unchanged; whether it should be is a question for the owner, outside
---    ORD-12). The values are the prescription row 0101 already reads FOR
+--    ORD-12). The refill interval (the clinical owner's safety rule, 24
+--    November 2026): a refill is refused before the Lagos day of the
+--    item's latest fill not reversed plus ceil(0.75 x the prescription's
+--    duration in days) (a day 1, a week 7, a month 30; at least 1), 23514
+--    REFILL_TOO_SOON with that day as DETAIL (YYYY-MM-DD); with every fill
+--    reversed there is no wait. No override: a clinician writes a new
+--    prescription. The fills and reversals are read as the owner, matched on
+--    the item. The values are the prescription row 0101 already reads FOR
 --    SHARE, so a refill needs it active and unchanged since the item was
 --    accepted: any change after the first fill, a hold then resume
 --    included, ends the remaining refills (0101's version check; owner
@@ -84,7 +98,8 @@
 --    requested work items (else 22023 WORK_ITEM_REFILLS_INVALID, a null
 --    array too), one row per own item (no order route) the session may
 --    read: refills_allowed (null read as 0), fills_recorded (every fill
---    row, a reversed one included), refill_open and closed_reason. "May
+--    row, a reversed one included), refill_open, closed_reason and
+--    next_fill_on. "May
 --    read" is 0148's C3 rule: the session's facility,
 --    pharmacy.work-item.read, and pharmacy.work_items' two read policies
 --    repeated as conditions (the consent test, and 0133's own-work half),
@@ -101,14 +116,19 @@
 --    fill yet reads refill_open false and closed_reason null. Otherwise a
 --    refill is open while fills_recorded < 1 + refills_allowed, the
 --    prescription is active at the version the item was accepted at (and
---    for its encounter), and ends_on is not before today in Lagos: exactly
+--    for its encounter), ends_on is not before today in Lagos, and the
+--    refill's day (next_fill_on, R4's interval) is today or past: exactly
 --    what R4 asks of the next fill, which R5 lets through for an own item
 --    already dispensed (0133's claims CHECK: a dispensed claim is never
 --    released). When it is not open, closed_reason is the first that holds:
 --    'none_left' (every allowed fill recorded), 'stopped' (the prescription
 --    is not active: on hold, completed, cancelled or entered in error),
 --    'changed' (active again, but not at the accepted version: an edit, or
---    a hold then resume) and 'ended' (ends_on is past). A stop comes before
+--    a hold then resume), 'ended' (ends_on is past) and 'not_yet' (the
+--    interval is running; next_fill_on is the day it opens). next_fill_on
+--    is that day while a fill is left and nothing else closes it (today or
+--    earlier while open; with every fill reversed, the latest reversal's
+--    day, no wait), else null. A stop comes before
 --    a change because every status change is a new version too. The reader
 --    knows nothing of PRESCRIPTION_REFILLS_ENABLED: pharmacy-api reads a
 --    refill as open only while that setting is on too. Its text names
@@ -116,6 +136,27 @@
 --    functions that read prescriptions (0133's suite's S7 list), and each
 --    suite that pins that list names it. 0125's reader
 --    (pharmacy.work_item_prescription_details) is not replaced.
+-- R7 pharmacy.open_refill_work_items() (new; plpgsql, STABLE, SECURITY
+--    DEFINER, the owner's, search_path pg_catalog, pg_temp, every name
+--    schema-qualified; EXECUTE as R6's), with its index on ehr.prescriptions,
+--    prescriptions_refills_facility_idx (facility_id) WHERE
+--    refills_allowed > 0. No ids are passed: it answers the ids of the
+--    session's own items whose refill is open now, by R6's rule exactly (the
+--    session's facility, pharmacy.work-item.read and the work items' two read
+--    policies repeated; at least one fill and fewer than 1 + refills_allowed;
+--    the prescription active at the accepted version and encounter; ends_on
+--    not before today in Lagos; the refill's day come), the refill that
+--    opened first first (then the item id), at most 200. pharmacy-api's work
+--    list counts those items as open work,
+--    so a refill that is open stays listed however many items were filled
+--    after it, and R6 is asked only about the rows the list shows. It starts
+--    from the session facility's active prescriptions that allow refills and
+--    have not ended: the index and those conditions (all leakproof, so a
+--    NOBYPASSRLS owner applies them before ehr.prescriptions' row-level
+--    security) bound its cost by those prescriptions, never by the
+--    facility's work items. A session without a facility or without
+--    pharmacy.work-item.read gets no row. Its text names ehr.prescriptions,
+--    so it joins 0133's S7 list too.
 --
 -- Replica mode (session_replication_role = replica) skips R4 (origin mode),
 -- so the refill count and the end date are not enforced there (the clinical
@@ -137,7 +178,8 @@
 -- setting. The table grants are table-wide (the EHR runtime's SELECT,
 -- INSERT and UPDATE on ehr.prescriptions; the Pharmacy runtime's SELECT and
 -- INSERT on pharmacy.dispensings), so the new columns need no grant; R6's
--- EXECUTE is granted here and in runtime-grants.sql (0152's block). Fill
+-- and R7's EXECUTE is granted here and in runtime-grants.sql (0152's
+-- block). Fill
 -- numbers need not be contiguous in the database (a gap needs a caller that
 -- skips one; pharmacy-api sends fills so far + 1): the bound is on how many
 -- rows an item can have.
@@ -145,14 +187,15 @@
 -- 0. Preconditions (catalog reads only, no table lock; 55000, or 42501 for
 --    the owner and the applier; nothing applied): a. 0001-0148 applied
 --    (0148's table and two functions, 0144's acceptances and their
---    validator, 0133's claims); b. already applied (the three bodies, both
---    columns and the new key: "0152: already applied", nothing changes);
---    c. no column, constraint or function of this file's names; d. every
+--    validator, 0133's claims); b. already applied (the four bodies, both
+--    columns, the new key and R7's index: "0152: already applied", nothing
+--    changes); c. no column, constraint, index or function of this file's
+--    names; d. every
 --    column the new bodies read, by name and type; e. the two replaced
 --    trigger functions (md5, attributes, no EXECUTE for anyone), 0133's
 --    work-item claim and 0148's C2 (C2 strips null-valued keys, which R1
 --    relies on; f61173d77be391a9e9c96db494827e82); and, by md5, every
---    function R4 and R6 call and every function the policies of
+--    function R4, R6 and R7 call and every function the policies of
 --    ehr.prescriptions, pharmacy.dispensings and pharmacy.work_items call
 --    (the session readers, 0005's consent test and the consent grant,
 --    0133 D5's source read, 0133's own-work halves, the patient's own read,
@@ -166,11 +209,11 @@
 --    and no other; h. one owner (0148's e and f, for a NOSUPERUSER
 --    NOBYPASSRLS owner, as production's): pharmacy.work_items' owner owns
 --    pharmacy.dispensings, ehr.prescriptions and 0133's claims, the two
---    replaced functions and the policy functions R6 repeats and 0133 D5's
---    source read, and owns or may execute every other function above; the
---    applier is that owner, or inherits it and may SET ROLE to it; that
---    owner may create in pharmacy and use the schemas the bodies name;
---    i. row-level security as 0133 left it; j. 0133 D5's premise (no hid_
+--    replaced functions and the policy functions R6 and R7 repeat and
+--    0133 D5's source read, and owns or may execute every other function
+--    above; the applier is that owner, or inherits it and may SET ROLE to
+--    it; that owner may create in pharmacy and use the schemas the bodies
+--    name; i. row-level security as 0133 left it; j. 0133 D5's premise (no hid_
 --    role a member of that owner). Every owner-run SECURITY DEFINER
 --    function's catalog row and both altered tables' ACLs are kept for
 --    section 7.
@@ -187,20 +230,22 @@
 --    AFTER UPDATE triggers on ehr.prescriptions.
 -- 4. R4 and R5, replaced (CREATE OR REPLACE keeps owner, ACL and triggers),
 --    and their comments.
--- 5. R1 (column, CHECK NOT VALID, VALIDATE), R2 (column, CHECK NOT VALID,
---    VALIDATE), R3 (the new key, then 0023's dropped), and the comments.
--- 6. R6, its EXECUTE (revoked from PUBLIC; granted to the two runtimes that
---    exist) and its comment.
--- 7. Post-checks (55000, nothing applied): the three functions exactly
+-- 5. R1 (column, CHECK NOT VALID, VALIDATE) and R7's index (one scan of
+--    ehr.prescriptions, no entry: the column is new), R2 (column, CHECK NOT
+--    VALID, VALIDATE), R3 (the new key, then 0023's dropped), and the
+--    comments.
+-- 6. R6 and R7, their EXECUTE (revoked from PUBLIC; granted to the two
+--    runtimes that exist) and their comments.
+-- 7. Post-checks (55000, nothing applied): the four functions exactly
 --    (md5, owner, attributes, result, ACL); R5 names no ehr.prescriptions and
---    R6 does (0133's S7 list gains R6 and nothing else: no other owner-run
---    definer made, replaced or dropped); both columns (type, null, default,
---    no column ACL); both CHECKs validated, exactly; the new key exactly and
---    0023's gone, and pharmacy.dispensings' unique indexes exactly three;
---    the five triggers and modes; 0148's AFTER UPDATE order on
---    ehr.prescriptions and C2's md5; owners, row-level security and both
---    tables' ACLs unchanged; a probe, undone: R6 refuses 201 ids and a null
---    array (it opens no table to do so).
+--    R6 and R7 do (0133's S7 list gains R6 and R7 and nothing else: no other
+--    owner-run definer made, replaced or dropped); both columns (type, null,
+--    default, no column ACL); both CHECKs validated, exactly; the new key
+--    exactly and 0023's gone, and pharmacy.dispensings' unique indexes
+--    exactly three; R7's index exactly; the five triggers and modes; 0148's
+--    AFTER UPDATE order on ehr.prescriptions and C2's md5; owners, row-level
+--    security and both tables' ACLs unchanged; a probe, undone: R6 refuses
+--    201 ids and a null array (it opens no table to do so).
 --
 -- Locks. Section 2, one DO block, each attempt in its own subtransaction:
 -- ACCESS SHARE NOWAIT on pharmacy.work_items, ehr.order_routes and 0133's
@@ -250,23 +295,27 @@
 -- the five, the file stops after 5 seconds, nothing applied, and never
 -- blocks them. In the dry run the locks last until the dry run ends.
 -- pg_locks before commit, with either applier: ACCESS EXCLUSIVE on
--- pharmacy.dispensings, ehr.prescriptions, the new key's index and 0023's
--- dropped key's index (and the weaker locks VALIDATE and the index build
--- take on the same two tables), ACCESS SHARE on pharmacy.work_items,
--- ehr.order_routes and 0133's claims, and no other application table (R5's
--- and R6's statements are planned only when they first run, and the probe
--- of section 7 opens no table); after section 0, none.
+-- pharmacy.dispensings, ehr.prescriptions, the new key's index, R7's index
+-- and 0023's dropped key's index (and the weaker locks VALIDATE, the index
+-- builds and the comments take on the same tables and indexes), ACCESS
+-- SHARE on pharmacy.work_items, ehr.order_routes and 0133's claims, and no
+-- other application table (R5's, R6's and R7's statements are planned only
+-- when they first run, and the probe of section 7 opens no table); after
+-- section 0, none.
 -- Measured on throwaway PostgreSQL 16 with 0001-0146 and 0148 applied and
 -- 20,000 prescriptions, own work items and dispensings (fictional data),
 -- ten runs with a superuser applier and ten with a NOSUPERUSER NOBYPASSRLS
--- applier:
---   the file takes 40-84 ms to commit; the hold, from the locks to commit,
---   is 24-40 ms in all 20 runs. Under the locks: section 3 2.2-5.6 ms; R1
---   (the column, its CHECK and the scan of 20,000 prescriptions) 3.2-6.3
---   ms; on pharmacy.dispensings, the column 0.5-2.9 ms, its CHECK's scan
---   3.4-5.8 ms, the new key's index build 6.3-13.3 ms and 0023's key
---   dropped 0.3-0.6 ms; R6 and its grants 0.6-2.4 ms; the post-checks
---   5.6-11.6 ms; commit 0.6-1.2 ms. Section 0, before any lock, 13-45 ms;
+-- applier (this text, with the refill interval):
+--   the file takes 62-92 ms to commit; the hold, from the locks to commit,
+--   is 42-59 ms in all 20 runs. Under the locks: section 3 3.2-6.1 ms; R1
+--   (the column, its CHECK and the scan of 20,000 prescriptions) 4.6-15.4
+--   ms; R7's index (one more scan, no entry; it takes SHARE on
+--   ehr.prescriptions, inside the ACCESS EXCLUSIVE already held, so it adds
+--   no wait) 4.9-10.6 ms; on pharmacy.dispensings, the column 0.7-3.0 ms,
+--   its CHECK's scan 4.0-5.9 ms, the new key's index build 9.3-15.1 ms and
+--   0023's key dropped 0.4-0.8 ms; R6, R7 and their grants 1.4-3.2 ms; the
+--   post-checks 8.5-11.4 ms; commit 0.8-2.0 ms. Section 0, before any lock,
+--   18-37 ms;
 --   behind another session's open read (ACCESS SHARE), write (ROW
 --   EXCLUSIVE), SHARE UPDATE EXCLUSIVE (as autovacuum) or ACCESS EXCLUSIVE
 --   on pharmacy.dispensings or on ehr.prescriptions, or ACCESS EXCLUSIVE on
@@ -300,11 +349,27 @@
 --   COMMITTED and 40001 under SERIALIZABLE (pharmacy-api's isolation); one
 --   fill 2 is recorded;
 --   R6 for 200 own items read by a pharmacist on the own-work basis (20,000
---   items in the facility, 200 with refills, 100 with a fill 2), 21 calls:
---   1.6-2.3 s (median 1.8 s) under the NOSUPERUSER NOBYPASSRLS owner, most
---   of it the row-level security of ehr.prescriptions on the 200 rows (1.3
---   s on its own; 0133 D5's source read and 0005's consent test run per
---   row), as 0125's reader costs about as much; 0.24-0.35 s (median 0.26
+--   items in the facility, each filled once; 200 allow 2 refills with a
+--   10-day duration and have a refill open, 100 of them with a fill 2), the
+--   200 a list shows, 11 calls: 2.4-2.7 s (median 2.4 s) under the
+--   NOSUPERUSER NOBYPASSRLS owner, most of it the row-level security of
+--   ehr.prescriptions on the 200 rows (0133 D5's source read and 0005's
+--   consent test run per row), as 0125's reader costs about as much;
+--   0.32-0.42 s (median 0.33 s) under a superuser owner;
+--   R7 as the same pharmacist, the same facility, 11 calls: 2.2-2.5 s
+--   (median 2.4 s) under the NOSUPERUSER NOBYPASSRLS owner and 0.31-0.41 s
+--   (median 0.33 s) under a superuser owner, the 200 found, the refill that
+--   opened first first; the plan reads the 200 prescriptions through R7's
+--   index, so the other 19,800 items add nothing. Its cost grows with the
+--   facility's active prescriptions that allow refills and have not ended,
+--   those not yet due included: with 2,000 of them (the same 200 open,
+--   1,800 not yet due), 3 calls, 20.3-21.3 s under the NOSUPERUSER
+--   NOBYPASSRLS owner (about 10 ms a prescription, nearly all of it the
+--   row-level security of ehr.prescriptions on the index's rows; the work
+--   items' and the fills' steps 0.4 s and 0.7 s) and 0.74-0.81 s under a
+--   superuser owner. A whole work-list load with the setting on (R7, the
+--   list statement, R6 on the 200 rows shown), 200 open: 7.3-8.0 s (median
+--   7.7 s) under the NOSUPERUSER NOBYPASSRLS owner, 2.9-5.5 s (median 3.1
 --   s) under a superuser owner.
 --
 -- Old services on this schema. Release A and B ehr-api: every INSERT and
@@ -316,10 +381,10 @@
 -- fill 1 exactly as before; its pre-check still answers a second dispensing
 -- 409 PHARMACY_WORK_ITEM_ALREADY_DISPENSED, and a racing second one meets
 -- R3's key (23505, as 0023's key answered); its reads map named fields, so
--- the new column is ignored, and it never calls R6. 0086's route return,
--- 0088's and 0090's wrong-patient voids (route-backed items, one fill) and
--- every 0133 and 0144 reader (they test whether a dispensing exists) answer
--- as before.
+-- the new column is ignored, and it never calls R6 or R7. 0086's route
+-- return, 0088's and 0090's wrong-patient voids (route-backed items, one
+-- fill) and every 0133 and 0144 reader (they test whether a dispensing
+-- exists) answer as before.
 --
 -- New services and rollback (Ola's answers). Release order: this file
 -- (after 0147, 0148 and 0149-0151), then the event-dispatcher that accepts
@@ -328,8 +393,13 @@
 -- from 0125's setting) goes on last, and only once both staff front ends
 -- (health and apps/pharmacy) handle more than one fill. The first
 -- refills-aware pharmacy-api reads one row per item whatever the setting
--- (the latest fill, fill numbers and R6), so it needs this file; only
--- recording a fill above 1 waits for the setting. Rollback floor: once any
+-- (the latest fill, fill numbers, R6 and R7), so it needs this file, and it
+-- answers not ready (GET /health/ready, 503) on a database without
+-- pharmacy.dispensings.fill_number, so a deploy before this file fails its
+-- health check instead of answering 500; only recording a fill above 1
+-- waits for the setting. While the setting is on, its work list asks R7
+-- which own items have a refill open and R6 about the own rows it shows.
+-- Rollback floor: once any
 -- refill is recorded, pharmacy-api must not roll back below that image (an
 -- older image joins dispensings one row per fill and shows the item twice,
 -- with an arbitrary fill's ids). Turning the setting off again stops new
@@ -343,9 +413,10 @@
 --    keeps owner, ACL and triggers; compiling the validator opens three
 --    tables with ACCESS SHARE, which waits only behind DDL). 0133's claim
 --    function refuses any dispensing of an item whose claim is dispensed,
---    so no image can record a refill; recorded fills stay. R6 stays (it
---    still answers what was recorded; refill_open may read true where the
---    database now refuses, so the setting stays off). Precondition b then
+--    so no image can record a refill; recorded fills stay. R6 and R7 stay
+--    (they still answer what was recorded; refill_open may read true, and
+--    R7 may name an item, where the database now refuses, so the setting
+--    stays off). Precondition b then
 --    no longer reads "already applied", and c refuses to apply the file
 --    again while either column or R6 exists.
 -- 2. Only if 0023's one-fill key must come back: in a quiet window, lock
@@ -356,13 +427,15 @@
 --    dispensings_work_item_fill_number_key and dispensings_fill_number_ck,
 --    restore FORCE. Drop the column fill_number only after no running
 --    pharmacy-api names it (none above the rollback floor may run then).
--- 3. drop function pharmacy.work_item_refills(uuid[]) only after no running
---    pharmacy-api calls it.
+-- 3. drop function pharmacy.work_item_refills(uuid[]) and
+--    pharmacy.open_refill_work_items(), then drop index
+--    ehr.prescriptions_refills_facility_idx, only after no running
+--    pharmacy-api calls them.
 -- 4. ehr.prescriptions.refills_allowed and its CHECK can stay (nullable,
 --    unread by old images). Drop them only after no running ehr-api names
---    the column and R6 is gone; dropping it changes the fingerprint of
---    every prescription that carried a value, so the first resume of such
---    an item after that reads 'edited'.
+--    the column and R6, R7 and R7's index are gone; dropping it changes the
+--    fingerprint of every prescription that carried a value, so the first
+--    resume of such an item after that reads 'edited'.
 -- The ledger row stays.
 
 -- 0. Preconditions.
@@ -387,25 +460,28 @@ begin
                   ('pharmacy', 'validate_work_item_acceptance', ''))) <> 3 then
     raise exception using errcode = '55000', message = '0152: 0001-0148 must be applied first';
   end if;
-  -- b. Already applied: the three bodies are this file's, both columns and
-  -- the new key are there. Nothing changes.
+  -- b. Already applied: the four bodies are this file's, both columns, the
+  -- new key and R7's index are there. Nothing changes.
   if (select count(*) from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
        where namespace.nspname = 'pharmacy'
-         and (proc.proname, md5(proc.prosrc)) in (('validate_dispensing', '61a927efcf0626ac434d2f894b319b4d'),
+         and (proc.proname, md5(proc.prosrc)) in (('validate_dispensing', '863016abdecb8806b9922ffc52522b57'),
                ('claim_prescription_dispensing', '1a50612f5330a36c9b64d0d831c77812'),
-               ('work_item_refills', '19870149098020ef3a39c51b562138eb'))) = 3
+               ('work_item_refills', '9666b34515987cc73ac788215e08a099'),
+               ('open_refill_work_items', 'b679f8534f17f7204edb36fea769e45b'))) = 4
      and (select count(*) from pg_attribute attribute_row
            where not attribute_row.attisdropped
              and ((attribute_row.attrelid = 'ehr.prescriptions'::regclass and attribute_row.attname = 'refills_allowed')
                or (attribute_row.attrelid = 'pharmacy.dispensings'::regclass and attribute_row.attname = 'fill_number'))) = 2
      and exists (select 1 from pg_constraint constraint_row
                   where constraint_row.conrelid = 'pharmacy.dispensings'::regclass
-                    and constraint_row.conname = 'dispensings_work_item_fill_number_key') then
+                    and constraint_row.conname = 'dispensings_work_item_fill_number_key')
+     and to_regclass('ehr.prescriptions_refills_facility_idx') is not null then
     raise exception using errcode = '55000', message = '0152: already applied';
   end if;
   -- c. Nothing of this file's names exists (a hand-made or half-undone
   -- schema): neither column, no constraint or index of the three names, no
-  -- function named work_item_refills in pharmacy (any signature).
+  -- relation named as R7's index in ehr, no function named work_item_refills
+  -- or open_refill_work_items in pharmacy (any signature).
   select exists (select 1 from pg_attribute attribute_row
                   where not attribute_row.attisdropped
                     and ((attribute_row.attrelid = 'ehr.prescriptions'::regclass
@@ -417,24 +493,28 @@ begin
                           'dispensings_work_item_fill_number_key'))
       or exists (select 1 from pg_class relation join pg_namespace namespace on namespace.oid = relation.relnamespace
                   where namespace.nspname = 'pharmacy' and relation.relname = 'dispensings_work_item_fill_number_key')
+      or exists (select 1 from pg_class relation join pg_namespace namespace on namespace.oid = relation.relnamespace
+                  where namespace.nspname = 'ehr' and relation.relname = 'prescriptions_refills_facility_idx')
       or exists (select 1 from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
-                  where namespace.nspname = 'pharmacy' and proc.proname = 'work_item_refills')
+                  where namespace.nspname = 'pharmacy' and proc.proname in ('work_item_refills', 'open_refill_work_items'))
     into found_absent;
   if found_absent then
     raise exception using errcode = '55000',
       message = '0152: ehr.prescriptions.refills_allowed, pharmacy.dispensings.fill_number, '
-        || 'pharmacy.work_item_refills or a constraint of this file''s names exists already, but this file is not '
-        || 'applied as a whole; nothing applied';
+        || 'pharmacy.work_item_refills, pharmacy.open_refill_work_items, ehr.prescriptions_refills_facility_idx or a '
+        || 'constraint of this file''s names exists already, but this file is not applied as a whole; nothing applied';
   end if;
   -- d. Every column the new bodies read, by name and type. The decision is
   -- an EXISTS over the absent columns (never null); the list only names them.
   with expected(schema_name, relation_name, column_names) as (values
          ('ehr', 'prescriptions', array['id uuid', 'patient_id uuid', 'facility_id uuid', 'encounter_id uuid',
-           'status text', 'row_version bigint', 'ends_on date']),
+           'status text', 'row_version bigint', 'ends_on date', 'duration_value integer', 'duration_unit text']),
          ('pharmacy', 'work_items', array['id uuid', 'patient_id uuid', 'facility_id uuid', 'order_route_id uuid',
            'source_ehr_prescription_id uuid', 'source_ehr_prescription_version bigint', 'source_encounter_id uuid']),
-         ('pharmacy', 'dispensings', array['work_item_id uuid', 'patient_id uuid', 'facility_id uuid',
+         ('pharmacy', 'dispensings', array['id uuid', 'work_item_id uuid', 'patient_id uuid', 'facility_id uuid',
            'dispensed_at timestamp with time zone']),
+         ('pharmacy', 'dispensing_reversals', array['dispensing_id uuid', 'patient_id uuid', 'facility_id uuid',
+           'reversed_at timestamp with time zone']),
          ('pharmacy', 'prescription_item_claims', array['work_item_id uuid', 'order_route_id uuid',
            'dispensed_at timestamp with time zone', 'released_at timestamp with time zone'])),
        absent as (
@@ -495,10 +575,12 @@ begin
     raise exception using errcode = '55000',
       message = format('0152: a function this migration relies on differs from 0001-0148: %s', missing);
   end if;
-  -- e2. Every other function R4 and R6 call, and every function the
-  -- policies of the three tables they read call (section 3 pins the
-  -- policies themselves), by md5, as 0101 pinned what its FOR SHARE relies
-  -- on. A function missing at its signature counts as a mismatch.
+  -- e2. Every other function R4, R6 and R7 call, and every function the
+  -- policies of the four tables they read call (section 3 pins the
+  -- policies themselves; pharmacy.dispensing_reversals' are the same
+  -- functions as pharmacy.dispensings'), by md5, as 0101 pinned what its
+  -- FOR SHARE relies on. A function missing at its signature counts as a
+  -- mismatch.
   with expected(schema_name, proc_name, argument_types, digest) as (values
          -- The session readers (R4: facility, account, membership; R6 and
          -- the consent tests: facility, actor, membership, purpose).
@@ -594,7 +676,8 @@ begin
   owner_oid := (select relation.relowner from pg_class relation where relation.oid = 'pharmacy.work_items'::regclass);
   validator_owner := (select proc.proowner from pg_proc proc where proc.oid = 'pharmacy.validate_dispensing()'::regprocedure);
   with owned_tables(relation_name) as (values
-         ('pharmacy.dispensings'), ('ehr.prescriptions'), ('pharmacy.prescription_item_claims')),
+         ('pharmacy.dispensings'), ('ehr.prescriptions'), ('pharmacy.prescription_item_claims'),
+         ('pharmacy.dispensing_reversals')),
        owned_functions(signature) as (values
          ('pharmacy.validate_dispensing()'), ('pharmacy.claim_prescription_dispensing()'),
          ('pharmacy.work_item_allows(uuid,uuid,uuid,text)'), ('identity.facility_work_session_membership(text)'),
@@ -652,17 +735,19 @@ begin
     raise exception using errcode = '42501', message = format('0152: %s lacks %s', pg_get_userbyid(owner_oid), missing);
   end if;
   -- i. Row-level security as 0133 left it: pharmacy.dispensings,
-  -- ehr.prescriptions and pharmacy.work_items enabled and forced, 0133's
-  -- claims enabled and not forced (R5 reads every claim in any session).
+  -- pharmacy.dispensing_reversals, ehr.prescriptions and
+  -- pharmacy.work_items enabled and forced, 0133's claims enabled and not
+  -- forced (R5 reads every claim in any session).
   if (select count(*) from pg_class relation
-       where (relation.oid in ('pharmacy.dispensings'::regclass, 'ehr.prescriptions'::regclass,
-                'pharmacy.work_items'::regclass)
+       where (relation.oid in ('pharmacy.dispensings'::regclass, 'pharmacy.dispensing_reversals'::regclass,
+                'ehr.prescriptions'::regclass, 'pharmacy.work_items'::regclass)
               and relation.relrowsecurity and relation.relforcerowsecurity)
           or (relation.oid = 'pharmacy.prescription_item_claims'::regclass and relation.relrowsecurity
-              and not relation.relforcerowsecurity)) <> 4 then
+              and not relation.relforcerowsecurity)) <> 5 then
     raise exception using errcode = '55000',
-      message = '0152: row-level security is not as 0133 left it (pharmacy.dispensings, ehr.prescriptions and '
-        || 'pharmacy.work_items enabled and forced; 0133''s claims enabled and not forced)';
+      message = '0152: row-level security is not as 0133 left it (pharmacy.dispensings, '
+        || 'pharmacy.dispensing_reversals, ehr.prescriptions and pharmacy.work_items enabled and forced; 0133''s '
+        || 'claims enabled and not forced)';
   end if;
   -- j. 0133 D5's premise: no hid_ role is a member of the role whose
   -- functions D5's two ehr.prescriptions policies let read prescriptions.
@@ -676,7 +761,7 @@ begin
   end if;
   -- For section 7: every owner-run SECURITY DEFINER function's catalog row
   -- (oid and row version), so only the two replaced may change and only R6
-  -- may be made, and none dropped; and both altered tables' ACLs.
+  -- and R7 may be made, and none dropped; and both altered tables' ACLs.
   perform set_config('refills_0152.definer_rows',
     coalesce((select string_agg(proc.oid::text || ':' || proc.xmin::text, ' ' order by proc.oid)
                 from pg_proc proc
@@ -785,11 +870,13 @@ begin
       message = '0152: pharmacy.prescription_item_claims does not have 0133''s CHECK that a dispensed claim is never '
         || 'released';
   end if;
-  -- c. Every policy of ehr.prescriptions (R4 reads it FOR SHARE, R6 reads
-  -- it), pharmacy.dispensings and pharmacy.work_items (R6 reads both), each
-  -- by name and the md5 of its command, permissive flag, roles (PUBLIC, or
-  -- the owner alone) and printed expressions: the policies 0005, 0023,
-  -- 0086, 0133, 0143 and 0145 left, none restrictive, no other.
+  -- c. Every policy of ehr.prescriptions (R4 reads it FOR SHARE, R6 and R7
+  -- read it), pharmacy.dispensings, pharmacy.dispensing_reversals (R4, R6
+  -- and R7 read both, for the refill interval) and pharmacy.work_items (R6
+  -- and R7 read it), each by name and the md5 of its command, permissive
+  -- flag, roles (PUBLIC, or the owner alone) and printed expressions: the
+  -- policies 0005, 0023, 0086, 0133, 0143 and 0145 left, none restrictive,
+  -- no other.
   with expected(relation_name, policy_name, digest) as (values
          ('ehr.prescriptions', 'prescriptions_cancel_check_read', '9f3f55cb0a7f48717809b4fd3e09781f'),
          ('ehr.prescriptions', 'prescriptions_insert', '6a0815669a3c5ccca1130bef9ab321d7'),
@@ -803,12 +890,17 @@ begin
          ('pharmacy.dispensings', 'pharmacy_dispensings_read', '50a418e05b8937b1f5386730f031e7f9'),
          ('pharmacy.dispensings', 'staff_own_work_insert', '2c003ec37d0d27856f7cf993b0dac391'),
          ('pharmacy.dispensings', 'staff_own_work_read', 'cb45d26770956bd1b62e735565f334d1'),
+         ('pharmacy.dispensing_reversals', 'pharmacy_reversals_insert', 'f06c4b223b1c855434f14f96187288a4'),
+         ('pharmacy.dispensing_reversals', 'pharmacy_reversals_read', '50a418e05b8937b1f5386730f031e7f9'),
+         ('pharmacy.dispensing_reversals', 'staff_own_work_insert', 'e03765d5c970ea065e5bf21333329fd5'),
+         ('pharmacy.dispensing_reversals', 'staff_own_work_read', '83e194551c580514a100c288ef7b23ca'),
          ('pharmacy.work_items', 'pharmacy_work_items_insert', 'ad22de4e47f475c209e7e79c8134eed5'),
          ('pharmacy.work_items', 'pharmacy_work_items_read', '14670758ef7af96dc84c324c2053f2e7'),
          ('pharmacy.work_items', 'staff_own_work_read', 'a97eccd35eb781a878c0f47f873f63a0')),
        present as (
          select case policy_row.polrelid when 'ehr.prescriptions'::regclass then 'ehr.prescriptions'
                   when 'pharmacy.dispensings'::regclass then 'pharmacy.dispensings'
+                  when 'pharmacy.dispensing_reversals'::regclass then 'pharmacy.dispensing_reversals'
                   else 'pharmacy.work_items' end as relation_name, policy_row.polname::text as policy_name,
                 md5(policy_row.polcmd::text || ':' || policy_row.polpermissive::text || ':'
                     || case when policy_row.polroles = array[0::oid] then 'public'
@@ -818,7 +910,7 @@ begin
                     || coalesce(pg_get_expr(policy_row.polwithcheck, policy_row.polrelid), '-')) as digest
            from pg_policy policy_row
           where policy_row.polrelid in ('ehr.prescriptions'::regclass, 'pharmacy.dispensings'::regclass,
-                  'pharmacy.work_items'::regclass)),
+                  'pharmacy.dispensing_reversals'::regclass, 'pharmacy.work_items'::regclass)),
        differing as (
          select coalesce(expected.relation_name, present.relation_name) || '.'
                 || coalesce(expected.policy_name, present.policy_name) as what
@@ -828,8 +920,8 @@ begin
   select string_agg(differing.what, ', ' order by differing.what) into mismatch from differing;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0152: the policies of ehr.prescriptions, pharmacy.dispensings or pharmacy.work_items are not '
-        || 'the ones 0001-0148 left: %s', mismatch);
+      message = format('0152: the policies of ehr.prescriptions, pharmacy.dispensings, pharmacy.dispensing_reversals or '
+        || 'pharmacy.work_items are not the ones 0001-0148 left: %s', mismatch);
   end if;
   -- d. The AFTER UPDATE triggers on ehr.prescriptions end with 0086's
   -- route sync, 0133 D8's and 0148's C4, in the order PostgreSQL fires them
@@ -918,7 +1010,10 @@ begin
   -- fill only on an own item (a route-backed item takes one fill), at most
   -- 1 + refills_allowed fills (null: none), and not once the prescription
   -- read above has ended (ends_on before today in Lagos; ends_on is the last
-  -- day).
+  -- day), nor before the refill interval has passed: the Lagos day of the
+  -- latest fill not reversed, plus 3/4 of the prescription's duration in
+  -- days (a week 7, a month 30), rounded up, at least 1 (no fill standing:
+  -- no wait). The DETAIL is the day the refill opens.
   if new.fill_number > 1 then
     if parent_row.order_route_id is not null
        or new.fill_number > 1 + coalesce(source_row.refills_allowed, 0) then
@@ -927,6 +1022,22 @@ begin
     if source_row.ends_on < (clock_timestamp() at time zone 'Africa/Lagos')::date then
       raise exception using errcode = '23514', message = 'REFILL_PRESCRIPTION_ENDED';
     end if;
+    declare
+      refill_opens_on date;
+    begin
+      select (max(dispensing.dispensed_at) at time zone 'Africa/Lagos')::date
+               + greatest(1, ceil(0.75 * source_row.duration_value
+                   * case source_row.duration_unit when 'week' then 7 when 'month' then 30 else 1 end))::integer
+        into refill_opens_on
+        from pharmacy.dispensings dispensing
+       where dispensing.work_item_id = new.work_item_id
+         and not exists (select 1 from pharmacy.dispensing_reversals reversal
+                          where reversal.dispensing_id = dispensing.id);
+      if refill_opens_on > (clock_timestamp() at time zone 'Africa/Lagos')::date then
+        raise exception using errcode = '23514', message = 'REFILL_TOO_SOON',
+          detail = to_char(refill_opens_on, 'YYYY-MM-DD');
+      end if;
+    end;
   end if;
   return new;
 end
@@ -962,17 +1073,25 @@ end;
 $$;
 
 comment on function pharmacy.validate_dispensing() is
-  '0101, refills by 0152 (ORD-12): a route-backed work item is dispensable only while its route is accepted and inside its work window (0086, ORDER_ROUTE_CLOSED); the dispensing must match its work item and the session (0077); a same-facility work item is dispensable only while its ehr.prescriptions row, read FOR SHARE, is active at the version accepted, for its patient, facility and encounter (23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE). A fill_number above 1: own items only, at most 1 + refills_allowed fills (null: none), else 23514 NO_REFILLS_LEFT; not once ends_on is before today in Lagos (23514 REFILL_PRESCRIPTION_ENDED). Origin mode only.';
+  '0101, refills by 0152 (ORD-12): a route-backed work item is dispensable only while its route is accepted and inside its work window (0086, ORDER_ROUTE_CLOSED); the dispensing must match its work item and the session (0077); a same-facility work item is dispensable only while its ehr.prescriptions row, read FOR SHARE, is active at the version accepted, for its patient, facility and encounter (23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE). A fill_number above 1: own items only, at most 1 + refills_allowed fills (null: none), else 23514 NO_REFILLS_LEFT; not once ends_on is before today in Lagos (23514 REFILL_PRESCRIPTION_ENDED); not before the Lagos day of the latest fill not reversed plus 3/4 of the duration in days, rounded up, at least 1 (23514 REFILL_TOO_SOON, DETAIL the day it opens, YYYY-MM-DD). Origin mode only.';
 comment on function pharmacy.claim_prescription_dispensing() is
   '0133 D14, refills by 0152 (ORD-12): fill 1 turns the item''s live, undispensed claim dispensed (dispensed_at, kept for good); a later fill needs that claim live, dispensed and the item''s own (no order route) and changes nothing; else 23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE, DETAIL sent_elsewhere or not_claimed. Enabled always; reads only the claims. Executed by no role.';
 
 -- 5. R1: the column and its CHECK, NOT VALID, then validated (one scan of
--- ehr.prescriptions, under the lock taken above).
+-- ehr.prescriptions, under the lock taken above). A refill needs a duration
+-- (the refill interval is 3/4 of it): 1-11 only with 0125's duration_value
+-- and duration_unit (0125's own CHECK gives them together or neither).
 alter table ehr.prescriptions
   add column refills_allowed smallint,
   add constraint prescriptions_refills_allowed_ck
-    check (refills_allowed is null or refills_allowed between 0 and 11) not valid;
+    check (refills_allowed is null
+           or (refills_allowed between 0 and 11
+               and (refills_allowed = 0 or (duration_value is not null and duration_unit is not null)))) not valid;
 alter table ehr.prescriptions validate constraint prescriptions_refills_allowed_ck;
+-- R7's index: the facility's prescriptions that allow refills. The column is
+-- new and null on every row, so the build scans ehr.prescriptions once and
+-- writes no entry.
+create index prescriptions_refills_facility_idx on ehr.prescriptions (facility_id) where refills_allowed > 0;
 
 -- R2: the column (every existing row reads the default 1, no rewrite) and
 -- its CHECK, NOT VALID, then validated (one scan of pharmacy.dispensings).
@@ -996,9 +1115,11 @@ end
 $$;
 
 comment on column ehr.prescriptions.refills_allowed is
-  'ORD-12 (0152): how many refills the prescriber allowed after the first fill, 0-11; null means none. Set at creation only (ehr-api never changes it). The hospital''s own pharmacy may record 1 + refills_allowed fills of the one work item while the prescription stays active and unchanged and its ends_on is not past.';
+  'ORD-12 (0152): how many refills the prescriber allowed after the first fill, 0-11; null means none; 1-11 needs a duration. Set at creation only (ehr-api never changes it). The hospital''s own pharmacy may record 1 + refills_allowed fills of the one work item while the prescription stays active and unchanged and its ends_on is not past, each refill from the Lagos day of the latest fill not reversed plus 3/4 of the duration in days (rounded up, at least 1).';
 comment on constraint prescriptions_refills_allowed_ck on ehr.prescriptions is
-  'ORD-12 (0152): refills_allowed is null or 0-11.';
+  'ORD-12 (0152): refills_allowed is null or 0-11, and 1-11 only with a duration (duration_value and duration_unit, 0125): a refill opens 3/4 of the duration after the latest fill not reversed.';
+comment on index ehr.prescriptions_refills_facility_idx is
+  'ORD-12 (0152): the prescriptions that allow refills, by facility; pharmacy.open_refill_work_items starts from them, so its cost grows with them and not with the facility''s work items.';
 comment on column pharmacy.dispensings.fill_number is
   'ORD-12 (0152): 1 for the first fill of the work item, 2 and above for refills (at most 12). Rows recorded before 0152 are fill 1. A reversed fill keeps its number.';
 comment on constraint dispensings_fill_number_ck on pharmacy.dispensings is
@@ -1010,13 +1131,17 @@ comment on constraint dispensings_work_item_fill_number_key on pharmacy.dispensi
 -- pharmacy.work-item.read (the consent branch of pharmacy.work_item_allows
 -- checks no permission); a predicate, not an early return, as 0148's C3.
 -- The work items are found first (at most 200, by their key), so the
--- policy tests and the reads of their prescriptions and fills run only for
--- the requested own items. The prescription and the fills are matched on
--- the item's patient and facility, so a row the tables' own policies would
--- hide from a NOBYPASSRLS owner is not counted by a superuser owner either.
+-- policy tests and the reads of their prescriptions, fills and reversals
+-- run only for the requested own items. The prescription, the fills and
+-- their reversals are matched on the item's patient and facility, so a row
+-- the tables' own policies would hide from a NOBYPASSRLS owner is not
+-- counted by a superuser owner either. The refill interval is R4's: the
+-- Lagos day of the latest fill not reversed, plus 3/4 of the duration in
+-- days (a week 7, a month 30), rounded up, at least 1; with every fill
+-- reversed, the day of the latest reversal (no wait, as R4).
 create function pharmacy.work_item_refills(requested_work_item_ids uuid[])
 returns table (work_item_id uuid, refills_allowed integer, fills_recorded integer, refill_open boolean,
-  closed_reason text)
+  closed_reason text, next_fill_on date)
 language plpgsql
 stable
 security definer
@@ -1055,10 +1180,11 @@ begin
     facts as (
       select visible.item_id,
              coalesce(prescription.refills_allowed, 0)::integer as allowed,
-             (select count(*) from pharmacy.dispensings dispensing
-               where dispensing.work_item_id = visible.item_id
-                 and dispensing.patient_id = visible.item_patient_id
-                 and dispensing.facility_id = visible.item_facility_id)::integer as recorded,
+             fills.recorded,
+             coalesce((fills.latest_standing at time zone 'Africa/Lagos')::date
+                        + greatest(1, pg_catalog.ceil(0.75 * prescription.duration_value
+                            * case prescription.duration_unit when 'week' then 7 when 'month' then 30 else 1 end))::integer,
+                      (fills.latest_reversal at time zone 'Africa/Lagos')::date) as opens_on,
              prescription.status is distinct from 'active' as stopped,
              (prescription.row_version is distinct from visible.source_version
                or prescription.encounter_id is distinct from visible.source_encounter_id) as changed,
@@ -1067,36 +1193,149 @@ begin
         left join ehr.prescriptions prescription
           on prescription.id = visible.source_id
          and prescription.patient_id = visible.item_patient_id
-         and prescription.facility_id = visible.item_facility_id)
-    select facts.item_id, facts.allowed, facts.recorded,
-           facts.recorded >= 1 and facts.recorded < 1 + facts.allowed
-             and not facts.stopped and not facts.changed and not facts.ended,
+         and prescription.facility_id = visible.item_facility_id
+       cross join lateral (
+         select count(*)::integer as recorded,
+                max(dispensing.dispensed_at) filter (where reversal.id is null) as latest_standing,
+                max(reversal.reversed_at) as latest_reversal
+           from pharmacy.dispensings dispensing
+           left join pharmacy.dispensing_reversals reversal
+             on reversal.dispensing_id = dispensing.id
+            and reversal.patient_id = visible.item_patient_id
+            and reversal.facility_id = visible.item_facility_id
+          where dispensing.work_item_id = visible.item_id
+            and dispensing.patient_id = visible.item_patient_id
+            and dispensing.facility_id = visible.item_facility_id) fills),
+    judged as (
+      select facts.item_id, facts.allowed, facts.recorded, facts.opens_on, facts.stopped, facts.changed, facts.ended,
+             facts.recorded >= 1 and facts.recorded < 1 + facts.allowed
+               and not facts.stopped and not facts.changed and not facts.ended as may_fill
+        from facts)
+    select judged.item_id, judged.allowed, judged.recorded,
+           judged.may_fill and coalesce(judged.opens_on <= lagos_today, false),
            case
-             when facts.recorded = 0 then null
-             when facts.recorded >= 1 + facts.allowed then 'none_left'
-             when facts.stopped then 'stopped'
-             when facts.changed then 'changed'
-             when facts.ended then 'ended'
-           end
-      from facts;
+             when judged.recorded = 0 then null
+             when judged.recorded >= 1 + judged.allowed then 'none_left'
+             when judged.stopped then 'stopped'
+             when judged.changed then 'changed'
+             when judged.ended then 'ended'
+             when coalesce(judged.opens_on > lagos_today, false) then 'not_yet'
+           end,
+           case when judged.may_fill then judged.opens_on end
+      from judged;
 end;
 $$;
 
--- R6's EXECUTE (here and in runtime-grants.sql): to each of the two
+-- R7, the open refills (see R7 above): R6's session tests, then four
+-- steps, each materialized so that what follows reads only what it found:
+-- the facility's active prescriptions that allow refills and have not ended
+-- (R7's index; every condition leakproof, so a NOBYPASSRLS owner applies
+-- them before the table's row-level security), with their refill interval;
+-- their own work items, accepted at the version and encounter, found by the
+-- list of those prescriptions (a leakproof condition too, so however the
+-- planner reaches pharmacy.work_items, its row-level security runs only on
+-- those items); those items' fills and their reversals, found the same way,
+-- counted as R6 counts them, with the day the next fill may be recorded (R6's
+-- rule); then, only for the items with a fill left whose day has come, the
+-- work items' two read policies, as R6 repeats them. The refill that opened
+-- first comes first (then the item id).
+create function pharmacy.open_refill_work_items()
+returns table (work_item_id uuid)
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, pg_temp
+as $$
+declare
+  session_facility uuid := platform.current_facility_id();
+  may_read boolean;
+  own_work_membership uuid;
+  lagos_today date := (pg_catalog.clock_timestamp() at time zone 'Africa/Lagos')::date;
+begin
+  if session_facility is null then
+    return;
+  end if;
+  may_read := coalesce(auth.membership_has_permission(platform.current_actor_subject(),
+    platform.current_membership_id(), session_facility, 'pharmacy.work-item.read'), false);
+  own_work_membership := identity.facility_work_session_membership('pharmacy');
+  return query
+    with candidates as materialized (
+      select prescription.id as source_id, prescription.patient_id as source_patient_id,
+             prescription.refills_allowed::integer as allowed, prescription.row_version as source_version,
+             prescription.encounter_id as source_encounter_id,
+             greatest(1, pg_catalog.ceil(0.75 * prescription.duration_value
+               * case prescription.duration_unit when 'week' then 7 when 'month' then 30 else 1 end))::integer
+               as interval_days
+        from ehr.prescriptions prescription
+       where may_read
+         and prescription.refills_allowed > 0
+         and prescription.facility_id = session_facility
+         and prescription.status = 'active'
+         and (prescription.ends_on is null or prescription.ends_on >= lagos_today)),
+    items as materialized (
+      select item.id as item_id, item.patient_id as item_patient_id, item.facility_id as item_facility_id,
+             item.order_route_id as item_route_id, candidates.allowed, candidates.interval_days
+        from pharmacy.work_items item
+        join candidates
+          on candidates.source_id = item.source_ehr_prescription_id
+         and candidates.source_patient_id = item.patient_id
+         and candidates.source_version = item.source_ehr_prescription_version
+         and candidates.source_encounter_id = item.source_encounter_id
+       where item.source_ehr_prescription_id = any (array(select candidates.source_id from candidates))
+         and item.order_route_id is null
+         and item.facility_id = session_facility),
+    fills as materialized (
+      select dispensing.work_item_id as fill_item_id, dispensing.patient_id as fill_patient_id,
+             dispensing.facility_id as fill_facility_id, count(*)::integer as recorded,
+             max(dispensing.dispensed_at) filter (where reversal.id is null) as latest_standing,
+             max(reversal.reversed_at) as latest_reversal
+        from pharmacy.dispensings dispensing
+        left join pharmacy.dispensing_reversals reversal
+          on reversal.dispensing_id = dispensing.id
+         and reversal.patient_id = dispensing.patient_id
+         and reversal.facility_id = dispensing.facility_id
+       where dispensing.work_item_id = any (array(select items.item_id from items))
+       group by dispensing.work_item_id, dispensing.patient_id, dispensing.facility_id),
+    timed as materialized (
+      select items.item_id, items.item_patient_id, items.item_facility_id, items.item_route_id,
+             coalesce((fills.latest_standing at time zone 'Africa/Lagos')::date + items.interval_days,
+                      (fills.latest_reversal at time zone 'Africa/Lagos')::date) as opens_on
+        from items
+        join fills
+          on fills.fill_item_id = items.item_id
+         and fills.fill_patient_id = items.item_patient_id
+         and fills.fill_facility_id = items.item_facility_id
+       where fills.recorded >= 1 and fills.recorded < 1 + items.allowed)
+    select timed.item_id
+      from timed
+     where timed.opens_on <= lagos_today
+       and (pharmacy.work_item_allows(timed.item_patient_id, timed.item_facility_id, timed.item_route_id,
+              'read_records')
+         or coalesce(identity.pharmacy_work_patient_allows(own_work_membership, timed.item_patient_id,
+              timed.item_facility_id, 'read_records'), false))
+     order by timed.opens_on, timed.item_id
+     limit 200;
+end;
+$$;
+
+-- R6's and R7's EXECUTE (here and in runtime-grants.sql): to each of the two
 -- runtimes that exists, nothing to PUBLIC.
-revoke all on function pharmacy.work_item_refills(uuid[]) from public;
+revoke all on function pharmacy.work_item_refills(uuid[]), pharmacy.open_refill_work_items() from public;
 do $$
 declare runtime_role text;
 begin
   foreach runtime_role in array array['hid_pharmacy_runtime', 'hid_schema_test_runtime'] loop
     if exists (select 1 from pg_roles where rolname = runtime_role) then
-      execute format('grant execute on function pharmacy.work_item_refills(uuid[]) to %I', runtime_role);
+      execute format('grant execute on function pharmacy.work_item_refills(uuid[]), '
+        || 'pharmacy.open_refill_work_items() to %I', runtime_role);
     end if;
   end loop;
 end
 $$;
 comment on function pharmacy.work_item_refills(uuid[]) is
-  '0152 ORD-12: for each requested own work item (no order route) the session may read (its facility, pharmacy.work-item.read, and pharmacy.work_items'' two read policies repeated), refills_allowed (null as 0), fills_recorded (reversed fills included), refill_open (a fill recorded, fewer than 1 + refills_allowed, the prescription active at the accepted version and ends_on not before today in Lagos; PRESCRIPTION_REFILLS_ENABLED is pharmacy-api''s to add) and closed_reason (none_left, stopped, changed or ended; null while open and before the first fill). At most 200 ids, else 22023 WORK_ITEM_REFILLS_INVALID.';
+  '0152 ORD-12: for each requested own work item (no order route) the session may read (its facility, pharmacy.work-item.read, and pharmacy.work_items'' two read policies repeated), refills_allowed (null as 0), fills_recorded (reversed fills included), refill_open (a fill recorded, fewer than 1 + refills_allowed, the prescription active at the accepted version, ends_on not before today in Lagos, and next_fill_on today or before; PRESCRIPTION_REFILLS_ENABLED is pharmacy-api''s to add), closed_reason (none_left, stopped, changed or ended, or not_yet while the refill interval runs; null while open and before the first fill) and next_fill_on (the Lagos day the next fill may be recorded: the latest fill not reversed plus 3/4 of the duration in days, rounded up, at least 1, or the latest reversal''s day when every fill is reversed; null before the first fill and once closed for a reason other than not_yet). At most 200 ids, else 22023 WORK_ITEM_REFILLS_INVALID.';
+comment on function pharmacy.open_refill_work_items() is
+  '0152 ORD-12: the ids of the session''s own work items whose refill is open now, by pharmacy.work_item_refills'' rule (its facility, pharmacy.work-item.read and pharmacy.work_items'' two read policies; at least one fill and fewer than 1 + refills_allowed; the prescription active at the accepted version and encounter; ends_on not before today in Lagos; the refill interval passed), the refill that opened first first (then the id), at most 200. Its cost grows with the facility''s active prescriptions that allow refills and have not ended (ehr.prescriptions_refills_facility_idx), not with its work items.';
 
 -- 7. Post-checks (still under the locks).
 do $$
@@ -1107,18 +1346,20 @@ declare
   error_state text;
   error_message text;
 begin
-  -- R4, R5 and R6: exactly one function of each name, this file's body
+  -- R4, R5, R6 and R7: exactly one function of each name, this file's body
   -- (md5), the owner, SECURITY DEFINER, the volatility, plpgsql, not
   -- STRICT, the result, the search_path each had; R4 and R5 no EXECUTE for
-  -- anyone but the owner (R6's grants below).
+  -- anyone but the owner (R6's and R7's grants below).
   with expected(proc_name, argument_types, digest, volatility, result_type, search_path) as (values
-         ('validate_dispensing', '', '61a927efcf0626ac434d2f894b319b4d', 'v', 'trigger',
+         ('validate_dispensing', '', '863016abdecb8806b9922ffc52522b57', 'v', 'trigger',
            'search_path=pharmacy, platform, pg_temp'),
          ('claim_prescription_dispensing', '', '1a50612f5330a36c9b64d0d831c77812', 'v', 'trigger',
            'search_path=pg_catalog, pg_temp'),
-         ('work_item_refills', 'uuid[]', '19870149098020ef3a39c51b562138eb', 's',
+         ('work_item_refills', 'uuid[]', '9666b34515987cc73ac788215e08a099', 's',
            'TABLE(work_item_id uuid, refills_allowed integer, fills_recorded integer, refill_open boolean, '
-             || 'closed_reason text)', 'search_path=pg_catalog, pg_temp')),
+             || 'closed_reason text, next_fill_on date)', 'search_path=pg_catalog, pg_temp'),
+         ('open_refill_work_items', '', 'b679f8534f17f7204edb36fea769e45b', 's', 'TABLE(work_item_id uuid)',
+           'search_path=pg_catalog, pg_temp')),
        differing as (
          select expected.proc_name,
                 (select string_agg(format('md5=%s owner=%s definer=%s volatile=%s strict=%s config=%s acl=%s',
@@ -1140,7 +1381,7 @@ begin
                   and language_row.lanname = 'plpgsql' and not proc.proisstrict
                   and pg_get_function_result(proc.oid) = expected.result_type
                   and proc.proconfig = array[expected.search_path]
-                  and (expected.proc_name = 'work_item_refills'
+                  and (expected.proc_name in ('work_item_refills', 'open_refill_work_items')
                     or not exists (select 1 from aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) privilege
                                     where privilege.grantee <> proc.proowner))))
   select exists (select 1 from differing),
@@ -1150,55 +1391,62 @@ begin
   if found_absent then
     raise exception using errcode = '55000', message = format('0152: functions are not as this file makes them: %s', mismatch);
   end if;
-  -- R6's exact EXECUTE grants: to each of the two runtimes that exists (not
-  -- grantable), nothing else, PUBLIC included. Decided by EXISTS, so a role
-  -- that does not exist never makes a comparison null.
-  with expected(grantee_name) as (values ('hid_pharmacy_runtime'), ('hid_schema_test_runtime')),
+  -- R6's and R7's exact EXECUTE grants: to each of the two runtimes that
+  -- exists (not grantable), nothing else, PUBLIC included. Decided by
+  -- EXISTS, so a role that does not exist never makes a comparison null.
+  with readers(reader) as (values ('pharmacy.work_item_refills(uuid[])'::regprocedure),
+         ('pharmacy.open_refill_work_items()'::regprocedure)),
+       expected(grantee_name) as (values ('hid_pharmacy_runtime'), ('hid_schema_test_runtime')),
        granted as (
-         select privilege.grantee, privilege.privilege_type, privilege.is_grantable
-           from pg_proc proc
+         select readers.reader, privilege.grantee, privilege.privilege_type, privilege.is_grantable
+           from readers
+           join pg_proc proc on proc.oid = readers.reader
           cross join aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) privilege
-          where proc.oid = 'pharmacy.work_item_refills(uuid[])'::regprocedure and privilege.grantee <> proc.proowner),
+          where privilege.grantee <> proc.proowner),
        wrong as (
-         select format('granted %s to %s', granted.privilege_type,
+         select format('%s granted %s to %s', granted.reader, granted.privilege_type,
                   case when granted.grantee = 0 then 'PUBLIC' else pg_get_userbyid(granted.grantee)::text end) as what
            from granted
           where not exists (select 1 from expected join pg_roles role_row on role_row.rolname = expected.grantee_name
                              where role_row.oid = granted.grantee and granted.privilege_type = 'EXECUTE'
                                and not granted.is_grantable)
          union all
-         select format('lacks EXECUTE for %s', expected.grantee_name)
-           from expected join pg_roles role_row on role_row.rolname = expected.grantee_name
+         select format('%s lacks EXECUTE for %s', readers.reader, expected.grantee_name)
+           from readers cross join expected join pg_roles role_row on role_row.rolname = expected.grantee_name
           where not exists (select 1 from granted
-                             where granted.grantee = role_row.oid and granted.privilege_type = 'EXECUTE'))
+                             where granted.reader = readers.reader and granted.grantee = role_row.oid
+                               and granted.privilege_type = 'EXECUTE'))
   select exists (select 1 from wrong), (select string_agg(wrong.what, '; ') from wrong)
     into found_absent, mismatch;
   if found_absent then
     raise exception using errcode = '55000',
-      message = format('0152: pharmacy.work_item_refills(uuid[])''s grants are not section 6''s: %s', mismatch);
+      message = format('0152: the readers'' grants are not section 6''s: %s', mismatch);
   end if;
-  -- 0133 D5: R5 names no ehr.prescriptions; R6 does, so 0133's S7 list (the
-  -- owner-run definers whose text names ehr.prescriptions) gains R6 (R4 is
-  -- on it already); no other owner-run SECURITY DEFINER function was made,
-  -- replaced or dropped, so the list is otherwise the one there was; 0148's
-  -- C2 unchanged.
+  -- 0133 D5: R5 names no ehr.prescriptions; R6 and R7 do, so 0133's S7 list
+  -- (the owner-run definers whose text names ehr.prescriptions) gains R6 and
+  -- R7 (R4 is on it already); no other owner-run SECURITY DEFINER function
+  -- was made, replaced or dropped, so the list is otherwise the one there
+  -- was; 0148's C2 unchanged.
   if exists (select 1 from pg_proc proc where proc.oid = 'pharmacy.claim_prescription_dispensing()'::regprocedure
               and proc.prosrc ~* 'ehr\.prescriptions')
      or not exists (select 1 from pg_proc proc where proc.oid = 'pharmacy.work_item_refills(uuid[])'::regprocedure
+                     and proc.prosrc ~* 'ehr\.prescriptions')
+     or not exists (select 1 from pg_proc proc where proc.oid = 'pharmacy.open_refill_work_items()'::regprocedure
                      and proc.prosrc ~* 'ehr\.prescriptions')
      or coalesce((select string_agg(proc.oid::text || ':' || proc.xmin::text, ' ' order by proc.oid)
                     from pg_proc proc
                    where proc.prosecdef and proc.proowner = owner_oid
                      and proc.oid not in ('pharmacy.validate_dispensing()'::regprocedure,
                            'pharmacy.claim_prescription_dispensing()'::regprocedure,
-                           'pharmacy.work_item_refills(uuid[])'::regprocedure)), 'none')
+                           'pharmacy.work_item_refills(uuid[])'::regprocedure,
+                           'pharmacy.open_refill_work_items()'::regprocedure)), 'none')
         is distinct from nullif(current_setting('refills_0152.definer_rows', true), '')
      or (select md5(proc.prosrc) from pg_proc proc
           where proc.oid = 'pharmacy.prescription_change_after_dispensing()'::regprocedure)
         is distinct from 'f61173d77be391a9e9c96db494827e82' then
     raise exception using errcode = '55000',
-      message = '0152: the claim function names ehr.prescriptions, the reader does not, or an owner-run definer '
-        || 'function other than this file''s three was made, replaced or dropped, or 0148''s recorder changed';
+      message = '0152: the claim function names ehr.prescriptions, a reader does not, or an owner-run definer '
+        || 'function other than this file''s four was made, replaced or dropped, or 0148''s recorder changed';
   end if;
   -- R1 and R2: the columns' types, NOT NULL, defaults, no generation or
   -- identity, and no column-level privilege.
@@ -1229,8 +1477,9 @@ begin
      is distinct from array[
        'pharmacy.dispensings dispensings_fill_number_ck CHECK (((fill_number >= 1) AND (fill_number <= 12))) true false',
        'pharmacy.dispensings dispensings_work_item_fill_number_key UNIQUE (work_item_id, fill_number) true false',
-       'ehr.prescriptions prescriptions_refills_allowed_ck CHECK (((refills_allowed IS NULL) OR ((refills_allowed >= 0) '
-         || 'AND (refills_allowed <= 11)))) true false']
+       'ehr.prescriptions prescriptions_refills_allowed_ck CHECK (((refills_allowed IS NULL) OR (((refills_allowed >= 0) '
+         || 'AND (refills_allowed <= 11)) AND ((refills_allowed = 0) OR ((duration_value IS NOT NULL) AND (duration_unit IS '
+         || 'NOT NULL)))))) true false']
      or exists (select 1 from pg_constraint constraint_row
                  where constraint_row.conrelid = 'pharmacy.dispensings'::regclass
                    and pg_get_constraintdef(constraint_row.oid) = 'UNIQUE (work_item_id)')
@@ -1246,6 +1495,14 @@ begin
             || 'fill_number) true'] then
     raise exception using errcode = '55000',
       message = '0152: the CHECKs or the keys of pharmacy.dispensings and ehr.prescriptions are not as this file makes them';
+  end if;
+  -- R7's index exactly, valid and ready.
+  if (select array_agg(pg_get_indexdef(index_row.indexrelid) || ' ' || (index_row.indisvalid and index_row.indisready)::text)
+        from pg_index index_row
+       where index_row.indexrelid = to_regclass('ehr.prescriptions_refills_facility_idx'))
+     is distinct from array['CREATE INDEX prescriptions_refills_facility_idx ON ehr.prescriptions USING btree '
+       || '(facility_id) WHERE (refills_allowed > 0) true'] then
+    raise exception using errcode = '55000', message = '0152: R7''s index on ehr.prescriptions is not as this file makes it';
   end if;
   -- The five triggers on pharmacy.dispensings and their modes, as before.
   if (select array_agg(trigger_row.tgname::text || ':' || trigger_row.tgfoid::regprocedure::text || ':'

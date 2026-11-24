@@ -218,9 +218,10 @@ begin
   -- 0148: the ten 0133's suite pins on Release B (0143's ehr.list_my_orders,
   -- 0144's acceptance trigger function and 0145's
   -- identity.decide_unknown_patient among them), and, once 0152 (ORD-12,
-  -- refills) is applied, its reader pharmacy.work_item_refills (the
-  -- prescription-refills suite, case 13).
-  perform pg_temp.expect('1g no 0148 body names ehr.prescriptions or the sends table; 0133''s S7 list (with 0152''s reader)',
+  -- refills) is applied, its two readers pharmacy.work_item_refills and
+  -- pharmacy.open_refill_work_items (the prescription-refills suite, cases
+  -- 13 and 14).
+  perform pg_temp.expect('1g no 0148 body names ehr.prescriptions or the sends table; 0133''s S7 list (with 0152''s readers)',
     (select count(*) from pg_proc proc
       where proc.oid in ('pharmacy.work_item_changes_after_dispensing(uuid[])'::regprocedure,
               'pharmacy.prescription_change_after_dispensing()'::regprocedure)
@@ -231,8 +232,8 @@ begin
     || 'ehr.patient_list_order_routes() ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,'
     || 'character) ehr.send_prescription_to_own_pharmacy(uuid,bigint) ehr.withdraw_own_pharmacy_send(uuid) '
     || 'identity.decide_unknown_patient(uuid,text,bigint,text,text,text) '
-    || 'identity.demo_story_install(text) pharmacy.validate_dispensing() pharmacy.validate_work_item() '
-    || 'pharmacy.validate_work_item_acceptance() pharmacy.work_item_refills(uuid[])');
+    || 'identity.demo_story_install(text) pharmacy.open_refill_work_items() pharmacy.validate_dispensing() '
+    || 'pharmacy.validate_work_item() pharmacy.validate_work_item_acceptance() pharmacy.work_item_refills(uuid[])');
   -- 1h. ehr.prescriptions' columns, in order: the trigger fingerprints the
   -- whole row less status, row_version and the two times, so a migration
   -- that adds a NOT NULL or defaulted column (which changes every later

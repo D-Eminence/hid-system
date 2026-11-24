@@ -2019,12 +2019,15 @@ end
 $$;
 
 -- Refills (0152, ORD-12): a prescription written with one refill allowed
--- takes two fills on its one work item, the second numbered 2, and refuses
--- a third.
+-- (and a duration, which a refill needs: 30 days) takes two fills on its
+-- one work item, the second numbered 2, and refuses a third. Fill 1 is
+-- recorded as of 40 days ago, so the refill interval (3/4 of the duration
+-- after the latest fill, 23 days) has passed when fill 2 is recorded.
 insert into ehr.prescriptions (
   id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
   medication_code_system, medication_code, medication_display, dose_quantity,
-  dose_unit, route_code, frequency, instructions, starts_on, status, refills_allowed
+  dose_unit, route_code, frequency, instructions, starts_on, status, refills_allowed,
+  duration_value, duration_unit
 ) values (
   'f3000000-0000-4000-8000-000000000011',
   '80000000-0000-4000-8000-000000000001',
@@ -2033,7 +2036,8 @@ insert into ehr.prescriptions (
   '20000000-0000-4000-8000-000000000001',
   '40000000-0000-4000-8000-000000000001',
   'urn:hid:test-medication', 'metformin-500mg', 'Metformin 500 mg',
-  1, 'tablet', 'oral', 'Twice daily', 'Take with meals', current_date, 'active', 1
+  1, 'tablet', 'oral', 'Twice daily', 'Take with meals', current_date, 'active', 1,
+  30, 'day'
 );
 do $$
 declare
@@ -2065,7 +2069,7 @@ begin
         medication_code_system, medication_code, medication_display,
         quantity_dispensed, quantity_unit,
         dispensed_by, dispensed_by_membership_id, reason,
-        idempotency_key, request_sha256, correlation_id, fill_number
+        idempotency_key, request_sha256, correlation_id, fill_number, dispensed_at
       ) values (
         work_id, 1, '50000000-0000-4000-8000-000000000001',
         '10000000-0000-4000-8000-000000000002',
@@ -2073,7 +2077,8 @@ begin
         60, 'tablet', '20000000-0000-4000-8000-000000000001',
         '40000000-0000-4000-8000-000000000001', 'Medication supplied to patient',
         'schema-pharmacy-refill-000' || fill, repeat('9', 64),
-        'schema-test-pharmacy-refill-' || fill, fill
+        'schema-test-pharmacy-refill-' || fill, fill,
+        clock_timestamp() - make_interval(days => case when fill = 1 then 40 else 0 end)
       );
       if fill = 3 then
         raise exception 'A third fill was recorded on a prescription that allows one refill';
