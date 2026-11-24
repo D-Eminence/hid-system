@@ -651,10 +651,21 @@ try {
     from audit.events where action like '%catalog%' or details->>'route' like '%catalog%'`);
   assert.equal(catalogAudit.filter(row => row.outcome === 'success').length, 0, 'a search that answers writes no audit row');
   assert(catalogAudit.length >= 5, `the refusals are audited: ${catalogAudit.length} rows`);
-  assert.equal(Number((await one(`select count(*) from audit.events where details::text ilike '%amox%'
-    or details::text ilike '%fbc%'`)).count), 0, 'no audit row anywhere holds a search text');
+  // A search text counts only as a whole word, in any case. A random id can hold the same letters inside a word:
+  // the uuid 493ba984-81a2-4f1a-bf96-7b0b8318fbcb holds fbc, and each group of a uuid is 4 to 12 hex digits, so
+  // fbc is never a whole word there. An escape that stands for a separator counts as one: a percent escape (%3D,
+  // %20), so a route kept URL-encoded (q%3Dfbc) is still found, and a JSON escape (\n, \t, \u0009), so a text after
+  // a line break is too. The database (~*) and this script (flag i) use the same pattern. The Health ID and the NIN
+  // below stay plain substrings: too long to turn up by chance, and found even when joined to other text.
+  const wordStart = String.raw`^|[^A-Za-z0-9_]|%[0-9A-Fa-f]{2}|\\[bfnrt]|\\u[0-9A-Fa-f]{4}`;
+  const wholeWord = words => `(${wordStart})(${words})($|[^A-Za-z0-9_])`;
+  assert.deepEqual(await all('select action, details::text as details from audit.events where details::text ~* $1',
+    [wholeWord('amox|fbc')]), [], 'no audit row anywhere holds a search text');
   const audited = JSON.stringify(catalogAudit);
-  for (const typed of ['amox', 'Amox', 'fbc', patient.hid, '12345678901', '4567 8901', '4567%208901']) {
+  for (const typed of ['amox', 'fbc']) {
+    assert(!new RegExp(wholeWord(typed), 'i').test(audited), `the search text ${typed} reached an audit row`);
+  }
+  for (const typed of [patient.hid, '12345678901', '4567 8901', '4567%208901']) {
     assert(!audited.includes(typed), `the search text ${typed} reached an audit row`);
   }
   evidence.catalog = { before: 'not available, empty search', loaded: { medicines: 3, labTests: 1 },

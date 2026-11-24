@@ -9,7 +9,10 @@
 // busy refusals are. 0149's own refusals in the transaction (its triggers and
 // the version guard: SQLSTATE 55000, such as CATALOG_ID_CHANGED; a table
 // check: 23514), and 0150's for a diagnosis list, are refusals too, with the
-// database's message.
+// database's message. A connection lost once the load's COMMIT is sent
+// (CommitOutcomeUnknown) is neither: the version may have committed, so its
+// line (COMMIT_UNKNOWN_LINE, exit 1) says so and asks for the same load
+// again, which settles it.
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { approvalFor, heldBackAndRetired, heldBackRetiredProblem, seedProblems, sha256 } from './catalog-seed.mjs';
@@ -29,6 +32,27 @@ export function refusalLine(refusal) {
 
 /** The busy refusal: this loader's lock or the versions table stayed held for the loader's 5 seconds (55P03). */
 export const BUSY = 'ehr.catalog_versions or another catalogue load stayed busy for 5 seconds';
+
+/**
+ * The load's COMMIT was sent and no reply to it came: the connection was
+ * lost (a terminated backend, a failover), or a fatal error came in its
+ * place. The server may have committed the version before the connection
+ * went (a backend terminated while its commit waits for a synchronous
+ * standby has already committed locally), so "nothing loaded" would not be
+ * true. The command ends with COMMIT_UNKNOWN_LINE, exit 1. An ERROR reply to
+ * COMMIT is a reply: the transaction rolled back, and that stays a refusal
+ * or a failure with "nothing loaded".
+ */
+export class CommitOutcomeUnknown extends Error {
+  constructor(cause) {
+    super('the connection was lost during commit', { cause });
+    this.name = 'CommitOutcomeUnknown';
+  }
+}
+
+/** The line a commit with no reply prints (stderr), which the deploy tool recognises (outcome unknown). */
+export const COMMIT_UNKNOWN_LINE = 'load-catalog: the connection was lost during commit, so the load may have committed; '
+  + 'ask for the same load again to settle it (it loads, or is refused as already loaded)';
 
 /**
  * The SQLSTATEs with which 0149 refuses a row or a change in the load's
@@ -154,12 +178,23 @@ const ACTIVE_IDS = { medicine: activeIds('ehr.catalog_medicines'), lab_test: act
  * and the new one on. A lock still held after 5 seconds (55P03) is the busy
  * refusal, and the database's own refusals (DATABASE_REFUSALS) are refusals
  * with the database's message. An ICD-11 diagnosis list needs 0150 and has no
- * dropped-id check. dryRun does all of it and rolls back. Returns the
- * evidence line.
+ * dropped-id check. dryRun does all of it and rolls back. Once COMMIT is
+ * sent, a failure with no ERROR reply from the server (the connection lost,
+ * or a fatal error in the reply's place) is CommitOutcomeUnknown: the version
+ * may have committed. A connection the client already knows is lost (its
+ * 'error' or 'end' event came first) is never sent COMMIT, so that stays a
+ * failure with nothing loaded. Returns the evidence line.
  */
 export async function loadSeed(client, { seed, fileSha256, approval, approvalsSha256, dryRun = false }) {
   const retiredHeldBack = heldBackAndRetired(seed);
   if (retiredHeldBack.length > 0) throw new LoadRefusal(retiredHeldBack.map(heldBackRetiredProblem).join('; '));
+  // Whether the client has seen its connection go (pg's Client emits 'error' and then 'end'): it then refuses any
+  // query without sending it, so a COMMIT asked for after that is never sent.
+  let connectionGone = false;
+  const gone = () => { connectionGone = true; };
+  client.on?.('error', gone);
+  client.on?.('end', gone);
+  let commitSent = false;
   try {
     await client.query('begin');
     await client.query("set local lock_timeout = '5s'");
@@ -194,14 +229,26 @@ export async function loadSeed(client, { seed, fileSha256, approval, approvalsSh
     const outcome = { status: dryRun ? 'dry-run: rolled back' : 'loaded', kind: seed.kind, version: seed.version, fileSha256,
       approvalsSha256, items: inserted.rowCount, newRetiredIds: retired.rows.map((row) => row.list_id),
       replaced: replaced.rows[0]?.version ?? null, heldBack: (seed.heldBack ?? []).length };
+    // A dry run's rollback that loses its connection leaves nothing (the server rolls back an ended session), and
+    // so does a connection already lost before COMMIT: the client refuses the query without sending it. Nothing
+    // runs between this check and the query, so COMMIT counts as sent exactly when it goes to a connection the
+    // client still holds; whether the server got it, and committed, is what stays unknown if no reply comes.
+    commitSent = !dryRun && !connectionGone;
     await client.query(dryRun ? 'rollback' : 'commit');
     return outcome;
   } catch (error) {
+    // The server answered COMMIT with an ERROR: the transaction rolled back, as with any other statement's error. No
+    // reply (the connection lost) or a fatal one: the outcome is unknown. (A server whose messages are not in English
+    // words its severity in its own language, which reads as unknown here: the safe side.)
+    if (commitSent && error?.severity !== 'ERROR') throw new CommitOutcomeUnknown(error);
     await client.query('rollback').catch(() => {});
     if (error?.code === '55P03') throw new LoadRefusal(BUSY, { busy: true });
     if (DATABASE_REFUSALS.includes(error?.code)) {
       throw new LoadRefusal(`the database refused the load: ${error.message} (${error.code})`);
     }
     throw error;
+  } finally {
+    client.off?.('error', gone);
+    client.off?.('end', gone);
   }
 }

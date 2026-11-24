@@ -41,15 +41,23 @@
 // loaded", never a stack trace. That covers an error before it connects (a
 // DATABASE_HOST that makes no address, a bad TLS setting), no database, and a
 // connection dropped mid-load (a terminated backend, a failover: the client's
-// 'error' event is listened for, so it is never an unhandled one). Either way
-// the line is the last one the loader prints, which the deploy tool shows.
+// 'error' event is listened for, so it is never an unhandled one), before the
+// load's COMMIT is sent. Once COMMIT is sent, a connection lost (or a fatal
+// error) before its reply may follow a commit (a backend terminated while its
+// commit waits for a synchronous standby has committed locally), so the line
+// is instead, exit 1: "load-catalog: the connection was lost during commit,
+// so the load may have committed; ask for the same load again to settle it
+// (it loads, or is refused as already loaded)". The deploy tool records that
+// seed's outcome as unknown. An ERROR reply to COMMIT means the load rolled
+// back, so that stays a refusal or a failure, nothing loaded. Either way the
+// line is the last one the loader prints, which the deploy tool shows.
 //
 // --dry-run does all of it and rolls back. Old versions are kept, so old
 // prescriptions keep their meaning. Prints one JSON line: what was loaded,
 // the seed's and the approvals file's sha256, and which version it replaced.
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { LoadRefusal, loadSeed, prepareLoad, refusalLine } from './catalog-load.mjs';
+import { COMMIT_UNKNOWN_LINE, CommitOutcomeUnknown, LoadRefusal, loadSeed, prepareLoad, refusalLine } from './catalog-load.mjs';
 import { databaseOptions, managedDatabaseUrl } from './database-options.mjs';
 
 const codes = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../docs/codes');
@@ -65,6 +73,11 @@ const refuse = (refusal) => {
 const fail = (error) => {
   const code = error?.code ? ` (${error.code})` : '';
   console.error(`load-catalog: ${error?.message ?? error}${code}; nothing loaded`);
+  process.exit(1);
+};
+// COMMIT sent and no reply: the version may have committed, so never "nothing loaded".
+const unknown = () => {
+  console.error(COMMIT_UNKNOWN_LINE);
   process.exit(1);
 };
 
@@ -94,13 +107,15 @@ try {
   client = new pg.Client(databaseOptions(databaseUrl, 'hid-catalog-loader'));
   // A connection that drops (a terminated backend, a failover) is also an 'error' event on the client, which with no
   // listener ends Node with "Unhandled 'error' event" and a stack trace. Keep it: the statement in hand, or the next
-  // one, fails, so a load cut off before its commit leaves nothing, and the loader ends with its one line.
+  // one, fails, so a load cut off before its commit leaves nothing, and the loader ends with its one line. Cut off
+  // once its COMMIT is sent, loadSeed throws CommitOutcomeUnknown instead.
   client.on('error', (error) => { lost ??= error; });
   await client.connect();
   outcome = await loadSeed(client, { ...prepared, dryRun: process.argv.includes('--dry-run') });
 } catch (error) {
   await client?.end().catch(() => {});
   if (error instanceof LoadRefusal) refuse(error);
+  if (error instanceof CommitOutcomeUnknown) unknown();
   // The server's own message (with its SQLSTATE, such as 57P01 for a terminated backend) says most; a statement that
   // failed only because the connection was already gone says less than the error that dropped it.
   fail((error?.code || !lost) ? error : lost);

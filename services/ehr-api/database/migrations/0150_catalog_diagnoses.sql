@@ -43,12 +43,18 @@
 --    active release's entries where every word of q starts a word of the
 --    code and title or of one other name, each split as q is, with 0149's
 --    query rules (the first 6 words of q, each cut to 40 characters; q
---    never reaches to_tsquery as typed). The entry whose code q is
---    (upper-cased, with or without its dot: "9A03.0" or "9a030") first,
---    found even without the dot, and as copied with punctuation around it:
---    characters that are neither letters, digits nor dots are taken off
---    both ends, then full stops off the end, before the code's shape is
---    tested ("NB91.", "NB91,", "(NB91)" are NB91); then entries whose
+--    never reaches to_tsquery as typed). The entry whose code q is comes
+--    first, and is found even when q is the code without its dot. For
+--    that test q is trimmed and upper-cased, and any run of characters
+--    that are neither letters nor digits, full stops included, is taken
+--    off both ends, so a code copied with punctuation around it is still
+--    that code ("NB91.", "NB91,", "(NB91)", "(NB91).", "NB91 .", ".NB91"
+--    and "NB91,." are NB91); a code's own dot, inside it, stays
+--    ("(9A03.0)." is 9A03.0). What is left is then the code as it is when
+--    it has a code's shape as written (four of A-Z and 0-9, then up to two
+--    parts of a dot and one or two of them: "9A03", "9A03.0"), or with the
+--    dot put back after the fourth character when it is five or six of
+--    them ("9a030" is 9A03.0), and no code otherwise. Then entries whose
 --    title or one of our other names starts with q
 --    (LIKE's %, _ and \ escaped), then shorter titles, then the title in the
 --    "C" collation and the code. At most limit (1-25) and whether more
@@ -335,7 +341,7 @@ $$;
 comment on table ehr.catalog_diagnoses is
   '0150 (ORD-9): the coded entries of an ICD-11 MMS release, one row per entry per version, WHO''s titles verbatim (ICD-11, World Health Organization, CC BY-ND 3.0 IGO) and our own other names apart; no extension codes, no blocks. Loaded by ORD-7''s governed loader. No patient data.';
 comment on function ehr.search_catalog_diagnoses(text, integer) is
-  '0150 (ORD-9): the active ICD-11 release''s entries whose code and title or one other name has a word starting with each word of q; the entry whose code q is (with or without its dot, and with punctuation around it left out) first, then names starting with q, then shorter titles, then A to Z; at most limit (1-25) and whether more matched. 22023 CATALOG_SEARCH_INVALID for q outside 2-100 characters or a limit outside 1-25.';
+  '0150 (ORD-9): the active ICD-11 release''s entries whose code and title or one other name has a word starting with each word of q; the entry whose code q is (with or without its dot, and with any run of characters that are neither letters nor digits taken off both ends; its own dot stays) first, then names starting with q, then shorter titles, then A to Z; at most limit (1-25) and whether more matched. 22023 CATALOG_SEARCH_INVALID for q outside 2-100 characters or a limit outside 1-25.';
 comment on function ehr.catalog_status() is
   '0149 (ORD-7), 0150 (ORD-9): per kind (diagnosis, lab_test, medicine): whether an active version exists, its label, when it was approved, how many rows it offers, the notices its sources require and the sha256 of its seed file.';
 

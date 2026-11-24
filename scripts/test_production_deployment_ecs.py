@@ -618,8 +618,11 @@ class CatalogPhaseTests(unittest.TestCase):
     def loader_aws(self, exit_code, lines, log_error=None, on_stopped=None):
         """A stand-in for the loader's tasks and logs. log_error: the error each log read raises (throttling, say);
         on_stopped: called when the task is seen stopped (to lose the lease then, say). aws.seen holds a copy of
-        the ECS's catalog_checks at each log read, once aws.ecs is set."""
+        the ECS's catalog_checks at each log read, once aws.ecs is set. exit_code and lines may each be a dict by
+        seed kind (the medicines load, then the lab tests do not)."""
         starts=[]; reads=[]
+        def kind():
+            return 'medicine' if starts[-1]['overrides']['containerOverrides'][0]['command'][-1].endswith('hid-medicines.json') else 'lab_test'
         class AWS:
             ecs=None; seen=[]
             def call(self,service,operation,args,**kwargs):
@@ -627,13 +630,14 @@ class CatalogPhaseTests(unittest.TestCase):
                     starts.append(args); return {'tasks':[{'taskArn':'arn:task/'+str(len(starts))}]}
                 if operation=='describe-tasks':
                     if on_stopped: on_stopped()
-                    return {'tasks':[{'lastStatus':'STOPPED','containers':[{'exitCode':exit_code}]}]}
+                    code=exit_code[kind()] if isinstance(exit_code,dict) else exit_code
+                    return {'tasks':[{'lastStatus':'STOPPED','containers':[{'exitCode':code}]}]}
                 if operation=='get-log-events':
                     reads.append(args)
                     if self.ecs is not None: self.seen.append(copy.deepcopy(self.ecs.catalog_checks))
                     if log_error: raise c.ReleaseError(log_error)
-                    kind='medicine' if starts[-1]['overrides']['containerOverrides'][0]['command'][-1].endswith('hid-medicines.json') else 'lab_test'
-                    return {'events':[{'message':line.replace('KIND',kind)} for line in lines]}
+                    return {'events':[{'message':line.replace('KIND',kind())}
+                                      for line in (lines[kind()] if isinstance(lines,dict) else lines)]}
                 raise AssertionError(operation)
         aws=AWS(); aws.reads=reads; aws.seen=[]
         return aws,starts
@@ -835,6 +839,80 @@ class CatalogPhaseTests(unittest.TestCase):
         output=io.StringIO()
         baseline,state,objects,calls,lease=self.execute(components=self.RELEASE,catalog='medicine',failure=True,output=output)
         self.assertTrue(lease.released); self.assertEqual(next_steps(output),['dispatch the release again with catalog_load none'])
+
+    # The loader's line when its COMMIT was sent and no reply came (round 4 of #319, point 1), word for word as
+    # scripts/tests/catalog-seeds.test.mjs has the loader print it.
+    COMMIT_UNKNOWN=('load-catalog: the connection was lost during commit, so the load may have committed; ask for the same '
+                    'load again to settle it (it loads, or is refused as already loaded)')
+
+    @staticmethod
+    def settle(kind):
+        return ('dispatch the release again with catalog_load '+kind+' to settle it (it loads, or is refused as already '
+                'loaded; once refused, dispatch again with catalog_load none)')
+
+    def test_a_commit_that_lost_its_connection_names_the_seed_as_outcome_unknown(self):
+        aws,starts=self.loader_aws(1,['starting',self.COMMIT_UNKNOWN,'INFO trailing']); ecs=b.ECS(aws,FakeLease())
+        output=io.StringIO()
+        with self.clock(),contextlib.redirect_stdout(output),self.assertRaisesRegex(c.ReleaseError,'^CATALOG_LOAD_OUTCOME_UNKNOWN$'):
+            ecs.load_catalog('arn:migration:2',index()['migration_network'],'release',self.seeds('medicine','lab_test'))
+        self.assertEqual(ecs.catalog_checks,[{'kind':'medicine','status':'outcome unknown','version':'2026.1','file_sha256':'1'*64}])
+        self.assertEqual(json.loads(output.getvalue()),{'release_id':'release','catalog_load':'outcome unknown','kind':'medicine',
+            'exit_codes':[1],'message':self.COMMIT_UNKNOWN})
+        self.assertEqual(len(starts),1,'the lab tests are not loaded after it')
+        self.assertEqual(len(aws.reads),1)
+        # Any other failure line stays "failed", nothing loaded (the loader's line says so).
+        line='load-catalog: terminating connection due to administrator command (57P01); nothing loaded'
+        aws,starts=self.loader_aws(1,[line]); ecs=b.ECS(aws,FakeLease()); output=io.StringIO()
+        with self.clock(),contextlib.redirect_stdout(output),self.assertRaisesRegex(c.ReleaseError,'^CATALOG_LOAD_FAILED$'):
+            ecs.load_catalog('arn:migration:2',index()['migration_network'],'release',self.seeds('medicine'))
+        self.assertEqual(ecs.catalog_checks,[]); self.assertEqual(json.loads(output.getvalue())['message'],line)
+
+    def test_through_the_release_an_unknown_outcome_is_in_the_failed_receipt_with_the_step_that_settles_it(self):
+        aws,starts=self.loader_aws(1,[self.COMMIT_UNKNOWN]); events=[]; output=io.StringIO()
+        with self.clock():
+            baseline,state,objects,calls,lease=self.execute(components=self.RELEASE,events=events,catalog='medicine',
+                catalog_aws=aws,catalog_failure='expected',output=output)
+        failed=self.receipt(objects,'failed.json')
+        self.assertEqual(failed['error_code'],'CATALOG_LOAD_OUTCOME_UNKNOWN')
+        self.assertEqual(failed['catalog_checks'],[{'kind':'medicine','status':'outcome unknown','version':'2026.1',
+            'file_sha256':SEED_SHA['hid-medicines.json']}])
+        self.assertEqual(events,[('migrate',None),('catalog',['medicine']),('update_all',[])])
+        self.assertEqual(state,baseline['backend']); self.assertEqual(calls,[]); self.assertTrue(lease.released)
+        release_id=self.receipt(objects,'started.json')['candidate']['release_id']
+        lines=[json.loads(l) for l in output.getvalue().splitlines() if l.startswith('{')]
+        self.assertIn({'release_id':release_id,'catalog_outcome_unknown':[{'kind':'medicine','version':'2026.1'}],
+            'next':self.settle('medicine')},lines)
+        # The medicines loaded, then the lab tests' commit lost its connection: both named, and only the lab tests are
+        # asked for again (the medicines would be refused as already loaded).
+        loaded=json.dumps({'status':'loaded','kind':'medicine','version':'2026.1','fileSha256':'e'*64,'approvalsSha256':'f'*64,
+            'items':1616,'newRetiredIds':[],'replaced':None,'heldBack':4},separators=(',',':'))
+        aws,starts=self.loader_aws({'medicine':0,'lab_test':1},{'medicine':[loaded],'lab_test':[self.COMMIT_UNKNOWN]})
+        output=io.StringIO()
+        with self.clock():
+            baseline,state,objects,calls,lease=self.execute(components=self.RELEASE,catalog='medicine,lab_test',
+                catalog_aws=aws,catalog_failure='expected',output=output)
+        failed=self.receipt(objects,'failed.json')
+        self.assertEqual(failed['error_code'],'CATALOG_LOAD_OUTCOME_UNKNOWN')
+        self.assertEqual(failed['catalog_checks'],[
+            {'kind':'medicine','status':'loaded','version':'2026.1','file_sha256':'e'*64,'approvals_sha256':'f'*64,'items':1616,
+             'replaced':None},
+            {'kind':'lab_test','status':'outcome unknown','version':'2026.1','file_sha256':SEED_SHA['hid-lab-tests.json']}])
+        lines=[json.loads(l) for l in output.getvalue().splitlines() if l.startswith('{')]
+        self.assertIn({'release_id':self.receipt(objects,'started.json')['candidate']['release_id'],
+            'catalog_loaded_before_failure':[{'kind':'medicine','version':'2026.1'}],
+            'catalog_outcome_unknown':[{'kind':'lab_test','version':'2026.1'}],'next':self.settle('lab_test')},lines)
+        # Unreconciled (the lease lost once the loader's line was read, so the rollback cannot be recorded): reconcile first.
+        lease=FakeLease(); aws,starts=self.loader_aws(1,[self.COMMIT_UNKNOWN])
+        lease.assert_owned=lambda:c.require(not aws.reads,'LEASE_LOST'); output=io.StringIO()
+        with self.clock():
+            baseline,state,objects,calls,lease=self.execute(components=self.RELEASE,catalog='medicine',catalog_aws=aws,
+                catalog_failure='expected',lease=lease,output=output)
+        self.assertFalse(lease.released); self.assertFalse(any(k.endswith('/failed.json') for k in objects))
+        lines=[json.loads(l) for l in output.getvalue().splitlines() if l.startswith('{')]
+        self.assertIn({'release_id':self.receipt(objects,'started.json')['candidate']['release_id'],
+            'catalog_outcome_unknown':[{'kind':'medicine','version':'2026.1'}],
+            'next':'reconcile this release first (it ended unreconciled and keeps the deployment lease), then '
+                   +self.settle('medicine')},lines)
 
     def test_the_seeds_asked_for_are_read_from_the_checkout_before_the_release_starts(self):
         with tempfile.TemporaryDirectory() as folder:

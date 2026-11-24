@@ -1594,7 +1594,7 @@ signs a version (Q124 A) and the governed loader (a later slice) loads it.
 ### Second slice: the seed files and the governed loader (draft, not live)
 
 Built on 23 Nov 2026 (lane D), stacked on the first slice; Rahman's review
-of hid-system#319 built in (three rounds). No migration and no route: three
+of hid-system#319 built in (four rounds). No migration and no route: three
 scripts in `services/ehr-api/scripts`, the approvals file, and an opt-in
 phase of the deploy tool. Nothing is loaded until the clinical lead signs a
 file.
@@ -1619,8 +1619,18 @@ file.
     stops it with "MED-00002 is held back in this seed and also listed as
     retired; fix the row, do not retire it; nothing built" (exit 2, one
     line): retired, the row would be gone for good, though it only needs
-    fixing. Any other list the builder cannot make into seeds also stops it
-    with one plain line, exit 2.
+    fixing.
+  - Everything the builder reads is inside that one-line handling: a file
+    that cannot be read or is not JSON, a broken CSV (an unclosed quote: "the
+    combined list <file>: CSV: a quoted field is not closed; nothing built";
+    a row with the wrong number of fields), any other list it cannot make
+    into seeds, or a seed that would not load (an HID-LAB code that is not
+    Wave 0's) stops it with one plain line, exit 2, nothing built. Both
+    seeds are built and checked in memory first and written only when both
+    are good, each under a temporary name and then renamed into place, so a
+    bad lab-test list never leaves a new medicine file behind, and seeds
+    already there stay as they were. A seed file it cannot write is one line
+    too (exit 1).
   - **ATC codes:** `atcCode` is `null` in the seed unless the builder is run
     with `--with-atc`, which it refuses until a medicine sign-off of that
     version records the WHOCC terms answer (`licences.whoccAtc`).
@@ -1699,14 +1709,26 @@ file.
   failover): the loader listens for the client's `error` event, so a drop
   is never an unhandled one, and a load cut off before its commit leaves
   nothing ("terminating connection due to administrator command (57P01);
-  nothing loaded"). Only a drop at the moment of the commit leaves it
-  unknown whether the version committed; asking for it again settles it
-  (it loads, or is refused as already loaded). So the database refuses a
-  retired, changed or reused id on its own, and the whole load rolls back.
-  In one transaction it takes its advisory lock and
-  SHARE ROW EXCLUSIVE on the versions, records the new retired ids, inserts
-  the version (with `approvals_sha256`, the approvals file's own sha256) and
-  its rows, then turns the old version off and the new one on. `--dry-run`
+  nothing loaded").
+
+  A drop once the load's COMMIT is sent is different: the version may have
+  committed (a backend terminated while its commit waits for a synchronous
+  standby has already committed locally), so the loader never says "nothing
+  loaded" then. It tracks that COMMIT was sent; if the connection is lost,
+  or a fatal error comes, before COMMIT's reply, it ends with one line,
+  exit 1: "load-catalog: the connection was lost during commit, so the load
+  may have committed; ask for the same load again to settle it (it loads,
+  or is refused as already loaded)". An ERROR reply to COMMIT means the
+  load rolled back and stays a refusal or a failure, and a connection the
+  client already knew was lost is never sent COMMIT, so both still end
+  "nothing loaded".
+
+  The database refuses a retired, changed or reused id on its own, and the
+  whole load rolls back. In one transaction the loader takes its advisory
+  lock and SHARE ROW EXCLUSIVE on the versions, records the new retired
+  ids, inserts the version (with `approvals_sha256`, the approvals file's
+  own sha256) and its rows, then turns the old version off and the new one
+  on. `--dry-run`
   rolls back. It prints one line: what loaded, the seed's and the approvals
   file's sha256, and what it replaced.
 - **Where it runs in production:** only in the migration image, which
@@ -1754,6 +1776,10 @@ file.
     example `AWS_ThrottlingException`). Either way the tool prints a line
     naming the seed as loaded, and the failed receipt, when the release can
     write one, names it.
+  - A loader whose last line is the commit line above may have loaded: the
+    tool names the seed as "outcome unknown" (kind, version and the file's
+    sha256 from the checkout), prints the line, and the release stops
+    (`CATALOG_LOAD_OUTCOME_UNKNOWN`); the failed receipt names the seed so.
   - **After a failure that follows a successful load** (a later seed
     refused, the evidence line missing, or the services failing after the
     catalogue phase), the operator dispatches the release again with
@@ -1768,6 +1794,15 @@ file.
     unreconciled and keeps the deployment lease), then dispatch the release
     again with catalog_load none". A seed that did not load is asked for on
     its own once its cause is fixed.
+  - **After a load whose outcome is unknown,** the operator dispatches the
+    release again asking for that seed alone, which settles it: it loads,
+    or it is refused as already loaded. The tool prints this step too
+    (`"catalog_outcome_unknown"` names the seed, and `"next": "dispatch the
+    release again with catalog_load medicine to settle it (it loads, or is
+    refused as already loaded; once refused, dispatch again with
+    catalog_load none)"`), after the reconcile-first step when the release
+    ended unreconciled. A seed loaded before it is named under
+    `catalog_loaded_before_failure` and not asked for again.
   - Not asked, the release runs exactly as before.
 - **Before the first real load:**
   - #312's open points: the Wave 0 codes, the 13 uncoded tests and the four
@@ -1824,6 +1859,25 @@ file.
     builder, given MED-00002 in the retired ids while the list holds its row
     back, stops with one line (exit 2) and writes nothing. A `DATABASE_HOST`
     of "db host" ends with one line (exit 1).
+  - Round 4: on a throwaway copy whose sessions commit synchronously and
+    whose cluster names a synchronous standby that never connects, the
+    loader's COMMIT of the medicine seed waits (wait event `SyncRep`), and
+    `pg_terminate_backend` ends its backend there. PostgreSQL warns that
+    the transaction has already committed locally, and medicine 2026.1 is
+    loaded and active (1,616 items). The loader now ends with the commit
+    line ("the connection was lost during commit, so the load may have
+    committed; ...", exit 1); round 3's loader said "Connection terminated
+    unexpectedly; nothing loaded". Asked for again, the load is refused as
+    already loaded, which settles it. Terminated before its COMMIT (waiting
+    on the versions table's lock), it still says "nothing loaded" and leaves
+    nothing, and the same load then loads.
+  - Round 4: #312's list with one more row whose quote is never closed
+    stops the builder with one line (exit 2), and the signed seeds in the
+    folder stay as they were; round 3's builder ended with a stack trace.
+    The list with LAB-0001's code changed to an HID-LAB code that is not
+    Wave 0's stops it with one line (exit 2) and writes neither seed; round
+    3's builder wrote a new medicine file. The list itself still builds the
+    same seeds (`d6a08fe2…`, `847040fb…`), and `--check` passes.
 
 ### Target
 
