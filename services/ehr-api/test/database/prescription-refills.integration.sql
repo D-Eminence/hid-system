@@ -37,7 +37,8 @@
 --      refills_allowed column and its CHECK saying that with refills the
 --      duration is how long one fill lasts; R8 exactly and who may execute
 --      it (the two runtimes that may write prescriptions); R9's table, test
---      and policy exactly, the policy the last read policy by name;
+--      and policy exactly, the policy the last read policy by name and 0143's
+--      prescriptions_scan_my_orders the one before it;
 --   2. fills 1 to 1 + N pass for N = 0, 1, 2 and 11, and fill N + 2 is
 --      refused NO_REFILLS_LEFT; null refills_allowed is one fill; the
 --      claim's dispensed_at stays the first fill's;
@@ -94,7 +95,8 @@
 --      facility, without pharmacy.work-item.read or at another facility;
 --      each of the work items' two read policies alone, as the per-item
 --      reader; the same under a superuser owner and a NOSUPERUSER
---      NOBYPASSRLS one;
+--      NOBYPASSRLS one; the read policies asked only of the due items it
+--      answers, own-work half first, 200 at most (14e);
 --  15. the refill interval (cases' own text below);
 --  16. the refill scan marker (R9, D8): no runtime role may read or write
 --      its table; the owner with a session but no marker, and the EHR
@@ -102,7 +104,9 @@
 --      'before'); no marker row after R6 or R7 returns or fails (a failure
 --      made while the marker is held); R6 and R7 answer exactly as before
 --      (as PH and as PG); a later statement in the same transaction reads
---      what it read before; the policy is asked once per statement, first
+--      what it read before, the owner's read in another facility's session
+--      included (16e, which also shows it sees a marker left behind by an R7
+--      without its DELETE); the policy is asked once per statement, first
 --      (pharmacy.refill_scan_open runs once for R6's and once for R7's
 --      statement; in the plan, the first arm of the read policies' OR is its
 --      one InitPlan);
@@ -113,8 +117,12 @@
 --      R8, R6 (refills_end_on, 'ended'), R4 (REFILL_PRESCRIPTION_ENDED,
 --      DETAIL the day) and R7 agree; an expired prescription is neither
 --      listed nor fillable; an edit, a hold and resume, or a later end date
---      does not move the day; R7's statement range-scans its index by
---      facility and time written.
+--      does not move the day; R7's statement can range-scan its index by
+--      facility and time written (sequential scans off), with R8's day a
+--      condition on the index only under an owner that bypasses row-level
+--      security; a late fill (a refill whose day would come after the last
+--      day) is ended at once in R6, R4 and R7, and a refill whose day is the
+--      last day is not_yet until then (17g).
 -- Fixtures inserted as the suite runner with session_replication_role =
 -- replica where the services would not write them (identity rows, the
 -- outside pharmacy's approval). Synthetic values only; uuid prefix e152.
@@ -190,7 +198,7 @@ begin
            proc.provolatile, proc.proisstrict, proc.proconfig), '; ')
     into mismatch
     from (values
-      ('pharmacy.validate_dispensing()', '4a5e308ec3e9c0e020a7283bc9034026', '{"search_path=pharmacy, platform, pg_temp"}'),
+      ('pharmacy.validate_dispensing()', '06be902c41bcd4ee65f7f840c120db8f', '{"search_path=pharmacy, platform, pg_temp"}'),
       ('pharmacy.claim_prescription_dispensing()', '1a50612f5330a36c9b64d0d831c77812', '{"search_path=pg_catalog, pg_temp"}'),
       ('pharmacy.prescription_change_after_dispensing()', 'f61173d77be391a9e9c96db494827e82',
        '{"search_path=pg_catalog, pg_temp"}')) expected(proc_name, digest, config)
@@ -275,7 +283,7 @@ begin
     || ' | ' || pg_get_function_result('pharmacy.work_item_refills(uuid[])'::regprocedure)
     || ' | ' || (select md5(proc.prosrc) from pg_proc proc
                   where proc.oid = 'pharmacy.work_item_prescription_details(uuid[])'::regprocedure),
-    'md5=3f28a855510aa4a8c66e52a32eb65085 owner=t definer=t volatile=v strict=f language=plpgsql '
+    'md5=1563ae61481d70df74c493a497260d44 owner=t definer=t volatile=v strict=f language=plpgsql '
     || 'config={"search_path=pg_catalog, pg_temp"} | TABLE(work_item_id uuid, refills_allowed integer, '
     || 'fills_recorded integer, refill_open boolean, closed_reason text, next_fill_on date, refills_end_on date) | '
     || 'e6013d732354a56794ad8ec7f2bbaf0c');
@@ -292,7 +300,7 @@ begin
     || ' | ' || (select pg_get_indexdef(index_row.indexrelid) || ' valid=' || (index_row.indisvalid and index_row.indisready)
                    from pg_index index_row
                   where index_row.indexrelid = 'ehr.prescriptions_refills_facility_idx'::regclass),
-    'md5=fe4bd65dc8b29414a1be3815e1b8e214 owner=t definer=t volatile=v strict=f language=plpgsql '
+    'md5=928d4e14fe8d7bff9ce717ef757a6974 owner=t definer=t volatile=v strict=f language=plpgsql '
     || 'config={"search_path=pg_catalog, pg_temp"} | TABLE(work_item_id uuid) | CREATE INDEX '
     || 'prescriptions_refills_facility_idx ON ehr.prescriptions USING btree (facility_id, created_at, '
     || 'ehr.prescription_refills_end_on(created_at, refills_allowed, duration_value, duration_unit, ends_on)) '
@@ -360,8 +368,10 @@ begin
   -- DEFINER, cost 1, search_path; EXECUTE for PUBLIC alone besides the
   -- owner); the policy exactly (permissive, SELECT, PUBLIC, its printed
   -- expression by md5), the last read policy of ehr.prescriptions by name, so
-  -- the first asked; no hid_ role but the owner a member of the table's
-  -- owner.
+  -- the first asked, and 0143's prescriptions_scan_my_orders the one before
+  -- it, so the second asked (no read policy sorts between them: one would be
+  -- asked before 0143's marker, inside its walk); no hid_ role but the owner
+  -- a member of the table's owner.
   perform pg_temp.expect('1l R9: the marker table, its test and the policy, exactly',
     (select format('table owner=%s rls=%s columns=%s key=%s grants=%s', relation.relowner = owner_oid,
               relation.relrowsecurity,
@@ -392,6 +402,11 @@ begin
                                          where policy_row.polrelid = 'ehr.prescriptions'::regclass
                                            and policy_row.polpermissive and policy_row.polcmd in ('r', '*')
                                            and policy_row.polname::text collate "C" > 'prescriptions_scan_refills')
+    || ' | the two last by name=' || (select string_agg(last_two.polname, ',' order by last_two.polname collate "C")
+                                       from (select policy_row.polname::text as polname from pg_policy policy_row
+                                              where policy_row.polrelid = 'ehr.prescriptions'::regclass
+                                                and policy_row.polpermissive and policy_row.polcmd in ('r', '*')
+                                              order by policy_row.polname::text collate "C" desc limit 2) last_two)
     || ' | hid_ members of the owner=' || (select count(*) from pg_roles role_row
                                              where role_row.rolname like 'hid\_%' and role_row.oid <> owner_oid
                                                and pg_has_role(role_row.oid, owner_oid, 'MEMBER')),
@@ -399,7 +414,8 @@ begin
     || 'key=PRIMARY KEY (backend_pid, transaction_started_at) grants=0 | test md5=c06a06f770a690e456409803cc51b309 '
     || 'owner=t definer=t volatile=s cost=1 language=sql config={"search_path=pg_catalog, pg_temp"} '
     || 'acl=PUBLIC:EXECUTE | policy cmd=r permissive=t roles=t qual=98487317d1007ee3de2a0b8b5055f317 check=f | '
-    || 'read policies after it=0 | hid_ members of the owner=0');
+    || 'read policies after it=0 | the two last by name=prescriptions_scan_my_orders,prescriptions_scan_refills | '
+    || 'hid_ members of the owner=0');
 end $$;
 
 -- Fixtures. Organization O (e1520000...01) with facility F1 "Refills Test
@@ -1093,7 +1109,7 @@ select pg_temp.expect('12 after the undo''s savepoint: 0152''s bodies again, and
   (select string_agg(md5(proc.prosrc), ' ' order by proc.proname) from pg_proc proc
     where proc.oid in ('pharmacy.validate_dispensing()'::regprocedure,
             'pharmacy.claim_prescription_dispensing()'::regprocedure)) || ' ' || pg_temp.fills_from(19, 1, 3),
-  '1a50612f5330a36c9b64d0d831c77812 4a5e308ec3e9c0e020a7283bc9034026 ok,ok,23514 NO_REFILLS_LEFT / -');
+  '1a50612f5330a36c9b64d0d831c77812 06be902c41bcd4ee65f7f840c120db8f ok,ok,23514 NO_REFILLS_LEFT / -');
 
 -- 13. The reader, pharmacy.work_item_refills (0152's R6), through the
 -- Pharmacy runtime as the services call it. 'rxN:allowed/recorded/open/
@@ -1488,6 +1504,55 @@ select pg_temp.install_bulk(1001, 1200);
 select pg_temp.expect('14d 200 at most, the earliest opened first, then by id',
   pg_temp.labels(pg_temp.open_refills(2)),
   (select string_agg('o' || n, ' ' order by n) from generate_series(1, 200) n));
+-- 14e. R7 asks the work items' two read policies, repeated, only of the due
+-- items it answers, in its order, and stops at 200 (the review of
+-- 24 November 2026: asked of every due item first, R7 grew about 2 ms a
+-- refill open at once under a NOSUPERUSER NOBYPASSRLS owner), the own-work
+-- half first (the consent test, pharmacy.work_item_allows, costs about 2
+-- ms a call; the own-work half about 0.1 ms): with the 204 due here, PH's
+-- call never asks the consent test (no table policy asks it of PH either:
+-- the work items' and the fills' own-work policies come first and hold), and,
+-- under an owner that bypasses row-level security (no table policy asked),
+-- asks the own-work half exactly 200 times; under a NOSUPERUSER NOBYPASSRLS
+-- owner the tables' own policies ask it on every row they read as well, so
+-- that count is checked on the superuser build only.
+set local track_functions = 'all';
+create function pg_temp.calls_during(statement text, counted regprocedure) returns bigint language plpgsql as $f$
+declare before_calls bigint := coalesce(pg_stat_get_xact_function_calls(counted), 0);
+begin
+  execute statement;
+  return coalesce(pg_stat_get_xact_function_calls(counted), 0) - before_calls;
+end
+$f$;
+create function pg_temp.r7_access_calls() returns text language plpgsql as $f$
+declare
+  consent_calls bigint;
+  own_work_calls bigint;
+  r7_rows integer;
+begin
+  set local role hid_pharmacy_api_runtime;
+  perform pg_temp.as_member(2);
+  consent_calls := pg_temp.calls_during('select count(*) from pharmacy.open_refill_work_items()',
+    'pharmacy.work_item_allows(uuid, uuid, uuid, text)'::regprocedure);
+  own_work_calls := pg_temp.calls_during('select count(*) from pharmacy.open_refill_work_items()',
+    'identity.pharmacy_work_patient_allows(uuid, uuid, uuid, text)'::regprocedure);
+  select count(*) into r7_rows from pharmacy.open_refill_work_items();
+  reset role;
+  return format('rows %s, consent test %s, own-work half %s', r7_rows, consent_calls,
+    case when (select role_row.rolsuper or role_row.rolbypassrls from pg_roles role_row
+                join pg_class relation on relation.relowner = role_row.oid
+               where relation.oid = 'ehr.prescriptions'::regclass) then own_work_calls::text
+         else 'not counted' end);
+end
+$f$;
+grant execute on function pg_temp.calls_during(text, regprocedure) to public;
+select pg_temp.expect('14e R7 asks the read policies of the due items it answers only, own-work first, 200 at most',
+  pg_temp.r7_access_calls() || ' (due ' || (select count(*) from refills_bulk bulk where bulk.label like 'o%')
+    + cardinality(array['rx13', 'rx21', 'd29', 'd23']) || ')',
+  'rows 200, consent test 0, own-work half '
+  || case when (select role_row.rolsuper or role_row.rolbypassrls from pg_roles role_row
+                 join pg_class relation on relation.relowner = role_row.oid
+                where relation.oid = 'ehr.prescriptions'::regclass) then '200' else 'not counted' end || ' (due 204)');
 rollback to savepoint refills_two_hundred;
 
 -- 15. The refill interval (the clinical owner's decision, 24 November
@@ -1860,23 +1925,55 @@ select pg_temp.expect('16d R6 and R7 answer as they did without the marker',
                                   where pg_temp.work_item_of(pg_temp.rx(n)) is not null)
                                + (select count(*) from refills_bulk bulk where bulk.label like 'd%'));
 -- 16e. A later statement in the same transaction that reads
--- ehr.prescriptions sees what it saw before: the owner in PH's session and
--- the EHR runtime, before and after R6 and R7 ran in this transaction, and
--- as without the marker's policy.
+-- ehr.prescriptions sees what it saw before: the owner in PH's session (who
+-- reads every row on the own-work basis), the owner in P4's session
+-- (another facility's pharmacist: under a NOSUPERUSER NOBYPASSRLS owner its
+-- owner-run reads see none of F1's rows, so a marker left behind shows
+-- there) and the EHR runtime, before and after R6 and R7 ran in this
+-- transaction, and as without the marker's policy; no marker row is left,
+-- and the owner's marker test answers false. Then the case's own check: with
+-- R7 replaced (undone at once) by its own text without the DELETE of its
+-- marker, the same function sees the leak (rows 1, open=true, and P4's
+-- owner-run read differs under a NOSUPERUSER NOBYPASSRLS owner).
 create function pg_temp.after_readers() returns text language plpgsql as $f$
 declare
   owner_before text := pg_temp.owner_sees(2);
+  bounded_before text := pg_temp.owner_sees(3);
   runtime_before text := pg_temp.ehr_runtime_sees(1);
 begin
   perform pg_temp.readers_answer(2, true);
-  return format('owner %s runtime %s', (pg_temp.owner_sees(2) = owner_before
+  return format('owner %s bounded %s runtime %s | %s open=%s', (pg_temp.owner_sees(2) = owner_before
            and owner_before = pg_temp.without_marker_policy('select pg_temp.owner_sees(2)'))::text,
+         (pg_temp.owner_sees(3) = bounded_before
+           and bounded_before = pg_temp.without_marker_policy('select pg_temp.owner_sees(3)'))::text,
          (pg_temp.ehr_runtime_sees(1) = runtime_before
-           and runtime_before = pg_temp.without_marker_policy('select pg_temp.ehr_runtime_sees(1)'))::text);
+           and runtime_before = pg_temp.without_marker_policy('select pg_temp.ehr_runtime_sees(1)'))::text,
+         pg_temp.marker_rows(), pg_temp.owner_marker_open());
+end
+$f$;
+create function pg_temp.after_leaking_reader() returns text language plpgsql as $f$
+declare
+  leaking text := pg_get_functiondef('pharmacy.open_refill_work_items()'::regprocedure);
+  answer text;
+begin
+  if leaking !~ 'delete from pharmacy\.refill_scans scan\s+where [^;]+;' then
+    return 'R7 has no DELETE of its marker to take out';
+  end if;
+  begin
+    execute regexp_replace(leaking, 'delete from pharmacy\.refill_scans scan\s+where [^;]+;', 'null;');
+    answer := pg_temp.after_readers();
+    raise exception using errcode = 'P0001', message = 'refills: put R7 back', detail = answer;
+  exception when raise_exception then
+    get stacked diagnostics answer = pg_exception_detail;
+  end;
+  return answer;
 end
 $f$;
 select pg_temp.expect('16e after R6 and R7, later reads of ehr.prescriptions in the transaction see what they saw',
-  pg_temp.after_readers(), 'owner true runtime true');
+  pg_temp.after_readers(), 'owner true bounded true runtime true | rows 0 open=false');
+select pg_temp.expect('16e the case sees a marker left behind (an R7 without its DELETE, undone)',
+  pg_temp.after_leaking_reader() || ' | then ' || pg_temp.marker_rows(),
+  format('owner true bounded %s runtime true | rows 1 open=true | then rows 0', pg_temp.owner_bypasses()::text));
 -- 16f. The policy is asked once per statement: pharmacy.refill_scan_open()
 -- runs once for R6's statement and once for R7's (several prescriptions
 -- read; none under a superuser owner, which never asks a policy), and in
@@ -2145,19 +2242,129 @@ select pg_temp.expect('17e an edit, a hold and resume and a later end date do no
   || pg_temp.rx48_day(),
   'ok | v1 written=true R8=120 R6=not_yet/120 | ok v2 written=true R8=120 R6=changed/120 | ok ok v4 written=true R8=120 '
   || 'R6=changed/120 | ok v5 written=true R8=120 R6=changed/120');
--- 17f. R7's index bounds the read: the plan of R7's statement (as the
--- owner, marker held) range-scans ehr.prescriptions_refills_facility_idx by
--- the facility and the time written (rule c as a leakproof range, so under
+-- 17f. R7's index can bound the read: the plan of R7's statement (as the
+-- owner, marker held), with sequential scans off (the suite's table is
+-- small, so unforced the planner reads it whole; this case shows the index
+-- can serve the statement, not that the planner picks it: the 20,000-row
+-- measurement in 0152's header shows it picked, unforced, under both owner
+-- kinds), range-scans ehr.prescriptions_refills_facility_idx by the
+-- facility and the time written (rule c as a leakproof range, so under
 -- either owner kind); under an owner that bypasses row-level security R8's
--- day is a condition on the index too.
-select pg_temp.expect('17f R7''s statement range-scans its index by facility and time written',
+-- day is a condition on the index too, and under a NOSUPERUSER NOBYPASSRLS
+-- owner it is not (R8 is not leakproof), so there every refill prescription
+-- of the facility written in the last 365 Lagos days is read.
+select pg_temp.expect('17f R7''s statement can range-scan its index by facility and time written (seqscan off)',
   (select (bool_or(line ~ ('Index (Only )?Scan using prescriptions_refills_facility_idx|Bitmap Index Scan on '
                              || 'prescriptions_refills_facility_idx'))
            and bool_or(line ~ 'Index Cond: \(\(prescription\.facility_id = .*\) AND \(prescription\.created_at >= ')
-           and (not pg_temp.owner_bypasses()
-                or bool_or(line ~ 'Index Cond: .*ehr\.prescription_refills_end_on\(')))::text
+           and pg_temp.owner_bypasses() = bool_or(line ~ 'Index Cond: .*ehr\.prescription_refills_end_on\('))::text
      from unnest(pg_temp.r7_statement_plan()) line),
   'true');
+
+-- 17g. A late fill (the review of 24 November 2026): a refill
+-- whose day, R4's interval after the latest fill, would fall after the
+-- refills' last day can never be collected, so the refills are closed as
+-- ended at once (R6 'ended', next_fill_on null; R4 REFILL_PRESCRIPTION_ENDED,
+-- DETAIL the last day; R7 does not list it), not 'not_yet' with a day on
+-- which R4 would refuse it. On the boundary, in pairs, at F1 for Bisi: both
+-- allow 2 refills of 30 days (a refill opens 23 days after the latest fill),
+-- written on Lagos day -110 (R8 rule (b): day -110 + 4 x 30 = day +10);
+-- L0's fill 1 at 23:59:59.999999 Lagos on day -13 (its refill opens on day
+-- +10, the last day itself: not_yet until then), L1's at 00:00 Lagos on day
+-- -12 (it would open on day +11, after the last day: ended now, ten days
+-- before the last day). The same under the far session time zones.
+create temporary table refills_late (label text primary key, n integer unique, fill_at timestamptz,
+  prescription uuid, item uuid) on commit drop;
+grant select on refills_late to public;
+insert into refills_late (label, n, fill_at)
+values ('L0', 1, pg_temp.lagos_at(-12, time '00:00') - interval '1 microsecond'),
+       ('L1', 2, pg_temp.lagos_at(-12, time '00:00'));
+update refills_late set prescription = ('e152001b-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid,
+       item = ('e152001c-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid;
+set local session_replication_role = replica;
+insert into ehr.prescriptions (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  medication_code_system, medication_code, medication_display, dose_quantity, dose_unit, route_code, frequency,
+  instructions, starts_on, ends_on, status, row_version, created_at, updated_at, refills_allowed, duration_value,
+  duration_unit)
+select late.prescription, 'e1520008-0000-4000-8000-000000000002', 'e1520006-0000-4000-8000-000000000002',
+       'e1520001-0000-4000-8000-000000000001', pg_temp.account(1), pg_temp.membership(1), 'http://www.whocc.no/atc',
+       'J01CA04', 'Amoxicillin 500 mg capsule (' || late.label || ')', 1, 'capsule', 'oral', 'Every 8 hours',
+       'Take after food', null, null, 'active', 1, pg_temp.lagos_at(-110), pg_temp.lagos_at(-110), 2, 30, 'day'
+  from refills_late late;
+insert into pharmacy.work_items (id, patient_id, facility_id, ordering_facility_id, source_ehr_prescription_id,
+  source_ehr_prescription_version, source_encounter_id, source_status, medication_code_system, medication_code,
+  medication_display, dose_quantity, dose_unit, route_code, frequency, instructions, starts_on, ends_on, prescribed_by,
+  prescribed_at, accepted_by, accepted_by_membership_id, acceptance_reason, idempotency_key, request_sha256,
+  correlation_id)
+select late.item, 'e1520006-0000-4000-8000-000000000002', 'e1520001-0000-4000-8000-000000000001',
+       'e1520001-0000-4000-8000-000000000001', late.prescription, 1, 'e1520008-0000-4000-8000-000000000002', 'active',
+       'http://www.whocc.no/atc', 'J01CA04', 'Amoxicillin 500 mg capsule (' || late.label || ')', 1, 'capsule',
+       'oral', 'Every 8 hours', 'Take after food', null, null, pg_temp.account(1), pg_temp.lagos_at(-110),
+       pg_temp.account(1), pg_temp.membership(1), 'Sent automatically when the prescription was activated',
+       'refills-late-item-' || late.n, repeat('a', 64), 'refills-late'
+  from refills_late late;
+insert into pharmacy.dispensings (id, work_item_id, work_item_version, patient_id, facility_id,
+  medication_code_system, medication_code, medication_display, quantity_dispensed, quantity_unit, dispensed_by,
+  dispensed_by_membership_id, dispensed_at, reason, idempotency_key, request_sha256, correlation_id, fill_number)
+select gen_random_uuid(), late.item, 1, 'e1520006-0000-4000-8000-000000000002',
+       'e1520001-0000-4000-8000-000000000001', 'http://www.whocc.no/atc', 'J01CA04',
+       'Amoxicillin 500 mg capsule (' || late.label || ')', 30, 'capsule', pg_temp.account(2), pg_temp.membership(2),
+       late.fill_at, 'Dispensed to the patient', 'refills-late-fill-' || late.n, repeat('d', 64), 'refills-late', 1
+  from refills_late late;
+set local session_replication_role = origin;
+-- R6, R4 (fill 2 now, undone at once) and R7 on L0 and L1 as PH:
+-- 'label:open/reason/next/last day' (days from today in Lagos), then
+-- 'label:R4's outcome' (the DETAIL as days from today), then R7's labels.
+create function pg_temp.late_fill() returns text language plpgsql as $f$
+declare
+  late_row record;
+  outcome text;
+  answer text;
+begin
+  set local role hid_pharmacy_api_runtime;
+  perform pg_temp.as_member(2);
+  select string_agg(format('%s:%s/%s/%s/%s', late.label, reader.refill_open::text, coalesce(reader.closed_reason, '-'),
+           coalesce((reader.next_fill_on - pg_temp.lagos_day(0))::text, '-'),
+           coalesce((reader.refills_end_on - pg_temp.lagos_day(0))::text, '-')), ' ' order by late.n)
+    into answer
+    from refills_late late
+    join pharmacy.work_item_refills(array(select item from refills_late)) reader on reader.work_item_id = late.item;
+  answer := answer || ' |';
+  for late_row in select * from refills_late order by n loop
+    begin
+      outcome := pg_temp.try(pg_temp.dispense_sql(late_row.item, 2, 2, clock_timestamp()));
+      raise exception using errcode = 'P0001', message = 'refills: undo the fill';
+    exception when raise_exception then
+      null;
+    end;
+    answer := answer || ' ' || late_row.label || ':'
+      || case when outcome ~ '[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+              then regexp_replace(outcome, '[0-9]{4}-[0-9]{2}-[0-9]{2}$',
+                     ((substring(outcome from '[0-9]{4}-[0-9]{2}-[0-9]{2}$'))::date - pg_temp.lagos_day(0))::text)
+              else outcome end;
+  end loop;
+  answer := answer || ' | R7 ' || coalesce((select string_agg(late.label, ' ' order by late.n)
+                                              from refills_late late
+                                             where late.item = any (array(select opened.work_item_id
+                                                                            from pharmacy.open_refill_work_items() opened))),
+                                           'none');
+  reset role;
+  return answer;
+end
+$f$;
+select pg_temp.expect('17g a late fill: a refill that would open after the last day is ended now; on the last day, not_yet',
+  pg_temp.late_fill(),
+  'L0:false/not_yet/10/10 L1:false/ended/-/10 | L0:23514 REFILL_TOO_SOON / 10 '
+  || 'L1:23514 REFILL_PRESCRIPTION_ENDED / 10 | R7 none');
+set local timezone = 'Pacific/Kiritimati';
+select pg_temp.expect('17g under TimeZone Pacific/Kiritimati (UTC+14): the same', pg_temp.late_fill(),
+  'L0:false/not_yet/10/10 L1:false/ended/-/10 | L0:23514 REFILL_TOO_SOON / 10 '
+  || 'L1:23514 REFILL_PRESCRIPTION_ENDED / 10 | R7 none');
+set local timezone = 'Etc/GMT+12';
+select pg_temp.expect('17g under TimeZone Etc/GMT+12 (UTC-12): the same', pg_temp.late_fill(),
+  'L0:false/not_yet/10/10 L1:false/ended/-/10 | L0:23514 REFILL_TOO_SOON / 10 '
+  || 'L1:23514 REFILL_PRESCRIPTION_ENDED / 10 | R7 none');
+reset timezone;
 
 do $$ begin raise notice 'prescription refills: every case passed'; end $$;
 rollback;

@@ -12242,7 +12242,7 @@ writes no version, so it records nothing and ends no refill.
   the database; the bound is on how many rows an item can have.
 - `pharmacy.validate_dispensing()` (BEFORE INSERT, origin mode) is 0101's
   text with one block before its RETURN (md5
-  4a5e308ec3e9c0e020a7283bc9034026; the body without the block is 0101's
+  06be902c41bcd4ee65f7f840c120db8f; the body without the block is 0101's
   17f7e8897bd2ab240332e4d2c9f757b7). The order-route branch, 0077's actor
   and work-item check and 0101's prescription check answer first, as
   before. Then, for `fill_number > 1` only: a route-backed item, or an own
@@ -12281,7 +12281,7 @@ writes no version, so it records nothing and ends no refill.
 - `pharmacy.work_item_refills(uuid[])`, new (plpgsql, VOLATILE: it writes
   0152's refill scan marker, D8; SECURITY DEFINER, the owner's,
   `search_path` `pg_catalog, pg_temp`, every name schema-qualified; md5
-  3f28a855510aa4a8c66e52a32eb65085). EXECUTE to `hid_pharmacy_runtime` and
+  1563ae61481d70df74c493a497260d44). EXECUTE to `hid_pharmacy_runtime` and
   `hid_schema_test_runtime` only, here and in `runtime-grants.sql` (0152's
   block); PUBLIC has none. 0125's reader is not replaced. For at most 200
   requested work items (201, or a null array: 22023
@@ -12345,7 +12345,7 @@ writes no version, so it records nothing and ends no refill.
 - `pharmacy.open_refill_work_items()`, new (plpgsql, VOLATILE, as the
   reader; SECURITY DEFINER, the owner's, `search_path` `pg_catalog,
   pg_temp`, every name schema-qualified; md5
-  fe4bd65dc8b29414a1be3815e1b8e214; EXECUTE as the reader's, here and in
+  928d4e14fe8d7bff9ce717ef757a6974; EXECUTE as the reader's, here and in
   `runtime-grants.sql`), with its index
   `ehr.prescriptions_refills_facility_idx` on `ehr.prescriptions
   (facility_id, created_at, ehr.prescription_refills_end_on(created_at,
