@@ -116,7 +116,7 @@ export class DiagnosesService {
   }
 
   /**
-   * ORD-9 (0151): the member's recent diagnoses, written in the save's own
+   * ORD-9 (0153): the member's recent diagnoses, written in the save's own
    * transaction (the route's and EHR-C5's consultation's). It is a
    * best-effort side record. What it guarantees: the record never waits for
    * another save of the same membership (it skips the record while another
@@ -132,7 +132,7 @@ export class DiagnosesService {
    * it holds no patient id (its display is the clinician's own text, which
    * may name a patient).
    * It runs in a savepoint, and any failure of the record (a schema without
-   * 0151, 42883; a deadlock, 40P01; a lock not available, 55P03; anything
+   * 0153, 42883; a deadlock, 40P01; a lock not available, 55P03; anything
    * else) is rolled back to it and the diagnosis saves as before; after
    * ROLLBACK TO SAVEPOINT the rest of the transaction commits normally. Only
    * a serialization failure (40001) in a SERIALIZABLE transaction is passed

@@ -83,8 +83,8 @@ describe('EHR DatabaseService staff session (0133 D13 and D14, owner\'s Q120 B a
     expect(connections.map(vitalsSwitchValue)).toEqual(['0142', '0142']);
   });
 
-  it('sets the membership and no purpose of use in a staff transaction (ORD-9\'s recent diagnoses, 0151)', async () => {
-    // 0151's record and read find the caller by app.membership_id (and app.facility_id and app.actor_subject); the
+  it('sets the membership and no purpose of use in a staff transaction (ORD-9\'s recent diagnoses, 0153)', async () => {
+    // 0153's record and read find the caller by app.membership_id (and app.facility_id and app.actor_subject); the
     // recent list reads no patient, so withStaffTransaction sets no purpose of use (Rahman's re-review of #321, nit 5).
     const { database, connections } = service();
     await database.withStaffTransaction({ subject: 'synthetic:doctor', facilityId: 'facility', membershipId: 'membership',

@@ -64,7 +64,7 @@ export class SearchCatalogMedicinesQueryDto extends SearchCatalogLabTestsQueryDt
 /** GET ehr/terminology/diagnoses?q=&limit= (ORD-9): q and limit as the lab-test search. */
 export class SearchDiagnosesQueryDto extends SearchCatalogLabTestsQueryDto {}
 
-/** GET ehr/terminology/diagnoses/recent?limit= (ORD-9, 0151): limit 1-50, default 20. */
+/** GET ehr/terminology/diagnoses/recent?limit= (ORD-9, 0153): limit 1-50, default 20. */
 export const RECENT_DIAGNOSES_DEFAULT_LIMIT = 20;
 export const RECENT_DIAGNOSES_MAX_LIMIT = 50;
 

@@ -164,7 +164,7 @@ export class DatabaseService implements OnApplicationShutdown {
 
   /**
    * A staff member's own work that reads no patient (ORD-9's recent
-   * diagnoses, 0151): the actor, facility and membership the guards
+   * diagnoses, 0153): the actor, facility and membership the guards
    * established, and no purpose of use, as there is no patient. It sets
    * neither app.own_facility_work nor app.vitals_status: the recent list
    * reads no order route and no vitals.

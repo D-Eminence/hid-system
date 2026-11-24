@@ -658,11 +658,11 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
   });
 });
 
-describe('ORD-9 (0151): recent diagnoses', () => {
+describe('ORD-9 (0153): recent diagnoses', () => {
   const facilityId = '123e4567-e89b-42d3-a456-426614174001';
   const caller: RecentDiagnosesCaller = { subject: 'staff:test-doctor', accountId: '123e4567-e89b-42d3-a456-426614174002',
     organizationId: '123e4567-e89b-42d3-a456-426614174003', facilityId, membershipId: membershipA,
-    correlationId: 'correlation-0151' };
+    correlationId: 'correlation-0153' };
   const lastUsedAt = new Date('2026-11-23T10:42:00.000Z');
 
   /** withStaffTransaction with one client; the audit row is written with that client. */
@@ -701,7 +701,7 @@ describe('ORD-9 (0151): recent diagnoses', () => {
     const list = jest.spyOn(service, 'list');
     const controller = new TerminologyController(new CatalogService(fakeDatabase([]).database), service);
     const setHeader = jest.fn();
-    const request = { correlationId: 'correlation-0151', facilityId, res: { setHeader }, header: () => undefined,
+    const request = { correlationId: 'correlation-0153', facilityId, res: { setHeader }, header: () => undefined,
       actor: { subject: caller.subject, accountId: caller.accountId,
         facility: { membershipId: membershipA, organizationId: caller.organizationId } } } as unknown as HidRequest;
     await expect(controller.recentDiagnoses(request, Object.assign(new RecentDiagnosesQueryDto(), { limit: 5 })))
@@ -736,7 +736,7 @@ describe('ORD-9 (0151): recent diagnoses', () => {
     expect(database.withStaffTransaction).toHaveBeenCalledWith(caller, expect.any(Function));
     expect(calls).toEqual([{ sql: RECENT_DIAGNOSES_SQL, values: [20] }]);
     expect(audits).toEqual([{ client, event: {
-      correlationId: 'correlation-0151', actorType: 'staff', actorSubject: caller.subject, actorAccountId: caller.accountId,
+      correlationId: 'correlation-0153', actorType: 'staff', actorSubject: caller.subject, actorAccountId: caller.accountId,
       actorMembershipId: membershipA, organizationId: caller.organizationId, facilityId,
       action: 'ehr.terminology.recent-read', resourceType: 'recent-diagnoses', outcome: 'success',
       details: { resultCount: 2 } } }]);
@@ -744,11 +744,11 @@ describe('ORD-9 (0151): recent diagnoses', () => {
   });
 
   it.each(['42883', '42P01', '57014', '42501'])('%s is 503 CATALOG_UNAVAILABLE in the diagnosis search\'s words; a schema '
-    + 'without 0151 is not logged', async (code) => {
+    + 'without 0153 is not logged', async (code) => {
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const { service, audits } = fakeStaff(databaseError(code));
     const problem = await problemOf(service.list(caller, 20));
-    // The same words as the diagnosis search's 503 (#320), so no advice: trying again does not help while 0151 is
+    // The same words as the diagnosis search's 503 (#320), so no advice: trying again does not help while 0153 is
     // not there, and a name alone is not accepted yet, so no "type the name instead" either.
     expect([problem.getStatus(), problem.code, problem.message]).toEqual([503, 'CATALOG_UNAVAILABLE',
       'Diagnosis search is not available right now.']);

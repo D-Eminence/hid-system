@@ -71,7 +71,7 @@ interface Tables {
  * transaction ends without an error (all or nothing), transactions run one
  * at a time, and statements are answered as PostgreSQL would for the rows
  * the services read. Inserting a diagnosis with code 'FAIL' breaks a CHECK.
- * ehr.record_recent_diagnosis (0151) adds to `recent`, or fails with the
+ * ehr.record_recent_diagnosis (0153) adds to `recent`, or fails with the
  * code given to failRecent; the transaction is READ COMMITTED unless
  * setIsolation says otherwise.
  */
@@ -379,7 +379,7 @@ describe('EHR-C5 one-call consultation (service)', () => {
     expect(tables.keys.every((row) => row.state === 'completed' && row.key === KEY)).toBe(true);
   });
 
-  it('records each diagnosis in the member\'s recent diagnoses (0151), in the save\'s transaction, in a savepoint', async () => {
+  it('records each diagnosis in the member\'s recent diagnoses (0153), in the save\'s transaction, in a savepoint', async () => {
     const db = fakeDatabase();
     await db.consultations.create(contextFor('correlation-0001'), patientId, body(), KEY);
     expect(db.tables().recent).toEqual([
@@ -409,7 +409,7 @@ describe('EHR-C5 one-call consultation (service)', () => {
       expect(db.audits.map((row) => row.action)).toEqual(['ehr.encounter.create', 'ehr.note.create',
         'ehr.vital.create', 'ehr.diagnosis.create', 'ehr.diagnosis.create']);
       // A warning with the SQLSTATE and the request's correlation id, as other ehr-api warnings log them (none for a
-      // schema without 0151): no patient, member, facility or account id.
+      // schema without 0153): no patient, member, facility or account id.
       const warning = { message: 'A recent diagnosis could not be recorded', sqlState: code,
         correlationId: 'correlation-0001' };
       expect(warn.mock.calls).toEqual(code === '42883' ? [] : [[warning], [warning]]);

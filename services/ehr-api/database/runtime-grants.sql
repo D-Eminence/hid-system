@@ -2039,8 +2039,8 @@ grant execute on function ehr.search_catalog_diagnoses(text, integer) to hid_ehr
 revoke all on function ehr.search_catalog_diagnoses(text, integer), ehr.catalog_diagnosis_not_sealed() from public;
 revoke all on ehr.catalog_diagnoses from public;
 
--- Recent diagnoses (0151, ORD-9 of the Akos EHR plan, second slice, first
--- part; sizing note on hid-system#258, 23 November 2026), exactly as 0151
+-- Recent diagnoses (0153, ORD-9 of the Akos EHR plan, second slice, first
+-- part; sizing note on hid-system#258, 23 November 2026), exactly as 0153
 -- grants them: the record and the read to the EHR runtime and the schema
 -- test runtime; no privilege on the table for any runtime (row-level
 -- security on, no policy: only the two functions, as its owner, use it).

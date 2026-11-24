@@ -713,7 +713,7 @@ try {
   step('ORD-9: the doctor finds a diagnosis by a word or our other name, an ICD-10 code typed is named back, a Health ID '
     + 'and a member without the permission are refused; the status names the release');
 
-  // ── ORD-9 (0151): the doctor's recent diagnoses ──
+  // ── ORD-9 (0153): the doctor's recent diagnoses ──
   // Written by ehr-api in each diagnosis save's transaction; read with no X-Purpose-Of-Use (no patient).
   const recentGet = (who, query = '') => terminologyGet(who, `/diagnoses/recent${query}`);
   const recentBefore = await recentGet(doctor);
@@ -757,7 +757,7 @@ try {
   step('ORD-9: each diagnosis the doctor saves joins their recent list (newest first, counted, a replay not), read '
     + 'with no purpose of use and never kept; audited with the count only; a member without the permission is refused');
 
-  // ── ORD-9 (0151): the record never waits, with two sessions ──
+  // ── ORD-9 (0153): the record never waits, with two sessions ──
   // Two connections as ehr-api connects (its runtime URL and role), each with the doctor's settings as a
   // diagnosis save sets them. Session A records 1F40, a pick the doctor already has, and keeps its transaction
   // open. Checked: A then holds the membership's recording lock (in pg_locks) and 1F40's row (the owner's

@@ -2270,13 +2270,13 @@ file's seed in `docs/codes/catalog-approvals.json`.
   diagnoses by name only and `codeStatus`, which alter `ehr.diagnoses` and
   need a lock plan.
 
-### Second slice, first part: recent diagnoses (0151, draft, not live)
+### Second slice, first part: recent diagnoses (0153, draft, not live)
 
-Built on 23 Nov 2026 (lane D), on 0150 (#320), as the sizing note on
-hid-system#258 (14:18 UTC) set out. The number 0151 is provisional. No
+Built on 23 Nov 2026 (lane D), on 0152 (#320), as the sizing note on
+hid-system#258 (14:18 UTC) set out. The number 0153 is provisional. No
 live table is altered.
 
-- **Database (0151):** `ehr.clinician_recent_diagnoses` (membership,
+- **Database (0153):** `ehr.clinician_recent_diagnoses` (membership,
   facility, code system, code, display, last used, count; key membership,
   code system and code). It has no foreign key, so no live table is locked,
   and no patient id. Row-level security is on with no policy and no grant:
@@ -2300,7 +2300,7 @@ live table is altered.
     may skip its record. The lock is keyed on the hash of the membership
     id, not the id, so a save also skips its record while a save of
     another membership whose id has the same `hashtext` value holds it,
-    even at another facility (0151's header says so too, lines 63-64:
+    even at another facility (0153's header says so too, lines 63-64:
     "two memberships whose ids share a hash only skip a record now and
     then"). The runtime verifier
     (`verify-prescription-details-runtime.mjs`) checks this with two
@@ -2324,7 +2324,7 @@ live table is altered.
   lock on one of them can hold the save at the record up to ehr-api's
   statement timeout (15 s, `database.service.ts:289`), after which the
   error (57014) is rolled back to the savepoint like any other and the
-  save goes on. Any failure of the record, a schema without 0151
+  save goes on. Any failure of the record, a schema without 0153
   (42883), a deadlock (40P01) or a lock not available (55P03) included, is
   rolled back to the savepoint and the diagnosis saves as before, with a
   warning naming the SQLSTATE and the request's correlation id, as other
@@ -2339,24 +2339,24 @@ live table is altered.
   - The read and its audit row (`ehr.terminology.recent-read`, details
     `{ resultCount }` only) commit in one transaction. A read whose audit
     row cannot be written is refused.
-  - A schema without 0151, or any database failure, answers 503
+  - A schema without 0153, or any database failure, answers 503
     `CATALOG_UNAVAILABLE`, sent as "The service could not complete the
     request." (as every 5xx, as for the search; the service's own words,
     "Diagnosis search is not available right now.", the search's, give no
-    advice and stay inside it: trying again does not help while 0151 is
+    advice and stay inside it: trying again does not help while 0153 is
     not there, and a name alone is not accepted yet). The screen reads the
     status and the code, and shows the empty field as before.
   - A refusal is audited by the interceptor, as for the search.
 - **Across an ICD-11 release switch** (Rahman's re-review of #321, minor
   1; Ola, clinical owner, 24 Nov 2026): picks are kept as saved. The read
-  (`0151:183-188`) does not look at the active release, and its answer
+  (`0153:183-188`) does not look at the active release, and its answer
   carries no release or in-list field. So after a new release goes live,
   a code that release dropped, or a code under its old title, is still
   offered from the recent list with nothing marking it, and picking it
   again raises its count. A diagnosis saved from such a pick is stored as
   typed: a code not in the list is allowed by design (`not_in_list` once
   `codeStatus` is built). Meanwhile the screen shows each pick's
-  `display` as saved, the old title included. 0151 is not changed for
+  `display` as saved, the old title included. 0153 is not changed for
   this.
   - **Booked:** the `codeStatus` slice, which alters `ehr.diagnoses`
     anyway, replaces the read, `ehr.recent_diagnoses`, so that it returns
@@ -2379,13 +2379,13 @@ live table is altered.
     WHO update: nothing is loaded until the lead signs the release file's
     seed in `docs/codes/catalog-approvals.json` (the first slice, above;
     owner decision Q124 A, 19 Nov 2026).
-- **0151's header** is left as it is: lines 16-17 still say the table
+- **0153's header** is left as it is: lines 16-17 still say the table
   "shows no patient", and lines 34-35 that the record "never fails or
   holds up a clinical save". This section says what holds: no patient
   id, a display that may name a patient, and a record that never waits
   for another save of the same membership. The header changes only if
-  0151 changes for another reason (0151 is cleared to sign at sha256
-  `5bed5f0b…`).
+  0153 changes for another reason (0153 is cleared to sign at sha256
+  `45faa6a7…`).
 - **Not in this slice:** diagnoses by name only and `codeStatus` (with
   the recent read's change for a release switch, above).
 

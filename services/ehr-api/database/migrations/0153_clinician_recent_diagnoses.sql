@@ -1,11 +1,11 @@
--- 0151 Recent diagnoses (ORD-9 of the Akos EHR plan, lane D, second
+-- 0153 Recent diagnoses (ORD-9 of the Akos EHR plan, lane D, second
 -- slice, first part). The planned contract's section "ORD-9: Diagnosis
 -- search on ICD-11, recent diagnoses, and diagnoses by name only",
 -- "Recent diagnoses"; the sizing note on hid-system#258 (Ola, 23 November
--- 2026, 14:18 UTC) splits it from the name-only part. Written on 0150
+-- 2026, 14:18 UTC) splits it from the name-only part. Written on 0152
 -- (#320). The number is provisional, given in merge order; no migration
 -- number appears inside a function body. This file requires 0001-0137,
--- 0149 and 0150 applied. The declaration is signed separately.
+-- 0149 and 0152 applied. The declaration is signed separately.
 --
 -- THE GAP. A clinician who records the same few diagnoses all day has to
 -- search for each one again.
@@ -42,7 +42,7 @@
 --
 -- Locks: the new table and functions only; no foreign key, so no existing
 -- relation is locked. Busy refusals: none; the preconditions' refusals
--- start with "0151: ".
+-- start with "0153: ".
 --
 -- The recording lock (at run time, not while applying): the two-key form
 -- pg_try_advisory_xact_lock(7409, hashtext(membership id)), class key 7409
@@ -76,17 +76,17 @@
 do $$
 begin
   if to_regclass('ehr.catalog_diagnoses') is null or to_regclass('ehr.diagnoses') is null then
-    raise exception using errcode = '55000', message = '0151: 0001-0137, 0149 and 0150 must be applied first';
+    raise exception using errcode = '55000', message = '0153: 0001-0137, 0149 and 0152 must be applied first';
   end if;
   if to_regclass('ehr.clinician_recent_diagnoses') is not null
      or to_regprocedure('ehr.record_recent_diagnosis(text,text,text)') is not null
      or to_regprocedure('ehr.recent_diagnoses(integer)') is not null then
-    raise exception using errcode = '55000', message = '0151: already applied';
+    raise exception using errcode = '55000', message = '0153: already applied';
   end if;
   if (select md5(proc.prosrc) from pg_proc proc
        where proc.oid = to_regprocedure('auth.membership_has_permission(text,uuid,uuid,text)'))
      is distinct from '65e3eaff93fe729fd5c5b986b80c9dd6' then
-    raise exception using errcode = '55000', message = '0151: auth.membership_has_permission is not as 0001-0137 left it';
+    raise exception using errcode = '55000', message = '0153: auth.membership_has_permission is not as 0001-0137 left it';
   end if;
 end
 $$;
@@ -204,11 +204,11 @@ end
 $$;
 
 comment on table ehr.clinician_recent_diagnoses is
-  '0151 (ORD-9): each member''s own last diagnosis picks at their facility (code system, code, display, last used, count), at most 200 per membership; no patient id. Row-level security on, no policy, no grant: read and written only by ehr.recent_diagnoses and ehr.record_recent_diagnosis.';
+  '0153 (ORD-9): each member''s own last diagnosis picks at their facility (code system, code, display, last used, count), at most 200 per membership; no patient id. Row-level security on, no policy, no grant: read and written only by ehr.recent_diagnoses and ehr.record_recent_diagnosis.';
 comment on function ehr.record_recent_diagnosis(text, text, text) is
-  '0151 (ORD-9): records a diagnosis pick for the session''s membership (ehr.diagnosis.write at the session''s facility), in the save''s transaction; records nothing otherwise or with no code. Never waits: records nothing while another transaction of the membership holds its recording lock (pg_try_advisory_xact_lock, class key 7409). At most 200 per membership.';
+  '0153 (ORD-9): records a diagnosis pick for the session''s membership (ehr.diagnosis.write at the session''s facility), in the save''s transaction; records nothing otherwise or with no code. Never waits: records nothing while another transaction of the membership holds its recording lock (pg_try_advisory_xact_lock, class key 7409). At most 200 per membership.';
 comment on function ehr.recent_diagnoses(integer) is
-  '0151 (ORD-9): the session''s membership''s diagnosis picks at its facility, newest first, at most limit (1-50); none without ehr.diagnosis.write. 22023 RECENT_DIAGNOSES_INVALID for a limit outside 1-50.';
+  '0153 (ORD-9): the session''s membership''s diagnosis picks at its facility, newest first, at most limit (1-50); none without ehr.diagnosis.write. 22023 RECENT_DIAGNOSES_INVALID for a limit outside 1-50.';
 
 -- 5. Post-checks. The owner is the owner of 0149's ehr.catalog_versions, a
 -- relation this file did not make, so a run by another role (the cluster
@@ -225,8 +225,8 @@ begin
                                     'ehr.recent_diagnoses(integer)'::regprocedure)
                    and proc.proowner is distinct from owner_oid) then
     raise exception using errcode = '55000',
-      message = '0151: the recent diagnoses table and functions are not owned by the owner of ehr.catalog_versions '
-                || '(apply 0151 as the role that applied 0149 and 0150)';
+      message = '0153: the recent diagnoses table and functions are not owned by the owner of ehr.catalog_versions '
+                || '(apply 0153 as the role that applied 0149 and 0152)';
   end if;
   if not (select relation.relrowsecurity from pg_class relation
            where relation.oid = 'ehr.clinician_recent_diagnoses'::regclass)
@@ -235,21 +235,21 @@ begin
                   acldefault('r', relation.relowner))) acl
                  where relation.oid = 'ehr.clinician_recent_diagnoses'::regclass
                    and acl.grantee <> relation.relowner) then
-    raise exception using errcode = '55000', message = '0151: the recent diagnoses table is not the owner''s only';
+    raise exception using errcode = '55000', message = '0153: the recent diagnoses table is not the owner''s only';
   end if;
   if exists (select 1 from pg_proc proc, lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
               where proc.oid in ('ehr.record_recent_diagnosis(text,text,text)'::regprocedure,
                                  'ehr.recent_diagnoses(integer)'::regprocedure)
                 and acl.grantee <> proc.proowner
                 and (acl.grantee = 0 or pg_get_userbyid(acl.grantee) not in ('hid_ehr_runtime', 'hid_schema_test_runtime'))) then
-    raise exception using errcode = '55000', message = '0151: a recent diagnoses function is granted to a role other than the EHR and schema test runtimes';
+    raise exception using errcode = '55000', message = '0153: a recent diagnoses function is granted to a role other than the EHR and schema test runtimes';
   end if;
   if (select count(*) from pg_proc proc
        where proc.oid in ('ehr.record_recent_diagnosis(text,text,text)'::regprocedure,
                           'ehr.recent_diagnoses(integer)'::regprocedure)
          and proc.prosecdef and proc.proowner = owner_oid
          and proc.proconfig = array['search_path=pg_catalog, pg_temp']) <> 2 then
-    raise exception using errcode = '55000', message = '0151: a recent diagnoses function is not as made';
+    raise exception using errcode = '55000', message = '0153: a recent diagnoses function is not as made';
   end if;
 end
 $$;

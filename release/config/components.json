@@ -95,7 +95,7 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0152",
+    "last": "0153",
     "count": 150,
     "files": [
       {
@@ -691,12 +691,12 @@
         "sha256": "a92d10f221ab1cfadc1eca18c55fc6e7ef56d79e0280fc5f0bbc29633976eac9"
       },
       {
-        "name": "0151_clinician_recent_diagnoses.sql",
-        "sha256": "5bed5f0bb3bf53d9cc06703f67e47845a6147dd4229ab1844aec47914dd7c764"
-      },
-      {
         "name": "0152_catalog_diagnoses.sql",
         "sha256": "abfecc3571808e4ad29fdf8c1e202f65b3cdf890e9f3106b74bd6ef1bd19f9c9"
+      },
+      {
+        "name": "0153_clinician_recent_diagnoses.sql",
+        "sha256": "45faa6a739056cc07426fdb5363b58c7dda1dbcbc096fb6d1769ae746798500b"
       }
     ]
   },

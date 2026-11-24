@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- 0151 (ORD-9): recent diagnoses. Rollback-only.
+-- 0153 (ORD-9): recent diagnoses. Rollback-only.
 --   1. a doctor's picks are recorded in the session's membership and
 --      facility, newest first, with a count; the same pick again updates
 --      its display, time and count; no code records nothing; a member
@@ -208,8 +208,8 @@ begin
   select string_agg(format('%s: expected [%s] got [%s]', name, expected, actual), E'\n' order by seq) into failures
     from recent_cases where expected is distinct from actual;
   if failures is not null then
-    raise exception E'0151 recent diagnoses suite failed:\n%', failures;
+    raise exception E'0153 recent diagnoses suite failed:\n%', failures;
   end if;
-  raise notice '0151 recent diagnoses suite: % cases passed', (select count(*) from recent_cases);
+  raise notice '0153 recent diagnoses suite: % cases passed', (select count(*) from recent_cases);
 end $$;
 rollback;
