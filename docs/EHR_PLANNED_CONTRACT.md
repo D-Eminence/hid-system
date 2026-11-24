@@ -1594,7 +1594,7 @@ signs a version (Q124 A) and the governed loader (a later slice) loads it.
 ### Second slice: the seed files and the governed loader (draft, not live)
 
 Built on 23 Nov 2026 (lane D), stacked on the first slice; Rahman's review
-of hid-system#319 built in (four rounds). No migration and no route: three
+of hid-system#319 built in (five rounds). No migration and no route: three
 scripts in `services/ehr-api/scripts`, the approvals file, and an opt-in
 phase of the deploy tool. Nothing is loaded until the clinical lead signs a
 file.
@@ -1715,13 +1715,17 @@ file.
   committed (a backend terminated while its commit waits for a synchronous
   standby has already committed locally), so the loader never says "nothing
   loaded" then. It tracks that COMMIT was sent; if the connection is lost,
-  or a fatal error comes, before COMMIT's reply, it ends with one line,
-  exit 1: "load-catalog: the connection was lost during commit, so the load
-  may have committed; ask for the same load again to settle it (it loads,
-  or is refused as already loaded)". An ERROR reply to COMMIT means the
-  load rolled back and stays a refusal or a failure, and a connection the
-  client already knew was lost is never sent COMMIT, so both still end
-  "nothing loaded".
+  or a fatal error comes, before COMMIT's reply, it ends with its own exit
+  code, 3, and one line: "load-catalog: the connection was lost during
+  commit, so the load may have committed; ask for the same load again to
+  settle it (it loads, or is refused as already loaded)". An ERROR reply to
+  COMMIT means the load rolled back and stays a refusal or a failure, and a
+  connection the client already knew was lost is never sent COMMIT, so both
+  still end "nothing loaded".
+
+  The loader's exit codes: 0 loaded (or a dry run rolled back), 1 a
+  failure with nothing loaded, 2 a refusal with nothing loaded, 3 the
+  connection lost during commit, outcome unknown.
 
   The database refuses a retired, changed or reused id on its own, and the
   whole load rolls back. In one transaction the loader takes its advisory
@@ -1776,10 +1780,16 @@ file.
     example `AWS_ThrottlingException`). Either way the tool prints a line
     naming the seed as loaded, and the failed receipt, when the release can
     write one, names it.
-  - A loader whose last line is the commit line above may have loaded: the
-    tool names the seed as "outcome unknown" (kind, version and the file's
-    sha256 from the checkout), prints the line, and the release stops
+  - A task that exits 3 may have loaded. The tool names the seed as
+    "outcome unknown" at once (kind, version and the file's sha256 from the
+    checkout), before it reads the task's log, and the release stops
     (`CATALOG_LOAD_OUTCOME_UNKNOWN`); the failed receipt names the seed so.
+    The exit code is enough: a log that cannot be read (CloudWatch
+    throttling, or the lease check before the read) or a line that never
+    arrives changes neither the entry nor the error. The log only adds to
+    what the tool prints: the loader's line, or `"log_error"` saying why it
+    could not be read. The commit line under any other exit code (never
+    expected) is treated the same way, the safe side.
   - **After a failure that follows a successful load** (a later seed
     refused, the evidence line missing, or the services failing after the
     catalogue phase), the operator dispatches the release again with
@@ -1794,15 +1804,29 @@ file.
     unreconciled and keeps the deployment lease), then dispatch the release
     again with catalog_load none". A seed that did not load is asked for on
     its own once its cause is fixed.
+  - The catalogue phase stops at the first seed that does not end loaded
+    with its evidence, so a seed asked for after it is never tried. The
+    step names every such seed, in load order, so none asked for is
+    dropped (`"catalog_not_tried"` lists them). After the medicines loaded
+    without their evidence line, with the lab tests asked for too, the step
+    is "dispatch the release again with catalog_load lab_test to load what
+    this release did not try" rather than `none`.
   - **After a load whose outcome is unknown,** the operator dispatches the
-    release again asking for that seed alone, which settles it: it loads,
-    or it is refused as already loaded. The tool prints this step too
+    release again asking for that seed, which settles it: it loads, or it
+    is refused as already loaded. The tool prints this step too
     (`"catalog_outcome_unknown"` names the seed, and `"next": "dispatch the
     release again with catalog_load medicine to settle it (it loads, or is
     refused as already loaded; once refused, dispatch again with
     catalog_load none)"`), after the reconcile-first step when the release
     ended unreconciled. A seed loaded before it is named under
-    `catalog_loaded_before_failure` and not asked for again.
+    `catalog_loaded_before_failure` and not asked for again. A seed asked
+    for after it was never tried, so the step asks for it too, after the
+    unknown one: with `medicine,lab_test` asked for and the medicines'
+    outcome unknown, "dispatch the release again with catalog_load
+    medicine,lab_test to settle medicine and load lab_test (medicine loads,
+    or is refused as already loaded; once refused, dispatch again with
+    catalog_load lab_test)". The second half is needed because a refusal
+    stops that release before the lab tests.
   - Not asked, the release runs exactly as before.
 - **Before the first real load:**
   - #312's open points: the Wave 0 codes, the 13 uncoded tests and the four
@@ -1878,6 +1902,14 @@ file.
     Wave 0's stops it with one line (exit 2) and writes neither seed; round
     3's builder wrote a new medicine file. The list itself still builds the
     same seeds (`d6a08fe2…`, `847040fb…`), and `--check` passes.
+  - Round 5: the same commit proof (a backend terminated while its COMMIT
+    waits in `SyncRep`, committed locally, medicine 2026.1 active with
+    1,616 items) ends with the same line and exit 3; round 4's loader ended
+    with it and exit 1, the code of a failure with nothing loaded, so the
+    deploy tool needed the log to tell the two apart. Asked for again, the
+    load is refused as already loaded (exit 2). Terminated before its
+    COMMIT, the loader still ends with exit 1 and "nothing loaded" and
+    leaves nothing, and the same load then loads.
 
 ### Target
 
