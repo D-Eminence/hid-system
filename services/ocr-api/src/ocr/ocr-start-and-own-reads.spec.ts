@@ -5,8 +5,9 @@ import { OcrController, OcrPublicationController } from './ocr.controller';
 // Owner decisions of 18 November 2026, migration 0136: Q111 A, starting or
 // retrying a reading needs ocr.job.start as well as ocr.job.write (doctors
 // keep ocr.job.write to check readings and confirm their patient, and do not
-// get ocr.job.start); Q112 A, the front desk's ocr.job.read-own follows a
-// reading's status but never reads its text.
+// get ocr.job.start, until 0150, owner decision Q141 B, gives it back to every
+// doctor; the routes ask for the same two codes either way); Q112 A, the front
+// desk's ocr.job.read-own follows a reading's status but never reads its text.
 describe('OCR routes after 0136 (Q111 A, Q112 A)', () => {
   const required = (handler: object) => Reflect.getMetadata(REQUIRED_PERMISSIONS, handler) as unknown;
   const anyOf = (handler: object) => Reflect.getMetadata(ANY_PERMISSIONS, handler) as unknown;

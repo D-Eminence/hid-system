@@ -5347,6 +5347,8 @@ per role:
 | `pharmacy@healthidentitydirectory.com` | pharmacist at QA Pharmacy |
 | `admin@healthidentitydirectory.com` | org_admin at QA Hospital, QA Laboratory and QA Pharmacy |
 | `outreach@healthidentitydirectory.com` | no membership: starts the QA Outreach group |
+| `frontdesk@healthidentitydirectory.com` | receptionist (front desk) at QA Hospital; added by 0151 (QA-2, below) |
+| `nurse@healthidentitydirectory.com` | nurse at QA Hospital; added by 0151 (QA-2, below) |
 
 Two patient logins: `patient1@healthidentitydirectory.com` (`HID-ZQAAAAA2`, QA
 Patient One) and `patient2@healthidentitydirectory.com` (`HID-ZQAAAAA3`, QA Patient
@@ -9150,7 +9152,7 @@ a staff member's next request; nobody is signed out. Pharmacists and
 
 | Code | Gives | Held by |
 | --- | --- | --- |
-| `ocr.job.start` | starting or retrying a reading (`POST /ocr/jobs`, `POST /ocr/jobs/:jobId/retry`), together with `ocr.job.write` | receptionist, nurse, clinician |
+| `ocr.job.start` | starting or retrying a reading (`POST /ocr/jobs`, `POST /ocr/jobs/:jobId/retry`), together with `ocr.job.write` | receptionist, nurse, clinician (0147 adds `reading_starter`; 0150, Q141 B, gives it to every doctor again) |
 | `ocr.job.read-own` | following the readings of documents this login uploaded at the facility (`GET /ocr/jobs/:jobId`, `GET /ocr/jobs?documentId=`, `GET /ocr/job-list`, which then lists only the readings it started), and letting ocr-api read such a document to start its reading. Never the text: extractions, validations and publications still need `ocr.job.read` | receptionist |
 | `ehr.document.read-own` | listing and opening only the documents this login uploaded at the facility (`GET /ehr/documents`, `GET /ehr/documents/:id/download`) | receptionist |
 
@@ -9161,7 +9163,7 @@ through any role keeps the full read; the "-own" codes narrow nobody.
 run under records processing, and records processing needs `ocr.job.write` at
 each use (0104 D8, 0108, 0113), so the doctor's `ocr.job.write` row has to
 stay. Starting a reading therefore needs a second code that doctors do not
-hold. A permission row (rather than a check on the role's name in ocr-api) is
+hold (until 0150, Q141 B, gives it back to every doctor). A permission row (rather than a check on the role's name in ocr-api) is
 read the same way by every service and screen, shows in the role table the
 owner reviews, applies to a doctor who is also a nurse exactly as to anyone
 else (the nurse role gives `ocr.job.start`), and is undone by a row.
@@ -9171,7 +9173,7 @@ else (the nurse role gives `ocr.job.start`), and is undone by a row.
 | Role | Before 0136 | After 0136 |
 | --- | --- | --- |
 | `receptionist` (front desk) | none of these | `ehr.document.write`, `ehr.document.read-own`, `ocr.job.write`, `ocr.job.start`, `ocr.job.read-own`, `ehr.vital.read`. Not `ehr.document.read`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write` |
-| `doctor` | `ocr.job.write`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write`; `outreach.campaign.read`, `outreach.campaign.write`, `outreach.registration.read`, `outreach.registration.write`; `lab.work-item.read`, `pharmacy.work-item.read` | `ocr.job.write`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write` (all kept, Q111 A); no `ocr.job.start`; no Outreach code; neither work list |
+| `doctor` | `ocr.job.write`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write`; `outreach.campaign.read`, `outreach.campaign.write`, `outreach.registration.read`, `outreach.registration.write`; `lab.work-item.read`, `pharmacy.work-item.read` | `ocr.job.write`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write` (all kept, Q111 A); no `ocr.job.start`; no Outreach code; neither work list (0150, Q141 B, gives every doctor `ocr.job.start` again) |
 | `nurse` | `ocr.job.write`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write` | the same, plus `ocr.job.start` |
 | `clinician` | the same as the nurse | the same, plus `ocr.job.start` |
 | `lab` | `ehr.encounter.read`, `ocr.job.read`, `ocr.job.write`, `ocr.validation.write` | none of these |
@@ -9218,7 +9220,7 @@ asserted: `admin` `identity.registration.approve`, `workforce.manage`,
 
 | Who | Routes (under `/api/v1`) |
 | --- | --- |
-| Doctor | `POST /ocr/jobs`, `POST /ocr/jobs/:jobId/retry` (no `ocr.job.start`); every Outreach route of outreach-api (campaigns, registrations, screening, exports, Health ID steps) and `GET`/`POST /identity/outreach-invitations` and its revoke; `GET /lab/work-items`, `GET /lab/work-items/:id`; `GET /pharmacy/work-items`, `GET /pharmacy/work-items/:id` |
+| Doctor | `POST /ocr/jobs`, `POST /ocr/jobs/:jobId/retry` (no `ocr.job.start`; from 0150, Q141 B, doctors hold `ocr.job.start` again and these two routes answer them as for a nurse); every Outreach route of outreach-api (campaigns, registrations, screening, exports, Health ID steps) and `GET`/`POST /identity/outreach-invitations` and its revoke; `GET /lab/work-items`, `GET /lab/work-items/:id`; `GET /pharmacy/work-items`, `GET /pharmacy/work-items/:id` |
 | Laboratory staff | `GET /ehr/patients/:patientId/encounters`, `.../encounters/open-today`, `.../encounters/:encounterId`; every `ocr/*` route (`ocr/jobs`, `ocr/job-list`, validations, extractions) |
 | Hospital administrator | `GET /lab/work-items`, `GET /lab/work-items/:id`; `GET /pharmacy/work-items`, `GET /pharmacy/work-items/:id` |
 | Front desk | `GET /ocr/jobs/:jobId/extractions`, `GET /ocr/jobs/:jobId/validations`, `GET /ocr/validations/:validationId/publications`, `POST /ocr/jobs/:jobId/validation(s)`, `POST /ocr/jobs/:jobId/patient-confirmation`, `POST /ocr/validations/:validationId/publications`, and every note, diagnosis, prescription and lab-request read |
@@ -9366,7 +9368,7 @@ with OCR", the job list) and vitals to the front desk, with the document and
 reading lists showing its own uploads only (`ehr.document.read-own`,
 `ocr.job.read-own`) and no extracted text, checking or publishing; show "start
 reading" only to staff holding `ocr.job.start` (front desk, nurses,
-clinicians), and keep doctors' "check reading" and "confirm patient" (they
+clinicians; from 0150, Q141 B, doctors too), and keep doctors' "check reading" and "confirm patient" (they
 hold `ocr.job.write` and `ocr.validation.write`); hide the Laboratory and
 Pharmacy department pages (work list, results, prescriptions) from doctors
 and administrators; hide Outreach from doctors; hide visits and the Migrate
@@ -9461,6 +9463,61 @@ amendment on #258, for the owner to confirm at signing.
     them out there is a follow-up.
 - **Undo:** mark both roles inactive (`auth.roles.active = false`); every
   member is back where 0136 left them from their next request.
+
+## 0150. Q141 B: every doctor starts paper readings again (migration 0150; not live until signed)
+
+Owner decision, verbatim (24 November 2026): "Q141 B and add front-desk or
+nurse login". 0150 is the "Q141 B" part only. It reverses one part of
+Q111 A as 0136 applied it: 0136 did not give doctors the new code
+`ocr.job.start` (its C4), so since Release A a doctor checks readings and
+confirms their patient but cannot start or retry one. 0136's line 21 counted
+1 such doctor at real facilities, whom 0147 (Q137 B) gave the narrow role
+`reading_starter`. Q141 B gives the code back to the `doctor` role itself.
+
+| Role code | Before 0150 | After 0150 |
+| --- | --- | --- |
+| `doctor` | `ocr.job.write`, `ocr.job.read`, `ocr.validation.write`, `ocr.patient.confirm`, `ocr.publication.write`; no `ocr.job.start` | the same, plus `ocr.job.start` |
+
+- **Who:** every doctor, at every facility (the sealed demo and QA tenants'
+  fictional doctors too), from the doctor's next request; nobody is signed
+  out. Every file and reading still needs the patient's access (a consent
+  grant, or records processing), as for anyone else.
+- **What the doctors see:** `POST /ocr/jobs` and `POST /ocr/jobs/:jobId/retry`
+  (which ask for `ocr.job.write` and `ocr.job.start`, unchanged since 0136)
+  answer as for a nurse instead of 403, and the session's `permissions` list
+  `ocr.job.start`. The websites already offer starting and retrying a reading
+  to anyone holding `ocr.job.write` (the EHR's scanned-record workspace, the
+  OCR app), so for doctors those actions, which answered 403 since Release A,
+  work again. No route, answer shape, website or service image changes.
+- **Unchanged:** everything else 0136 left doctors (no Outreach code, neither
+  work list; they keep `lab.work-item.accept`, the order reads and the OCR
+  checking codes); every other role's rows; 0147's two narrow roles, their
+  rows and their assignments (the counted doctor holds the code through both
+  roles, which changes nothing; SX-4 still revokes `reading_starter` with
+  `doctor`). No function, policy or grant changes, so `runtime-grants.sql` is
+  unchanged.
+- **Rows:** one `auth.role_permissions` row (`doctor`, `ocr.job.start`) and
+  one audit row: system actor, `auth.role-permission.add`, resource
+  `role-permission` `doctor/ocr.job.start`, reason "Owner decision Q141 B (24
+  November 2026): every doctor starts paper readings again", no account,
+  membership, facility or patient.
+- **Safety:** locks first, NOWAIT (SHARE ROW EXCLUSIVE on
+  `auth.role_permissions`, ROW EXCLUSIVE on `audit.events`, ROW SHARE on the
+  tables the two rows' foreign keys reference), retried for about 5 seconds,
+  or refused at once inside the runner's dry run when an earlier file holds
+  locks; both busy refusals are 55P03 starting `0150: `, which the dry run
+  retries (#306). Preconditions (55000, nothing applied): 0001-0149 applied;
+  the doctor's 35 codes exactly as Release C leaves them (md5-pinned);
+  `ocr.job.start` held by exactly `clinician`, `nurse`, `reading_starter` and
+  `receptionist`; `auth.membership_has_permission` as Release C leaves it
+  (md5-pinned). A second run answers `0150: already applied`. Post-checks:
+  the doctor's codes are the pinned ones plus `ocr.job.start`, no other row
+  changed, one audit row.
+- **Undo:** take the one row back out of `auth.role_permissions` (a
+  migration only if the owner signs it); doctors are then back where 0136 and
+  0147 left them from their next request.
+- **Not in 0150:** the front-desk and nurse logins at QA Hospital (the second
+  half of the owner's message) are a separate change.
 
 ## ORD-2. This facility's own pharmacy and lab work; prescriptions sent to the hospital's own pharmacy (Akos Release A, migration 0133)
 
@@ -10958,6 +11015,57 @@ gain a second membership, at QA Hospital (pharmacist and lab roles; not
 primary). Pick QA Hospital when signing in. Written only where 0123 installed
 the sealed QA tenant (Amazon RDS: production and staging); on every other
 database (CI, acceptance, rehearsals) nothing is written. No API change.
+
+## QA-2. QA Hospital front desk and nurse logins (sealed QA only; migration 0151; not live until signed)
+
+Owner decision of 24 November 2026, verbatim: "Q141 B and add front-desk or
+nurse login" (0150 is the Q141 B part), then "yes both receive mail" for
+`frontdesk@healthidentitydirectory.com` and `nurse@healthidentitydirectory.com`,
+then "go ahead". A QA facility administrator cannot invite a new login
+(section 52's known limits), so 0151
+(`0151_sealed_qa_front_desk_and_nurse_logins.sql`) seeds both exactly as 0123
+seeded its seven staff logins:
+
+| Login | Name | Role | Account, staff record, membership |
+| --- | --- | --- | --- |
+| `frontdesk@healthidentitydirectory.com` | QA Front Desk | receptionist at QA Hospital | `c0a00003-…0008`, `c0a00004-…0008`, `c0a00005-…0081` |
+| `nurse@healthidentitydirectory.com` | QA Nurse | nurse at QA Hospital | `c0a00003-…0009`, `c0a00004-…0009`, `c0a00005-…0091` |
+
+- Each is a sealed QA account (`identity.sealed_qa_members`), `pending_reset`
+  with no password (none is in any file), its email verified, with a verified
+  staff record and exactly one membership (QA Hospital, primary) and one
+  facility role (the membership's id, as 0123's). No platform role.
+- What each can do is its role's codes, unchanged: the receptionist's 17 as
+  0136 C1 leaves them (scan paper records and start and follow its own
+  readings, vitals read, registration, consent, encounters, outreach) and the
+  nurse's 38 as Release C and 0150 leave them. 0151 pins both lists (md5) and
+  refuses if either differs. Both sign in on `ehr.` (and `migrate.`), like
+  every hospital role (section 53).
+- The seal (section 52) holds: neither can be given a membership at a real or
+  demo facility (42501 `SEALED_QA_MEMBERSHIP_REFUSED`) or a platform role
+  (42501 `SEALED_QA_PLATFORM_ROLE_REFUSED`); at QA Hospital they read QA
+  patients only.
+- Written only where 0123 installed the sealed QA tenant (QA Hospital is a QA
+  facility: Amazon RDS, production and staging). On every other database (CI,
+  acceptance, rehearsals) nothing is written, not even an audit row, and a
+  NOTICE says so.
+- Refused (55000, nothing written, the release stops) when either address
+  belongs to another account (not deleted) or staff record, is the first
+  administrator of an open organization application or the invitee of a
+  pending staff invitation, any case (`0151: SEALED_QA_ADDRESS_TAKEN`, 0123's
+  rule), or when a fixed id is held by another row
+  (`0151: SEALED_QA_ID_TAKEN`). A second run answers `0151: already applied`.
+- One audit row per login: `identity.sealed-qa.staff-login-add`, the system
+  actor, resource `staff-membership` (the membership id), facility QA
+  Hospital, correlation id `0151-sealed-qa-front-desk-nurse`; no account,
+  address, name, organization or patient.
+- Activation, by the owner, for each address: on `ehr.healthidentitydirectory.com`
+  (staging: `ehr.staging.healthidentitydirectory.com`) choose Forgot password,
+  enter the address, enter the code from the reset email that arrives in that
+  mailbox and choose a password; sign in and pick QA Hospital. The live
+  recovery hold applies as for any login (section 52).
+- No function, policy, grant, role or table changes; `runtime-grants.sql` is
+  unchanged. No API change.
 
 
 ## ID-6. Verify a NIN later and link it (Release B, migration 0138; not live until signed)
