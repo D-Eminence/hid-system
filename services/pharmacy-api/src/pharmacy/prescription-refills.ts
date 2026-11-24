@@ -48,6 +48,41 @@ export const WORK_ITEM_REFILLS_QUERY = `select work_item_id::text as work_item_i
 export const OPEN_REFILLS_QUERY = `select work_item_id::text as work_item_id
   from pharmacy.open_refill_work_items()`;
 
+/**
+ * The open refills' own time limit inside a work-list request (milliseconds),
+ * below the pool's 15 s statement_timeout. 0152's open refills cost about
+ * 10 ms for each of the facility's active prescriptions that allow refills
+ * and have not ended (under a NOSUPERUSER NOBYPASSRLS owner, production's
+ * kind), and nothing takes such a prescription out of that set when its
+ * refills are used up, changed or never collected (an expiry is the owner's
+ * decision, not built), so the statement grows with the facility's refill
+ * history. Past this limit (about 300 such prescriptions) the list stops
+ * waiting for it: it answers without open refills and says so
+ * (`refillsUnavailable`), instead of holding every row past the staff
+ * client's 10 s timeout (@hid/api-client's default) and then answering
+ * nothing at all. 3 s because the rest of a list request (every other reader
+ * on) measured 5.8-7.2 s (median 6.2 s) at 20,000 items under that owner
+ * kind, so the whole request stays within the 10 s (8.2-9.8 s with 200 such
+ * prescriptions, 9.3-9.6 s with 2,000 and the limit reached); with a 5 s
+ * limit, 2,000 took the request to 11.3-11.5 s. Set with set_config(..., true) inside the open
+ * refills' savepoint, and undone by rolling back to it (the reader writes
+ * nothing), so no other statement of the request runs under it. Exported for
+ * the tests.
+ */
+export const OPEN_REFILLS_TIMEOUT_MS = 3_000;
+export const OPEN_REFILLS_TIMEOUT_QUERY =
+  `select set_config('statement_timeout', '${OPEN_REFILLS_TIMEOUT_MS}', true)`;
+
+/**
+ * The work list's open refills: the ids (0152's order), and whether they
+ * could not be read (`unavailable`: a timeout, a refusal, a schema without
+ * the reader), in which case `ids` is empty and the list says so.
+ */
+export interface OpenRefills {
+  ids: string[];
+  unavailable: boolean;
+}
+
 /** A row of 0152's reader (next_fill_on as YYYY-MM-DD, the Lagos day). */
 export interface WorkItemRefillsRow {
   work_item_id: string;
@@ -119,7 +154,12 @@ interface RefillsWorkRow {
  *   route-backed item `refills` with none allowed and one fill at most;
  * - an own item with a refill open is open work on the list, of any age
  *   (0152's open refills, asked once before the rows are chosen, in a
- *   savepoint: a failure opens no item for a refill and never fails the list);
+ *   savepoint and under their own time limit, OPEN_REFILLS_TIMEOUT_MS: a
+ *   failure opens no item for a refill and never fails the list);
+ * - when either reader fails on the list, the list says so
+ *   (`refillsUnavailable: true`, for the front ends' "Refills could not be
+ *   loaded") and the failure is logged as an error: a due refill is then
+ *   missing from the open work, which must not pass unseen;
  * - `dispensing.fillNumber`, `lastFilledAt` and a dispensing's `fillNumber`.
  * No audit row: no new person is shown.
  */
@@ -128,9 +168,13 @@ export class PharmacyRefills {
 
   constructor(readonly enabled: boolean) {}
 
-  /** 0152's reader for these own items, in batches of 200; nothing while off. */
+  /**
+   * 0152's reader for these own items, in batches of 200; nothing while off.
+   * undefined when the reader failed (a warning; the caller leaves `refills`
+   * out, and the work list says `refillsUnavailable`).
+   */
   async read(client: PoolClient, workItemIds: readonly string[], correlationId: string):
-  Promise<Map<string, WorkItemRefillsRow>> {
+  Promise<Map<string, WorkItemRefillsRow> | undefined> {
     const found = new Map<string, WorkItemRefillsRow>();
     if (!this.enabled || workItemIds.length === 0) return found;
     await client.query('savepoint pharmacy_work_item_refills');
@@ -144,7 +188,7 @@ export class PharmacyRefills {
     } catch (error) {
       await client.query('rollback to savepoint pharmacy_work_item_refills');
       this.logger.warn({ message: 'Refills on own work could not be read', sqlState: sqlState(error), correlationId });
-      return new Map();
+      return undefined;
     }
     return found;
   }
@@ -152,23 +196,43 @@ export class PharmacyRefills {
   /**
    * The work list's first step while on: the own items whose refill is open
    * now (OPEN_REFILLS_QUERY, at most 200), which the list then counts as open
-   * work. One statement in a savepoint; a failure answers none (a warning).
-   * The per-item reader is asked afterwards only about the rows the list
-   * shows (read()). Nothing while off.
+   * work. One statement in a savepoint, under its own time limit
+   * (OPEN_REFILLS_TIMEOUT_QUERY), which rolling back to the savepoint undoes
+   * (the reader writes nothing), so the rest of the request keeps the pool's.
+   * A failure (the time limit, a refusal, a schema without the reader) answers
+   * none, `unavailable`, and is logged as an error, not a warning: every due
+   * refill is then missing from the open work, so the list says so. The
+   * per-item reader is asked afterwards only about the rows the list shows
+   * (read()). Nothing while off.
    */
-  async openForList(client: PoolClient, correlationId: string): Promise<string[]> {
-    if (!this.enabled) return [];
+  async openForList(client: PoolClient, correlationId: string): Promise<OpenRefills> {
+    if (!this.enabled) return { ids: [], unavailable: false };
     await client.query('savepoint pharmacy_open_refills');
     try {
-      const open = (await client.query<{ work_item_id: string }>(OPEN_REFILLS_QUERY)).rows.map((row) => row.work_item_id);
+      await client.query(OPEN_REFILLS_TIMEOUT_QUERY);
+      const ids = (await client.query<{ work_item_id: string }>(OPEN_REFILLS_QUERY)).rows.map((row) => row.work_item_id);
+      await client.query('rollback to savepoint pharmacy_open_refills');
       await client.query('release savepoint pharmacy_open_refills');
-      return open;
+      return { ids, unavailable: false };
     } catch (error) {
       await client.query('rollback to savepoint pharmacy_open_refills');
-      this.logger.warn({ message: 'Own work with refills open could not be read', sqlState: sqlState(error),
-        correlationId });
-      return [];
+      await client.query('release savepoint pharmacy_open_refills');
+      this.logger.error({ message: 'Own work with refills open could not be read; the work list says refillsUnavailable',
+        sqlState: sqlState(error), correlationId });
+      return { ids: [], unavailable: true };
     }
+  }
+
+  /**
+   * The work list's own flag while on: `refillsUnavailable: true` when either
+   * reader failed (the open refills, or the per-item reader on the own rows
+   * shown, `refills` undefined), so the front ends can say "Refills could not
+   * be loaded" instead of showing a due refill as done work without a word.
+   * Nothing otherwise, and nothing while off (today's answer).
+   */
+  listFlag(open: OpenRefills, refills: ReadonlyMap<string, WorkItemRefillsRow> | undefined):
+  { refillsUnavailable?: true } {
+    return this.enabled && (open.unavailable || refills === undefined) ? { refillsUnavailable: true } : {};
   }
 
   /**

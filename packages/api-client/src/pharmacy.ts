@@ -267,6 +267,23 @@ export interface PharmacyWorkItemRefills {
   nextFillOn: string | null;
 }
 
+/**
+ * The pharmacy work list with what the list says about itself
+ * (listWorkQueue):
+ * - `items`: the work items, as listWorkItems answers them;
+ * - `refillsUnavailable` (ORD-12): true when pharmacy-api, with refills on,
+ *   could not read which items have a refill open, or the refills of the
+ *   rows shown (a timeout among them: the open refills' cost grows with the
+ *   facility's refill history). A due refill may then be missing from the
+ *   open work, and the rows carry no `refills`: show "Refills could not be
+ *   loaded" above the list. False when pharmacy-api does not say it (refills
+ *   off, an older pharmacy-api) or says anything but true.
+ */
+export interface PharmacyWorkQueue {
+  items: PharmacyWorkItem[];
+  refillsUnavailable: boolean;
+}
+
 export interface PharmacistAcceptance {
   acceptedAt: string;
   /** Never null: pharmacy-api reads it from columns that are NOT NULL (0023's work item, 0144's acceptance). */
@@ -469,9 +486,19 @@ export class PharmacyApiClient {
   }
 
   async listWorkItems(context: PharmacyRequestContext, signal?: AbortSignal): Promise<PharmacyWorkItem[]> {
+    return (await this.listWorkQueue(context, signal)).items;
+  }
+
+  /**
+   * The work list and what it says about itself (PharmacyWorkQueue): today's
+   * items, and ORD-12's `refillsUnavailable`. A front end that shows refills
+   * reads the list through this, so a refill missing because pharmacy-api
+   * could not read the refills is shown as such.
+   */
+  async listWorkQueue(context: PharmacyRequestContext, signal?: AbortSignal): Promise<PharmacyWorkQueue> {
     const value = record(await this.get('/api/v1/pharmacy/work-items', context, signal), 'Pharmacy work queue');
     if (!Array.isArray(value.items)) throw new PharmacyApiProblem(502, value);
-    return value.items.map(parseWorkItem);
+    return { items: value.items.map(parseWorkItem), refillsUnavailable: value.refillsUnavailable === true };
   }
 
   async getWorkItem(workItemId: string, context: PharmacyRequestContext,

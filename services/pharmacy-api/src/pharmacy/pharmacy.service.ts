@@ -140,19 +140,24 @@ const WORK_LIST_ORDER = `order by o.open_work desc,o.refill_open asc,case when o
  * history does not add to it): 1.0-1.7 s for 200 rows, against 0.4-0.7 s for
  * reading the same rows under row-level security (INTERFACE_CONTRACT.md §46).
  * With PRESCRIPTION_REFILLS_ENABLED on (ORD-12, 0152), each list load also
- * asks pharmacy.open_refill_work_items once before this query (its cost
- * grows with the facility's active prescriptions that allow refills and have
- * not ended, those not yet due included, about 10 ms each under a NOBYPASSRLS
- * owner, not with its work items) and pharmacy.work_item_refills once after
- * it, for the own rows shown (at most 200). Measured on 20,000 own items, 200
- * of them with a refill open and listed: under a NOSUPERUSER NOBYPASSRLS
- * owner the open refills 2.2-2.5 s, this query 2.7-3.0 s, the reader on the
- * 200 rows 2.4-2.7 s, 7.3-8.0 s in all; under a superuser owner 0.31-0.41,
- * 2.3-4.7 and 0.32-0.42 s, 2.9-5.5 s in all. With 2,000 such prescriptions
- * (200 open), the open refills alone take 20.3-21.3 s under the NOBYPASSRLS
- * owner (0.74-0.81 s under a superuser one). The setting goes on only after
- * the whole request is measured at the hospital's numbers and the cost
- * accepted in writing (INTERFACE_CONTRACT.md, ORD-12).
+ * asks pharmacy.open_refill_work_items once before this query, under its own
+ * 3-second limit (OPEN_REFILLS_TIMEOUT_MS: its cost grows with the facility's
+ * active prescriptions that allow refills and have not ended, those used up,
+ * changed or not yet due included, about 10 ms each under a NOBYPASSRLS
+ * owner, not with its work items; nothing takes one out of that set but a
+ * stop, a completion or a passed end date), and pharmacy.work_item_refills
+ * once after it, for the own rows shown (at most 200). The whole request
+ * (listWorkItems, every reader on), measured on 20,000 own items, 200 of them
+ * with a refill open and listed, 11 loads: 8.2-9.8 s under a NOSUPERUSER
+ * NOBYPASSRLS owner (the open refills 2.4-2.7 s, this query 2.7-3.4 s, the
+ * per-item reader 2.6-3.1 s, 0133's states 0.4-0.5 s, the rest under 0.2 s
+ * each), 3.5-4.1 s under a superuser owner. With 2,000 such prescriptions the
+ * open refills alone would take 20.3-21.3 s under the NOBYPASSRLS owner; they
+ * stop at 3 s, the answer says refillsUnavailable, and the request takes
+ * 9.3-9.6 s, within the staff client's 10 s. The setting goes on only after
+ * the owner's decision on refill expiry and after the whole request is
+ * measured at the hospital's numbers and the cost accepted in writing
+ * (INTERFACE_CONTRACT.md, ORD-12, "Before the setting goes on").
  */
 export const WORK_LIST_QUERY = `${WORK_ITEM_SELECT}
   cross join lateral (select d.id is null or w.id=any($2::uuid[]) as open_work,
@@ -595,15 +600,21 @@ export class PharmacyService {
    * filled after them), and those are open work of any age, after the items
    * waiting for their first fill; each own row then carries `refills` (0152's
    * per-item reader, asked once, for the own rows shown), and each row
-   * `dispensing.fillNumber` and `lastFilledAt` once dispensed. Off, nothing is
-   * asked and nothing added.
+   * `dispensing.fillNumber` and `lastFilledAt` once dispensed. The open
+   * refills run under their own time limit (OPEN_REFILLS_TIMEOUT_MS): their
+   * cost grows with the facility's refill history, and past the limit the list
+   * answers without them rather than not at all. When either reader fails, the
+   * answer says `refillsUnavailable: true` (logged as an error), so a due
+   * refill missing from the open work is shown as such ("Refills could not be
+   * loaded"). Off, nothing is asked and nothing added.
    */
   async listWorkItems(context: DataAccessContext) {
     const since = workListSince();
     const page = await this.database.withTransaction(context, async (client) => {
-      // ORD-12: the own items with a refill open, asked before the rows are chosen (nothing while refills are off).
-      const refillOpen = await this.refills.openForList(client, context.correlationId);
-      const result = await this.workList(client, since, refillOpen);
+      // ORD-12: the own items with a refill open, asked before the rows are chosen (nothing while refills are off),
+      // under their own time limit; if they cannot be read the list says so (refillsUnavailable).
+      const openRefills = await this.refills.openForList(client, context.correlationId);
+      const result = await this.workList(client, since, openRefills.ids);
       await this.audit.recordWithClient(client, context, 'pharmacy.work-item.list', {
         resourceType: 'pharmacy-work-item-collection', resourceId: context.facilityId,
       }, { returnedCount: result.rows.length });
@@ -622,14 +633,15 @@ export class PharmacyService {
       const changed = await this.dispensedChanges.changes(client, result.rows.filter((row) => row.dispensing_id)
         .map((row) => row.id), context.correlationId);
       // ORD-12 (refills on): 0152's per-item reader for the own rows shown, and only those (no audit row: no new
-      // person is shown); a failure leaves `refills` out.
+      // person is shown); a failure leaves `refills` out, and the list says refillsUnavailable.
       const refills = await this.refills.read(client, ownIds, context.correlationId);
       const receiving = await this.routeCards.receiving(client, context);
       return { items: result.rows.map((row) => this.projectWorkItem(row, cards.get(row.id), own.get(row.id),
         this.prescriptionDetails.forRow(row, details.get(row.id)), states?.get(row.id), changed.get(row.id),
-        this.refills.forRow(row, refills.get(row.id)))), since,
+        this.refills.forRow(row, refills?.get(row.id)))), since,
         ...receiving,
-        ...this.routeCards.lateCorrection(context), ...this.routeCards.cannotComplete(context) };
+        ...this.routeCards.lateCorrection(context), ...this.routeCards.cannotComplete(context),
+        ...this.refills.listFlag(openRefills, refills) };
     });
     return { ...page, ...(await this.routeCards.flags()) };
   }

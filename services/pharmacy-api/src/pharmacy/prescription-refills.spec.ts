@@ -17,8 +17,9 @@ import { PharmacyModule } from './pharmacy.module';
 import { DISPENSING_REPLAY_QUERY, INSERT_DISPENSING, LATER_FILL_QUERY, PharmacyService, WORK_ITEM_SELECT,
   WORK_LIST_QUERY, WORK_LIST_QUERY_0133 } from './pharmacy.service';
 import { PharmacyPrescriptionDetails, PRESCRIPTION_DETAILS_OFF } from './prescription-dispensing-details';
-import { CreateDispensingBodyPipe, DISPENSING_KEY_CONSTRAINT, FILL_KEY_CONSTRAINT, OPEN_REFILLS_QUERY, PharmacyRefills,
-  REFILLS_OFF, WORK_ITEM_REFILLS_QUERY, dispensingDigestInput } from './prescription-refills';
+import { CreateDispensingBodyPipe, DISPENSING_KEY_CONSTRAINT, FILL_KEY_CONSTRAINT, OPEN_REFILLS_QUERY,
+  OPEN_REFILLS_TIMEOUT_MS, OPEN_REFILLS_TIMEOUT_QUERY, PharmacyRefills, REFILLS_OFF, WORK_ITEM_REFILLS_QUERY,
+  dispensingDigestInput } from './prescription-refills';
 import { workListSince } from './work-list-window';
 
 /*
@@ -392,7 +393,10 @@ const SEVERAL: Item[] = [
   { n: 3, refills: 1, received: 5, fills: [{ days: 4 }] },
 ];
 
-beforeEach(() => jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined));
+beforeEach(() => {
+  jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+});
 afterEach(() => jest.restoreAllMocks());
 
 describe('ORD-12: one row per item, whatever the setting', () => {
@@ -512,8 +516,79 @@ describe('ORD-12: refills on the work item (setting on)', () => {
     expect((await listOf(noOpen)).map((item) => item.id)).toEqual([id(2), id(3), id(1)]);
     expect(noOpen.sent((sql) => /^rollback to savepoint pharmacy_open_refills$/.test(sql))).toHaveLength(1);
     expect(noOpen.sent((sql) => sql === WORK_LIST_QUERY_0133).map((statement) => statement.values[1])).toEqual([[]]);
-    expect(Logger.prototype.warn).toHaveBeenCalledWith(expect.objectContaining({
-      message: 'Own work with refills open could not be read', sqlState: '57014' }));
+    // An error, not a warning (fix2): every due refill is then missing from the open work.
+    expect(Logger.prototype.error).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'Own work with refills open could not be read; the work list says refillsUnavailable',
+      sqlState: '57014' }));
+  });
+
+  it('F9 the open refills run under their own time limit, set in their savepoint and undone with it', async () => {
+    const h = harness({ items: SEVERAL, on: true });
+    const page = await h.service.listWorkItems(pharmacist) as unknown as Answer;
+    expect(OPEN_REFILLS_TIMEOUT_MS).toBe(3_000);
+    expect(OPEN_REFILLS_TIMEOUT_QUERY).toBe("select set_config('statement_timeout', '3000', true)");
+    const sqls = h.statements.map((statement) => statement.sql);
+    const at = sqls.indexOf(OPEN_REFILLS_QUERY);
+    // The limit is set inside the savepoint, just before the open refills, and rolling back to the savepoint (the
+    // reader writes nothing) undoes it, so the list statement and every later one keep the pool's 15 s.
+    expect(sqls.slice(at - 2, at + 3)).toEqual(['savepoint pharmacy_open_refills', OPEN_REFILLS_TIMEOUT_QUERY,
+      OPEN_REFILLS_QUERY, 'rollback to savepoint pharmacy_open_refills', 'release savepoint pharmacy_open_refills']);
+    expect(sqls.filter((sql) => /statement_timeout/.test(sql))).toEqual([OPEN_REFILLS_TIMEOUT_QUERY]);
+    expect(sqls.indexOf(WORK_LIST_QUERY_0133)).toBeGreaterThan(at + 2);
+    // What it read is kept: item 3's refill is open work.
+    expect((page.items as Answer[]).find((item) => item.id === id(3))!.refills).toMatchObject({ open: true });
+    expect(page).not.toHaveProperty('refillsUnavailable');
+    // The per-item reader (bounded by the 200 rows shown) runs under the pool's limit, not this one.
+    const reader = sqls.indexOf(WORK_ITEM_REFILLS_QUERY);
+    expect(sqls.slice(reader - 1, reader)).toEqual(['savepoint pharmacy_work_item_refills']);
+  });
+
+  it('F10 the open refills failing (their time limit, a refusal, no reader): the list answers without them and says '
+    + 'refillsUnavailable, logged as an error', async () => {
+    for (const code of ['57014', '42501', '42883']) {
+      const h = harness({ items: SEVERAL, on: true, openError: sqlError(code) });
+      const page = await h.service.listWorkItems(pharmacist) as unknown as Answer;
+      expect(page.refillsUnavailable).toBe(true);
+      // The rows are otherwise whole: item 3 is done work (its open refill could not be found), and each own row
+      // still carries refills from the per-item reader.
+      const items = page.items as Answer[];
+      expect(items.map((item) => item.id)).toEqual([id(2), id(3), id(1)]);
+      expect(items.find((item) => item.id === id(3))!.refills).toMatchObject({ open: true });
+      // The savepoint is released, so nothing later runs under the open refills' time limit.
+      const sqls = h.statements.map((statement) => statement.sql);
+      expect(sqls.slice(sqls.indexOf(OPEN_REFILLS_QUERY) + 1, sqls.indexOf(OPEN_REFILLS_QUERY) + 3)).toEqual([
+        'rollback to savepoint pharmacy_open_refills', 'release savepoint pharmacy_open_refills']);
+      expect(Logger.prototype.error).toHaveBeenLastCalledWith(expect.objectContaining({ sqlState: code,
+        correlationId: pharmacist.correlationId }));
+    }
+  });
+
+  it('F11 the per-item reader failing on the list: refillsUnavailable too; a single read carries no flag', async () => {
+    const h = harness({ items: SEVERAL, on: true, readerErrors: [sqlError('57014')] });
+    const page = await h.service.listWorkItems(pharmacist) as unknown as Answer;
+    expect(page.refillsUnavailable).toBe(true);
+    for (const item of page.items as Answer[]) expect(item).not.toHaveProperty('refills');
+    const read = harness({ items: SEVERAL, on: true, readerErrors: [sqlError('57014')] });
+    const one = await readOf(read, 3);
+    expect(one).not.toHaveProperty('refills');
+    expect(one).not.toHaveProperty('refillsUnavailable');
+  });
+
+  it('F12 refillsUnavailable only while on and only on a failure: absent off (today\'s answer), absent on success, '
+    + 'absent with no own row to read', async () => {
+    const off = await harness({ items: SEVERAL }).service.listWorkItems(pharmacist) as unknown as Answer;
+    expect(off).not.toHaveProperty('refillsUnavailable');
+    const offFailing = harness({ items: SEVERAL, openError: sqlError('57014'), readerErrors: [sqlError('57014')] });
+    expect(await offFailing.service.listWorkItems(pharmacist)).not.toHaveProperty('refillsUnavailable');
+    expect(offFailing.sent((sql) => /statement_timeout/.test(sql) || sql === OPEN_REFILLS_QUERY)).toEqual([]);
+    const on = await harness({ items: SEVERAL, on: true }).service.listWorkItems(pharmacist) as unknown as Answer;
+    expect(on).not.toHaveProperty('refillsUnavailable');
+    const routedOnly = harness({ items: [{ n: 5, routed: true, fills: [{ days: 1 }] }], on: true });
+    expect(await routedOnly.service.listWorkItems(pharmacist)).not.toHaveProperty('refillsUnavailable');
+    expect(new PharmacyRefills(true).listFlag({ ids: [], unavailable: false }, new Map())).toEqual({});
+    expect(new PharmacyRefills(true).listFlag({ ids: [], unavailable: true }, new Map())).toEqual({ refillsUnavailable: true });
+    expect(new PharmacyRefills(true).listFlag({ ids: [], unavailable: false }, undefined)).toEqual({ refillsUnavailable: true });
+    expect(REFILLS_OFF.listFlag({ ids: [], unavailable: true }, undefined)).toEqual({});
   });
 
   it('F6 a closed reason this image does not know is answered as null, never passed on', () => {
@@ -558,7 +633,7 @@ describe('ORD-12: refills on the work item (setting on)', () => {
         refills_allowed: 0, fills_recorded: 0, refill_open: false, closed_reason: null })) : [] }));
     const ids = Array.from({ length: 450 }, (_, index) => id(1000 + index));
     const found = await refills.read({ query } as never, ids, 'ord12-correlation-0002');
-    expect(found.size).toBe(450);
+    expect(found?.size).toBe(450);
     expect(query.mock.calls.filter(([sql]) => sql === WORK_ITEM_REFILLS_QUERY).map(([, values]) => (values![0] as string[]).length))
       .toEqual([200, 200, 50]);
   });

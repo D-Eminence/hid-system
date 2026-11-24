@@ -1,5 +1,5 @@
 import { PharmacyApiClient, type CreatePharmacyDispensingInput, type PharmacyDispensing,
-  type PharmacyWorkItem, type PharmacyWorkItemRefills } from '@hid/api-client';
+  type PharmacyWorkItem, type PharmacyWorkItemRefills, type PharmacyWorkQueue } from '@hid/api-client';
 
 // ORD-12 (refills, 0152): a work item's `refills`, `lastFilledAt` and its dispensing's `fillNumber`, and a
 // dispensing's `fillNumber`, as packages/api-client parses them, and the dispensing body's `fillNumber` as it sends
@@ -128,5 +128,24 @@ describe('PharmacyApiClient refills (ORD-12)', () => {
         reason: 'Handed to the patient with counselling', fillNumber: 2 }, context, 'ord12-client-key-0003'))
         .rejects.toMatchObject({ status: 409, payload: { code, ...extra } });
     }
+  });
+
+  it('C8 listWorkQueue: the items and refillsUnavailable (true only when the list says exactly true); listWorkItems '
+    + 'the same items', async () => {
+    respond({ items: [base], since: '2026-08-26', refillsUnavailable: true });
+    const queue: PharmacyWorkQueue = await client.listWorkQueue(context);
+    expect(queue.refillsUnavailable).toBe(true);
+    expect(queue.items).toHaveLength(1);
+    expect(queue.items[0]!.id).toBe(base.id);
+    respond({ items: [base], since: '2026-08-26', refillsUnavailable: true });
+    expect(await client.listWorkItems(context)).toEqual(queue.items);
+    // Absent (refills off, an older pharmacy-api) or anything but true: false, and the list kept (never a 502).
+    for (const payload of [{ items: [base] }, { items: [base], refillsUnavailable: 'true' },
+      { items: [base], refillsUnavailable: 1 }, { items: [base], refillsUnavailable: null }]) {
+      respond(payload);
+      expect(await client.listWorkQueue(context)).toEqual({ items: queue.items, refillsUnavailable: false });
+    }
+    respond({ refillsUnavailable: true });
+    await expect(client.listWorkQueue(context)).rejects.toMatchObject({ status: 502 });
   });
 });

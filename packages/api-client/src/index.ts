@@ -127,6 +127,7 @@ export type {
   PharmacyWorkItemOrderRoute,
   PharmacyWorkItemPatient,
   PharmacyWorkItemRefills,
+  PharmacyWorkQueue,
   PharmacyRefillsClosedReason,
   ReversePharmacyDispensingInput,
 } from './pharmacy';
