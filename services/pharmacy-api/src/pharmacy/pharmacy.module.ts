@@ -10,6 +10,7 @@ import { PharmacyOrderRouteCards } from './order-route-cards';
 import { PharmacyOwnWorkPatientCards } from './own-work-patient-cards';
 import { PharmacyOwnWork } from './own-work-access';
 import { PharmacyPrescriptionDetails } from './prescription-dispensing-details';
+import { PharmacyChangesAfterDispensing } from './changes-after-dispensing';
 import { HealthIdInUrlRefusalModule } from './health-id-in-url';
 // ORD-3: read-only progress of this facility's own work items, for ehr-api.
 import { PharmacyWorkItemProgressController } from './work-item-progress.controller';
@@ -24,5 +25,8 @@ import { PharmacyWorkItemProgressService } from './work-item-progress.service';
     { provide: PharmacyPrescriptionDetails,
       useFactory: () => new PharmacyPrescriptionDetails(getEnvironment().PRESCRIPTION_DISPENSING_DETAILS_ENABLED) },
     // This facility's own work for its pharmacy staff (0133): always on; a schema without 0133 answers as before.
-    { provide: PharmacyOwnWork, useFactory: () => new PharmacyOwnWork(true) }] })
+    { provide: PharmacyOwnWork, useFactory: () => new PharmacyOwnWork(true) },
+    // Q132 A (0148): the notice on a dispensed item whose prescription changed afterwards: always on, with no
+    // environment setting (0133 D12's rule); a schema without 0148 answers no notice (42883), as before.
+    { provide: PharmacyChangesAfterDispensing, useFactory: () => new PharmacyChangesAfterDispensing(true) }] })
 export class PharmacyModule {}

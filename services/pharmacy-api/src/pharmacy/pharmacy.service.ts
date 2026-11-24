@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { requestDigest } from '../common/idempotency';
@@ -19,6 +19,8 @@ import { OWN_WORK_OFF, PharmacyOwnWork, type OwnWorkState, type OwnWorkWithdrawn
 import { workListSince } from './work-list-window';
 import { PRESCRIPTION_DETAILS_OFF, PharmacyPrescriptionDetails,
   type WorkItemDispensingDetails } from './prescription-dispensing-details';
+import { CHANGES_AFTER_DISPENSING_OFF, PharmacyChangesAfterDispensing,
+  type ChangedAfterDispensing } from './changes-after-dispensing';
 
 interface WorkItemRow extends QueryResultRow {
   id: string; patient_id: string; facility_id: string; ordering_facility_id: string;
@@ -398,7 +400,14 @@ export class PharmacyService {
     private readonly routeCards: PharmacyOrderRouteCards,
     private readonly ownPatients: PharmacyOwnWorkPatientCards = OWN_WORK_PATIENT_CARDS_OFF,
     private readonly prescriptionDetails: PharmacyPrescriptionDetails = PRESCRIPTION_DETAILS_OFF,
-    private readonly ownWork: PharmacyOwnWork = OWN_WORK_OFF) {}
+    private readonly ownWork: PharmacyOwnWork = OWN_WORK_OFF,
+    // Q132 A (0148): the notice on a dispensed item whose prescription changed afterwards. Last and off by
+    // default, so every `new PharmacyService(...)` in the specs is unchanged. @Optional because Nest resolves
+    // every constructor parameter by its type and ignores the default: a testing module built before Q132
+    // (two specs build the service through Nest with a provider for each parameter they knew) has no
+    // provider for it, and Nest then passes undefined, which takes the default. PharmacyModule always
+    // provides it on (no environment setting, 0133 D12's rule); a test pins that.
+    @Optional() private readonly dispensedChanges: PharmacyChangesAfterDispensing = CHANGES_AFTER_DISPENSING_OFF) {}
 
   async acceptPrescription(context: DataAccessContext, input: AcceptEhrPrescriptionDto, key: string) {
     if (input.orderingFacilityId !== context.facilityId) throw new DomainProblem(403,
@@ -423,7 +432,16 @@ export class PharmacyService {
         // sent elsewhere: D14) when it was (no flag when it cannot be read).
         const states = existing.order_route_id ? undefined
           : await this.ownWork.states(client, [existing.id], context.correlationId, 'flag');
-        return this.projectWorkItem(existing, undefined, undefined, undefined, states?.get(existing.id));
+        // Q132 A: and, once dispensed, its change after dispensing, as the read answers it (ehr-api passes the
+        // answer through unchanged). In practice a replay seldom carries one: any change raises the
+        // prescription's row_version, which the digest covers, so a hand-off after a change is the 409 above;
+        // only api-client's single immediate retry could meet a notice. The list and the read carry it. The
+        // transaction is SERIALIZABLE: a 40001 from the reader is passed on, and DatabaseService runs the whole
+        // replay again.
+        const changed = existing.dispensing_id
+          ? await this.dispensedChanges.changes(client, [existing.id], context.correlationId) : undefined;
+        return this.projectWorkItem(existing, undefined, undefined, undefined, states?.get(existing.id),
+          changed?.get(existing.id));
       }
       const inserted = await client.query<WorkItemRow>(`insert into pharmacy.work_items (
         id,patient_id,facility_id,ordering_facility_id,source_ehr_prescription_id,
@@ -482,7 +500,11 @@ export class PharmacyService {
    * cannot be read), and that this backend serves the late correction
    * (`lateCorrection: true`, D17) and "We can't complete this order"
    * (`cannotComplete: true`, D18). The answer also says whether orders
-   * between facilities and work on them are on (FEAS R4, V11).
+   * between facilities and work on them are on (FEAS R4, V11). Q132 A
+   * (0148): a dispensed row whose prescription was changed afterwards
+   * carries `changedAfterDispensing` (projectWorkItem); a change does not
+   * move the row (it keeps its place in the done work, by the day it was
+   * received, Q123 A).
    */
   async listWorkItems(context: DataAccessContext) {
     const since = workListSince();
@@ -500,9 +522,15 @@ export class PharmacyService {
       const states = await this.ownWork.states(client, ownIds, context.correlationId, 'audit');
       await this.auditShownPatients(client, context, result.rows, cards, own, states);
       const details = await this.prescriptionDetails.details(client, ownIds, context.correlationId);
+      // Q132 A (0148): each dispensed row's change after dispensing, own and route-backed alike (a reversed
+      // dispensing included: the claim keeps its first dispensing). Asked once, for dispensed rows only, after
+      // the audit rows (the notice shows no new person, so it adds none); a failure answers no notice.
+      const changed = await this.dispensedChanges.changes(client, result.rows.filter((row) => row.dispensing_id)
+        .map((row) => row.id), context.correlationId);
       const receiving = await this.routeCards.receiving(client, context);
       return { items: result.rows.map((row) => this.projectWorkItem(row, cards.get(row.id), own.get(row.id),
-        this.prescriptionDetails.forRow(row, details.get(row.id)), states?.get(row.id))), since, ...receiving,
+        this.prescriptionDetails.forRow(row, details.get(row.id)), states?.get(row.id), changed.get(row.id))), since,
+        ...receiving,
         ...this.routeCards.lateCorrection(context), ...this.routeCards.cannotComplete(context) };
     });
     return { ...page, ...(await this.routeCards.flags()) };
@@ -603,8 +631,12 @@ export class PharmacyService {
       // 0133: whether its automatic send was withdrawn (no flag when it cannot be read).
       const states = row.order_route_id ? undefined
         : await this.ownWork.states(client, [row.id], context.correlationId, 'flag');
+      // Q132 A (0148): once dispensed, own or route-backed, its change after dispensing (no notice when it
+      // cannot be read). The read's audit row above already names the item and the patient.
+      const changed = row.dispensing_id
+        ? await this.dispensedChanges.changes(client, [row.id], context.correlationId) : undefined;
       return this.projectWorkItem(row, cards?.get(row.id), own?.get(row.id),
-        this.prescriptionDetails.forRow(row, details?.get(row.id)), states?.get(row.id));
+        this.prescriptionDetails.forRow(row, details?.get(row.id)), states?.get(row.id), changed?.get(row.id));
     });
   }
 
@@ -1042,9 +1074,22 @@ export class PharmacyService {
    * its route). An own item carries them only when ORD-4's steps reader
    * answered it (`ownState.steps`): on a schema without it, or when the
    * reader could not be read, neither is answered, never a guessed step.
+   *
+   * Q132 A (0148): a dispensed item (reversed or not) whose prescription the
+   * prescribing team changed after its first dispensing carries
+   * `changedAfterDispensing: { change, changedAt, changeCount }` as its last
+   * field: the latest shown change's code and time, and how many shown
+   * changes there were. `change` is left out when the database answered a
+   * code this image does not know. It is answered only next to a dispensing
+   * (`row.dispensing_id`), so it never stands next to `dispensing: null`, nor
+   * next to `withdrawn`, which exists only before a dispensing. It adds no
+   * prescription id, version or encounter: a route-backed item still carries
+   * none of the other facility's ids (PRIV P4.3). The item's step stays
+   * `dispensed` or `dispensing_reversed`; `status`, `acceptedAt`, `version`
+   * and `dispensing` keep their meaning.
    */
   private projectWorkItem(row: WorkItemRow, card?: OrderRouteCard, ownPatient?: WorkItemRoutePatient,
-    details?: WorkItemDispensingDetails, ownState?: OwnWorkState) {
+    details?: WorkItemDispensingDetails, ownState?: OwnWorkState, changed?: ChangedAfterDispensing) {
     const source = row.order_route_id ? {} : { sourceEhrPrescriptionId: row.source_ehr_prescription_id,
       sourceEncounterId: row.source_encounter_id };
     const route = row.order_route_id
@@ -1067,7 +1112,10 @@ export class PharmacyService {
       ...(details?.quantityToDispense === undefined ? {}
         : { quantityToDispense: details.quantityToDispense, quantityUnit: details.quantityUnit }),
       ...(ownState?.withdrawn ? { withdrawn: true,
-        ...(ownState.withdrawnReason ? { withdrawnReason: ownState.withdrawnReason } : {}) } : {}) };
+        ...(ownState.withdrawnReason ? { withdrawnReason: ownState.withdrawnReason } : {}) } : {}),
+      ...(row.dispensing_id && changed ? { changedAfterDispensing: {
+        ...(changed.change ? { change: changed.change } : {}), changedAt: changed.changedAt,
+        changeCount: changed.changeCount } } : {}) };
   }
 
   private projectDispensing(row: DispensingRow) {
