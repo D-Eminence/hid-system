@@ -112,13 +112,16 @@ select pg_temp.expect('1d receptionist', 'ehr.document.read-own ehr.document.wri
   || 'identity.patient.read identity.registration.write ocr.job.read-own ocr.job.start ocr.job.write '
   || 'outreach.campaign.read outreach.campaign.write outreach.registration.read outreach.registration.write',
   pg_temp.role_line('receptionist'));
-select pg_temp.expect('1e doctor', 'ehr.diagnosis.read ehr.diagnosis.write ehr.document.read ehr.document.write '
+-- 0150 (Q141 B) gives doctors ocr.job.start again; nothing else of theirs
+-- changes after 0136.
+select pg_temp.expect('1e doctor (with 0150''s ocr.job.start)', 'ehr.diagnosis.read ehr.diagnosis.write ehr.document.read ehr.document.write '
   || 'ehr.encounter.read ehr.encounter.write ehr.lab-request.read ehr.lab-request.write ehr.note.read ehr.note.write '
   || 'ehr.order-route.send ehr.prescription.read ehr.prescription.write ehr.vital.read ehr.vital.write '
   || 'identity.authorization.check identity.break-glass.write identity.consent.read identity.consent.write '
   || 'identity.patient-access-pin.verify identity.patient.read identity.registration.write lab.import.read '
-  || 'lab.import.write lab.result.released.read lab.work-item.accept ocr.job.read ocr.job.write ocr.patient.confirm '
-  || 'ocr.publication.write ocr.validation.write pharmacy.dispensing.read pharmacy.import.read pharmacy.import.write',
+  || 'lab.import.write lab.result.released.read lab.work-item.accept ocr.job.read ocr.job.start ocr.job.write '
+  || 'ocr.patient.confirm ocr.publication.write ocr.validation.write pharmacy.dispensing.read pharmacy.import.read '
+  || 'pharmacy.import.write',
   pg_temp.role_line('doctor'));
 select pg_temp.expect('1f lab', 'ehr.document.read ehr.document.write ehr.lab-request.read ehr.lab-request.write '
   || 'identity.authorization.check identity.consent.read identity.consent.write identity.patient.read '
@@ -150,9 +153,10 @@ select pg_temp.expect('1i clinician (gains ocr.job.start only)', 'ehr.diagnosis.
   || 'ocr.validation.write outreach.campaign.read outreach.campaign.write outreach.registration.read '
   || 'outreach.registration.write pharmacy.dispensing.read pharmacy.import.read pharmacy.import.write '
   || 'pharmacy.work-item.read', pg_temp.role_line('clinician'));
--- 0147 (Q137 B) gives ocr.job.start to its narrow role reading_starter too.
+-- 0147 (Q137 B) gives ocr.job.start to its narrow role reading_starter too,
+-- and 0150 (Q141 B) to doctors again.
 select pg_temp.expect('1j who holds the new codes', 'ehr.document.read-own: receptionist | ocr.job.read-own: '
-  || 'receptionist | ocr.job.start: clinician nurse reading_starter receptionist',
+  || 'receptionist | ocr.job.start: clinician doctor nurse reading_starter receptionist',
   (select string_agg(code || ': ' || holders, ' | ' order by code)
      from (select permission_code as code, string_agg(role_code, ' ' order by role_code) as holders
              from auth.role_permissions

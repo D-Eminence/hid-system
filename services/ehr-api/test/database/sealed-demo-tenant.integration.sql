@@ -1432,13 +1432,13 @@ begin
                     (2, 'lab.result.enter'), (2, 'lab.result.release'), (3, 'pharmacy.order-route.receive'),
                     (3, 'pharmacy.dispensing.create'), (4, 'outreach.registration.write'), (4, 'outreach.campaign.write'),
                     (4, 'identity.break-glass.write'), (4, 'audit.read')) wanted(site, permission)));
-  -- 0136 (owner decisions Q103 A, Q111 A): doctors no longer start
-  -- paper-record readings (that needs ocr.job.start, which doctors and
-  -- org_admin lack), so the staff login (doctor and org_admin at Demo
-  -- Hospital) cannot start one there; it keeps ocr.job.write (above), so it
-  -- still checks readings and confirms their patient under records processing.
-  perform pg_temp.assert('0136: the staff login at Demo Hospital cannot start a reading',
-    not auth.membership_has_permission('sealed-demo:98d00003-0000-4000-8000-000000000001',
+  -- 0136 (owner decisions Q103 A, Q111 A) took the start of a paper-record
+  -- reading (ocr.job.start) from doctors; 0150 (owner decision Q141 B) gives
+  -- it back to every doctor, so the staff login (doctor and org_admin at Demo
+  -- Hospital) starts readings there again, with the ocr.job.write it kept
+  -- (above).
+  perform pg_temp.assert('0150: the staff login (doctor) at Demo Hospital starts a reading again',
+    auth.membership_has_permission('sealed-demo:98d00003-0000-4000-8000-000000000001',
       '98d00005-0000-4000-8000-000000000001', '98d00002-0000-4000-8000-000000000001', 'ocr.job.start'));
   perform pg_temp.assert('the patient logins resolve',
     (select count(*) from identity.current_patient_account('patient:98d00008-0000-4000-8000-000000000001')) = 1
