@@ -12175,7 +12175,11 @@ day) not past, and opens on the Lagos day of the item's latest fill not
 reversed plus 3/4 of the prescription's duration in days, rounded up (the
 refill interval: a new safety rule set by the clinical owner on 24 November
 2026, with no override; for an earlier supply a clinician writes a new
-prescription), so a prescription with refills needs a duration; a
+prescription), so a prescription with refills needs a duration, and with
+refills that duration is how long one fill lasts (one supply, not the whole
+course: a 30-day supply is refilled from day 23; a 90-day course entered
+there would hold each refill back until day 68), which the prescribe form
+and the refusal say ("Duration of each fill"); a
 prescription sent to another facility's pharmacy gets one fill, as today. Any change after the first fill, a hold then resume
 included, ends the remaining refills (0101's version check, the owner
 decision at 0101:48-54). The prescriber sees the refills allowed; the
@@ -12504,6 +12508,7 @@ which needs 0152's `fill_number`):
 | Dispensing body | optional `fillNumber`, a whole number 1-12 (null refused); left out, fill 1. It must be the fills recorded plus one, else 409 `PHARMACY_FILL_NUMBER_CHANGED` with `fillsRecorded`. A refill of an item from another facility's order route is 409 `PHARMACY_NO_REFILLS_LEFT` before the insert. Only a first fill accepts a received item (ORD-4). |
 | Dispensing answer (create, replay, read) | `fillNumber` |
 | Work item (list, read; hand-off answers) | `dispensing.fillNumber`; `lastFilledAt` (the latest fill's time) once dispensed; on the list and a read, `refills: { allowed, recorded, open, closedReason, nextFillOn }` after the other fields and before `changedAfterDispensing` |
+| Work list (the answer itself) | `refillsUnavailable: true` when the open refills or the per-item reader could not be read (left out otherwise) |
 | Progress (ehr-api's ORD-3 call) | `lastFilledAt` after the other fields (today's ehr-api drops it) |
 | `MedicationDispensed` | written for every fill; its payload names `fillNumber` on a refill only (a first fill's is today's) |
 | Audit `pharmacy.dispensing.create` | `fillNumber` on a refill |
@@ -12520,7 +12525,8 @@ fill and once closed for another reason). A route-backed item answers
 other facility's). When the reader cannot be read (a
 schema without it, a refusal, a timeout) `refills` is left out, no item is
 kept open for a refill, a warning is logged, and the answer is otherwise
-whole, as with 0125's details.
+whole, as with 0125's details; on the work list the answer then also says
+`refillsUnavailable: true` (below).
 
 The work list's open rule: an own item is open while it has no fill, or while
 a refill is open. Before the list chooses its 200 rows it asks 0152's open
@@ -12536,39 +12542,78 @@ work (newest first, the 90-day window of Q123 A). A refill not yet due
 are always listed (the clinical owner's answer of 23 November 2026), up to
 the list's 200 rows, and done items keep the 90-day window; only beyond 200
 items with a refill open at once does the open-refills reader leave the
-latest opened out. The list then asks the per-item reader once, for the own
+latest opened out. That holds only while the open refills can be read within
+their limit (below): past it the list says so instead, and without an expiry
+for refills that point comes as the facility's refill history grows ("Before
+the setting goes on"). The list then asks the per-item reader once, for the own
 rows it shows,
-so each own row carries `refills`. A failure of either reader (a timeout
-included) opens no item for a refill and leaves `refills` out, with a
-warning; the list still answers. The single read asks the per-item reader for
-its one item.
+so each own row carries `refills`. The open refills run under their own
+time limit, 3 seconds (`OPEN_REFILLS_TIMEOUT_MS`, set with `set_config(...,
+true)` inside their savepoint and undone by rolling back to it, so no other
+statement of the request runs under it), below the pool's 15-second
+`statement_timeout`: their cost grows with the facility's refill history (the
+cost paragraph below), and past the limit the list answers without them
+instead of holding every row past the staff client's 10-second timeout. A
+failure of either reader (that limit included) opens no item for a refill and
+leaves `refills` out; the list still answers, and says
+`refillsUnavailable: true` at its top level (after the other fields), so the
+front ends say "Refills could not be loaded" instead of showing a due refill
+as done work without a word. The open refills' failure is logged as an
+error, the per-item reader's as a warning. Off, the list never carries the
+field. The single read asks the per-item reader for its one item (no flag:
+`refills` is simply left out).
 
-Cost of one list load with the setting on (what the code does: the open
-refills once, the list statement, then the per-item reader once on the own
-rows shown, at most 200), measured on 20,000 own items in the facility, each
-filled once, 200 of them allowing 2 refills with a 10-day duration and a
-refill open (100 with a fill 2), so the list shows those 200 as open work, 11
-loads as a pharmacist on the own-work basis. Under a NOSUPERUSER NOBYPASSRLS
-owner (production's kind): the open refills 2.2-2.5 s (median 2.4),
-the list statement itself 2.7-3.0 s (median 2.8), the per-item
-reader on the 200 shown rows 2.4-2.7 s (median 2.4), 7.3-8.0 s in
-all (median 7.7 s). Under a superuser owner: 0.31-0.41, 2.3-4.7
-and 0.32-0.42 s, 2.9-5.5 s in all (median 3.1 s). The
-open refills' share grows with the facility's active prescriptions that allow
-refills and have not ended (2,000 of them: 20.3-21.3 s under the NOSUPERUSER
-NOBYPASSRLS owner, 0.74-0.81 s under a superuser owner), the reader's with
-the own rows shown (at most 200), and neither with the rest of the facility's
-work. Off, the list asks neither.
+Cost of one list load with the setting on, measured on 20,000 own items in
+the facility, each filled once, 200 of them allowing 2 refills with a 10-day
+duration and a refill open (100 with a fill 2), so the list shows those 200
+as open work, as a pharmacist on the own-work basis (PostgreSQL 16 on a shared
+machine; fictional data).
+
+The whole request, measured with pharmacy-api's own list code
+(`PharmacyService.listWorkItems` with every reader on: 0124's patient cards,
+0125's details, 0133's states, 0148's changes and both refill readers, the
+audit rows, through the Pharmacy API's runtime and the pool's 15-second
+`statement_timeout`), 11 loads: under a NOSUPERUSER NOBYPASSRLS owner
+(production's kind) 8.2-9.8 s (median 8.8 s), of which the open refills
+2.4-2.7 s, the list statement 2.7-3.4 s, the per-item reader on the 200 shown
+rows 2.6-3.1 s, 0133's states 0.39-0.48 s, the audit rows 0.12-0.17 s, 0124's
+cards 0.03-0.08 s, 0125's details and 0148's changes under 0.02 s each; so
+the request without the open refills is 5.8-7.2 s (median 6.2 s). Under a
+superuser owner: 3.5-4.1 s (median 3.8 s), the open refills 0.32-0.42 s.
+(The earlier figure, 7.3-8.0 s, counted three of these statements only.)
+This fixture understates two readers: its pharmacist works on the own-work
+basis with no consent grant, and it holds no 0125 prescription snapshots, so
+0124's cards and 0125's details had almost nothing to answer; at a hospital
+where they do, section 46's figures apply (0.6-1.0 s and 1.0-1.7 s for 200
+own rows under a NOBYPASSRLS owner), which would take the request past the
+staff client's 10 seconds at these numbers.
+
+The open refills' share grows with the facility's active prescriptions that
+allow refills and have not ended, about 10 ms each under the NOSUPERUSER
+NOBYPASSRLS owner (2,000 of them, 200 open and 1,800 not yet due: 20.3-21.3 s
+alone; under a superuser owner 0.69-0.79 s), and that set never shrinks by
+use ("Before the setting goes on" below); the per-item reader's share grows with the
+own rows shown (at most 200), and neither with the rest of the facility's
+work. pharmacy-api's 3-second limit on the open refills keeps the request
+within the staff client's 10 seconds at these numbers: with 2,000 such
+prescriptions the open refills stop at 3.0 s, the list answers with
+`refillsUnavailable: true` and no refill open, 9.3-9.6 s in all, 3 loads
+(the list statement after them, 2.9-3.3 s, ran under the pool's 15 seconds:
+the limit was undone with the savepoint); with a 5-second limit it was
+11.3-11.5 s, past the client's timeout. Off, the list
+asks neither reader.
 The setting goes on only after the whole list request has been measured this
-way at the hospital's expected numbers and the cost accepted in writing (see
-"Before the setting goes on").
+way at the hospital's expected numbers and the cost accepted in writing, and
+after the owner's expiry decision (see "Before the setting goes on").
 
 **ehr-api, setting on:** a prescription create may carry `refillsAllowed`, a
 whole number 0-11 (null, fractions and anything else refused 400 naming it),
 stored in `refills_allowed` (left out: null, none). Above 0 it needs a
 duration (0125's `durationValue` and `durationUnit`), else 400
 `REFILLS_NEED_DURATION` before anything is written (0152's CHECK refuses it
-too); a create carries a duration only while 0125's
+too), whose words say what the duration means with refills: "A prescription
+with refills needs the duration of each fill: how long one supply lasts, not
+the whole course. Add it, or set refills to 0."; a create carries a duration only while 0125's
 `PRESCRIPTION_DISPENSING_DETAILS_ENABLED` is on as well, so with that off
 only 0 refills can be written. Every answer of the
 prescriptions routes (list, read, create, its replay, update) carries
@@ -12600,7 +12645,10 @@ fill sends one notice and none is dropped or doubled.
 `lastFilledAt` and `refills` (`PharmacyWorkItemRefills` with `nextFillOn`,
 `PharmacyRefillsClosedReason` with `not_yet`), `PharmacyDispensing.fillNumber`
 and `CreatePharmacyDispensingInput.fillNumber` (its refusals documented,
-`PHARMACY_REFILL_TOO_SOON` with `refillOpensOn` among them). The parsers are
+`PHARMACY_REFILL_TOO_SOON` with `refillOpensOn` among them), and
+`listWorkQueue()`, which answers `PharmacyWorkQueue` (`items`, as
+`listWorkItems()` answers them, and `refillsUnavailable`, true only when the
+list says exactly true). The parsers are
 lenient: absent or malformed, each is left out and the item reads as before
 (never a 502); an unknown closed reason reads as null, and a `nextFillOn` that
 is not a day, or absent, as null.
@@ -12610,8 +12658,14 @@ is not a day, or absent, as null.
 Dispense again only while `refills.open` (sending `fillNumber:
 refills.recorded + 1`), show "Refill from <date>" (`nextFillOn`) while
 `closedReason` is `not_yet`, offer Reverse on the latest fill only, say "Fill
-2 of 3" (`fillNumber` of `allowed + 1`) and word each new 409 by its code
-(`PHARMACY_REFILL_TOO_SOON` with its day); and
+2 of 3" (`fillNumber` of `allowed + 1`), word each new 409 by its code
+(`PHARMACY_REFILL_TOO_SOON` with its day), and read the list through
+`listWorkQueue()` and, while it says `refillsUnavailable`, show above it
+"Refills could not be loaded. Some refills that are due may not be listed.
+Reload the list; if this keeps happening, tell your administrator."; once the
+prescribe form in health labels the duration "Duration of each fill" when
+refills are above 0, with "Each refill can be collected from <3/4 of it>
+after the last one"; and
 once the prescriber's edit dialog in health (a prescription with
 `refillsAllowed` above 0 whose `ownProgress` is dispensed) says, before the
 change is saved: "Changing this prescription ends its remaining refills. To
@@ -12627,13 +12681,43 @@ changed after the first fill. That is the website slice's; no backend
 change in this one (the clinical owner's decision, 24 November 2026).
 
 **Before the setting goes on** (pharmacy-api's `PRESCRIPTION_REFILLS_ENABLED`),
-besides the front ends above: the whole list request is measured under a
-NOSUPERUSER NOBYPASSRLS owner at the hospital's expected numbers of own items
-and of active prescriptions with refills, as above (at 20,000 items and 200
-such prescriptions, 7.7 s a load against 3.1 s under a
-superuser owner), and the cost is accepted in writing. The refill interval is
-decided and built (24 November 2026); an expiry for refills of a prescription
-with no end date is not (a later decision).
+besides the front ends above:
+1. **The owner decides an expiry for refills.** The open refills read every
+   active prescription at the facility that allows refills and has not
+   ended. Nothing takes one out of that set when its refills are used up
+   (`none_left`), when it is changed after the first fill, or when its item
+   is never filled here; only a stop, a completion or a passed end date
+   does, and `endsOn` is optional. So their cost grows with the facility's
+   refill history, about 10 ms a prescription under a NOSUPERUSER
+   NOBYPASSRLS owner, against the house rule for list readers (section 46:
+   a list reader's cost must not grow with the history). Past pharmacy-api's
+   3-second limit for them, about 300 such prescriptions at the measured
+   cost, every load says `refillsUnavailable` and lists no open refill, so
+   "open refills are always listed" no longer holds. Example: a hospital
+   writing 10 prescriptions with refills a day, without end dates, reaches
+   300 in about a month. The smallest bound: refills need an end date
+   (ehr-api 400, 0152's CHECK extended to `ends_on` when `refills_allowed` is
+   above 0, and R7's index on (`facility_id`, `ends_on`) where
+   `refills_allowed` > 0, so the open refills range-scan the prescriptions
+   not yet ended); an implicit expiry worked out from the duration and the
+   refills allowed would also do. Either changes 0152 before it is signed.
+   Not built: it is the owner's decision (open question in the PR).
+2. **The whole list request is measured at the hospital's numbers and the
+   cost accepted in writing**, against the two limits it runs under: the
+   staff client's 10-second timeout (`@hid/api-client`'s default, which
+   `apps/pharmacy` uses) for the whole request, and pharmacy-api's
+   15-second `statement_timeout` for each statement (3 seconds for the open
+   refills). Measured as above, every reader on, at the hospital's expected
+   numbers of own items and of active prescriptions with refills, with the
+   hospital's 0124 and 0125 settings and data (the fixture above had almost
+   nothing for those two readers): at 20,000 items and 200 such
+   prescriptions, 8.2-9.8 s a load under a NOSUPERUSER NOBYPASSRLS owner
+   (3.5-4.1 s under a superuser owner), which leaves little room under the
+   client's 10 seconds even before the open refills grow. If the measured
+   request does not fit, the owner chooses between a longer client timeout
+   for the work list, fewer readers on it, or cheaper readers; the 3-second
+   limit only keeps the open refills from being the cause.
+The refill interval is decided and built (24 November 2026).
 
 **Rollback floor and undo:** once any refill is recorded, pharmacy-api must
 not roll back below its first refills-aware image (an older one joins
@@ -12674,7 +12758,9 @@ day and 00:01 on the next, under far time zones), the validator and the
 reader agreeing on each item's next fill, `REFILL_TOO_SOON` with its day,
 the open refills leaving out a refill not yet due, a reversed latest fill
 (the wait runs from the latest fill standing), every fill reversed (no
-wait), and the CHECK refusing refills without a duration. Each clause of the functions and
+wait), and the CHECK refusing refills without a duration; and (case 1j)
+the comments on `refills_allowed` and its CHECK saying that with refills the
+duration is how long one fill lasts. Each clause of the functions and
 each constraint is shown to matter:
 a copy without it, applied after the suite's structure case, fails a named
 case (the clauses that restate what others enforce are listed in the
@@ -12692,7 +12778,11 @@ open rule on the list beyond 90 days and through the open refills (a refill
 open 30 days after its fill listed first among 251 filled items; the
 per-item reader asked once, for the rows shown; a refill not yet due as done
 work with `not_yet` and `nextFillOn`; the open refills after the first fills,
-in the reader's order); recording, numbering,
+in the reader's order; the open refills under their own 3-second limit,
+set inside their savepoint and undone with it; either reader failing, a
+timeout included: the list whole and `refillsUnavailable: true`, the open
+refills' failure logged as an error; the flag absent off, on success and on
+a single read); recording, numbering,
 replaying and refusing fills (`PHARMACY_REFILL_TOO_SOON` with
 `refillOpensOn` among them), the races and a second 23505; every fill's
 event; the latest-fill reversal; the body pipe; the setting's wiring),
@@ -12700,8 +12790,9 @@ event; the latest-fill reversal; the body pipe; the setting's wiring),
 earlier fill standing reads dispensed), `health.controller.spec.ts` and
 `database.service.spec.ts` (not ready without 0152's column), and
 `pharmacy-client-refills.contract.spec.ts` (`@hid/api-client`'s types and
-parsers, `not_yet` and `nextFillOn` among them); ehr-api's
-`prescription-refills.spec.ts` (`REFILLS_NEED_DURATION`); the event-dispatcher's
+parsers, `not_yet` and `nextFillOn` among them, and `listWorkQueue`'s
+`refillsUnavailable`); ehr-api's
+`prescription-refills.spec.ts` (`REFILLS_NEED_DURATION` and its words); the event-dispatcher's
 `event-contracts.spec.ts`. pharmacy-api's statements were also run against
 PostgreSQL 16 with 0152 (both owners) through the Pharmacy runtime, and the
 runtime verifiers that dispense (own-facility work, order routes, own-work
@@ -12710,7 +12801,8 @@ own-facility work verifier runs twice: with `PRESCRIPTION_REFILLS_ENABLED`
 on in ehr-api and pharmacy-api (its ORD-12 steps: refills need a duration,
 each refill refused before its day with `PHARMACY_REFILL_TOO_SOON` and
 recorded on it, the clock moved on by moving the fill back as the owner, in
-replica mode, then the restart with the setting off), and with it off in
+replica mode, then the restart with the setting off; no list it reads says
+`refillsUnavailable`), and with it off in
 both from the start (every step before ORD-12's unchanged; nothing of
 refills shown; `fillNumber` and `refillsAllowed` unknown fields). pharmacy-api
 booted from source against a database without 0152 answers `live` 200 and

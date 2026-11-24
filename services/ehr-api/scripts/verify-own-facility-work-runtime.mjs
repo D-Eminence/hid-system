@@ -1211,7 +1211,13 @@ try {
 
   // ── ORD-12: refills (0152) ──
   // Helpers for both settings. The pharmacist's list and items; a fill and a reversal through pharmacy-api.
-  const ownList = async label => expectStatus(await pharmacyCall(ownPharmacist, 'GET', '/work-items'), 200, label).items;
+  // Each of these lists must have read its refills: pharmacy-api says refillsUnavailable only when the open refills or
+  // the per-item reader could not be read (never while off).
+  const ownList = async label => {
+    const page = expectStatus(await pharmacyCall(ownPharmacist, 'GET', '/work-items'), 200, label);
+    assert.equal(page.refillsUnavailable, undefined, `${label}: the list says refillsUnavailable`);
+    return page.items;
+  };
   const onlyRow = (items, rx, label) => {
     const rows = items.filter(item => item.sourceEhrPrescriptionId === rx.id);
     assert.equal(rows.length, 1, `${label}: one row for prescription ${rx.id}, not ${rows.length}`);

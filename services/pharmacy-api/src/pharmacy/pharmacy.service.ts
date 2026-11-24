@@ -151,7 +151,9 @@ const WORK_LIST_ORDER = `order by o.open_work desc,o.refill_open asc,case when o
  * with a refill open and listed, 11 loads: 8.2-9.8 s under a NOSUPERUSER
  * NOBYPASSRLS owner (the open refills 2.4-2.7 s, this query 2.7-3.4 s, the
  * per-item reader 2.6-3.1 s, 0133's states 0.4-0.5 s, the rest under 0.2 s
- * each), 3.5-4.1 s under a superuser owner. With 2,000 such prescriptions the
+ * each: that fixture gave 0124's and 0125's readers almost nothing to answer,
+ * so add their costs above where they do), 3.5-4.1 s under a superuser
+ * owner. With 2,000 such prescriptions the
  * open refills alone would take 20.3-21.3 s under the NOBYPASSRLS owner; they
  * stop at 3 s, the answer says refillsUnavailable, and the request takes
  * 9.3-9.6 s, within the staff client's 10 s. The setting goes on only after

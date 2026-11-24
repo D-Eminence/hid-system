@@ -396,7 +396,10 @@
 --   2,000 (200 open), R7 stops at pharmacy-api's 3-second limit, the list
 --   answers with refillsUnavailable and no refill open, and the request
 --   takes 9.3-9.6 s under the NOBYPASSRLS owner (with a 5-second limit it
---   took 11.3-11.5 s, past the staff client's 10 s).
+--   took 11.3-11.5 s, past the staff client's 10 s). The fixture's pharmacist
+--   has no consent grant and the fixture no 0125 prescription snapshots, so
+--   0124's cards and 0125's details answered almost nothing; where they do,
+--   add the interface contract's section 46 figures.
 --
 -- Old services on this schema. Release A and B ehr-api: every INSERT and
 -- read of ehr.prescriptions names its columns, so refills_allowed is null on
