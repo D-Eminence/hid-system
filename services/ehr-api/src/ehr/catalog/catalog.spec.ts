@@ -3,7 +3,9 @@ import type { ArgumentMetadata } from '@nestjs/common';
 import { HEADERS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { Test } from '@nestjs/testing';
 import type { NextFunction, Request, Response } from 'express';
+import { readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
+import { resolve } from 'node:path';
 import { ANY_PERMISSIONS, AUDIT_FAILURES_ONLY, PATIENT_ALLOWED, REQUIRED_PERMISSIONS } from '../../common/decorators';
 import { DomainProblem, ProblemDetailsFilter } from '../../common/problem';
 import type { HidRequest } from '../../common/request-context';
@@ -621,6 +623,19 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
           [{ field: 'q', messages: ['q must not contain control characters'] }]]);
       }
       expect(calls).toEqual([]);
+    });
+
+    it('the planned contract says what is sent: ORD-9\'s 503 row and its first slice give the filter\'s words', () => {
+      const contract = readFileSync(resolve(__dirname, '../../../../../docs/EHR_PLANNED_CONTRACT.md'), 'utf8');
+      const start = contract.indexOf('\n## ORD-9: ');
+      const section = contract.slice(start, contract.indexOf('\n## ', start + 1));
+      const sent = 'sent as "The service could not complete the request."';
+      const row = section.split('\n').filter((line) => line.startsWith('| 503 | `CATALOG_UNAVAILABLE` |'));
+      expect(row).toHaveLength(1);
+      expect(row[0]).toContain(sent);
+      expect(row[0]).not.toMatch(/\| "Diagnosis search is not available right now\."/);
+      const firstSlice = section.slice(section.indexOf('### First slice'));
+      expect(firstSlice.replace(/\s+/g, ' ')).toContain(`503 \`CATALOG_UNAVAILABLE\`, ${sent}`);
     });
 
     it('an answer is sent as the service gives it, kept a minute', async () => {
