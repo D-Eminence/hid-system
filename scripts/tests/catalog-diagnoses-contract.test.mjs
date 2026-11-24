@@ -26,3 +26,22 @@ test('ORD-9\'s 503 row and its first slice say the filter\'s words are what is s
   const firstSlice = section.slice(section.indexOf('### First slice')).replace(/\s+/g, ' ')
   assert.ok(firstSlice.includes(`503 \`CATALOG_UNAVAILABLE\`, sent as "${sent}"`))
 })
+
+test('no line of ORD-9 presents the service\'s own words as what a 503 sends', () => {
+  // Every "503 `CATALOG_UNAVAILABLE`" in ORD-9 (the search's, and any later route's, such as recent diagnoses) is
+  // followed by the filter's words, and the service's own words appear only as its own words, kept inside them
+  // (found in our own review of round 6: #321's recent route still said its 503 sent the service's words).
+  const sent = problem.match(/const detail = status >= 500\s*\?\s*'([^']+)'/)[1]
+  const own = 'Diagnosis search is not available right now.'
+  const start = contract.indexOf('\n## ORD-9: ')
+  const section = contract.slice(start, contract.indexOf('\n## ', start + 1)).replace(/\s+/g, ' ')
+  const mentions = [...section.matchAll(/\b503[ |]*`CATALOG_UNAVAILABLE`[ |,]*/g)]
+  assert.ok(mentions.length >= 2, `ORD-9 names its 503 in the errors table and the first slice (${mentions.length})`)
+  for (const mention of mentions) {
+    const after = mention.index + mention[0].length
+    assert.ok(section.startsWith(`sent as "${sent}"`, after), section.slice(mention.index, after + 120))
+  }
+  for (const word of section.matchAll(new RegExp(own.replace(/[.]/g, '\\.'), 'g'))) {
+    assert.ok(section.slice(0, word.index).endsWith('own words, "'), section.slice(Math.max(0, word.index - 120), word.index + own.length + 40))
+  }
+})
