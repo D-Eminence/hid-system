@@ -220,7 +220,9 @@ begin
   -- identity.decide_unknown_patient among them), and, once 0152 (ORD-12,
   -- refills) is applied, its two readers pharmacy.work_item_refills and
   -- pharmacy.open_refill_work_items (the prescription-refills suite, cases
-  -- 13 and 14).
+  -- 13, 14 and 16: they read ehr.prescriptions under 0152's refill scan
+  -- marker; its test, pharmacy.refill_scan_open, names no
+  -- ehr.prescriptions).
   perform pg_temp.expect('1g no 0148 body names ehr.prescriptions or the sends table; 0133''s S7 list (with 0152''s readers)',
     (select count(*) from pg_proc proc
       where proc.oid in ('pharmacy.work_item_changes_after_dispensing(uuid[])'::regprocedure,

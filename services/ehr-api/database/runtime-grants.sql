@@ -2035,11 +2035,26 @@ revoke all on pharmacy.prescription_changes_after_dispensing from public;
 -- Identity, OCR, Outreach or Notification runtimes (they read
 -- pharmacy.work_items, ehr.prescriptions and pharmacy.dispensings as their
 -- owner, the owner of pharmacy.validate_dispensing). The two new columns
--- (ehr.prescriptions.refills_allowed, pharmacy.dispensings.fill_number) and
--- the new index need no grant: the table privileges above are table-wide.
+-- (ehr.prescriptions.refills_allowed, pharmacy.dispensings.fill_number) need
+-- no grant: the table privileges above are table-wide.
 -- The replaced pharmacy.validate_dispensing and
 -- pharmacy.claim_prescription_dispensing keep their ACLs (executed by no
 -- role).
 grant execute on function pharmacy.work_item_refills(uuid[]), pharmacy.open_refill_work_items()
   to hid_pharmacy_runtime, hid_schema_test_runtime;
 revoke all on function pharmacy.work_item_refills(uuid[]), pharmacy.open_refill_work_items() from public;
+-- The refills' last day (0152 R8, the clinical owner's decision D9 of 24
+-- November 2026), ehr.prescription_refills_end_on: to the two runtimes that
+-- may write ehr.prescriptions (the EHR runtime and the schema test runtime),
+-- because PostgreSQL runs the expression of the open refills' index
+-- (ehr.prescriptions_refills_facility_idx) as the role that inserts or
+-- updates a prescription with refills; nothing to PUBLIC. The refill scan
+-- marker (0152 R9, decision D8), as 0143's: the table pharmacy.refill_scans
+-- is the owner's only; its test pharmacy.refill_scan_open() is run by every
+-- role that reads ehr.prescriptions (the policy prescriptions_scan_refills
+-- calls it), so PUBLIC may execute it.
+grant execute on function ehr.prescription_refills_end_on(timestamptz, smallint, integer, text, date)
+  to hid_ehr_runtime, hid_schema_test_runtime;
+revoke all on function ehr.prescription_refills_end_on(timestamptz, smallint, integer, text, date) from public;
+revoke all on pharmacy.refill_scans from public;
+grant execute on function pharmacy.refill_scan_open() to public;

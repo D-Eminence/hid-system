@@ -35,7 +35,12 @@
 --      ehr.prescriptions, the Pharmacy runtime's readers of own items'
 --      refills: pharmacy.work_item_refills (an item's refills) and
 --      pharmacy.open_refill_work_items (the items whose refill is open now)
---      (S7's eleventh and twelfth; case 8);
+--      (S7's eleventh and twelfth; case 8). Each reads ehr.prescriptions in
+--      one statement under 0152's refill scan marker (the policy
+--      prescriptions_scan_refills: while the marker is held, the owner reads
+--      every row, so their own conditions decide what they answer); its
+--      marker test, pharmacy.refill_scan_open, is an owner-run definer that
+--      names no ehr.prescriptions, so S7 is otherwise unchanged;
 --   2. the send: the prescriber's activated prescription becomes a work item
 --      accepted by the prescriber with the fixed reason, one event, one
 --      outbox event with pharmacy-api's own four payload keys (what the event
@@ -490,7 +495,11 @@ begin
   -- function; 0152 added pharmacy.work_item_refills and
   -- pharmacy.open_refill_work_items, the Pharmacy runtime's readers of own
   -- items' refills, which answer only for items the session may read, as
-  -- the prescription-refills suite's cases 13 and 14 show);
+  -- the prescription-refills suite's cases 13 and 14 show; they read
+  -- ehr.prescriptions under 0152's refill scan marker, so in their one
+  -- statement that reads it the owner sees every row and their own
+  -- conditions decide, as under a superuser owner, which that suite's case
+  -- 16 shows changes no answer and no other read);
   -- case 8 shows each gives the pharmacist nothing more (the two
   -- validators in cases 3 and 5, and 0144's in its own suite,
   -- pharmacy-work-item-acceptance, too). A new one must be
