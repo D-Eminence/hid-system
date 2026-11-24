@@ -167,16 +167,18 @@ describe('refills: on', () => {
       .toEqual([{ field: 'refillsRemaining', messages: ['property refillsRemaining should not exist'] }]);
   });
 
-  it.each([[false, 17], [true, 24]])('E7 stores it after today\'s columns (0125 details on: %p, placeholder $%p)',
-    async (withDetails, placeholder) => {
+  // Refills above 0 need a duration (E16), which a create carries only with 0125's details on: details off, 0 refills.
+  it.each([[false, 17, 0], [true, 24, 3]])(
+    'E7 stores it after today\'s columns (0125 details on: %p, placeholder $%p, refills %p)',
+    async (withDetails, placeholder, refillsAllowed) => {
       const { service, statements } = harness(true, { details: withDetails });
       await create(service, await pipe(true, withDetails).transform({ ...body, ...(withDetails ? details : {}),
-        refillsAllowed: 3 }));
+        refillsAllowed }));
       const insert = insertOf(statements);
       expect(insert.sql).toMatch(new RegExp(`status${withDetails ? '[\\s\\S]*quantity_unit' : ''}, refills_allowed\\s*\\)`));
       expect(insert.sql).toMatch(new RegExp(`\\$${placeholder - 1},\\$${placeholder}\\)`));
       expect(insert.values).toHaveLength(placeholder);
-      expect(insert.values.at(-1)).toBe(3);
+      expect(insert.values.at(-1)).toBe(refillsAllowed);
       expect(insert.sql).toContain('returning');
       expect(insert.sql).toContain('refills_allowed as "refillsAllowed"');
     });
@@ -212,10 +214,10 @@ describe('refills: on', () => {
     const on = harness(true);
     await create(on.service, await pipe(true).transform({ ...body }));
     expect(on.digest()).toBe(off.digest());
-    const two = harness(true);
-    await create(two.service, await pipe(true).transform({ ...body, refillsAllowed: 2 }));
-    const three = harness(true);
-    await create(three.service, await pipe(true).transform({ ...body, refillsAllowed: 3 }));
+    const two = harness(true, { details: true });
+    await create(two.service, await pipe(true, true).transform({ ...body, ...details, refillsAllowed: 2 }));
+    const three = harness(true, { details: true });
+    await create(three.service, await pipe(true, true).transform({ ...body, ...details, refillsAllowed: 3 }));
     expect(new Set([off.digest(), two.digest(), three.digest()]).size).toBe(3);
   });
 
@@ -231,6 +233,38 @@ describe('refills: on', () => {
       { type: 'body', data: undefined, metatype: UpdatePrescriptionDto }));
     expect(refused.errors).toEqual(expect.arrayContaining([{ field: 'refillsAllowed',
       messages: ['property refillsAllowed should not exist'] }]));
+  });
+});
+
+describe('refills need a duration (the clinical owner\'s refill interval, 24 November 2026)', () => {
+  it.each([[true], [false]])('E16 refillsAllowed above 0 without a duration is 400 REFILLS_NEED_DURATION, nothing written '
+    + '(0125 details on: %p)', async (withDetails) => {
+    for (const refillsAllowed of [1, 11]) {
+      const { service, statements } = harness(true, { details: withDetails });
+      const input = await pipe(true, withDetails).transform({ ...body, refillsAllowed });
+      expect(await refusal(create(service, input))).toEqual({ status: 400, code: 'REFILLS_NEED_DURATION', errors: undefined });
+      expect(statements).toEqual([]);
+    }
+  });
+
+  it('E17 refills 0 or left out need none; refills with a duration (each unit) are written', async () => {
+    for (const extra of [{ refillsAllowed: 0 }, {}]) {
+      const { service, statements } = harness(true);
+      await create(service, await pipe(true).transform({ ...body, ...extra }));
+      expect(insertOf(statements)).toBeDefined();
+    }
+    for (const unit of ['day', 'week', 'month']) {
+      const { service, statements } = harness(true, { details: true });
+      await create(service, await pipe(true, true).transform({ ...body, ...details, durationValue: 2, durationUnit: unit,
+        refillsAllowed: 2 }));
+      expect(insertOf(statements).values.at(-1)).toBe(2);
+    }
+  });
+
+  it('E18 off, nothing is checked (the body cannot carry refillsAllowed); on, a value without its unit is refused', () => {
+    expect(() => PRESCRIPTION_REFILLS_OFF.requireDuration({ refillsAllowed: 3 })).not.toThrow();
+    expect(() => new PrescriptionRefills(true).requireDuration({ refillsAllowed: 3, durationValue: 10 }))
+      .toThrow(expect.objectContaining({ code: 'REFILLS_NEED_DURATION' }));
   });
 });
 

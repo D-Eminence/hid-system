@@ -20,7 +20,8 @@ const base = { id: '123e4567-e89b-42d3-a456-426614174003', patientId: '123e4567-
   acceptedAt: '2026-11-20T09:00:00.000Z', version: 1,
   dispensing: { id: '123e4567-e89b-42d3-a456-426614174007', status: 'dispensed', reversed: false },
   pharmacyStep: 'dispensed', pharmacistAcceptance: null };
-const refills: PharmacyWorkItemRefills = { allowed: 2, recorded: 1, open: true, closedReason: null };
+const refills: PharmacyWorkItemRefills = { allowed: 2, recorded: 1, open: true, closedReason: null,
+  nextFillOn: '2026-11-21' };
 const dispensing = { id: '123e4567-e89b-42d3-a456-426614174007', workItemId: base.id, patientId: base.patientId,
   facilityId: context.facilityId, status: 'dispensed', effectiveStatus: 'dispensed',
   medication: { codeSystem: null, code: null, display: 'Amlodipine 5 mg tablet' }, quantityDispensed: 30,
@@ -47,25 +48,36 @@ describe('PharmacyApiClient refills (ORD-12)', () => {
 
   it('C2 present: refills, lastFilledAt and the latest fill\'s number, on listWorkItems and getWorkItem', async () => {
     const shown = { ...base, dispensing: { ...base.dispensing, fillNumber: 2 }, lastFilledAt: '2026-11-21T09:30:00.000Z',
-      refills: { allowed: 2, recorded: 2, open: true, closedReason: null } };
+      refills: { allowed: 2, recorded: 2, open: true, closedReason: null, nextFillOn: '2026-11-22' } };
     respond({ items: [shown, { ...base, dispensing: null, pharmacyStep: 'received', refills: { allowed: 1, recorded: 0,
-      open: false, closedReason: null } }] });
+      open: false, closedReason: null, nextFillOn: null } }] });
     const items: PharmacyWorkItem[] = await client.listWorkItems(context);
     expect(items[0]).toMatchObject({ dispensing: { fillNumber: 2 }, lastFilledAt: '2026-11-21T09:30:00.000Z',
-      refills: { allowed: 2, recorded: 2, open: true, closedReason: null } });
-    expect(items[1]!.refills).toEqual({ allowed: 1, recorded: 0, open: false, closedReason: null });
+      refills: { allowed: 2, recorded: 2, open: true, closedReason: null, nextFillOn: '2026-11-22' } });
+    expect(items[1]!.refills).toEqual({ allowed: 1, recorded: 0, open: false, closedReason: null, nextFillOn: null });
     respond({ ...shown, refills: { allowed: 0, recorded: 1, open: false, closedReason: 'none_left', extra: 'dropped' } });
     expect((await client.getWorkItem(base.id, context)).refills).toEqual({ allowed: 0, recorded: 1, open: false,
-      closedReason: 'none_left' });
+      closedReason: 'none_left', nextFillOn: null });
   });
 
   it('C3 each closed reason is kept; one this client does not know reads as null', async () => {
-    for (const closedReason of ['none_left', 'changed', 'stopped', 'ended'] as const) {
+    for (const closedReason of ['none_left', 'changed', 'stopped', 'ended', 'not_yet'] as const) {
       respond({ ...base, refills: { ...refills, open: false, closedReason } });
       expect((await client.getWorkItem(base.id, context)).refills?.closedReason).toBe(closedReason);
     }
     respond({ ...base, refills: { ...refills, open: false, closedReason: 'paused_by_owner' } });
     expect((await client.getWorkItem(base.id, context)).refills).toEqual({ ...refills, open: false, closedReason: null });
+  });
+
+  it('C3b the refill interval: not_yet with nextFillOn (the Lagos day it opens); a nextFillOn that is not a day, or '
+    + 'absent (a pharmacy-api before the interval), reads as null', async () => {
+    respond({ ...base, refills: { ...refills, open: false, closedReason: 'not_yet', nextFillOn: '2026-12-08' } });
+    expect((await client.getWorkItem(base.id, context)).refills).toEqual({ ...refills, open: false,
+      closedReason: 'not_yet', nextFillOn: '2026-12-08' });
+    for (const nextFillOn of ['8 December', '2026-12-08T00:00:00Z', 20261208, undefined]) {
+      respond({ ...base, refills: { ...refills, nextFillOn } });
+      expect((await client.getWorkItem(base.id, context)).refills).toEqual({ ...refills, nextFillOn: null });
+    }
   });
 
   it('C4 malformed refills, lastFilledAt or fill number: left out, and the list kept (never a 502)', async () => {
@@ -109,7 +121,8 @@ describe('PharmacyApiClient refills (ORD-12)', () => {
 
   it('C7 the refill refusals reach the caller as problems with their codes and extensions', async () => {
     for (const [code, extra] of [['PHARMACY_FILL_NUMBER_CHANGED', { fillsRecorded: 2 }], ['PHARMACY_NO_REFILLS_LEFT', {}],
-      ['PHARMACY_REFILL_PRESCRIPTION_ENDED', {}], ['PHARMACY_DISPENSING_NOT_LATEST_FILL', {}]] as const) {
+      ['PHARMACY_REFILL_PRESCRIPTION_ENDED', {}], ['PHARMACY_REFILL_TOO_SOON', { refillOpensOn: '2026-12-08' }],
+      ['PHARMACY_DISPENSING_NOT_LATEST_FILL', {}]] as const) {
       respond({ status: 409, code, detail: 'refused', ...extra }, 409);
       await expect(client.dispense(base.id, { expectedWorkItemVersion: 1, quantityDispensed: 30, quantityUnit: 'tablet',
         reason: 'Handed to the patient with counselling', fillNumber: 2 }, context, 'ord12-client-key-0003'))

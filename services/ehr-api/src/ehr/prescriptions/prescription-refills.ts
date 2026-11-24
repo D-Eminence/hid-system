@@ -1,3 +1,4 @@
+import { DomainProblem } from '../../common/problem';
 import type { CreatePrescriptionWithRefillsDto } from '../shared/clinical.dto';
 
 /**
@@ -14,6 +15,7 @@ import type { CreatePrescriptionWithRefillsDto } from '../shared/clinical.dto';
  * answer carries it. On:
  * - a create may carry `refillsAllowed` (0-11; left out is stored as null,
  *   none), stored with the prescription; the update route never changes it;
+ *   above 0 it needs a duration (requireDuration);
  * - every prescription answer of these routes (list, read, create, its
  *   replay, update) carries `refillsAllowed`, a number (null read as 0);
  * - the list says `refills: true`, so the website sends the field only to a
@@ -37,6 +39,27 @@ export class PrescriptionRefills {
     if (!this.enabled) return row;
     const { refillsAllowed, ...rest } = row as Row & { refillsAllowed?: number | string | null };
     return { ...rest, refillsAllowed: refillsAllowed == null ? 0 : Number(refillsAllowed) } as Row & { refillsAllowed: number };
+  }
+
+  /**
+   * The clinical owner's rule (24 November 2026): a prescription with refills
+   * carries a duration, from which the refill interval comes (0152: a refill
+   * opens on the Lagos day of the latest fill not reversed plus 3/4 of the
+   * duration in days, rounded up). `refillsAllowed` above 0 without 0125's
+   * `durationValue` and `durationUnit` is 400 REFILLS_NEED_DURATION before
+   * anything is written; 0152's CHECK refuses it in the database too. A create
+   * carries a duration only while PRESCRIPTION_DISPENSING_DETAILS_ENABLED is
+   * on as well, so with that setting off only 0 refills can be written.
+   * Nothing while off.
+   */
+  requireDuration(input: object): void {
+    if (!this.enabled) return;
+    const { refillsAllowed, durationValue, durationUnit } = input as { refillsAllowed?: number | null;
+      durationValue?: number | null; durationUnit?: string | null };
+    if ((refillsAllowed ?? 0) > 0 && (durationValue == null || durationUnit == null)) {
+      throw new DomainProblem(400, 'REFILLS_NEED_DURATION',
+        'A prescription with refills needs a duration. Add how long the course lasts, or set refills to 0.');
+    }
   }
 
   /** The prescriptions list's served flag: present only while on. */

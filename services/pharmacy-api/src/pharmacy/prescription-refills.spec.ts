@@ -17,8 +17,8 @@ import { PharmacyModule } from './pharmacy.module';
 import { DISPENSING_REPLAY_QUERY, INSERT_DISPENSING, LATER_FILL_QUERY, PharmacyService, WORK_ITEM_SELECT,
   WORK_LIST_QUERY, WORK_LIST_QUERY_0133 } from './pharmacy.service';
 import { PharmacyPrescriptionDetails, PRESCRIPTION_DETAILS_OFF } from './prescription-dispensing-details';
-import { CreateDispensingBodyPipe, DISPENSING_KEY_CONSTRAINT, FILL_KEY_CONSTRAINT, PharmacyRefills,
-  REFILL_CANDIDATES_QUERY, REFILLS_OFF, WORK_ITEM_REFILLS_QUERY, dispensingDigestInput } from './prescription-refills';
+import { CreateDispensingBodyPipe, DISPENSING_KEY_CONSTRAINT, FILL_KEY_CONSTRAINT, OPEN_REFILLS_QUERY, PharmacyRefills,
+  REFILLS_OFF, WORK_ITEM_REFILLS_QUERY, dispensingDigestInput } from './prescription-refills';
 import { workListSince } from './work-list-window';
 
 /*
@@ -48,6 +48,10 @@ const fillId = (n: number, fill: number) => `65200000-0000-4000-8${String(fill).
 const DAY = 86_400_000;
 const NOW = Date.now();
 const ago = (days: number, minute = 0) => new Date(NOW - days * DAY + minute * 60_000);
+/** The Lagos day (UTC+1, no daylight saving) of a moment, YYYY-MM-DD. */
+const lagosDay = (at: Date) => new Date(at.getTime() + 3_600_000).toISOString().slice(0, 10);
+const plusDays = (day: string, days: number) => new Date(Date.parse(`${day}T00:00:00Z`) + days * DAY).toISOString().slice(0, 10);
+const LAGOS_TODAY = lagosDay(new Date(NOW));
 
 const pharmacist: DataAccessContext = { correlationId: 'ord12-correlation-0001', facilityId,
   membershipId: pharmacistMembership, purposeOfUse: 'direct-care', authorization: 'Bearer pharmacist', actor: {
@@ -72,6 +76,11 @@ interface Item {
   fills?: { days: number; reversed?: boolean; by?: string; key?: string; body?: Record<string, unknown> }[];
   /** `ends_on` (YYYY-MM-DD), the prescription's as accepted. */
   endsOn?: string;
+  /**
+   * The refill interval in days (3/4 of the prescription's duration, rounded up, at least 1; the clinical owner's
+   * rule of 24 November 2026): a refill opens on the Lagos day of the latest fill not reversed plus this. Default 1.
+   */
+  interval?: number;
 }
 
 interface FillRow {
@@ -102,8 +111,8 @@ interface Options {
   on?: boolean;
   /** Raised by 0152's reader, one per statement, then it answers. */
   readerErrors?: Error[];
-  /** Raised by the candidates statement. */
-  candidatesError?: Error;
+  /** Raised by 0152's open refills (pharmacy.open_refill_work_items). */
+  openError?: Error;
   /** Raised by the next dispensing INSERTs (the database's own refusals), in order. */
   insertErrors?: Error[];
   /**
@@ -172,25 +181,39 @@ function harness(options: Options) {
       dispensing_fill_number: latest?.fill_number ?? null, last_filled_at: latest?.dispensed_at ?? null,
       fills_recorded: fills.length };
   };
-  /** What 0152's reader answers for an own item. */
+  /**
+   * What 0152's reader answers for an own item, by its rule: a refill may be recorded while fills < 1 + allowed and
+   * the prescription is as accepted (`closed` otherwise), from the Lagos day of the latest fill not reversed plus the
+   * interval (every fill reversed: the latest reversal's day, no wait); before that day not_yet.
+   */
   const refillsRow = (state: State, item: Item) => {
     const allowed = item.refills ?? 0;
-    const recorded = state.fills.filter((row) => row.work_item_id === id(item.n)).length;
-    const closed = recorded === 0 ? null : recorded >= 1 + allowed ? 'none_left' : item.closed ?? null;
+    const fills = state.fills.filter((row) => row.work_item_id === id(item.n));
+    const recorded = fills.length;
+    const latest = (dates: Date[]) => dates.reduce<Date | undefined>((a, b) => (a && a > b ? a : b), undefined);
+    const standing = latest(fills.filter((row) => !reversalOf(state, row.id)).map((row) => row.dispensed_at));
+    const reversed = latest(fills.map((row) => reversalOf(state, row.id)?.reversed_at).filter((at): at is Date => Boolean(at)));
+    const opensOn = standing ? plusDays(lagosDay(standing), item.interval ?? 1) : reversed ? lagosDay(reversed) : null;
+    const mayFill = recorded >= 1 && recorded < 1 + allowed && !item.closed;
+    const closed = recorded === 0 ? null : recorded >= 1 + allowed ? 'none_left' : item.closed
+      ?? (opensOn !== null && opensOn > LAGOS_TODAY ? 'not_yet' : null);
     return { work_item_id: id(item.n), refills_allowed: allowed, fills_recorded: recorded,
-      refill_open: recorded >= 1 && closed === null, closed_reason: closed };
+      refill_open: mayFill && closed === null, closed_reason: closed, next_fill_on: mayFill ? opensOn : null };
   };
   const today = new Date(NOW).toISOString().slice(0, 10);
 
   const answer = (sql: string, values: unknown[], working: State): unknown[] => {
     if (sql === WORK_LIST_QUERY || sql === WORK_LIST_QUERY_0133) {
       const since = new Date(`${values[0] as string}T00:00:00+01:00`);
-      const refillOpen = new Set(values[1] as string[]);
+      const opened = values[1] as string[];
+      const refillOpen = new Set(opened);
       const rows = items.map((item) => workRow(working, item)).map((row) => ({ row,
         open: row.dispensing_id === null || refillOpen.has(row.id),
         refill: row.dispensing_id !== null && refillOpen.has(row.id) }))
         .filter((entry) => entry.open || entry.row.accepted_at >= since);
+      // WORK_LIST_ORDER: open work first; among it the first fills, then the refills in $2's order.
       rows.sort((a, b) => Number(b.open) - Number(a.open) || Number(a.refill) - Number(b.refill)
+        || (a.refill ? opened.indexOf(a.row.id) - opened.indexOf(b.row.id) : 0)
         || (a.open ? a.row.accepted_at.getTime() - b.row.accepted_at.getTime() : b.row.accepted_at.getTime() - a.row.accepted_at.getTime()));
       return rows.slice(0, 200).map((entry) => entry.row);
     }
@@ -198,12 +221,13 @@ function harness(options: Options) {
       const item = itemOf.get(values[0] as string);
       return item ? [workRow(working, item)] : [];
     }
-    if (sql === REFILL_CANDIDATES_QUERY) {
-      if (options.candidatesError) throw options.candidatesError;
+    if (sql === OPEN_REFILLS_QUERY) {
+      // 0152's open refills: the own items the per-item reader calls open now (an ended prescription is closed, a
+      // refill not yet due is not open), the refill that opened first first, then by id, 200 at most.
+      if (options.openError) throw options.openError;
       return items.filter((item) => !item.routed && (item.endsOn === undefined || item.endsOn >= today))
-        .map((item) => ({ item, fills: fillsOf(working, id(item.n)) }))
-        .filter((entry) => entry.fills.length >= 1 && entry.fills.length <= 11)
-        .sort((a, b) => b.fills[b.fills.length - 1]!.dispensed_at.getTime() - a.fills[a.fills.length - 1]!.dispensed_at.getTime())
+        .map((item) => ({ item, row: refillsRow(working, item) })).filter((entry) => entry.row.refill_open)
+        .sort((a, b) => a.row.next_fill_on!.localeCompare(b.row.next_fill_on!) || id(a.item.n).localeCompare(id(b.item.n)))
         .slice(0, 200).map((entry) => ({ work_item_id: id(entry.item.n) }));
     }
     if (sql === WORK_ITEM_REFILLS_QUERY) {
@@ -395,8 +419,8 @@ describe('ORD-12: one row per item, whatever the setting', () => {
     const items = await listOf(h);
     for (const item of items) expect(Object.keys(item)).toEqual(TODAY_KEYS);
     expect(Object.keys(await readOf(h, 1))).toEqual(TODAY_KEYS);
-    // No reader, no candidates, no new parameter but an empty list of open refills.
-    expect(h.sent((sql) => sql === WORK_ITEM_REFILLS_QUERY || sql === REFILL_CANDIDATES_QUERY)).toEqual([]);
+    // No reader, no open refills, no new parameter but an empty list of open refills.
+    expect(h.sent((sql) => sql === WORK_ITEM_REFILLS_QUERY || sql === OPEN_REFILLS_QUERY)).toEqual([]);
     expect(h.sent((sql) => sql === WORK_LIST_QUERY_0133).map((statement) => statement.values[1])).toEqual([[]]);
     // Item 3 still has a refill open in the database, but off it is done work like any dispensed item.
     expect(items.map((item) => [item.id, item.dispensing === null])).toEqual([[id(2), true], [id(3), false], [id(1), false]]);
@@ -427,9 +451,11 @@ describe('ORD-12: refills on the work item (setting on)', () => {
     const h = harness({ items: SEVERAL, on: true });
     const items = await listOf(h);
     const byId = (n: number) => items.find((item) => item.id === id(n))!;
-    expect(byId(1).refills).toEqual({ allowed: 2, recorded: 3, open: false, closedReason: 'none_left' });
-    expect(byId(2).refills).toEqual({ allowed: 2, recorded: 0, open: false, closedReason: null });
-    expect(byId(3).refills).toEqual({ allowed: 1, recorded: 1, open: true, closedReason: null });
+    expect(byId(1).refills).toEqual({ allowed: 2, recorded: 3, open: false, closedReason: 'none_left', nextFillOn: null });
+    expect(byId(2).refills).toEqual({ allowed: 2, recorded: 0, open: false, closedReason: null, nextFillOn: null });
+    // Filled 4 days ago, a one-day interval: open since 3 days ago (the Lagos day).
+    expect(byId(3).refills).toEqual({ allowed: 1, recorded: 1, open: true, closedReason: null,
+      nextFillOn: plusDays(lagosDay(ago(4)), 1) });
     expect(wire(byId(1).lastFilledAt)).toBe(ago(2).toISOString());
     expect(byId(2)).not.toHaveProperty('lastFilledAt');
     // After today's fields, before Q132's notice (none here): refills last, lastFilledAt before it.
@@ -437,15 +463,16 @@ describe('ORD-12: refills on the work item (setting on)', () => {
     expect(Object.keys(byId(2))).toEqual([...TODAY_KEYS, 'refills']);
   });
 
-  it('F2 the reader is asked for the candidates first, then once for the shown own rows it has not answered', async () => {
+  it('F2 the open refills are asked first (no ids), then the per-item reader once, for the own rows shown', async () => {
     const h = harness({ items: SEVERAL, on: true });
-    await listOf(h);
-    const asked = h.sent((sql) => sql === WORK_ITEM_REFILLS_QUERY).map((statement) => statement.values[0]);
-    // Candidates: own items with 1-11 fills, the latest fill first (item 3's fill is older than item 1's third).
-    expect(asked).toEqual([[id(1), id(3)], [id(2)]]);
-    const order = h.statements.map((statement) => statement.sql).filter((sql) => sql === REFILL_CANDIDATES_QUERY
+    const items = await listOf(h);
+    expect(h.sent((sql) => sql === OPEN_REFILLS_QUERY).map((statement) => statement.values)).toEqual([[]]);
+    // The per-item reader: one statement, the own rows the list shows, in their order.
+    expect(h.sent((sql) => sql === WORK_ITEM_REFILLS_QUERY).map((statement) => statement.values[0]))
+      .toEqual([items.map((item) => item.id)]);
+    const order = h.statements.map((statement) => statement.sql).filter((sql) => sql === OPEN_REFILLS_QUERY
       || sql === WORK_ITEM_REFILLS_QUERY || sql === WORK_LIST_QUERY_0133);
-    expect(order).toEqual([REFILL_CANDIDATES_QUERY, WORK_ITEM_REFILLS_QUERY, WORK_LIST_QUERY_0133, WORK_ITEM_REFILLS_QUERY]);
+    expect(order).toEqual([OPEN_REFILLS_QUERY, WORK_LIST_QUERY_0133, WORK_ITEM_REFILLS_QUERY]);
   });
 
   it('F3 a route-backed item carries one fill and none allowed, without asking the reader about it', async () => {
@@ -453,10 +480,11 @@ describe('ORD-12: refills on the work item (setting on)', () => {
     const h = harness({ items, on: true });
     const listed = await listOf(h);
     expect(listed.map((item) => [item.id, item.refills])).toEqual([
-      [id(6), { allowed: 0, recorded: 0, open: false, closedReason: null }],
-      [id(5), { allowed: 0, recorded: 1, open: false, closedReason: 'none_left' }]]);
+      [id(6), { allowed: 0, recorded: 0, open: false, closedReason: null, nextFillOn: null }],
+      [id(5), { allowed: 0, recorded: 1, open: false, closedReason: 'none_left', nextFillOn: null }]]);
     expect(h.sent((sql) => sql === WORK_ITEM_REFILLS_QUERY)).toEqual([]);
-    expect((await readOf(h, 5)).refills).toEqual({ allowed: 0, recorded: 1, open: false, closedReason: 'none_left' });
+    expect((await readOf(h, 5)).refills).toEqual({ allowed: 0, recorded: 1, open: false, closedReason: 'none_left',
+      nextFillOn: null });
     // No prescription id or encounter of the other facility comes with it (PRIV P4.3).
     expect(listed[1]).not.toHaveProperty('sourceEhrPrescriptionId');
   });
@@ -464,7 +492,8 @@ describe('ORD-12: refills on the work item (setting on)', () => {
   it.each([['changed'], ['stopped'], ['ended']] as const)('F4 the closed reason %s is answered as the reader gives it',
     async (closed) => {
       const h = harness({ items: [{ n: 7, refills: 2, closed, fills: [{ days: 1 }] }], on: true });
-      expect((await readOf(h, 7)).refills).toEqual({ allowed: 2, recorded: 1, open: false, closedReason: closed });
+      expect((await readOf(h, 7)).refills).toEqual({ allowed: 2, recorded: 1, open: false, closedReason: closed,
+        nextFillOn: null });
     });
 
   it('F5 a reader that fails leaves refills out and opens no item; it never fails the list or the read', async () => {
@@ -473,21 +502,54 @@ describe('ORD-12: refills on the work item (setting on)', () => {
     const items = await listOf(h);
     expect(items.map((item) => item.id)).toEqual([id(2), id(3), id(1)]);
     for (const item of items) expect(item).not.toHaveProperty('refills');
-    expect(h.sent((sql) => /^rollback to savepoint pharmacy_work_item_refills$/.test(sql))).toHaveLength(2);
+    expect(h.sent((sql) => /^rollback to savepoint pharmacy_work_item_refills$/.test(sql))).toHaveLength(1);
     expect(await readOf(h, 3)).not.toHaveProperty('refills');
     expect(Logger.prototype.warn).toHaveBeenCalledWith(expect.objectContaining({
       message: 'Refills on own work could not be read', sqlState: '42883' }));
-    const noCandidates = harness({ items: SEVERAL, on: true, candidatesError: sqlError('57014') });
-    expect((await listOf(noCandidates)).map((item) => item.id)).toEqual([id(2), id(3), id(1)]);
+    // The open refills failing (a statement timeout): none open (item 3 is done work, newest first), the list still
+    // answers.
+    const noOpen = harness({ items: SEVERAL, on: true, openError: sqlError('57014') });
+    expect((await listOf(noOpen)).map((item) => item.id)).toEqual([id(2), id(3), id(1)]);
+    expect(noOpen.sent((sql) => /^rollback to savepoint pharmacy_open_refills$/.test(sql))).toHaveLength(1);
+    expect(noOpen.sent((sql) => sql === WORK_LIST_QUERY_0133).map((statement) => statement.values[1])).toEqual([[]]);
+    expect(Logger.prototype.warn).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'Own work with refills open could not be read', sqlState: '57014' }));
   });
 
   it('F6 a closed reason this image does not know is answered as null, never passed on', () => {
     expect(new PharmacyRefills(true).forRow({ order_route_id: null }, { work_item_id: id(1), refills_allowed: 2,
       fills_recorded: 1, refill_open: false, closed_reason: 'something_new' })).toEqual({ allowed: 2, recorded: 1,
-      open: false, closedReason: null });
+      open: false, closedReason: null, nextFillOn: null });
     expect(REFILLS_OFF.forRow({ order_route_id: null }, { work_item_id: id(1), refills_allowed: 2, fills_recorded: 1,
       refill_open: true, closed_reason: null })).toBeUndefined();
   });
+
+  it('F8 the refill interval: a refill not yet due reads not_yet with the Lagos day it opens; open again on that day',
+    async () => {
+      // Item 8: refills 2, a 7-day interval (10 days' duration), filled 2 days ago: opens in 5 days. Item 9: the same,
+      // filled 7 days ago: opens today. Item 16: fill 2 (2 days ago) reversed, fill 1 9 days ago standing: open.
+      const items: Item[] = [{ n: 8, refills: 2, interval: 8, received: 3, fills: [{ days: 2 }] },
+        { n: 9, refills: 2, interval: 7, received: 8, fills: [{ days: 7 }] },
+        { n: 16, refills: 2, interval: 8, received: 10, fills: [{ days: 9 }, { days: 2, reversed: true }] }];
+      const h = harness({ items, on: true });
+      expect((await readOf(h, 8)).refills).toEqual({ allowed: 2, recorded: 1, open: false, closedReason: 'not_yet',
+        nextFillOn: plusDays(lagosDay(ago(2)), 8) });
+      expect((await readOf(h, 9)).refills).toEqual({ allowed: 2, recorded: 1, open: true, closedReason: null,
+        nextFillOn: plusDays(lagosDay(ago(7)), 7) });
+      expect((await readOf(h, 16)).refills).toEqual({ allowed: 2, recorded: 2, open: true, closedReason: null,
+        nextFillOn: plusDays(lagosDay(ago(9)), 8) });
+      // pharmacy-api passes the day on only as a day, and open only with no closed reason.
+      const refills = new PharmacyRefills(true);
+      expect(refills.forRow({ order_route_id: null }, { work_item_id: id(8), refills_allowed: 2, fills_recorded: 1,
+        refill_open: false, closed_reason: 'not_yet', next_fill_on: '2026-12-01' }))
+        .toEqual({ allowed: 2, recorded: 1, open: false, closedReason: 'not_yet', nextFillOn: '2026-12-01' });
+      expect(refills.forRow({ order_route_id: null }, { work_item_id: id(8), refills_allowed: 2, fills_recorded: 1,
+        refill_open: true, closed_reason: 'not_yet', next_fill_on: '1 December' }))
+        .toEqual({ allowed: 2, recorded: 1, open: false, closedReason: 'not_yet', nextFillOn: null });
+      expect(WORK_ITEM_REFILLS_QUERY.replace(/\s+/g, ' ')).toBe('select work_item_id::text as work_item_id, refills_allowed, '
+        + "fills_recorded, refill_open, closed_reason, to_char(next_fill_on, 'YYYY-MM-DD') as next_fill_on from "
+        + 'pharmacy.work_item_refills($1::uuid[])');
+    });
 
   it('F7 the reader is asked at most 200 ids a statement', async () => {
     const refills = new PharmacyRefills(true);
@@ -522,7 +584,8 @@ describe('ORD-12: open work on the list (setting on)', () => {
     // Item 10 (200 days, a refill open) is listed; item 11 (200 days, none left) is not: done work keeps 90 days.
     expect(h.sent((sql) => sql === WORK_LIST_QUERY_0133).map((statement) => statement.values))
       .toEqual([[workListSince(), [id(10)]]]);
-    expect(items.find((item) => item.id === id(10))!.refills).toEqual({ allowed: 3, recorded: 2, open: true, closedReason: null });
+    expect(items.find((item) => item.id === id(10))!.refills).toEqual({ allowed: 3, recorded: 2, open: true,
+      closedReason: null, nextFillOn: plusDays(lagosDay(ago(30)), 1) });
   });
 
   it('O2 off, the same items: an item with any fill is done work, so item 10 is left out', async () => {
@@ -530,15 +593,12 @@ describe('ORD-12: open work on the list (setting on)', () => {
     expect((await listOf(h)).map((item) => item.id)).toEqual([id(12), id(15), id(13), id(14)]);
   });
 
-  it('O3 the candidates: own items with 1-11 fills whose end date is not past, the latest fill first, 200 at most', () => {
-    const flat = REFILL_CANDIDATES_QUERY.replace(/\s+/g, ' ');
-    expect(flat).toContain('where w.order_route_id is null and f.fills between 1 and 11');
-    expect(flat).toContain("(w.ends_on is null or w.ends_on >= (now() at time zone 'Africa/Lagos')::date)");
-    expect(flat).toContain('order by f.last_filled_at desc, w.id desc limit 200');
-    expect(flat).not.toMatch(/\$\d/);
+  it('O3 the open refills are 0152\'s reader, asked with no ids; pharmacy-api picks no candidates itself', () => {
+    expect(OPEN_REFILLS_QUERY.replace(/\s+/g, ' ')).toBe('select work_item_id::text as work_item_id from '
+      + 'pharmacy.open_refill_work_items()');
   });
 
-  it('O4 an item whose prescription ended is no candidate; one with a 12th fill neither', async () => {
+  it('O4 an item whose prescription ended is not open work; one with a 12th fill neither', async () => {
     const items: Item[] = [
       { n: 20, refills: 2, received: 10, endsOn: '2000-01-01', fills: [{ days: 9 }] },
       { n: 21, refills: 11, received: 10, fills: Array.from({ length: 12 }, (_, index) => ({ days: 9 - index * 0.5 })) },
@@ -546,7 +606,52 @@ describe('ORD-12: open work on the list (setting on)', () => {
     ];
     const h = harness({ items, on: true });
     await listOf(h);
-    expect(h.sent((sql) => sql === WORK_ITEM_REFILLS_QUERY)[0]!.values[0]).toEqual([id(22)]);
+    expect(h.sent((sql) => sql === WORK_LIST_QUERY_0133).map((statement) => statement.values[1])).toEqual([[id(22)]]);
+  });
+
+  it('O5 a refill that is open stays open work however many items were filled after it', async () => {
+    // Item 40: received 31 days ago, filled 30 days ago, a refill open. Items 100-349: 250 items received and filled
+    // in the last days, none with a refill. Before, pharmacy-api asked the reader only about the 200 most recently
+    // filled own items, so item 40 was done work, received a month ago: the 201st row or later, never listed.
+    const busy: Item[] = [{ n: 40, refills: 2, received: 31, fills: [{ days: 30 }] },
+      ...Array.from({ length: 250 }, (_, index): Item => ({ n: 100 + index, refills: 0, received: 0.002 * index,
+        fills: [{ days: 0.001 * index }] }))];
+    const h = harness({ items: busy, on: true });
+    const items = await listOf(h);
+    expect(items).toHaveLength(200);
+    expect(items[0]!.id).toBe(id(40));
+    expect(items[0]!.refills).toEqual({ allowed: 2, recorded: 1, open: true, closedReason: null,
+      nextFillOn: plusDays(lagosDay(ago(30)), 1) });
+    expect(h.sent((sql) => sql === WORK_LIST_QUERY_0133).map((statement) => statement.values[1])).toEqual([[id(40)]]);
+    // The per-item reader is asked about the 200 rows shown, once.
+    expect(h.sent((sql) => sql === WORK_ITEM_REFILLS_QUERY).map((statement) => (statement.values[0] as string[]).length))
+      .toEqual([200]);
+  });
+});
+
+describe('ORD-12: the refill interval and the order on the list (setting on)', () => {
+  it('O6 a refill not yet due is done work (not in the open refills); open refills follow the first fills, the refill '
+    + 'that opened first first', async () => {
+    // Item 50: no fill, received 2 days ago. Item 51: filled 40 days ago (one-day interval): opened 39 days ago.
+    // Item 52: filled 20 days ago, a 10-day interval: opened 10 days ago. Item 53: filled 3 days ago, a 23-day
+    // interval: not yet (opens in 20 days), received 5 days ago. Item 54: no fill, received 1 day ago.
+    const items: Item[] = [{ n: 50, refills: 1, received: 2 }, { n: 51, refills: 2, received: 41, fills: [{ days: 40 }] },
+      { n: 52, refills: 2, interval: 10, received: 21, fills: [{ days: 20 }] },
+      { n: 53, refills: 1, interval: 23, received: 5, fills: [{ days: 3 }] }, { n: 54, refills: 0, received: 1 }];
+    const h = harness({ items, on: true });
+    const listed = await listOf(h);
+    expect(h.sent((sql) => sql === WORK_LIST_QUERY_0133).map((statement) => statement.values[1]))
+      .toEqual([[id(51), id(52)]]);
+    expect(listed.map((item) => item.id)).toEqual([id(50), id(54), id(51), id(52), id(53)]);
+    expect(listed[4]!.refills).toEqual({ allowed: 1, recorded: 1, open: false, closedReason: 'not_yet',
+      nextFillOn: plusDays(lagosDay(ago(3)), 23) });
+  });
+
+  it('O7 WORK_LIST_ORDER puts the open refills in $2\'s order (0152\'s: the refill that opened first first)', () => {
+    for (const query of [WORK_LIST_QUERY, WORK_LIST_QUERY_0133]) {
+      expect(query.replace(/\s+/g, ' ')).toContain('order by o.open_work desc,o.refill_open asc,'
+        + 'case when o.refill_open then array_position($2::uuid[],w.id) end asc, ');
+    }
   });
 });
 
@@ -628,6 +733,20 @@ describe('ORD-12: recording a fill', () => {
     expect(h.committed.outbox).toEqual([]);
     expect(h.committed.fills).toHaveLength(1);
   });
+
+  it('D10 a refill too soon (0152\'s REFILL_TOO_SOON) is 409 PHARMACY_REFILL_TOO_SOON with the Lagos day it opens',
+    async () => {
+      const soon = harness({ items: ONE, on: true,
+        insertErrors: [sqlError('23514', { message: 'REFILL_TOO_SOON', detail: '2026-12-08' })] });
+      expect(await refusal(dispense(soon, 30, 'ord12-dispense-key-000000000011', { fillNumber: 2 })))
+        .toEqual({ status: 409, code: 'PHARMACY_REFILL_TOO_SOON', refillOpensOn: '2026-12-08' });
+      expect(soon.committed.outbox).toEqual([]);
+      expect(soon.committed.fills).toHaveLength(1);
+      // A DETAIL that is not a day: the same refusal, without the day (never a 500).
+      const odd = harness({ items: ONE, on: true, insertErrors: [sqlError('23514', { message: 'REFILL_TOO_SOON' })] });
+      expect(await refusal(dispense(odd, 30, 'ord12-dispense-key-000000000012', { fillNumber: 2 })))
+        .toEqual({ status: 409, code: 'PHARMACY_REFILL_TOO_SOON' });
+    });
 
   it('D8 another 23514 is passed on unchanged (a broken session, not a refusal for the pharmacist)', async () => {
     const other = sqlError('23514', { message: 'Dispensing does not match its eligible Pharmacy work item and actor context' });

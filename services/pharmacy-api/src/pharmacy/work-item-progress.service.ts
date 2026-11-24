@@ -18,8 +18,10 @@ import { PharmacyRefills, REFILLS_OFF } from './prescription-refills';
  *   (accept-ehr-prescription), when it was accepted as it was made;
  * - dispensed: it was dispensed (dispensedAt);
  * - dispensing_reversed: it was dispensed and the dispensing was reversed;
- *   with refills (ORD-12, 0152), these two follow the latest fill, and
- *   `dispensedAt` stays the first fill's (0133's claim time);
+ *   with refills (ORD-12, 0152), 'dispensed' while any fill of the item stands
+ *   (is not reversed), and 'dispensing_reversed', with `reversedAt` (the
+ *   latest fill's reversal), only once every fill is reversed; `dispensedAt`
+ *   stays the first fill's (0133's claim time);
  * - withdrawn (0133): sent by itself to the pharmacy, then held, cancelled,
  *   entered in error, edited or resumed before it was dispensed; the pharmacy
  *   holds the version sent, which it can no longer dispense;
@@ -71,9 +73,10 @@ export interface PharmacyProgressItem {
   acceptedAt?: string | null;
   /**
    * ORD-12, only while PRESCRIPTION_REFILLS_ENABLED is on: the latest fill's
-   * time (null before the first). `dispensedAt` stays the first fill's and
-   * `reversedAt` is the latest fill's reversal. An ehr-api that does not read
-   * it drops it (its parser keeps the fields it names).
+   * time (null before the first). `dispensedAt` stays the first fill's;
+   * `reversedAt` is the latest fill's reversal, and only once every fill is
+   * reversed. An ehr-api that does not read it drops it (its parser keeps the
+   * fields it names).
    */
   lastFilledAt?: string | null;
 }
@@ -81,6 +84,8 @@ export interface PharmacyProgressItem {
 interface ProgressRow extends QueryResultRow {
   work_item_id: string; source_ehr_prescription_id: string; accepted_at: Date;
   dispensed_at: Date | null; reversed_at: Date | null; last_filled_at: Date | null;
+  /** ORD-12: a fill of the item is not reversed (false, or absent, when none is recorded). */
+  fill_standing?: boolean | null;
 }
 
 /**
@@ -93,12 +98,16 @@ interface ProgressRow extends QueryResultRow {
  * item, whatever its number of fills (ORD-12, 0152, setting on or off): the
  * first fill's time (`dispensed_at`, 0133's claim time), the latest fill's
  * (`last_filled_at`) and the latest fill's reversal (one per dispensing,
- * 0023), each by fill number. It needs 0152's `fill_number`. Exported for the
+ * 0023), each by fill number, and whether any fill of the item stands (has no
+ * reversal), so that a refill reversed after an earlier fill that stands
+ * still reads dispensed. It needs 0152's `fill_number`. Exported for the
  * tests.
  */
 export const WORK_ITEM_PROGRESS_QUERY = `select w.id::text as work_item_id,
   w.source_ehr_prescription_id::text as source_ehr_prescription_id, w.accepted_at,
-  f.dispensed_at, l.dispensed_at as last_filled_at, r.reversed_at
+  f.dispensed_at, l.dispensed_at as last_filled_at, r.reversed_at,
+  exists (select 1 from pharmacy.dispensings ds where ds.work_item_id=w.id
+    and not exists (select 1 from pharmacy.dispensing_reversals rs where rs.dispensing_id=ds.id)) as fill_standing
   from pharmacy.work_items w
   left join lateral (select df.dispensed_at from pharmacy.dispensings df where df.work_item_id=w.id
     order by df.fill_number asc limit 1) f on true
@@ -177,8 +186,9 @@ export class PharmacyWorkItemProgressService {
 }
 
 /**
- * The status, in this order: a reversal, a dispensing, sent elsewhere,
- * withdrawn, accepted (ORD-4), else received. To a caller without
+ * The status, in this order: a reversal of every fill (ORD-12: while any fill
+ * stands the item reads dispensed, and `reversedAt` is null), a dispensing,
+ * sent elsewhere, withdrawn, accepted (ORD-4), else received. To a caller without
  * OWN_PROGRESS_HEADER, 'withdrawn' is 'received' (times kept) and
  * 'sent_elsewhere' 'not_received' (times null), the statuses an ehr-api from
  * before 0133 knows. To a caller without both headers (`accepted` false),
@@ -191,7 +201,8 @@ function project(id: string, row: ProgressRow | undefined, state: OwnWorkState |
     dispensedAt: null, reversedAt: null, ...(accepted ? { acceptedAt: null } : {}) };
   if (!row) return notReceived;
   const acceptedAt = acceptedTime(row, state);
-  const status: PharmacyProgressStatus = row.reversed_at ? 'dispensing_reversed'
+  const reversedAt = row.reversed_at && row.fill_standing !== true ? row.reversed_at : null;
+  const status: PharmacyProgressStatus = reversedAt ? 'dispensing_reversed'
     : row.dispensed_at ? 'dispensed'
       : state?.withdrawn === true && state.withdrawnReason === 'sent_elsewhere' ? 'sent_elsewhere'
         : state?.withdrawn === true ? 'withdrawn'
@@ -200,7 +211,7 @@ function project(id: string, row: ProgressRow | undefined, state: OwnWorkState |
   const answered: PharmacyProgressStatus = (!current && status === 'withdrawn') || (!accepted && status === 'accepted')
     ? 'received' : status;
   return { sourceEhrPrescriptionId: id, status: answered, receivedAt: iso(row.accepted_at),
-    dispensedAt: iso(row.dispensed_at), reversedAt: iso(row.reversed_at),
+    dispensedAt: iso(row.dispensed_at), reversedAt: iso(reversedAt),
     ...(accepted ? { acceptedAt: iso(acceptedAt) } : {}) };
 }
 

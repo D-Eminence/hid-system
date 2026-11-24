@@ -175,6 +175,7 @@ export class PrescriptionsService {
       throw new DomainProblem(400, 'DOSE_INCOMPLETE', 'Dose quantity and unit must be supplied together');
     }
     this.details.requirePairs(input);
+    this.refills.requireDuration(input);
     const operation = 'prescription.create';
     const digest = requestDigest(operation, { patientId, encounterId,
       input: this.refills.digestInput(this.details.digestInput(input)) });

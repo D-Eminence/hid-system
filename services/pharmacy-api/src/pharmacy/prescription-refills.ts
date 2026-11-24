@@ -30,41 +30,43 @@ export const DISPENSING_KEY_CONSTRAINT = 'dispensings_facility_id_dispensed_by_i
  * may read. Exported for the tests.
  */
 export const WORK_ITEM_REFILLS_QUERY = `select work_item_id::text as work_item_id, refills_allowed, fills_recorded,
-       refill_open, closed_reason
+       refill_open, closed_reason, to_char(next_fill_on, 'YYYY-MM-DD') as next_fill_on
   from pharmacy.work_item_refills($1::uuid[])`;
 
 /**
- * ORD-12: the own items that may have a refill open, at most 200, so that the
- * work list can ask 0152's reader about them before it chooses its rows: the
- * session's own items (no order route) it may read under row-level security,
- * with 1 to 11 fills (a 12th fill is never open: 1 + 11 refills at most), whose
- * end date is not before today in Lagos (`ends_on` is the prescription's as
- * accepted; a refill after any change is closed anyway), the latest fill
- * first. Only the reader says which of them are open (refills allowed, the
- * prescription active at the accepted version). An own item with a refill open
- * beyond these 200 is listed with the done work, by the day it was received.
- * Exported for the tests.
+ * 0152's open refills, `pharmacy.open_refill_work_items()` (SECURITY DEFINER,
+ * no ids): the session's own items whose refill is open now, by the per-item
+ * reader's rule (the session's facility, pharmacy.work-item.read and the work
+ * items' two read policies; a fill recorded and fewer than 1 + refills
+ * allowed; the prescription active at the accepted version; its end date not
+ * past in Lagos; the refill interval passed), the refill that opened first
+ * first (then by id), at most 200. It starts from the facility's active
+ * prescriptions that allow refills, so a refill that is open is found however
+ * many items were filled after it. The list keeps its order among the open
+ * refills. Exported for the tests.
  */
-export const REFILL_CANDIDATES_QUERY = `select w.id::text as work_item_id
-  from pharmacy.work_items w
-  cross join lateral (select count(*)::integer as fills, max(df.dispensed_at) as last_filled_at
-    from pharmacy.dispensings df where df.work_item_id=w.id) f
-  where w.order_route_id is null and f.fills between 1 and 11
-    and (w.ends_on is null or w.ends_on >= (now() at time zone 'Africa/Lagos')::date)
-  order by f.last_filled_at desc, w.id desc limit 200`;
+export const OPEN_REFILLS_QUERY = `select work_item_id::text as work_item_id
+  from pharmacy.open_refill_work_items()`;
 
-/** A row of 0152's reader. */
+/** A row of 0152's reader (next_fill_on as YYYY-MM-DD, the Lagos day). */
 export interface WorkItemRefillsRow {
   work_item_id: string;
   refills_allowed: number;
   fills_recorded: number;
   refill_open: boolean;
   closed_reason: string | null;
+  next_fill_on?: string | null;
 }
 
-/** Why no further fill can be recorded (0152's reader); null while one is open, and before the first fill. */
-export type RefillsClosedReason = 'none_left' | 'changed' | 'stopped' | 'ended';
-const CLOSED_REASONS: ReadonlySet<string> = new Set(['none_left', 'changed', 'stopped', 'ended']);
+/**
+ * Why no further fill can be recorded now (0152's reader); null while one is
+ * open, and before the first fill. `not_yet`: the refill interval has not
+ * passed (the clinical owner's rule, 24 November 2026); it opens on
+ * `nextFillOn`.
+ */
+export type RefillsClosedReason = 'none_left' | 'changed' | 'stopped' | 'ended' | 'not_yet';
+const CLOSED_REASONS: ReadonlySet<string> = new Set(['none_left', 'changed', 'stopped', 'ended', 'not_yet']);
+const LAGOS_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
  * The `refills` an item carries while refills are on:
@@ -72,7 +74,11 @@ const CLOSED_REASONS: ReadonlySet<string> = new Set(['none_left', 'changed', 'st
  * - `recorded`: the fills recorded on the item, a reversed fill included;
  * - `open`: another fill may be recorded now ("Dispense" again);
  * - `closedReason`: why not, once at least one fill is recorded (null while
- *   open, and before the first fill).
+ *   open, and before the first fill); `not_yet` while the refill interval
+ *   runs;
+ * - `nextFillOn`: the Lagos day (YYYY-MM-DD) from which the next fill may be
+ *   recorded: in the future while `not_yet` ("Refill from <date>"), today or
+ *   earlier while open; null before the first fill and once closed for good.
  * The label "Fill 2 of 3" is fill `recorded` (or `recorded + 1` when
  * dispensing again) of `allowed + 1`.
  */
@@ -81,6 +87,7 @@ export interface WorkItemRefills {
   recorded: number;
   open: boolean;
   closedReason: RefillsClosedReason | null;
+  nextFillOn: string | null;
 }
 
 /** The work-item columns the refills field reads. */
@@ -110,7 +117,9 @@ interface RefillsWorkRow {
  *   ids a statement: a failure leaves `refills` out and keeps no item open for
  *   a refill, and never fails the answer, as 0125's details do), a
  *   route-backed item `refills` with none allowed and one fill at most;
- * - an own item with a refill open is open work on the list, of any age;
+ * - an own item with a refill open is open work on the list, of any age
+ *   (0152's open refills, asked once before the rows are chosen, in a
+ *   savepoint: a failure opens no item for a refill and never fails the list);
  * - `dispensing.fillNumber`, `lastFilledAt` and a dispensing's `fillNumber`.
  * No audit row: no new person is shown.
  */
@@ -141,27 +150,25 @@ export class PharmacyRefills {
   }
 
   /**
-   * The work list's first step while on: the candidates (REFILL_CANDIDATES_QUERY)
-   * and 0152's answer for them, in one savepoint (a failure: none open, nothing
-   * read, a warning). `open` names the items with a refill open, which the list
-   * then counts as open work; `found` is kept for the rows the list shows.
+   * The work list's first step while on: the own items whose refill is open
+   * now (OPEN_REFILLS_QUERY, at most 200), which the list then counts as open
+   * work. One statement in a savepoint; a failure answers none (a warning).
+   * The per-item reader is asked afterwards only about the rows the list
+   * shows (read()). Nothing while off.
    */
-  async openForList(client: PoolClient, correlationId: string):
-  Promise<{ open: string[]; found: Map<string, WorkItemRefillsRow> }> {
-    if (!this.enabled) return { open: [], found: new Map() };
-    await client.query('savepoint pharmacy_refill_candidates');
-    let candidates: string[];
+  async openForList(client: PoolClient, correlationId: string): Promise<string[]> {
+    if (!this.enabled) return [];
+    await client.query('savepoint pharmacy_open_refills');
     try {
-      candidates = (await client.query<{ work_item_id: string }>(REFILL_CANDIDATES_QUERY)).rows
-        .map((row) => row.work_item_id);
-      await client.query('release savepoint pharmacy_refill_candidates');
+      const open = (await client.query<{ work_item_id: string }>(OPEN_REFILLS_QUERY)).rows.map((row) => row.work_item_id);
+      await client.query('release savepoint pharmacy_open_refills');
+      return open;
     } catch (error) {
-      await client.query('rollback to savepoint pharmacy_refill_candidates');
-      this.logger.warn({ message: 'Own work with refills could not be read', sqlState: sqlState(error), correlationId });
-      return { open: [], found: new Map() };
+      await client.query('rollback to savepoint pharmacy_open_refills');
+      this.logger.warn({ message: 'Own work with refills open could not be read', sqlState: sqlState(error),
+        correlationId });
+      return [];
     }
-    const found = await this.read(client, candidates, correlationId);
-    return { open: [...found.values()].filter((row) => row.refill_open === true).map((row) => row.work_item_id), found };
   }
 
   /**
@@ -173,13 +180,15 @@ export class PharmacyRefills {
     if (!this.enabled) return undefined;
     if (row.order_route_id) {
       const recorded = Math.max(0, Number(row.fills_recorded ?? 0));
-      return { allowed: 0, recorded, open: false, closedReason: recorded > 0 ? 'none_left' : null };
+      return { allowed: 0, recorded, open: false, closedReason: recorded > 0 ? 'none_left' : null, nextFillOn: null };
     }
     if (!found) return undefined;
     const closed = found.closed_reason;
+    const next = found.next_fill_on;
     return { allowed: Number(found.refills_allowed), recorded: Number(found.fills_recorded),
       open: found.refill_open === true && closed === null,
-      closedReason: closed !== null && CLOSED_REASONS.has(closed) ? closed as RefillsClosedReason : null };
+      closedReason: closed !== null && CLOSED_REASONS.has(closed) ? closed as RefillsClosedReason : null,
+      nextFillOn: typeof next === 'string' && LAGOS_DAY.test(next) ? next : null };
   }
 }
 
@@ -219,6 +228,22 @@ export function noRefillsLeft(): DomainProblem {
     'No refills are left on this prescription. Ask the prescriber for a new one.');
 }
 
+/**
+ * 409: a refill before the refill interval has passed (0152's REFILL_TOO_SOON,
+ * the clinical owner's rule of 24 November 2026: the Lagos day of the latest
+ * fill not reversed plus 3/4 of the prescription's duration). `refillOpensOn`
+ * is the Lagos day it opens (YYYY-MM-DD, the refusal's DETAIL), left out if
+ * the DETAIL is not a day. No override: a clinician writes a new
+ * prescription.
+ */
+export function refillTooSoon(opensOn: string | undefined): DomainProblem {
+  const day = typeof opensOn === 'string' && LAGOS_DAY.test(opensOn) ? opensOn : undefined;
+  return new DomainProblem(409, 'PHARMACY_REFILL_TOO_SOON',
+    day ? `This refill is too early. It can be dispensed from ${day}.`
+      : 'This refill is too early. Reload the prescription to see when it can be dispensed.',
+    undefined, day ? { extensions: { refillOpensOn: day } } : undefined);
+}
+
 /** 409: a refill after the prescription's end date, the Lagos day (0152's REFILL_PRESCRIPTION_ENDED). */
 export function refillPrescriptionEnded(): DomainProblem {
   return new DomainProblem(409, 'PHARMACY_REFILL_PRESCRIPTION_ENDED',
@@ -243,15 +268,16 @@ export function dispensingKeyConflict(): DomainProblem {
 }
 
 /**
- * 0152's two refill refusals (23514, by message), answered with their own
+ * 0152's three refill refusals (23514, by message), answered with their own
  * codes; anything else is undefined (the caller's mapping goes on).
  */
 export function refillRefusal(error: unknown): DomainProblem | undefined {
-  const { code, message } = (typeof error === 'object' && error !== null ? error : {}) as { code?: unknown;
-    message?: unknown };
+  const { code, message, detail } = (typeof error === 'object' && error !== null ? error : {}) as { code?: unknown;
+    message?: unknown; detail?: unknown };
   if (code !== '23514') return undefined;
   if (message === 'NO_REFILLS_LEFT') return noRefillsLeft();
   if (message === 'REFILL_PRESCRIPTION_ENDED') return refillPrescriptionEnded();
+  if (message === 'REFILL_TOO_SOON') return refillTooSoon(typeof detail === 'string' ? detail : undefined);
   return undefined;
 }
 

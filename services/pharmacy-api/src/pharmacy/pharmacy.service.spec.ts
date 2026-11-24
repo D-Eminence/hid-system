@@ -203,7 +203,10 @@ describe('PharmacyService.listWorkItems order: open work first', () => {
     // A reversed dispensing is done unless a refill is open: a reversed fill still counts (0152).
     expect(WORK_LIST_QUERY).not.toMatch(/r\.id is not null as open_work/);
     const order = WORK_LIST_QUERY.slice(WORK_LIST_QUERY.lastIndexOf('order by'));
-    expect(order.replace(/\s+/g, ' ')).toBe('order by o.open_work desc,o.refill_open asc,case when o.open_work then w.accepted_at end asc,'
+    // ORD-12: the refills open in $2's order (0152's open refills: the refill that opened first first).
+    expect(order.replace(/\s+/g, ' ')).toBe('order by o.open_work desc,o.refill_open asc,'
+      + 'case when o.refill_open then array_position($2::uuid[],w.id) end asc, '
+      + 'case when o.open_work then w.accepted_at end asc,'
       + 'case when o.open_work then null else w.accepted_at end desc, case when o.open_work then w.id end asc,'
       + 'case when o.open_work then null else w.id end desc limit 200');
     expect(WORK_LIST_QUERY).not.toMatch(/order by w\.accepted_at asc,w\.id asc/);
@@ -215,8 +218,8 @@ describe('PharmacyService.listWorkItems order: open work first', () => {
     const query = WORK_LIST_QUERY.replace(/\s+/g, ' ');
     expect(query).toContain("as refill_open) o where (o.open_work or "
       + "w.accepted_at >= ($1::date::timestamp at time zone 'Africa/Lagos')) order by o.open_work desc");
-    // $1 the window's first day; $2 (twice) the own items with a refill open (ORD-12).
-    expect(query.match(/\$\d/g)).toEqual(['$2', '$2', '$1']);
+    // $1 the window's first day; $2 (three times) the own items with a refill open, in their order (ORD-12).
+    expect(query.match(/\$\d/g)).toEqual(['$2', '$2', '$1', '$2']);
     // One for the list, one inside WORK_ITEM_SELECT's latest-fill lookup (ORD-12: one row per item).
     expect(query.match(/\bwhere\b/g)).toHaveLength(2);
     expect(query).toContain('from pharmacy.dispensings df where df.work_item_id=w.id order by df.fill_number desc limit 1');
@@ -300,7 +303,8 @@ describe('WORK_LIST_QUERY_0133 (0133 D14)', () => {
     expect(window(WORK_LIST_QUERY_0133)).toEqual(window(WORK_LIST_QUERY));
     expect(window(WORK_LIST_QUERY)).toEqual(["(o.open_work or w.accepted_at >= ($1::date::timestamp at time zone 'Africa/Lagos'))"]);
     expect(flat(WORK_LIST_QUERY_0133)).toContain(`and ${window(WORK_LIST_QUERY)![0]} order by`);
-    expect(flat(WORK_LIST_QUERY_0133).match(/\$\d/g)).toEqual(['$2', '$2', '$1']);
+    // $2 (ORD-12) twice for the open work and once for the order of the open refills.
+    expect(flat(WORK_LIST_QUERY_0133).match(/\$\d/g)).toEqual(['$2', '$2', '$1', '$2']);
   });
 
   it('keeps WORK_LIST_QUERY\'s order and limit, byte for byte', () => {

@@ -101,18 +101,21 @@ const WORK_LIST_WINDOW = `(o.open_work or w.accepted_at >= ($1::date::timestamp 
 
 /**
  * Open work first, oldest first, then done work, newest first; 200 rows. The same for both list queries. Among the
- * open work, items waiting for their first fill come before items with a refill open (ORD-12), so a pharmacy with
- * many refills open still sees every new prescription first; with refills off no item has a refill open.
+ * open work, items waiting for their first fill (oldest received first) come before items with a refill open
+ * (ORD-12), so a pharmacy with many refills open still sees every new prescription first; the refills in `$2`'s
+ * order, 0152's open refills' (the refill that opened first first). With refills off no item has a refill open.
  */
-const WORK_LIST_ORDER = `order by o.open_work desc,o.refill_open asc,case when o.open_work then w.accepted_at end asc,case when o.open_work then null else w.accepted_at end desc,
+const WORK_LIST_ORDER = `order by o.open_work desc,o.refill_open asc,case when o.refill_open then array_position($2::uuid[],w.id) end asc,
+  case when o.open_work then w.accepted_at end asc,case when o.open_work then null else w.accepted_at end desc,
   case when o.open_work then w.id end asc,case when o.open_work then null else w.id end desc limit 200`;
 
 /**
  * The work list (200 rows, as before): open work of any age, and done work
  * received on or after the day in `$1` (WORK_LIST_WINDOW, Q123 A). A work
  * item is open while it has no dispensing, or (ORD-12, refills on) while it is
- * one of `$2`, the own items 0152's reader says have a refill open; `$2` is
- * empty while refills are off. A reversed dispensing counts as done unless a
+ * one of `$2`, the own items 0152's open refills
+ * (pharmacy.open_refill_work_items) names; `$2` is empty while refills are
+ * off. A reversed dispensing counts as done unless a
  * refill is open: a reversed fill still counts as a fill (0152), so a reversed
  * item with no refill open cannot be dispensed again and would otherwise stay
  * at the top for good (owner, 2026-11-02). Open work comes first, oldest
@@ -136,6 +139,20 @@ const WORK_LIST_ORDER = `order by o.open_work desc,o.refill_open asc,case when o
  * policy once (the reader joins the snapshot by its key, so the prescription
  * history does not add to it): 1.0-1.7 s for 200 rows, against 0.4-0.7 s for
  * reading the same rows under row-level security (INTERFACE_CONTRACT.md §46).
+ * With PRESCRIPTION_REFILLS_ENABLED on (ORD-12, 0152), each list load also
+ * asks pharmacy.open_refill_work_items once before this query (its cost
+ * grows with the facility's active prescriptions that allow refills and have
+ * not ended, those not yet due included, about 10 ms each under a NOBYPASSRLS
+ * owner, not with its work items) and pharmacy.work_item_refills once after
+ * it, for the own rows shown (at most 200). Measured on 20,000 own items, 200
+ * of them with a refill open and listed: under a NOSUPERUSER NOBYPASSRLS
+ * owner the open refills 2.2-2.5 s, this query 2.7-3.0 s, the reader on the
+ * 200 rows 2.4-2.7 s, 7.3-8.0 s in all; under a superuser owner 0.31-0.41,
+ * 2.3-4.7 and 0.32-0.42 s, 2.9-5.5 s in all. With 2,000 such prescriptions
+ * (200 open), the open refills alone take 20.3-21.3 s under the NOBYPASSRLS
+ * owner (0.74-0.81 s under a superuser one). The setting goes on only after
+ * the whole request is measured at the hospital's numbers and the cost
+ * accepted in writing (INTERFACE_CONTRACT.md, ORD-12).
  */
 export const WORK_LIST_QUERY = `${WORK_ITEM_SELECT}
   cross join lateral (select d.id is null or w.id=any($2::uuid[]) as open_work,
@@ -573,19 +590,20 @@ export class PharmacyService {
    *
    * ORD-12 (0152): one row per item, whatever its number of fills, setting on
    * or off (WORK_ITEM_SELECT). While PRESCRIPTION_REFILLS_ENABLED is on, the
-   * list first asks 0152's reader which own items have a refill open
-   * (PharmacyRefills.openForList: at most 200 candidates), and those are open
-   * work of any age, after the items waiting for their first fill; each own
-   * row then carries `refills` (the reader asked once more, for the shown own
-   * rows it has not answered yet), and each row `dispensing.fillNumber` and
-   * `lastFilledAt` once dispensed. Off, nothing is asked and nothing added.
+   * list first asks 0152's open refills which own items have a refill open
+   * now (PharmacyRefills.openForList, at most 200, however many items were
+   * filled after them), and those are open work of any age, after the items
+   * waiting for their first fill; each own row then carries `refills` (0152's
+   * per-item reader, asked once, for the own rows shown), and each row
+   * `dispensing.fillNumber` and `lastFilledAt` once dispensed. Off, nothing is
+   * asked and nothing added.
    */
   async listWorkItems(context: DataAccessContext) {
     const since = workListSince();
     const page = await this.database.withTransaction(context, async (client) => {
       // ORD-12: the own items with a refill open, asked before the rows are chosen (nothing while refills are off).
-      const refills = await this.refills.openForList(client, context.correlationId);
-      const result = await this.workList(client, since, refills.open);
+      const refillOpen = await this.refills.openForList(client, context.correlationId);
+      const result = await this.workList(client, since, refillOpen);
       await this.audit.recordWithClient(client, context, 'pharmacy.work-item.list', {
         resourceType: 'pharmacy-work-item-collection', resourceId: context.facilityId,
       }, { returnedCount: result.rows.length });
@@ -603,14 +621,13 @@ export class PharmacyService {
       // the audit rows (the notice shows no new person, so it adds none); a failure answers no notice.
       const changed = await this.dispensedChanges.changes(client, result.rows.filter((row) => row.dispensing_id)
         .map((row) => row.id), context.correlationId);
-      // ORD-12 (refills on): 0152's answer for the shown own rows the first step did not read (no audit row: no new
+      // ORD-12 (refills on): 0152's per-item reader for the own rows shown, and only those (no audit row: no new
       // person is shown); a failure leaves `refills` out.
-      const more = await this.refills.read(client, ownIds.filter((workItemId) => !refills.found.has(workItemId)),
-        context.correlationId);
+      const refills = await this.refills.read(client, ownIds, context.correlationId);
       const receiving = await this.routeCards.receiving(client, context);
       return { items: result.rows.map((row) => this.projectWorkItem(row, cards.get(row.id), own.get(row.id),
         this.prescriptionDetails.forRow(row, details.get(row.id)), states?.get(row.id), changed.get(row.id),
-        this.refills.forRow(row, refills.found.get(row.id) ?? more.get(row.id)))), since,
+        this.refills.forRow(row, refills.get(row.id)))), since,
         ...receiving,
         ...this.routeCards.lateCorrection(context), ...this.routeCards.cannotComplete(context) };
     });
@@ -909,7 +926,11 @@ export class PharmacyService {
    * - the insert names the fill number; the database decides the rest
    *   (0152): past 1 + the prescription's refills, 409 PHARMACY_NO_REFILLS_LEFT;
    *   its end date (the Lagos day) passed, 409
-   *   PHARMACY_REFILL_PRESCRIPTION_ENDED; changed, held, stopped or sent
+   *   PHARMACY_REFILL_PRESCRIPTION_ENDED; before the refill interval has
+   *   passed (the Lagos day of the latest fill not reversed plus 3/4 of the
+   *   prescription's duration), 409 PHARMACY_REFILL_TOO_SOON with
+   *   `refillOpensOn`, the day it opens (no override: a clinician writes a new
+   *   prescription); changed, held, stopped or sent
    *   elsewhere, 409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE as before. Two
    *   requests for the same fill at once: the loser meets 0152's key (23505)
    *   or a serialization failure (40001) and DatabaseService runs it again,
