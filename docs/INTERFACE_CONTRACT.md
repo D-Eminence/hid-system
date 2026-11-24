@@ -12377,7 +12377,10 @@ writes no version, so it records nothing and ends no refill.
 Each of ehr-api and pharmacy-api reads its own `PRESCRIPTION_REFILLS_ENABLED`
 (`true` or `false`, default `false`; any other value stops the service at
 start), as each reads 0125's setting, and separately from it. The
-event-dispatcher and `@hid/api-client` have no setting.
+event-dispatcher and `@hid/api-client` have no setting. Neither setting is
+wired into `infra/aws` yet (0125's is, as
+`HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED`): until that is added, with the
+switch-on, both stay at their default, off.
 
 **pharmacy-api, whatever the setting** (from its first refills-aware image,
 which needs 0152's `fill_number`):
@@ -12402,8 +12405,8 @@ which needs 0152's `fill_number`):
   409 `PHARMACY_DISPENSING_NOT_LATEST_FILL` (after its own replay, which is
   unchanged). A reversal and a refill of one item at once make one of the two
   SERIALIZABLE transactions fail, and it runs again.
-- 0152's refusals answer plain 409s, never a 500: `NO_REFILLS_LEFT`
-  `PHARMACY_NO_REFILLS_LEFT`, `REFILL_PRESCRIPTION_ENDED`
+- 0152's refusals answer plain 409s, never a 500: `NO_REFILLS_LEFT` as
+  `PHARMACY_NO_REFILLS_LEFT`, `REFILL_PRESCRIPTION_ENDED` as
   `PHARMACY_REFILL_PRESCRIPTION_ENDED` (and 0101's and 0133's as before). Two
   requests for one fill at once: the loser meets 0152's key or a
   serialization failure, runs again, and is answered by the replay rule; a
