@@ -574,8 +574,10 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
 
     const start = async (answer: readonly Record<string, unknown>[] | Error) => {
       const { database, calls } = fakeDatabase(answer);
+      // The terminology controller also serves recent diagnoses; these HTTP tests never call that route.
       @Module({ controllers: [CatalogController, TerminologyController],
-        providers: [CatalogService, { provide: DatabaseService, useValue: database }] })
+        providers: [CatalogService, { provide: DatabaseService, useValue: database },
+          { provide: RecentDiagnosesService, useValue: {} }] })
       class TestModule {}
       const moduleRef = await Test.createTestingModule({ imports: [TestModule] }).compile();
       app = moduleRef.createNestApplication({ logger: false });
