@@ -28,9 +28,11 @@ ROLLOUT_POLL_SECONDS = 5
 SKIPPED_PLAN_AFTER = "PLAN_BEFORE_FOUND_ZERO_PENDING"
 # ORD-7's governed catalogue load, opt-in (CATALOG_LOAD): the signed seed files where the migration image carries
 # them (services/ehr-api/Dockerfile copies them by name to /app/docs/codes), and the loader's three kinds of last line:
-# its evidence line when it loaded (exit 0), its one line when it loaded nothing (a refusal, exit 2, or a failure),
-# and its line when the connection was lost once its COMMIT was sent (exit 1): the version may have committed.
+# its evidence line when it loaded (exit 0), its one line when it loaded nothing (a refusal, exit 2, or a failure,
+# exit 1), and its line when the connection was lost once its COMMIT was sent: the version may have committed. That
+# last one has its own exit code, 3 (CATALOG_COMMIT_UNKNOWN_EXIT): the outcome is known to be unknown without the log.
 CATALOG_SEEDS = {"medicine":"/app/docs/codes/hid-medicines.json","lab_test":"/app/docs/codes/hid-lab-tests.json"}
+CATALOG_COMMIT_UNKNOWN_EXIT = 3
 CATALOG_LOADED = re.compile(r'\{"status":"loaded",.*\}')
 CATALOG_NOT_LOADED = re.compile(r"load-catalog: .*; nothing loaded(?:; run the release again at a quieter time)?")
 CATALOG_COMMIT_UNKNOWN = re.compile(re.escape("load-catalog: the connection was lost during commit, so the load may have "
@@ -42,13 +44,20 @@ EVIDENCE_LINE_MISSING = "evidence line missing"
 EVIDENCE_UNREADABLE = "evidence unreadable"
 # The operator's next step after a failure that follows a load: the loaded version stays loaded and asking for it again
 # is refused. After a load whose outcome is unknown, the same load is asked for again, which settles it: it loads, or
-# it is refused as already loaded. An unreconciled release (the lease lost, or a rollback that could not be confirmed)
-# is reconciled first.
+# it is refused as already loaded. A seed asked for that the catalogue phase never started (it stops at the first seed
+# that does not end loaded with its evidence) is asked for in the step too, after the unknown one if there is one, so
+# it is not dropped; a refusal of the unknown seed as already loaded stops that release before the next seed, so the
+# step says to ask for the untried seeds alone then. An unreconciled release (the lease lost, or a rollback that could
+# not be confirmed) is reconciled first.
 NEXT_AFTER_LOAD = "dispatch the release again with catalog_load none"
+NEXT_AFTER_LOAD_UNTRIED = "dispatch the release again with catalog_load {untried} to load what this release did not try"
 RECONCILE_FIRST = "reconcile this release first (it ended unreconciled and keeps the deployment lease), then "
 NEXT_AFTER_LOAD_UNRECONCILED = RECONCILE_FIRST+NEXT_AFTER_LOAD
 NEXT_AFTER_UNKNOWN = ("dispatch the release again with catalog_load {} to settle it (it loads, or is refused as already "
                       "loaded; once refused, dispatch again with catalog_load none)")
+NEXT_AFTER_UNKNOWN_UNTRIED = ("dispatch the release again with catalog_load {asked} to settle {unknown} and load {untried} "
+                              "({unknown} loads, or is refused as already loaded; once refused, dispatch again with "
+                              "catalog_load {untried})")
 PHASES = frozenset({"approval","lease","snapshot-before","receipt-started","migration","catalog","register-services",
     "rollout-services","register-gateway","rollout-gateway","snapshot-after","index-and-receipt","notify",
     "rollback-rollout","rollback-snapshot","rollback-index"})
@@ -131,6 +140,30 @@ def catalog_seeds(kinds):
                 "CATALOG_SEED_MISSING")
         seeds[kind] = {"version":seed["version"],"file_sha256":sha(data)}
     return seeds
+
+def catalog_next_step(seeds, checks, not_tried):
+    """The operator's next step after a release that failed once its catalogue phase had loaded a seed or left one's
+    outcome unknown, and the seeds the step names; None when it did neither (nothing to settle or to skip).
+
+    seeds: the seeds asked for, in load order (catalog_seeds); checks: the catalogue phase's checks; not_tried: the
+    kinds asked for whose task the phase never started. The step asks again for the seed whose outcome is unknown,
+    which settles it, then for every seed not tried, in load order, so none asked for is dropped."""
+    loaded = [{"kind":k["kind"],"version":k["version"]} for k in checks if k.get("status") == "loaded"]
+    unknown = [{"kind":k["kind"],"version":k["version"]} for k in checks if k.get("status") == OUTCOME_UNKNOWN]
+    if not (loaded or unknown): return None
+    untried = [{"kind":kind,"version":seeds[kind]["version"]} for kind in seeds if kind in not_tried]
+    kinds = lambda rows: ",".join(row["kind"] for row in rows)
+    if unknown and untried:
+        step = NEXT_AFTER_UNKNOWN_UNTRIED.format(asked=kinds(unknown+untried),unknown=kinds(unknown),untried=kinds(untried))
+    elif unknown:
+        step = NEXT_AFTER_UNKNOWN.format(kinds(unknown))
+    elif untried:
+        step = NEXT_AFTER_LOAD_UNTRIED.format(untried=kinds(untried))
+    else:
+        step = NEXT_AFTER_LOAD
+    return {**({"catalog_loaded_before_failure":loaded} if loaded else {}),
+            **({"catalog_outcome_unknown":unknown} if unknown else {}),
+            **({"catalog_not_tried":untried} if untried else {})}, step
 
 def catalog_outcome(line, kind):
     """The loader's evidence line as the receipt records it, or None when it is not one for this kind: every field the
@@ -231,6 +264,7 @@ class ECS:
         self.aws, self.lease = aws, lease
         self.migration_checks = None
         self.catalog_checks = None
+        self.catalog_not_tried = []
 
     def service(self, component):
         body = self.aws.call("ecs","describe-services",{"cluster":CLUSTER,"services":["hid-production-"+component]})
@@ -477,12 +511,17 @@ class ECS:
         sha256 from the checkout, "evidence pending"), before its log is read. Then its evidence line replaces that
         entry; without one, the entry says "evidence line missing" and the release stops with
         CATALOG_LOAD_EVIDENCE_MISSING; if the log cannot be read (throttling, the lease check), it says "evidence
-        unreadable" and the release stops with that error. A loader whose last line says the connection was lost
-        during its commit may have loaded: the checks name the seed as "outcome unknown" (kind, version and sha256
-        from the checkout) and the release stops with CATALOG_LOAD_OUTCOME_UNKNOWN."""
+        unreadable" and the release stops with that error. A task that exits 3 (CATALOG_COMMIT_UNKNOWN_EXIT) lost its
+        connection during its commit, so it may have loaded: the checks name the seed as "outcome unknown" at once
+        (kind, version and sha256 from the checkout), before its log is read, and the release stops with
+        CATALOG_LOAD_OUTCOME_UNKNOWN whether or not the log can be read; the log only adds the loader's line to what is
+        printed. catalog_not_tried keeps the kinds whose task was never started, for the operator's next step."""
         self.catalog_checks = []
+        self.catalog_not_tried = list(seeds)
         for kind, seed in seeds.items():
             self.lease.assert_owned()
+            # From here the task may start (run-task can succeed even when its answer is lost), so it counts as tried.
+            self.catalog_not_tried.remove(kind)
             task = self.aws.call("ecs","run-task",{"cluster":CLUSTER,"taskDefinition":arn,"launchType":"FARGATE",
                 "clientToken":sha((release_id+"catalog-"+kind).encode()),
                 "networkConfiguration":{"awsvpcConfiguration":network},"enableExecuteCommand":False,
@@ -518,20 +557,41 @@ class ECS:
                     raise ReleaseError("CATALOG_LOAD_EVIDENCE_MISSING")
                 self.catalog_checks[-1] = outcome
                 continue
+            if CATALOG_COMMIT_UNKNOWN_EXIT in codes:
+                # The connection was lost once the loader's COMMIT was sent: the version may have committed. The exit
+                # code says so on its own, so the checks (and any receipt written after the failure) name the seed now,
+                # before the log is read; the log only adds the loader's line to what is printed.
+                self.catalog_checks.append({"kind":kind,"status":OUTCOME_UNKNOWN,"version":seed["version"],
+                                            "file_sha256":seed["file_sha256"]})
+                try:
+                    line, last = self.catalog_line(task_arn,CATALOG_COMMIT_UNKNOWN)
+                    detail = {"message":line if line is not None else last}
+                except Exception as error:
+                    # Throttling, or the lease check before a read: the outcome is still unknown, and the release
+                    # still stops with that code (a lost lease is found again by the rollback, which then cannot run).
+                    detail = {"message":None,"log_error":str(error)}
+                self.print_outcome_unknown(release_id,kind,seed,codes,detail)
+                raise ReleaseError("CATALOG_LOAD_OUTCOME_UNKNOWN")
             # Any other exit: the loader's last line (its refusal or failure line, else whatever it printed last).
             line, last = self.catalog_line(task_arn,CATALOG_LAST_LINE)
             if line is not None and CATALOG_COMMIT_UNKNOWN.fullmatch(line):
-                # The connection was lost once the loader's COMMIT was sent: the version may have committed. The checks
-                # (and the failed receipt) name the seed so; asking for the same load again settles it.
+                # The commit line under another exit code (the loader exits 3 with it): still the safe side, never
+                # "failed", since the version may have committed.
                 self.catalog_checks.append({"kind":kind,"status":OUTCOME_UNKNOWN,"version":seed["version"],
                                             "file_sha256":seed["file_sha256"]})
-                print(json.dumps({"release_id":release_id,"catalog_load":OUTCOME_UNKNOWN,"kind":kind,"exit_codes":codes,
-                    "message":line}), flush=True)
+                self.print_outcome_unknown(release_id,kind,seed,codes,{"message":line})
                 raise ReleaseError("CATALOG_LOAD_OUTCOME_UNKNOWN")
             refused = 2 in codes
             print(json.dumps({"release_id":release_id,"catalog_load":"refused" if refused else "failed","kind":kind,
                 "exit_codes":codes,"message":line if line is not None else last}), flush=True)
             raise ReleaseError("CATALOG_LOAD_REFUSED" if refused else "CATALOG_LOAD_FAILED")
+
+    @staticmethod
+    def print_outcome_unknown(release_id, kind, seed, codes, detail):
+        """The line naming a seed whose outcome is unknown: kind, version and sha256 from the checkout, the exit codes,
+        and the loader's line (or why the log could not be read)."""
+        print(json.dumps({"release_id":release_id,"catalog_load":OUTCOME_UNKNOWN,"kind":kind,"version":seed["version"],
+            "file_sha256":seed["file_sha256"],"exit_codes":codes,**detail}), flush=True)
 
     @staticmethod
     def print_loaded(release_id, check):
@@ -714,17 +774,14 @@ def deploy(mode="deploy", rollback_id=None):
                 reconciled = False
         if not started: reconciled = True
         try:
-            checks = ecs.catalog_checks or []
-            loaded = [{"kind":k["kind"],"version":k["version"]} for k in checks if k.get("status") == "loaded"]
-            unknown = [{"kind":k["kind"],"version":k["version"]} for k in checks if k.get("status") == OUTCOME_UNKNOWN]
-            if loaded or unknown:
-                # The runbook (planned contract, ORD-7): a loaded version stays loaded and loading it again is refused;
-                # a load whose outcome is unknown is asked for again (only that seed), which settles it. Unreconciled
-                # (the lease lost, or a rollback that could not be confirmed), the release is reconciled first.
-                step = NEXT_AFTER_UNKNOWN.format(",".join(k["kind"] for k in unknown)) if unknown else NEXT_AFTER_LOAD
-                print(json.dumps({"release_id":candidate["release_id"],
-                    **({"catalog_loaded_before_failure":loaded} if loaded else {}),
-                    **({"catalog_outcome_unknown":unknown} if unknown else {}),
+            # The runbook (planned contract, ORD-7): a loaded version stays loaded and loading it again is refused; a
+            # load whose outcome is unknown is asked for again, which settles it; a seed asked for and never tried is
+            # asked for again too. Unreconciled (the lease lost, or a rollback that could not be confirmed), the
+            # release is reconciled first.
+            found = catalog_next_step(catalog,ecs.catalog_checks or [],ecs.catalog_not_tried) if catalog else None
+            if found:
+                named, step = found
+                print(json.dumps({"release_id":candidate["release_id"],**named,
                     "next":step if reconciled else RECONCILE_FIRST+step}), flush=True)
         except Exception: pass
         try: notify(aws,candidate,"failed-rolled-back" if reconciled and started else "reconciliation-required")
