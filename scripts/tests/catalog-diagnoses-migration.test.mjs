@@ -39,6 +39,19 @@ test('0150\'s post-checks pin each trigger by name, tgtype and function', () => 
   assert.match(postChecks, /trigger_row\.tgfoid = 'ehr\.catalog_diagnosis_not_sealed\(\)'::regprocedure/)
 })
 
+test('0150\'s post-checks pin each trigger with no WHEN condition, no column list and no arguments', () => {
+  // A trigger edited to fire only WHEN (...), or on UPDATE OF one column, keeps its tgtype, so the type alone does
+  // not pin it: each post-check that names a trigger also requires tgqual, tgattr and tgnargs as CREATE TRIGGER
+  // above leaves them (found in our own review of round 6).
+  const plain = "trigger_row.tgqual is null and trigger_row.tgattr = ''::int2vector and trigger_row.tgnargs = 0"
+  const checks = postChecks.split(/from pg_trigger trigger_row/).slice(1).map((rest) => rest.slice(0, rest.indexOf(' then')))
+  for (const trigger of triggers) {
+    const naming = checks.filter((check) => check.includes(`trigger_row.tgname = '${trigger.name}'`))
+    assert.equal(naming.length, 1, `one post-check names ${trigger.name}`)
+    assert.ok(naming[0].replace(/\s+/g, ' ').includes(plain), `${trigger.name}'s post-check requires: ${plain}`)
+  }
+})
+
 test('0150\'s post-checks pin the sealed-release function\'s body: the md5 is of its body in this file', () => {
   const start = sql.indexOf('create function ehr.catalog_diagnosis_not_sealed()')
   const bodyStart = sql.indexOf('as $$', start) + 'as $$'.length

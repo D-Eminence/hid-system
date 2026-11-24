@@ -2133,8 +2133,9 @@ file's seed in `docs/codes/catalog-approvals.json`.
   that is or has been live takes no new entry (55000
   `CATALOG_VERSION_SEALED`): only a release still loading takes entries. A
   version of another kind (a medicine or lab-test list) takes none either
-  (55000). The post-checks pin each trigger's events and the sealed-release
-  function's body.
+  (55000). The post-checks pin each trigger's events, that it has no WHEN
+  condition, column list or arguments, and the sealed-release function's
+  body.
   Instead of the planned `ehr.terminology_icd11`, the list shares ORD-7's
   versions, loader and sign-off. The loader takes 0150's refusals as it
   takes 0149's: a sealed release (55000) or a table check (23514) ends the
@@ -2182,7 +2183,11 @@ file's seed in `docs/codes/catalog-approvals.json`.
     "wilson's disease" find theirs (before, the lone s had to start another
     word, so these found nothing). When nothing matched, the search runs
     once more with a final s dropped from each word of 4 or more letters
-    ("parkinsons", "alzheimers").
+    ("parkinsons", "alzheimers"), and keeps only the entries where each
+    word so shortened is a whole word of the title or of one of our other
+    names. So "parkinsons" puts 8A00.0 Parkinson disease first, and "fits"
+    finds nothing: fit only starts "Fitting or adjustment of ..." entries,
+    which it used to offer. "gallstones" finds what "gallstone" finds.
   - The order: the entry whose code `q` is; then an entry whose title or
     one of our other names is `q` itself, as words ("ra" is FA20
     Rheumatoid arthritis, whose other name is ra, before shorter titles
