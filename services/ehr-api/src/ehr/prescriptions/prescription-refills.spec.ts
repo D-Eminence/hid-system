@@ -9,7 +9,7 @@ import { CreatePrescriptionDto, CreatePrescriptionWithDetailsAndRefillsDto, Crea
   CreatePrescriptionWithRefillsDto, OrderStatus, UpdatePrescriptionDto } from '../shared/clinical.dto';
 import { CreatePrescriptionBodyPipe, PRESCRIPTION_DISPENSING_DETAILS_OFF,
   PrescriptionDispensingDetails } from './prescription-dispensing-details';
-import { PRESCRIPTION_REFILLS_OFF, PrescriptionRefills } from './prescription-refills';
+import { PRESCRIPTION_REFILLS_OFF, PrescriptionRefills, REFILLS_NEED_DURATION_MESSAGE } from './prescription-refills';
 import { PrescriptionsModule } from './prescriptions.module';
 import { PrescriptionsService } from './prescriptions.service';
 
@@ -259,6 +259,18 @@ describe('refills need a duration (the clinical owner\'s refill interval, 24 Nov
         refillsAllowed: 2 }));
       expect(insertOf(statements).values.at(-1)).toBe(2);
     }
+  });
+
+  it('E19 the refusal says the duration is how long one fill lasts, not the whole course', async () => {
+    const { service } = harness(true, { details: true });
+    const input = await pipe(true, true).transform({ ...body, refillsAllowed: 2 });
+    let problem: unknown;
+    try { await create(service, input); } catch (error) { problem = error; }
+    expect(problem).toMatchObject({ code: 'REFILLS_NEED_DURATION' });
+    expect((problem as Error).message).toBe(REFILLS_NEED_DURATION_MESSAGE);
+    expect((problem as Error).message).toContain('the duration of each fill: how long one supply lasts, not the whole course');
+    expect(REFILLS_NEED_DURATION_MESSAGE).toBe('A prescription with refills needs the duration of each fill: how long '
+      + 'one supply lasts, not the whole course. Add it, or set refills to 0.');
   });
 
   it('E18 off, nothing is checked (the body cannot carry refillsAllowed); on, a value without its unit is refused', () => {

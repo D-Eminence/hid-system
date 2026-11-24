@@ -26,6 +26,16 @@ import type { CreatePrescriptionWithRefillsDto } from '../shared/clinical.dto';
  * tells nobody that it did (0152 leaves ehr.withdraw_own_pharmacy_send and
  * 0133's steps as they are; the change is the prescriber's own).
  */
+/**
+ * REFILLS_NEED_DURATION's words. With refills above 0, the duration (0125's
+ * `durationValue` and `durationUnit`) is how long ONE fill lasts, not the
+ * whole course: each refill opens 3/4 of it after the latest fill not
+ * reversed (0152), so a course length entered there would hold every refill
+ * back for weeks after the supply ran out. Exported for the tests.
+ */
+export const REFILLS_NEED_DURATION_MESSAGE = 'A prescription with refills needs the duration of each fill: how long '
+  + 'one supply lasts, not the whole course. Add it, or set refills to 0.';
+
 export class PrescriptionRefills {
   constructor(readonly enabled: boolean) {}
 
@@ -45,7 +55,9 @@ export class PrescriptionRefills {
    * The clinical owner's rule (24 November 2026): a prescription with refills
    * carries a duration, from which the refill interval comes (0152: a refill
    * opens on the Lagos day of the latest fill not reversed plus 3/4 of the
-   * duration in days, rounded up). `refillsAllowed` above 0 without 0125's
+   * duration in days, rounded up). With refills, the duration is how long one
+   * fill lasts (a 30-day supply refilled from day 23), and the refusal says
+   * so (REFILLS_NEED_DURATION_MESSAGE). `refillsAllowed` above 0 without 0125's
    * `durationValue` and `durationUnit` is 400 REFILLS_NEED_DURATION before
    * anything is written; 0152's CHECK refuses it in the database too. A create
    * carries a duration only while PRESCRIPTION_DISPENSING_DETAILS_ENABLED is
@@ -57,8 +69,7 @@ export class PrescriptionRefills {
     const { refillsAllowed, durationValue, durationUnit } = input as { refillsAllowed?: number | null;
       durationValue?: number | null; durationUnit?: string | null };
     if ((refillsAllowed ?? 0) > 0 && (durationValue == null || durationUnit == null)) {
-      throw new DomainProblem(400, 'REFILLS_NEED_DURATION',
-        'A prescription with refills needs a duration. Add how long the course lasts, or set refills to 0.');
+      throw new DomainProblem(400, 'REFILLS_NEED_DURATION', REFILLS_NEED_DURATION_MESSAGE);
     }
   }
 

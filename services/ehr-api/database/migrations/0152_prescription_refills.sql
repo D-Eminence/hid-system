@@ -30,7 +30,13 @@
 --    R4, because it fits 0125's model (the details are fixed at creation, as
 --    this column is) and refuses the prescription when it is written, not
 --    the pharmacy at the counter; ehr-api refuses it first (400
---    REFILLS_NEED_DURATION). Null means none: every existing row and every
+--    REFILLS_NEED_DURATION). With refills, that duration is how long ONE
+--    fill lasts (one supply), not the whole course: a refill opens 3/4 of it
+--    after the latest fill, so a course length entered there (90 days for
+--    three monthly supplies) would hold each refill back until day 68, weeks
+--    after the supply ran out. The column's comment, its CHECK's comment,
+--    ehr-api's refusal and the prescribe form ("Duration of each fill") say
+--    so. Null means none: every existing row and every
 --    row an image without ORD-12 writes.
 --    ehr-api sets it at creation only and never changes it (its PATCH SET
 --    list does not name it), as for 0125's columns. Nullable on purpose:
@@ -154,7 +160,20 @@
 --    have not ended: the index and those conditions (all leakproof, so a
 --    NOBYPASSRLS owner applies them before ehr.prescriptions' row-level
 --    security) bound its cost by those prescriptions, never by the
---    facility's work items. A session without a facility or without
+--    facility's work items. But nothing takes a prescription out of that
+--    set when its refills are used up ('none_left'), when it is changed
+--    after the first fill, or when its item is never filled here: only a
+--    stop, a completion or a passed end date does, and ends_on is optional.
+--    So, without an expiry for refills (the owner's decision; not built),
+--    R7's cost grows with the facility's refill history, about 10 ms a
+--    prescription under a NOSUPERUSER NOBYPASSRLS owner (measured below).
+--    pharmacy-api therefore runs R7 under a 3-second limit of its own (below
+--    its pool's 15-second statement_timeout and the staff client's
+--    10-second timeout) and, past it or on any failure, lists no open refill
+--    and says refillsUnavailable (logged as an error), rather than holding
+--    the whole list; and the setting does not go on before the owner's
+--    expiry decision (the interface contract's "Before the setting goes
+--    on"). A session without a facility or without
 --    pharmacy.work-item.read gets no row. Its text names ehr.prescriptions,
 --    so it joins 0133's S7 list too.
 --
@@ -368,10 +387,16 @@
 --   NOBYPASSRLS owner (about 10 ms a prescription, nearly all of it the
 --   row-level security of ehr.prescriptions on the index's rows; the work
 --   items' and the fills' steps 0.4 s and 0.7 s) and 0.74-0.81 s under a
---   superuser owner. A whole work-list load with the setting on (R7, the
---   list statement, R6 on the 200 rows shown), 200 open: 7.3-8.0 s (median
---   7.7 s) under the NOSUPERUSER NOBYPASSRLS owner, 2.9-5.5 s (median 3.1
---   s) under a superuser owner.
+--   superuser owner. A whole work-list request with the setting on
+--   (pharmacy-api's own list code, every reader on: R7, the list statement,
+--   R6 on the 200 rows shown, 0124's cards, 0125's details, 0133's states,
+--   0148's changes and the audit rows), 200 open, 11 loads: 8.2-9.8 s
+--   (median 8.8 s) under the NOSUPERUSER NOBYPASSRLS owner, 5.8-7.2 s of it
+--   without R7, and 3.5-4.1 s (median 3.8 s) under a superuser owner. With
+--   2,000 (200 open), R7 stops at pharmacy-api's 3-second limit, the list
+--   answers with refillsUnavailable and no refill open, and the request
+--   takes 9.3-9.6 s under the NOBYPASSRLS owner (with a 5-second limit it
+--   took 11.3-11.5 s, past the staff client's 10 s).
 --
 -- Old services on this schema. Release A and B ehr-api: every INSERT and
 -- read of ehr.prescriptions names its columns, so refills_allowed is null on
@@ -399,7 +424,9 @@
 -- pharmacy.dispensings.fill_number, so a deploy before this file fails its
 -- health check instead of answering 500; only recording a fill above 1
 -- waits for the setting. While the setting is on, its work list asks R7
--- which own items have a refill open and R6 about the own rows it shows.
+-- which own items have a refill open (under R7's own 3-second limit; a
+-- failure lists no open refill and the answer says refillsUnavailable) and
+-- R6 about the own rows it shows.
 -- Rollback floor: once any
 -- refill is recorded, pharmacy-api must not roll back below that image (an
 -- older image joins dispensings one row per fill and shows the item twice,
@@ -1116,9 +1143,9 @@ end
 $$;
 
 comment on column ehr.prescriptions.refills_allowed is
-  'ORD-12 (0152): how many refills the prescriber allowed after the first fill, 0-11; null means none; 1-11 needs a duration. Set at creation only (ehr-api never changes it). The hospital''s own pharmacy may record 1 + refills_allowed fills of the one work item while the prescription stays active and unchanged and its ends_on is not past, each refill from the Lagos day of the latest fill not reversed plus 3/4 of the duration in days (rounded up, at least 1).';
+  'ORD-12 (0152): how many refills the prescriber allowed after the first fill, 0-11; null means none; 1-11 needs a duration. With refills, the duration (0125''s duration_value and duration_unit) is how long ONE fill lasts, not the whole course. Set at creation only (ehr-api never changes it). The hospital''s own pharmacy may record 1 + refills_allowed fills of the one work item while the prescription stays active and unchanged and its ends_on is not past, each refill from the Lagos day of the latest fill not reversed plus 3/4 of the duration in days (rounded up, at least 1).';
 comment on constraint prescriptions_refills_allowed_ck on ehr.prescriptions is
-  'ORD-12 (0152): refills_allowed is null or 0-11, and 1-11 only with a duration (duration_value and duration_unit, 0125): a refill opens 3/4 of the duration after the latest fill not reversed.';
+  'ORD-12 (0152): refills_allowed is null or 0-11, and 1-11 only with a duration (duration_value and duration_unit, 0125), which with refills is how long one fill lasts, not the whole course: a refill opens 3/4 of it after the latest fill not reversed.';
 comment on index ehr.prescriptions_refills_facility_idx is
   'ORD-12 (0152): the prescriptions that allow refills, by facility; pharmacy.open_refill_work_items starts from them, so its cost grows with them and not with the facility''s work items.';
 comment on column pharmacy.dispensings.fill_number is

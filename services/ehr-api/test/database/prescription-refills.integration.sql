@@ -27,7 +27,9 @@
 --      pharmacy.dispensings and their modes; what the runtimes may do with
 --      the new columns; the two readers exactly (md5, owner, attributes,
 --      result) and who may execute them (the Pharmacy and schema test
---      runtimes only); R7's index on ehr.prescriptions exactly;
+--      runtimes only); R7's index on ehr.prescriptions exactly; the
+--      refills_allowed column and its CHECK saying that with refills the
+--      duration is how long one fill lasts;
 --   2. fills 1 to 1 + N pass for N = 0, 1, 2 and 11, and fill N + 2 is
 --      refused NO_REFILLS_LEFT; null refills_allowed is one fill; the
 --      claim's dispensed_at stays the first fill's;
@@ -282,6 +284,18 @@ begin
     || ' ehr_api=' || has_function_privilege('hid_ehr_api_runtime', 'pharmacy.work_item_refills(uuid[])', 'EXECUTE')
     || '/' || has_function_privilege('hid_ehr_api_runtime', 'pharmacy.open_refill_work_items()', 'EXECUTE'),
     'as granted public=false ehr_api=false/false');
+  -- 1j. What the duration means with refills, on the column the prescriber's
+  -- refills live in and on its CHECK (skeptic's round 2: a course length
+  -- entered as the duration holds every refill back for weeks): one fill's
+  -- length, not the whole course.
+  perform pg_temp.expect('1j the column and its CHECK say the duration is how long one fill lasts',
+    (select position('the duration (0125''s duration_value and duration_unit) is how long ONE fill lasts, not the '
+                     || 'whole course' in col_description('ehr.prescriptions'::regclass,
+                       (select attnum from pg_attribute where attrelid = 'ehr.prescriptions'::regclass
+                         and attname = 'refills_allowed'))) > 0
+         and position('how long one fill lasts' in obj_description(
+               (select oid from pg_constraint where conname = 'prescriptions_refills_allowed_ck'), 'pg_constraint')) > 0)::text,
+    'true');
 end $$;
 
 -- Fixtures. Organization O (e1520000...01) with facility F1 "Refills Test
