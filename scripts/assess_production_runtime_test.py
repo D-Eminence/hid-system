@@ -62,6 +62,7 @@ class ProductionAssessmentTests(unittest.TestCase):
         policy=json.loads(a.POLICY.read_text())
         expiring={f['id']:f['expires_at'] for f in policy['findings'] if 'expires_at' in f}
         self.assertEqual(expiring,{'CVE-2026-107493':'2026-12-01T00:00:00+00:00','CVE-2026-124709':'2026-12-01T00:00:00+00:00',
-                                  'CVE-2026-84786':'2026-12-01T00:00:00+00:00','CVE-2026-121482':'2026-12-01T00:00:00+00:00'})
+                                  'CVE-2026-84786':'2026-12-01T00:00:00+00:00','CVE-2026-121482':'2026-12-01T00:00:00+00:00',
+                                  'CVE-2026-107494':'2026-12-01T00:00:00+00:00'})
 
 if __name__=='__main__':unittest.main()
