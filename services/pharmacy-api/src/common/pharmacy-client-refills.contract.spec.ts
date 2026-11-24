@@ -1,7 +1,8 @@
 import { PharmacyApiClient, type CreatePharmacyDispensingInput, type PharmacyDispensing,
   type PharmacyWorkItem, type PharmacyWorkItemRefills, type PharmacyWorkQueue } from '@hid/api-client';
 
-// ORD-12 (refills, 0152): a work item's `refills`, `lastFilledAt` and its dispensing's `fillNumber`, and a
+// ORD-12 (refills, 0152): a work item's `refills` (`endsOn` among them, the refills' last day: the clinical owner's
+// D9 of 24 November 2026), `lastFilledAt` and its dispensing's `fillNumber`, and a
 // dispensing's `fillNumber`, as packages/api-client parses them, and the dispensing body's `fillNumber` as it sends
 // it. Lenient: absent (an older pharmacy-api, or PRESCRIPTION_REFILLS_ENABLED off) or malformed, each is left out and
 // the rest reads as before, never a 502 (the work list parses every item). The types are imported from the package's
@@ -21,7 +22,7 @@ const base = { id: '123e4567-e89b-42d3-a456-426614174003', patientId: '123e4567-
   dispensing: { id: '123e4567-e89b-42d3-a456-426614174007', status: 'dispensed', reversed: false },
   pharmacyStep: 'dispensed', pharmacistAcceptance: null };
 const refills: PharmacyWorkItemRefills = { allowed: 2, recorded: 1, open: true, closedReason: null,
-  nextFillOn: '2026-11-21' };
+  nextFillOn: '2026-11-21', endsOn: '2026-12-30' };
 const dispensing = { id: '123e4567-e89b-42d3-a456-426614174007', workItemId: base.id, patientId: base.patientId,
   facilityId: context.facilityId, status: 'dispensed', effectiveStatus: 'dispensed',
   medication: { codeSystem: null, code: null, display: 'Amlodipine 5 mg tablet' }, quantityDispensed: 30,
@@ -48,16 +49,18 @@ describe('PharmacyApiClient refills (ORD-12)', () => {
 
   it('C2 present: refills, lastFilledAt and the latest fill\'s number, on listWorkItems and getWorkItem', async () => {
     const shown = { ...base, dispensing: { ...base.dispensing, fillNumber: 2 }, lastFilledAt: '2026-11-21T09:30:00.000Z',
-      refills: { allowed: 2, recorded: 2, open: true, closedReason: null, nextFillOn: '2026-11-22' } };
+      refills: { allowed: 2, recorded: 2, open: true, closedReason: null, nextFillOn: '2026-11-22',
+        endsOn: '2026-12-30' } };
     respond({ items: [shown, { ...base, dispensing: null, pharmacyStep: 'received', refills: { allowed: 1, recorded: 0,
-      open: false, closedReason: null, nextFillOn: null } }] });
+      open: false, closedReason: null, nextFillOn: null, endsOn: '2026-12-20' } }] });
     const items: PharmacyWorkItem[] = await client.listWorkItems(context);
     expect(items[0]).toMatchObject({ dispensing: { fillNumber: 2 }, lastFilledAt: '2026-11-21T09:30:00.000Z',
-      refills: { allowed: 2, recorded: 2, open: true, closedReason: null, nextFillOn: '2026-11-22' } });
-    expect(items[1]!.refills).toEqual({ allowed: 1, recorded: 0, open: false, closedReason: null, nextFillOn: null });
+      refills: { allowed: 2, recorded: 2, open: true, closedReason: null, nextFillOn: '2026-11-22', endsOn: '2026-12-30' } });
+    expect(items[1]!.refills).toEqual({ allowed: 1, recorded: 0, open: false, closedReason: null, nextFillOn: null,
+      endsOn: '2026-12-20' });
     respond({ ...shown, refills: { allowed: 0, recorded: 1, open: false, closedReason: 'none_left', extra: 'dropped' } });
     expect((await client.getWorkItem(base.id, context)).refills).toEqual({ allowed: 0, recorded: 1, open: false,
-      closedReason: 'none_left', nextFillOn: null });
+      closedReason: 'none_left', nextFillOn: null, endsOn: null });
   });
 
   it('C3 each closed reason is kept; one this client does not know reads as null', async () => {
@@ -77,6 +80,18 @@ describe('PharmacyApiClient refills (ORD-12)', () => {
     for (const nextFillOn of ['8 December', '2026-12-08T00:00:00Z', 20261208, undefined]) {
       respond({ ...base, refills: { ...refills, nextFillOn } });
       expect((await client.getWorkItem(base.id, context)).refills).toEqual({ ...refills, nextFillOn: null });
+    }
+  });
+
+  it('C3c the refills\' last day: endsOn kept as the Lagos day (ended with the day it ended); anything but a day, or '
+    + 'absent (a pharmacy-api before the expiry), reads as null and keeps the rest', async () => {
+    respond({ ...base, refills: { ...refills, open: false, closedReason: 'ended', nextFillOn: null,
+      endsOn: '2026-11-20' } });
+    expect((await client.getWorkItem(base.id, context)).refills).toEqual({ ...refills, open: false,
+      closedReason: 'ended', nextFillOn: null, endsOn: '2026-11-20' });
+    for (const endsOn of ['20 November', '2026-11-20T00:00:00Z', 20261120, null, undefined]) {
+      respond({ ...base, refills: { ...refills, endsOn } });
+      expect((await client.getWorkItem(base.id, context)).refills).toEqual({ ...refills, endsOn: null });
     }
   });
 
@@ -121,7 +136,8 @@ describe('PharmacyApiClient refills (ORD-12)', () => {
 
   it('C7 the refill refusals reach the caller as problems with their codes and extensions', async () => {
     for (const [code, extra] of [['PHARMACY_FILL_NUMBER_CHANGED', { fillsRecorded: 2 }], ['PHARMACY_NO_REFILLS_LEFT', {}],
-      ['PHARMACY_REFILL_PRESCRIPTION_ENDED', {}], ['PHARMACY_REFILL_TOO_SOON', { refillOpensOn: '2026-12-08' }],
+      ['PHARMACY_REFILL_PRESCRIPTION_ENDED', { refillsEndedOn: '2026-11-20' }],
+      ['PHARMACY_REFILL_TOO_SOON', { refillOpensOn: '2026-12-08' }],
       ['PHARMACY_DISPENSING_NOT_LATEST_FILL', {}]] as const) {
       respond({ status: 409, code, detail: 'refused', ...extra }, 409);
       await expect(client.dispense(base.id, { expectedWorkItemVersion: 1, quantityDispensed: 30, quantityUnit: 'tablet',

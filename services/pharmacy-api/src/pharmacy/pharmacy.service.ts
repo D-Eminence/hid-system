@@ -141,25 +141,30 @@ const WORK_LIST_ORDER = `order by o.open_work desc,o.refill_open asc,case when o
  * reading the same rows under row-level security (INTERFACE_CONTRACT.md §46).
  * With PRESCRIPTION_REFILLS_ENABLED on (ORD-12, 0152), each list load also
  * asks pharmacy.open_refill_work_items once before this query, under its own
- * 3-second limit (OPEN_REFILLS_TIMEOUT_MS: its cost grows with the facility's
- * active prescriptions that allow refills and have not ended, those used up,
- * changed or not yet due included, about 10 ms each under a NOBYPASSRLS
- * owner, not with its work items; nothing takes one out of that set but a
- * stop, a completion or a passed end date), and pharmacy.work_item_refills
- * once after it, for the own rows shown (at most 200). The whole request
- * (listWorkItems, every reader on), measured on 20,000 own items, 200 of them
- * with a refill open and listed, 11 loads: 8.2-9.8 s under a NOSUPERUSER
- * NOBYPASSRLS owner (the open refills 2.4-2.7 s, this query 2.7-3.4 s, the
- * per-item reader 2.6-3.1 s, 0133's states 0.4-0.5 s, the rest under 0.2 s
- * each: that fixture gave 0124's and 0125's readers almost nothing to answer,
- * so add their costs above where they do), 3.5-4.1 s under a superuser
- * owner. With 2,000 such prescriptions the
- * open refills alone would take 20.3-21.3 s under the NOBYPASSRLS owner; they
- * stop at 3 s, the answer says refillsUnavailable, and the request takes
- * 9.3-9.6 s, within the staff client's 10 s. The setting goes on only after
- * the owner's decision on refill expiry and after the whole request is
- * measured at the hospital's numbers and the cost accepted in writing
- * (INTERFACE_CONTRACT.md, ORD-12, "Before the setting goes on").
+ * 3-second limit (OPEN_REFILLS_TIMEOUT_MS, kept as a guard), and
+ * pharmacy.work_item_refills once after it, for the own rows shown (at most
+ * 200). Both read ehr.prescriptions under 0152's refill scan marker (the
+ * clinical owner's D8, 24 November 2026), so that table's read policies no
+ * longer run per row under a NOBYPASSRLS owner (about 10 ms a row before);
+ * the open refills read only the facility's prescriptions with refills
+ * written in the last 365 Lagos days whose refills have not ended (D9: they
+ * end one fill's length after the course should have finished, or after a
+ * year, at the latest), so their cost is bounded by the prescriptions still
+ * refillable, not by the facility's history; what still grows with those is
+ * the work items' and the fills' own row-level security, about 0.3 ms each.
+ * The whole request (listWorkItems, every reader on), measured on 20,000 own
+ * items, 200 of them with a refill open and listed, 11 loads: 4.1-4.9 s
+ * under a NOSUPERUSER NOBYPASSRLS owner (8.2-9.8 s before D8; the open
+ * refills 0.43-0.60 s, this query 2.7-3.2 s, the per-item reader
+ * 0.38-0.50 s, 0133's states 0.37-0.51 s, the audit rows 0.12-0.20 s, the
+ * rest under 0.05 s each: that fixture gave 0124's and 0125's readers almost
+ * nothing to answer, so add their costs above where they do), 3.7-4.3 s under
+ * a superuser owner. With 2,000 prescriptions with refills not ended (200
+ * open), 5 loads: 4.8-5.5 s (the open refills 0.99-1.37 s, within their
+ * 3-second limit, so no load said refillsUnavailable) and 4.4-5.2 s. The
+ * setting goes on only after the whole request is measured at the hospital's
+ * numbers and the cost accepted in writing, and both staff front ends are
+ * ready (INTERFACE_CONTRACT.md, ORD-12, "Before the setting goes on").
  */
 export const WORK_LIST_QUERY = `${WORK_ITEM_SELECT}
   cross join lateral (select d.id is null or w.id=any($2::uuid[]) as open_work,
@@ -603,12 +608,14 @@ export class PharmacyService {
    * waiting for their first fill; each own row then carries `refills` (0152's
    * per-item reader, asked once, for the own rows shown), and each row
    * `dispensing.fillNumber` and `lastFilledAt` once dispensed. The open
-   * refills run under their own time limit (OPEN_REFILLS_TIMEOUT_MS): their
-   * cost grows with the facility's refill history, and past the limit the list
-   * answers without them rather than not at all. When either reader fails, the
-   * answer says `refillsUnavailable: true` (logged as an error), so a due
-   * refill missing from the open work is shown as such ("Refills could not be
-   * loaded"). Off, nothing is asked and nothing added.
+   * refills run under their own time limit (OPEN_REFILLS_TIMEOUT_MS, a
+   * guard), and past it the list answers without them rather than not at
+   * all. When either reader fails, the answer says `refillsUnavailable: true`
+   * (logged as an error), so a due refill missing from the open work is shown
+   * as such ("Refills could not be loaded"). Both readers write 0152's refill
+   * scan marker (D8), so this transaction is READ COMMITTED and read-write
+   * (DatabaseService's default; never readOnly: a READ ONLY one would refuse
+   * them, 25006). Off, nothing is asked and nothing added.
    */
   async listWorkItems(context: DataAccessContext) {
     const since = workListSince();
@@ -749,7 +756,8 @@ export class PharmacyService {
       // cannot be read). The read's audit row above already names the item and the patient.
       const changed = row.dispensing_id
         ? await this.dispensedChanges.changes(client, [row.id], context.correlationId) : undefined;
-      // ORD-12 (refills on): an own item's refills (0152's reader; none when it cannot be read).
+      // ORD-12 (refills on): an own item's refills (0152's reader; none when it cannot be read). The reader writes
+      // 0152's scan marker, so this transaction stays read-write (READ COMMITTED, DatabaseService's default).
       const refills = row.order_route_id ? undefined : await this.refills.read(client, [row.id], context.correlationId);
       return this.projectWorkItem(row, cards?.get(row.id), own?.get(row.id),
         this.prescriptionDetails.forRow(row, details?.get(row.id)), states?.get(row.id), changed?.get(row.id),
@@ -939,8 +947,11 @@ export class PharmacyService {
    * - only a first fill accepts a received item (ORD-4); a refill never does;
    * - the insert names the fill number; the database decides the rest
    *   (0152): past 1 + the prescription's refills, 409 PHARMACY_NO_REFILLS_LEFT;
-   *   its end date (the Lagos day) passed, 409
-   *   PHARMACY_REFILL_PRESCRIPTION_ENDED; before the refill interval has
+   *   after the refills' last day (the Lagos day; the earliest of its end date,
+   *   the day it was written plus (refills + 2) fills' durations, and that day
+   *   plus 365: the clinical owner's D9), 409
+   *   PHARMACY_REFILL_PRESCRIPTION_ENDED with `refillsEndedOn`, that day;
+   *   before the refill interval has
    *   passed (the Lagos day of the latest fill not reversed plus 3/4 of the
    *   prescription's duration), 409 PHARMACY_REFILL_TOO_SOON with
    *   `refillOpensOn`, the day it opens (no override: a clinician writes a new

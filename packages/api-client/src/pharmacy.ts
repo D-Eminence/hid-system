@@ -233,7 +233,10 @@ export type PharmacyStep = 'received' | 'accepted' | 'dispensed' | 'dispensing_r
  * prescription allows is recorded; a reversed fill counts), `stopped` (the
  * prescription is on hold, completed, cancelled or entered in error),
  * `changed` (the prescribing team changed it after it was accepted: an edit,
- * or a hold then resume), `ended` (its end date, the Lagos day, is past),
+ * or a hold then resume), `ended` (the refills' last day, `endsOn`, is past:
+ * the earliest of the prescription's end date, the Lagos day it was written
+ * plus (refills + 2) times one fill's duration, and that day plus 365; the
+ * clinical owner's decision of 24 November 2026),
  * `not_yet` (the refill interval has not passed: the refill opens on
  * `nextFillOn`, the Lagos day of the latest fill not reversed plus 3/4 of the
  * prescription's duration, rounded up; the clinical owner's rule of 24
@@ -255,7 +258,13 @@ export type PharmacyRefillsClosedReason = 'none_left' | 'changed' | 'stopped' | 
  *   recorded: a later day while `closedReason` is `not_yet` (show "Refill
  *   from <date>"), today or earlier while open; null before the first fill,
  *   once closed for another reason, and from a pharmacy-api that does not
- *   send it.
+ *   send it;
+ * - `endsOn`: the last Lagos day (YYYY-MM-DD) a refill can be collected,
+ *   whatever the item's state: show "Refills until <date>" while refills
+ *   remain, and "Refills ended on <date>" once `closedReason` is `ended`.
+ *   Null when the prescription allows no refill, for an item from another
+ *   facility's order route, and from a pharmacy-api that does not send it (or
+ *   sends anything but a day).
  * Label: "Fill {recorded} of {allowed + 1}" ("Fill 2 of 3"); while open, the
  * fill about to be recorded is recorded + 1.
  */
@@ -265,6 +274,7 @@ export interface PharmacyWorkItemRefills {
   open: boolean;
   closedReason: PharmacyRefillsClosedReason | null;
   nextFillOn: string | null;
+  endsOn: string | null;
 }
 
 /**
@@ -402,7 +412,8 @@ export interface CreatePharmacyDispensingInput {
    * fill (201), whatever the Idempotency-Key, so a second press records
    * nothing. Refusals (409): PHARMACY_FILL_NUMBER_CHANGED with
    * `fillsRecorded` (another fill was recorded since the item was read: read
-   * it again), PHARMACY_NO_REFILLS_LEFT, PHARMACY_REFILL_PRESCRIPTION_ENDED,
+   * it again), PHARMACY_NO_REFILLS_LEFT, PHARMACY_REFILL_PRESCRIPTION_ENDED
+   * with `refillsEndedOn` (YYYY-MM-DD, the refills' last day, `endsOn`),
    * PHARMACY_REFILL_TOO_SOON with `refillOpensOn` (YYYY-MM-DD, the Lagos day
    * the refill opens),
    * PHARMACY_PRESCRIPTION_NOT_DISPENSABLE (held, stopped or changed),
@@ -850,15 +861,17 @@ function parseFillNumber(value: unknown): { fillNumber?: number } {
  * older pharmacy-api, the setting off) or malformed (not an object, `allowed`
  * not a whole number 0-11, `recorded` not a whole number 0-12, `open` not a
  * boolean), it is left out and the item reads as before. A `closedReason` this
- * client does not know is read as null, and a `nextFillOn` that is not a day
- * (YYYY-MM-DD), or absent, as null. Keys other than the five are dropped.
+ * client does not know is read as null, and a `nextFillOn` or `endsOn` that is
+ * not a day (YYYY-MM-DD), or absent, as null. Keys other than the six are
+ * dropped.
  */
 function parseWorkItemRefills(value: unknown): Pick<PharmacyWorkItem, 'refills'> {
   if (!isRecord(value) || !wholeNumber(value.allowed, 0, 11) || !wholeNumber(value.recorded, 0, 12)
     || typeof value.open !== 'boolean') return {};
   const closedReason = REFILLS_CLOSED_REASONS.find((reason) => reason === value.closedReason) ?? null;
-  const nextFillOn = typeof value.nextFillOn === 'string' && LAGOS_DAY.test(value.nextFillOn) ? value.nextFillOn : null;
-  return { refills: { allowed: value.allowed, recorded: value.recorded, open: value.open, closedReason, nextFillOn } };
+  const lagosDay = (day: unknown) => (typeof day === 'string' && LAGOS_DAY.test(day) ? day : null);
+  return { refills: { allowed: value.allowed, recorded: value.recorded, open: value.open, closedReason,
+    nextFillOn: lagosDay(value.nextFillOn), endsOn: lagosDay(value.endsOn) } };
 }
 
 function parseDispensing(payload: unknown): PharmacyDispensing {
