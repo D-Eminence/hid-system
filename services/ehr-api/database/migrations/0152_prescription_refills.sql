@@ -159,8 +159,9 @@
 --    so it joins 0133's S7 list too.
 --
 -- Replica mode (session_replication_role = replica) skips R4 (origin mode),
--- so the refill count and the end date are not enforced there (the clinical
--- owner's call: no replica-mode writer records refills). The backstops that
+-- so the refill count, the end date and the refill interval are not
+-- enforced there (the clinical owner's call: no replica-mode writer records
+-- refills). The backstops that
 -- fire in every mode: R5 (ENABLE ALWAYS: no refill of an item never
 -- dispensed, sent elsewhere or route-backed), R2's CHECK (at most 12 fills)
 -- and R3's key (one row per fill number).

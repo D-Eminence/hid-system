@@ -12337,9 +12337,10 @@ writes no version, so it records nothing and ends no refill.
   open, 1,800 not yet due), 3 calls, 20.3-21.3 seconds under the
   NOSUPERUSER NOBYPASSRLS owner and 0.74-0.81 seconds under a superuser
   owner, the same 200 answered.
-- Replica mode skips the dispensing check (origin mode), so the refill count
-  and the end date are not enforced there (the clinical owner's call: no
-  replica-mode writer records refills). What holds in every mode: the claim
+- Replica mode skips the dispensing check (origin mode), so the refill
+  count, the end date and the refill interval are not enforced there (the
+  clinical owner's call: no replica-mode writer records refills). What holds
+  in every mode: the claim
   function (no refill of an item never dispensed, sent elsewhere or
   route-backed), the CHECK (at most 12 fills) and the key.
 - A reversal is unchanged (one per dispensing, by its id); the reversed fill
