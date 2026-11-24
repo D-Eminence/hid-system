@@ -9,7 +9,7 @@ import {
   verbatimTitle, zipMember,
 } from '../../services/ehr-api/scripts/icd11-seed.mjs'
 
-// ORD-9 (0150): the ICD-11 diagnosis seed from WHO's release file
+// ORD-9 (0152): the ICD-11 diagnosis seed from WHO's release file
 // (services/ehr-api/scripts/icd11-seed.mjs). Synthetic files with ICD-11's
 // own codes and titles (WHO, CC BY-ND 3.0 IGO); the other names are ours.
 const repository = resolve(import.meta.dirname, '..', '..')
@@ -197,7 +197,7 @@ test('an other name for a code the release lacks, or a code twice, stops the bui
     /the code 1F40 appears twice/)
 })
 
-test('the loader refuses a diagnosis seed that breaks 0150\'s rules', () => {
+test('the loader refuses a diagnosis seed that breaks 0152\'s rules', () => {
   const seed = buildIcd11Seed(parseTabulation(TABULATION), { release: '2026-01', releaseFile: RELEASE_FILE })
   const copy = () => JSON.parse(JSON.stringify(seed))
   const extension = copy(); extension.items.push({ ...extension.items[0], code: 'XN6P4' })

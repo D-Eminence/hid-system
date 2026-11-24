@@ -51,7 +51,7 @@ export class CatalogController {
 }
 
 /**
- * ORD-9 (0150): the ICD-11 diagnosis search, for anyone who records
+ * ORD-9 (0152): the ICD-11 diagnosis search, for anyone who records
  * diagnoses (ehr.diagnosis.write). The catalogue's rules: X-Facility-Id, no
  * X-Purpose-Of-Use, q never a Health ID or NIN and never logged, 300
  * searches per 5 minutes per membership (counted with the catalogue's),

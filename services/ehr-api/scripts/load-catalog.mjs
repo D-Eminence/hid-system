@@ -23,7 +23,7 @@
 //   without the licence answers it needs (the Nigeria EML 8th edition
 //   confirmation; the WHOCC answer when the file holds ATC codes);
 // and, in its transaction (catalog-load.mjs):
-// - a schema without 0149 (or, for the ICD-11 diagnosis list, 0150), or a
+// - a schema without 0149 (or, for the ICD-11 diagnosis list, 0152), or a
 //   version of that kind already loaded;
 // - an id of the active version that the seed drops: one it holds back
 //   ("<id> is in the live list but held back in this seed; fix the row, do
@@ -35,7 +35,7 @@
 //   whose medicine or test changed, a lab code another id held, a sealed
 //   version (its triggers and guard, SQLSTATE 55000: CATALOG_ID_RETIRED,
 //   CATALOG_ID_CHANGED, CATALOG_VERSION_SEALED), or a table check (23514);
-//   for a diagnosis list, 0150's the same ways (a sealed version, a table
+//   for a diagnosis list, 0152's the same ways (a sealed version, a table
 //   check). The whole load rolls back.
 // Anything else is a failure: exit 1, one line "load-catalog: ...; nothing
 // loaded", never a stack trace. That covers an error before it connects (a

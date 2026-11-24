@@ -602,7 +602,7 @@ test('dropped ids: an id of the active version missing from the seed is refused 
   assert.equal(client.statements.at(-1).sql, 'commit')
 })
 
-test('an ICD-11 release (0150) loads into ehr.catalog_diagnoses, needs 0150, and has no dropped-id check', async () => {
+test('an ICD-11 release (0152) loads into ehr.catalog_diagnoses, needs 0152, and has no dropped-id check', async () => {
   const seed = { format: SEED_FORMAT, kind: 'diagnosis', version: '2026-01',
     attribution: ['Synthetic notice: ICD-11, World Health Organization, CC BY-ND 3.0 IGO.'], retired: [], items: [
       { code: '1F40', title: 'Malaria due to Plasmodium falciparum', otherNames: ['falciparum malaria'], chapter: '01', residual: false },
@@ -619,11 +619,11 @@ test('an ICD-11 release (0150) loads into ehr.catalog_diagnoses, needs 0150, and
   const rows = client.statements.find(({ sql }) => sql.includes('insert into ehr.catalog_diagnoses'))
   assert.deepEqual(JSON.parse(rows.params[1]).map((item) => item.code), ['1F40', 'RA01'])
   assert.equal(client.statements.at(-1).sql, 'commit')
-  // A schema without 0150 is refused, nothing written.
+  // A schema without 0152 is refused, nothing written.
   const without = new StandInClient({ ready: false })
   await assert.rejects(loadSeed(without, { seed, fileSha256: 'a'.repeat(64), approval, approvalsSha256: 'b'.repeat(64) }),
     (error) => error instanceof LoadRefusal && refusalLine(error)
-      === 'load-catalog: this schema has no catalogue tables for diagnosis (0150 is not applied); nothing loaded')
+      === 'load-catalog: this schema has no catalogue tables for diagnosis (0152 is not applied); nothing loaded')
   assert.deepEqual(without.writes(), [])
 })
 
@@ -692,7 +692,7 @@ test('0149\'s own refusals in the transaction (55000, 23514) are refusals with t
     (error) => !(error instanceof LoadRefusal) && error.code === '57P01')
 })
 
-test('0150\'s refusals of a diagnosis row (55000, 23514) are refusals too, with the database\'s message; nothing loaded', async () => {
+test('0152\'s refusals of a diagnosis row (55000, 23514) are refusals too, with the database\'s message; nothing loaded', async () => {
   const seed = { format: SEED_FORMAT, kind: 'diagnosis', version: '2026-01',
     attribution: ['Synthetic notice: ICD-11, World Health Organization, CC BY-ND 3.0 IGO.'], retired: [], items: [
       { code: '1F40', title: 'Malaria due to Plasmodium falciparum', otherNames: [], chapter: '01', residual: false }] }

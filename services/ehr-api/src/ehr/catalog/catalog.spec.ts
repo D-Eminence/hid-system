@@ -411,7 +411,7 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
     });
   });
 
-  describe('ORD-9 (0150): the ICD-11 diagnosis search', () => {
+  describe('ORD-9 (0152): the ICD-11 diagnosis search', () => {
     const diagnoses = (q?: string, limit = 10) => Object.assign(new SearchDiagnosesQueryDto(), { q, limit });
 
     it('GET ehr/terminology/diagnoses: ehr.diagnosis.write, refusals audited only, in the catalogue module', () => {
@@ -531,8 +531,8 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
         const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
         const failed = await problemOf(new CatalogService(fakeDatabase(databaseError(code)).database)
           .searchDiagnoses(membershipA, diagnoses('malaria')));
-        // The same words for a schema without 0150 (42883, 42P01) as for a passing failure, so no advice: trying again
-        // does not help while 0150 is not there, and a name alone is not accepted yet (clinical.dto.ts still requires
+        // The same words for a schema without 0152 (42883, 42P01) as for a passing failure, so no advice: trying again
+        // does not help while 0152 is not there, and a name alone is not accepted yet (clinical.dto.ts still requires
         // the code), so no "type it instead" either.
         expect([failed.getStatus(), failed.code, failed.message]).toEqual([503, 'CATALOG_UNAVAILABLE',
           'Diagnosis search is not available right now.']);

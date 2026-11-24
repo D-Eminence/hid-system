@@ -8,7 +8,7 @@
 // a busy table also asks for a quieter time, worded as the migrations' own
 // busy refusals are. 0149's own refusals in the transaction (its triggers and
 // the version guard: SQLSTATE 55000, such as CATALOG_ID_CHANGED; a table
-// check: 23514), and 0150's for a diagnosis list, are refusals too, with the
+// check: 23514), and 0152's for a diagnosis list, are refusals too, with the
 // database's message. A connection lost once the load's COMMIT is sent
 // (CommitOutcomeUnknown) is neither: the version may have committed, so the
 // command ends with its own exit code (COMMIT_UNKNOWN_EXIT, 3) and a line
@@ -65,7 +65,7 @@ export const COMMIT_UNKNOWN_LINE = 'load-catalog: the connection was lost during
  * The SQLSTATEs with which 0149 refuses a row or a change in the load's
  * transaction: 55000 from its insert triggers (CATALOG_VERSION_SEALED,
  * CATALOG_ID_RETIRED, CATALOG_ID_CHANGED) and the versions guard, and 23514
- * from a table check. 0150 refuses a diagnosis row the same ways: its
+ * from a table check. 0152 refuses a diagnosis row the same ways: its
  * sealed-release trigger (55000, CATALOG_VERSION_SEALED) and its table
  * checks (23514). The transaction rolls back, so nothing is loaded.
  */
@@ -130,7 +130,7 @@ const LAB_TESTS_INSERT = `insert into ehr.catalog_lab_tests (version_id, list_id
          item.source, item.withdrawn
     from jsonb_to_recordset($2::jsonb) as item("listId" text, "codeSystem" text, code text, display text,
       "otherNames" jsonb, specimen text, category text, source text, withdrawn boolean)`;
-// 0150 (ORD-9): an ICD-11 release's coded entries.
+// 0152 (ORD-9): an ICD-11 release's coded entries.
 const DIAGNOSES_INSERT = `insert into ehr.catalog_diagnoses (version_id, code, title, other_names, chapter, residual)
   select $1, item.code, item.title, array_to_string(array(select jsonb_array_elements_text(item."otherNames")), '; '),
          item.chapter, item.residual
@@ -184,7 +184,7 @@ const ACTIVE_IDS = { medicine: activeIds('ehr.catalog_medicines'), lab_test: act
  * the approvals file's sha256); its rows; then the old active version off
  * and the new one on. A lock still held after 5 seconds (55P03) is the busy
  * refusal, and the database's own refusals (DATABASE_REFUSALS) are refusals
- * with the database's message. An ICD-11 diagnosis list needs 0150 and has no
+ * with the database's message. An ICD-11 diagnosis list needs 0152 and has no
  * dropped-id check. dryRun does all of it and rolls back. Once COMMIT is
  * sent, a failure with no ERROR reply from the server (the connection lost,
  * or a fatal error in the reply's place) is CommitOutcomeUnknown: the version
@@ -210,7 +210,7 @@ export async function loadSeed(client, { seed, fileSha256, approval, approvalsSh
         and to_regclass('ehr.catalog_retired_codes') is not null
         and ($1 <> 'diagnosis' or to_regclass('ehr.catalog_diagnoses') is not null) as ready`, [seed.kind]);
     if (!present.rows[0].ready) {
-      throw new LoadRefusal(seed.kind === 'diagnosis' ? 'this schema has no catalogue tables for diagnosis (0150 is not applied)'
+      throw new LoadRefusal(seed.kind === 'diagnosis' ? 'this schema has no catalogue tables for diagnosis (0152 is not applied)'
         : 'this schema has no catalogue tables (0149 is not applied)');
     }
     await client.query('lock table ehr.catalog_versions in share row exclusive mode');

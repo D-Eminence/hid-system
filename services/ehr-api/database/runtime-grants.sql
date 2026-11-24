@@ -2028,8 +2028,8 @@ revoke all on function ehr.search_catalog_medicines(text, integer, text, text),
 revoke all on ehr.catalog_versions, ehr.catalog_medicines, ehr.catalog_lab_tests, ehr.catalog_retired_codes
   from public;
 
--- The ICD-11 diagnosis search (0150, ORD-9 of the Akos EHR plan, first
--- slice; design note on hid-system#258, 23 November 2026), exactly as 0150
+-- The ICD-11 diagnosis search (0152, ORD-9 of the Akos EHR plan, first
+-- slice; design note on hid-system#258, 23 November 2026), exactly as 0152
 -- grants and revokes it: the search to the EHR runtime and the schema test
 -- runtime; no privilege for any runtime on the diagnosis list or on its
 -- insert trigger function (sealed releases), which its trigger runs as the

@@ -1,4 +1,4 @@
--- 0150 Diagnosis search on ICD-11, first slice: the diagnosis list and its
+-- 0152 Diagnosis search on ICD-11, first slice: the diagnosis list and its
 -- search (ORD-9 of the Akos EHR plan, lane D). The planned contract's
 -- section "ORD-9: Diagnosis search on ICD-11, recent diagnoses, and
 -- diagnoses by name only" is what this slice builds a part of; the design
@@ -109,7 +109,7 @@
 -- first, here, instead of waiting there with the versions table held
 -- (Rahman's re-review of #320, finding 2). Each with NOWAIT: a busy table
 -- fails the attempt at once, and the attempt gives back what it took; it is
--- made again every 100 ms for at most 5 seconds, then 55P03 "0150: ...
+-- made again every 100 ms for at most 5 seconds, then 55P03 "0152: ...
 -- stayed busy for 5 seconds; nothing applied; run the release again at a
 -- quieter time". When this transaction already holds an earlier
 -- migration's locks that stop other sessions (the runner's dry run), one
@@ -161,11 +161,11 @@ do $$
 begin
   if to_regclass('identity.qoreid_nin_checks') is null or to_regclass('ehr.visit_queue') is null
      or to_regclass('ehr.catalog_versions') is null or to_regclass('ehr.catalog_retired_codes') is null then
-    raise exception using errcode = '55000', message = '0150: 0001-0137 and 0149 must be applied first';
+    raise exception using errcode = '55000', message = '0152: 0001-0137 and 0149 must be applied first';
   end if;
   if to_regclass('ehr.catalog_diagnoses') is not null
      or to_regprocedure('ehr.search_catalog_diagnoses(text,integer)') is not null then
-    raise exception using errcode = '55000', message = '0150: already applied';
+    raise exception using errcode = '55000', message = '0152: already applied';
   end if;
   -- The search below calls 0149's query helper, so its body (the 6 words, 40 characters, prefix matching, never
   -- raw to_tsquery), owner and search_path are pinned beside the status's body.
@@ -181,14 +181,14 @@ begin
                        and proc.proconfig = array['search_path=pg_catalog, pg_temp'])
      or (select md5(proc.prosrc) from pg_proc proc where proc.oid = to_regprocedure('platform.reject_mutation()'))
      is distinct from '398738f39f6eebed2c54da5009495def' then
-    raise exception using errcode = '55000', message = '0150: 0149''s status or query helper, or 0001''s append-only trigger function, is not as made';
+    raise exception using errcode = '55000', message = '0152: 0149''s status or query helper, or 0001''s append-only trigger function, is not as made';
   end if;
   if not exists (select 1 from pg_constraint constraint_row
                   where constraint_row.conrelid = 'ehr.catalog_versions'::regclass
                     and constraint_row.conname = 'catalog_versions_kind_check'
                     and pg_get_constraintdef(constraint_row.oid)
                         = 'CHECK ((kind = ANY (ARRAY[''medicine''::text, ''lab_test''::text])))') then
-    raise exception using errcode = '55000', message = '0150: the catalogue versions'' kind check is not as 0149 made it';
+    raise exception using errcode = '55000', message = '0152: the catalogue versions'' kind check is not as 0149 made it';
   end if;
 end
 $$;
@@ -221,13 +221,13 @@ begin
       -- Both endings are the runner's busy refusal (dry-run-attempts.mjs), so a dry run tries again.
       if holding then
         raise exception using errcode = '55P03',
-          message = '0150: ehr.catalog_versions (a catalogue search or load), ehr.catalog_medicines or '
+          message = '0152: ehr.catalog_versions (a catalogue search or load), ehr.catalog_medicines or '
             || 'ehr.catalog_lab_tests is busy and this transaction already holds an earlier migration''s locks, so it '
             || 'does not wait; nothing applied; run the release again at a quieter time';
       end if;
       if attempt >= 50 then
         raise exception using errcode = '55P03',
-          message = '0150: ehr.catalog_versions (a catalogue search or load), ehr.catalog_medicines or '
+          message = '0152: ehr.catalog_versions (a catalogue search or load), ehr.catalog_medicines or '
             || 'ehr.catalog_lab_tests stayed busy for 5 seconds; nothing applied; run the release again at a quieter '
             || 'time';
       end if;
@@ -473,11 +473,11 @@ end
 $$;
 
 comment on table ehr.catalog_diagnoses is
-  '0150 (ORD-9): the coded entries of an ICD-11 MMS release, one row per entry per version, WHO''s titles verbatim (ICD-11, World Health Organization, CC BY-ND 3.0 IGO) and our own other names apart; no extension codes, no blocks. Loaded by ORD-7''s governed loader. No patient data.';
+  '0152 (ORD-9): the coded entries of an ICD-11 MMS release, one row per entry per version, WHO''s titles verbatim (ICD-11, World Health Organization, CC BY-ND 3.0 IGO) and our own other names apart; no extension codes, no blocks. Loaded by ORD-7''s governed loader. No patient data.';
 comment on function ehr.search_catalog_diagnoses(text, integer) is
-  '0150 (ORD-9): the active ICD-11 release''s entries whose code and title or one other name has a word starting with each word of q (a word-final ''s dropped from q; when nothing matched, once more with a final s dropped from words of 4 or more letters, each word so shortened then a whole word of the title or of one other name); the entry whose code q is (with or without its dot, or with spaces at its dot, and with any run of characters that are neither letters nor digits taken off both ends; its own dot stays) first, then a title or other name that is q, then names starting with q, then shorter titles, then A to Z; at most limit (1-25) and whether more matched. 22023 CATALOG_SEARCH_INVALID for q outside 2-100 characters or a limit outside 1-25.';
+  '0152 (ORD-9): the active ICD-11 release''s entries whose code and title or one other name has a word starting with each word of q (a word-final ''s dropped from q; when nothing matched, once more with a final s dropped from words of 4 or more letters, each word so shortened then a whole word of the title or of one other name); the entry whose code q is (with or without its dot, or with spaces at its dot, and with any run of characters that are neither letters nor digits taken off both ends; its own dot stays) first, then a title or other name that is q, then names starting with q, then shorter titles, then A to Z; at most limit (1-25) and whether more matched. 22023 CATALOG_SEARCH_INVALID for q outside 2-100 characters or a limit outside 1-25.';
 comment on function ehr.catalog_status() is
-  '0149 (ORD-7), 0150 (ORD-9): per kind (diagnosis, lab_test, medicine): whether an active version exists, its label, when it was approved, how many rows it offers, the notices its sources require and the sha256 of its seed file.';
+  '0149 (ORD-7), 0152 (ORD-9): per kind (diagnosis, lab_test, medicine): whether an active version exists, its label, when it was approved, how many rows it offers, the notices its sources require and the sha256 of its seed file.';
 
 -- 6. Post-checks.
 do $$
@@ -486,19 +486,19 @@ declare
 begin
   if exists (select 1 from pg_class relation, lateral aclexplode(coalesce(relation.relacl, acldefault('r', relation.relowner))) acl
               where relation.oid = 'ehr.catalog_diagnoses'::regclass and acl.grantee <> relation.relowner) then
-    raise exception using errcode = '55000', message = '0150: the diagnosis list is granted to a role other than its owner';
+    raise exception using errcode = '55000', message = '0152: the diagnosis list is granted to a role other than its owner';
   end if;
   if exists (select 1 from pg_proc proc, lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
               where proc.oid in ('ehr.search_catalog_diagnoses(text,integer)'::regprocedure, 'ehr.catalog_status()'::regprocedure)
                 and acl.grantee <> proc.proowner
                 and (acl.grantee = 0 or pg_get_userbyid(acl.grantee) not in ('hid_ehr_runtime', 'hid_schema_test_runtime'))) then
-    raise exception using errcode = '55000', message = '0150: a catalogue function is granted to a role other than the EHR and schema test runtimes';
+    raise exception using errcode = '55000', message = '0152: a catalogue function is granted to a role other than the EHR and schema test runtimes';
   end if;
   if (select count(*) from pg_proc proc
        where proc.oid in ('ehr.search_catalog_diagnoses(text,integer)'::regprocedure, 'ehr.catalog_status()'::regprocedure)
          and proc.prosecdef and proc.provolatile = 's' and proc.proowner = owner_oid
          and proc.proconfig = array['search_path=pg_catalog, pg_temp']) <> 2 then
-    raise exception using errcode = '55000', message = '0150: a catalogue function is not as made';
+    raise exception using errcode = '55000', message = '0152: a catalogue function is not as made';
   end if;
   -- Each trigger's events as made (pg_trigger.tgtype: 1 for each row, 2 before, 4 insert, 8 delete, 16 update,
   -- 32 truncate): 27 before update or delete for each row, 34 before truncate. With no WHEN condition (tgqual), no
@@ -511,7 +511,7 @@ begin
          and trigger_row.tgqual is null and trigger_row.tgattr = ''::int2vector and trigger_row.tgnargs = 0
          and ((trigger_row.tgname = 'catalog_diagnoses_append_only' and trigger_row.tgtype = 27)
               or (trigger_row.tgname = 'catalog_diagnoses_no_truncate' and trigger_row.tgtype = 34))) <> 2 then
-    raise exception using errcode = '55000', message = '0150: the diagnosis list is missing its append-only triggers';
+    raise exception using errcode = '55000', message = '0152: the diagnosis list is missing its append-only triggers';
   end if;
   -- 7: before insert for each row, with no WHEN condition, column list or arguments; and the function's body as this
   -- file makes it.
@@ -527,17 +527,17 @@ begin
                        and proc.proowner = owner_oid and proc.proconfig = array['search_path=pg_catalog, pg_temp'])
      or exists (select 1 from pg_proc proc, lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
                  where proc.oid = 'ehr.catalog_diagnosis_not_sealed()'::regprocedure and acl.grantee <> proc.proowner) then
-    raise exception using errcode = '55000', message = '0150: the diagnosis list''s sealed-release trigger is not as made';
+    raise exception using errcode = '55000', message = '0152: the diagnosis list''s sealed-release trigger is not as made';
   end if;
   if not exists (select 1 from pg_constraint constraint_row
                   where constraint_row.conrelid = 'ehr.catalog_versions'::regclass
                     and constraint_row.conname = 'catalog_versions_kind_check' and constraint_row.convalidated
                     and pg_get_constraintdef(constraint_row.oid)
                         = 'CHECK ((kind = ANY (ARRAY[''medicine''::text, ''lab_test''::text, ''diagnosis''::text])))') then
-    raise exception using errcode = '55000', message = '0150: the catalogue versions'' kind check is not as made';
+    raise exception using errcode = '55000', message = '0152: the catalogue versions'' kind check is not as made';
   end if;
   if exists (select 1 from ehr.catalog_diagnoses) then
-    raise exception using errcode = '55000', message = '0150: the diagnosis list must be empty after this file';
+    raise exception using errcode = '55000', message = '0152: the diagnosis list must be empty after this file';
   end if;
 end
 $$;

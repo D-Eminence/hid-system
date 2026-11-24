@@ -1,4 +1,4 @@
-// ORD-9 (0150): the ICD-11 diagnosis list's seed, built from WHO's own
+// ORD-9 (0152): the ICD-11 diagnosis list's seed, built from WHO's own
 // release file (SimpleTabulation-ICD-11-MMS-en.zip, the file
 // ocr-worker/src/reading/diagnosis-list.ts checked its titles against) and
 // our own other names (that file's DIAGNOSIS_SYNONYMS). Node only, no
