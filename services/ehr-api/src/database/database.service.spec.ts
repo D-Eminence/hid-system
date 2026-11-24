@@ -2,8 +2,9 @@ import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService, OWN_FACILITY_WORK, VITALS_STATUS_AWARE } from './database.service';
 
 // 0133 D13 and D14 (owner's Q120 B and Q121 A): the new ehr-api sets app.own_facility_work to '0133' in every staff
-// transaction, so the order-route send and its resend flag follow D14's rule. It never sets it in a patient-self,
-// system or workload transaction. Fictional values only.
+// transaction of withTransaction, so the order-route send and its resend flag follow D14's rule. It never sets it in
+// withStaffTransaction's (ORD-9's recent diagnoses, which read no order route) or in a patient-self, system or workload
+// transaction. Fictional values only.
 const context = { correlationId: 'correlation-own-facility-work', facilityId: 'facility', membershipId: 'membership',
   purposeOfUse: 'direct-care', authorization: 'Bearer user',
   actor: { id: 'account', subject: 'synthetic:doctor', accountId: 'account' } } as unknown as DataAccessContext;
@@ -51,7 +52,7 @@ const staffSetting = (calls: Call[], name: string) => {
 };
 
 describe('EHR DatabaseService staff session (0133 D13 and D14, owner\'s Q120 B and Q121 A)', () => {
-  it('sets app.own_facility_work to 0133 in every staff transaction, beside the staff context', async () => {
+  it('sets app.own_facility_work to 0133 in every withTransaction staff transaction, beside the staff context', async () => {
     const { database, connections } = service();
     await database.withTransaction(context, async () => 'done');
     expect(OWN_FACILITY_WORK).toBe('0133');
@@ -74,7 +75,7 @@ describe('EHR DatabaseService staff session (0133 D13 and D14, owner\'s Q120 B a
     expect(connections.map(switchValue)).toEqual(['0133', '0133', '0133', '0133']);
   });
 
-  it('sets app.vitals_status to 0142 in every staff transaction (0142 D2: this image reads withdrawn readings)', async () => {
+  it('sets app.vitals_status to 0142 in every withTransaction staff transaction (0142 D2: this image reads withdrawn readings)', async () => {
     const { database, connections } = service();
     await database.withTransaction(context, async () => 'done');
     await database.withTransaction(context, async () => 'read', { readOnly: true });
@@ -98,6 +99,9 @@ describe('EHR DatabaseService staff session (0133 D13 and D14, owner\'s Q120 B a
     expect(staffSetting(calls, 'correlation_id')).toBe('correlation-staff');
     expect(calls.some((call) => /purpose_of_use/.test(call.sql))).toBe(false);
     expect(calls.flatMap((call) => call.values)).not.toContain('direct-care');
+    // The recent list reads no order route and no vitals, so neither switch is set here (database.service.ts's
+    // OWN_FACILITY_WORK and VITALS_STATUS_AWARE: withTransaction's staff transactions only).
+    expect(mentionsSwitch(calls)).toBe(false);
   });
 
   it('never sets either switch in a patient-self, system or workload transaction', async () => {
