@@ -119,7 +119,19 @@
 // prescriber still reads dispensed (fills 1 and 2 stand). An edit after
 // fill 1 of another prescription closes its refills (changed) and shows
 // 0148's notice (edited, 1); a hold closes them (stopped; on_hold, 1); each
-// refused refill is 409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE. Then both
+// refused refill is 409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE. Every item's
+// refills carry endsOn, the refills' last day (0152's
+// ehr.prescription_refills_end_on, the clinical owner's decision D9 of 24
+// November 2026: the earliest of the end date, the Lagos day written plus
+// (refills + 2) fills' durations, and that day plus 365), whatever its state.
+// The expiry: a prescription with 1 refill and a 1-day duration, filled once,
+// reads endsOn 3 days after the day it was written; once that day has passed
+// (the clock moved on as the owner moves its writing and its fill back 4
+// days, in replica mode, a fixture, which records no version and no change),
+// it reads closed ended with that day, lists as done work (0152's open
+// refills leave it out), and its refill is refused (409
+// PHARMACY_REFILL_PRESCRIPTION_ENDED with refillsEndedOn, the same day,
+// which is the database's own day for it). Then both
 // services restart with the setting off (and ehr-api's details off again):
 // the item with three fills is still one row (its latest fill); a second
 // dispensing of an item with a refill open is refused exactly as before
@@ -1258,6 +1270,8 @@ try {
         'x-hid-own-progress-accepted': 'ord4' } }), 200, label).items;
   // The Lagos day `offset` days from now (Africa/Lagos is UTC+1, no daylight saving), YYYY-MM-DD.
   const lagosDay = (offset = 0) => new Date(Date.now() + 3_600_000 + offset * 86_400_000).toISOString().slice(0, 10);
+  // A day (YYYY-MM-DD) plus `days`.
+  const plusDay = (day, days) => new Date(Date.parse(`${day}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
   // A fixture for the clinical owner's refill interval (24 November 2026: a refill opens on the Lagos day of the
   // latest fill not reversed plus 3/4 of the duration): the clock moved on, as the owner moves a fill `days` back.
   // Replica mode skips 0023's immutability guard (origin mode only); 0133's key guard fires only when the work item
@@ -1276,6 +1290,29 @@ try {
       }
       await client.query('commit');
       return moved.dispensed_at.toISOString();
+    } catch (error) {
+      await client.query('rollback');
+      throw error;
+    } finally {
+      client.release();
+    }
+  };
+
+  // A fixture for the refills' last day (D9: counted from the Lagos day the prescription was written, created_at):
+  // the clock moved on, as the owner moves the prescription's writing `days` back. Replica mode: no version is
+  // written (0004's versioning is origin mode only), so the item's accepted version still matches and 0148 records no
+  // change; R7's index is kept by PostgreSQL. Answers the new Lagos day written and the row version.
+  const prescriptionWrittenEarlier = async (rx, days) => {
+    const client = await owner.connect();
+    try {
+      await client.query('begin');
+      await client.query('set local session_replication_role = replica');
+      const moved = (await client.query(`update ehr.prescriptions set created_at = created_at - make_interval(days => $2)
+        where id = $1 returning to_char(created_at at time zone 'Africa/Lagos', 'YYYY-MM-DD') as written,
+        row_version::text as version`, [rx.id, days])).rows[0];
+      assert(moved, `the prescription ${rx.id} to move`);
+      await client.query('commit');
+      return moved;
     } catch (error) {
       await client.query('rollback');
       throw error;
@@ -1307,6 +1344,10 @@ try {
     const rxChanged = await newPrescription('active', 'Synthetic losartan 50 mg tablet', { refillsAllowed: 2, ...tenDays });
     const rxStopped = await newPrescription('active', 'Synthetic simvastatin 20 mg tablet', { refillsAllowed: 1, ...tenDays });
     const rxOpen = await newPrescription('active', 'Synthetic metformin 850 mg tablet', { refillsAllowed: 1, ...tenDays });
+    // The refills' last day (0152's ehr.prescription_refills_end_on, D9): with no end date and a 10-day fill, the
+    // Lagos day written plus (refills + 2) x 10 days: 40 days with 2 refills, 30 with 1 (each under 365).
+    const written = lagosDay(0);
+    const endsOnFor = allowed => plusDay(written, (allowed + 2) * 10);
     assert.deepEqual([rxRefills, rxChanged, rxStopped, rxOpen].map(rx => [rx.refillsAllowed, rx.durationValue,
       rx.durationUnit, rx.pharmacyHandoff]), [[2, 10, 'day', SENT], [2, 10, 'day', SENT], [1, 10, 'day', SENT],
       [1, 10, 'day', SENT]], 'the prescriptions with refills are answered with them and their duration, and sent');
@@ -1340,18 +1381,18 @@ try {
       .map(rx => onlyRow(refillList, rx, 'the list before any fill'));
     assert.deepEqual([itemR, itemChanged, itemStopped, itemOpen].map(item => [item.refills, item.dispensing,
       item.pharmacyStep]), [2, 2, 1, 1].map(allowed => [{ allowed, recorded: 0, open: false, closedReason: null,
-      nextFillOn: null }, null, 'received']),
+      nextFillOn: null, endsOn: endsOnFor(allowed) }, null, 'received']),
     `the items before any fill: ${JSON.stringify([itemR, itemChanged, itemStopped, itemOpen])}`);
     assert.deepEqual(onlyRow(refillList, rx4, 'the list before any fill').refills,
-      { allowed: 0, recorded: 1, open: false, closedReason: 'none_left', nextFillOn: null },
-      'a prescription without refills: one fill');
+      { allowed: 0, recorded: 1, open: false, closedReason: 'none_left', nextFillOn: null, endsOn: null },
+      'a prescription without refills: one fill, no last day for refills');
 
     const key1 = freshKey('fill');
     const fill1 = expectStatus(await dispenseFill(itemR, { fillNumber: 1 }, key1), 201, 'fill 1 of 3');
     assert.equal(fill1.fillNumber, 1);
     let readR = await readItem(itemR, 'rxRefills\'s item after fill 1');
     assert.deepEqual([readR.refills, readR.dispensing, readR.lastFilledAt, readR.pharmacyStep],
-      [{ allowed: 2, recorded: 1, open: false, closedReason: 'not_yet', nextFillOn: lagosDay(8) },
+      [{ allowed: 2, recorded: 1, open: false, closedReason: 'not_yet', nextFillOn: lagosDay(8), endsOn: endsOnFor(2) },
         { id: fill1.id, status: 'dispensed', reversed: false, fillNumber: 1 }, fill1.dispensedAt, 'dispensed'],
     `rxRefills's item after fill 1: the refill opens in 8 days: ${JSON.stringify(readR)}`);
     refillList = await ownList('the list after fill 1');
@@ -1364,8 +1405,8 @@ try {
     // Eight days on: fill 1 recorded 8 days earlier, so its refill opens today.
     const fill1At = await fillRecordedEarlier(fill1, 8);
     readR = await readItem(itemR, 'rxRefills\'s item 8 days after fill 1');
-    assert.deepEqual(readR.refills, { allowed: 2, recorded: 1, open: true, closedReason: null, nextFillOn: lagosDay(0) },
-      `the refill opens on its day: ${JSON.stringify(readR.refills)}`);
+    assert.deepEqual(readR.refills, { allowed: 2, recorded: 1, open: true, closedReason: null, nextFillOn: lagosDay(0),
+      endsOn: endsOnFor(2) }, `the refill opens on its day: ${JSON.stringify(readR.refills)}`);
     refillList = await ownList('the list on the day the refill opens');
     oneRowEach(refillList, 'the list on the day the refill opens');
     assert.equal(listClass(onlyRow(refillList, rxRefills, 'the list on the day the refill opens')), 1,
@@ -1400,7 +1441,7 @@ try {
       [[fill1.id, 1], [fill2.id, 2], [fill3.id, 3]], 'three fills on the one item');
     readR = await readItem(itemR, 'rxRefills\'s item after fill 3');
     assert.deepEqual([readR.refills, readR.dispensing, readR.lastFilledAt, readR.pharmacyStep],
-      [{ allowed: 2, recorded: 3, open: false, closedReason: 'none_left', nextFillOn: null },
+      [{ allowed: 2, recorded: 3, open: false, closedReason: 'none_left', nextFillOn: null, endsOn: endsOnFor(2) },
         { id: fill3.id, status: 'dispensed', reversed: false, fillNumber: 3 }, fill3.dispensedAt, 'dispensed'],
     `rxRefills's item after fill 3: ${JSON.stringify(readR)}`);
     refillList = await ownList('the list after fill 3');
@@ -1450,7 +1491,7 @@ try {
     readR = await readItem(itemR, 'rxRefills\'s item after fill 3 was reversed');
     assert.deepEqual([readR.dispensing, readR.pharmacyStep, readR.refills],
       [{ id: fill3.id, status: 'dispensed', reversed: true, fillNumber: 3 }, 'dispensing_reversed',
-        { allowed: 2, recorded: 3, open: false, closedReason: 'none_left', nextFillOn: null }],
+        { allowed: 2, recorded: 3, open: false, closedReason: 'none_left', nextFillOn: null, endsOn: endsOnFor(2) }],
     `rxRefills's item after the reversal: ${JSON.stringify(readR)}`);
     // Fills 1 and 2 stand, so the prescriber still reads dispensed, at the first fill's time, with no reversal (only an
     // item whose every fill is reversed reads dispensing_reversed); pharmacy-api's own answer says the same.
@@ -1466,18 +1507,20 @@ try {
     const changedFill = expectStatus(await dispenseFill(itemChanged), 201, 'fill 1 of rxChanged, without fillNumber');
     assert.equal(changedFill.fillNumber, 1, 'a dispensing without fillNumber is fill 1');
     assert.deepEqual((await readItem(itemChanged, 'rxChanged\'s item after fill 1')).refills,
-      { allowed: 2, recorded: 1, open: false, closedReason: 'not_yet', nextFillOn: lagosDay(8) },
+      { allowed: 2, recorded: 1, open: false, closedReason: 'not_yet', nextFillOn: lagosDay(8), endsOn: endsOnFor(2) },
       'a refill after fill 1, from its day');
     await fillRecordedEarlier(changedFill, 8);
     assert.deepEqual((await readItem(itemChanged, 'rxChanged\'s item 8 days after fill 1')).refills,
-      { allowed: 2, recorded: 1, open: true, closedReason: null, nextFillOn: lagosDay(0) }, 'a refill open on its day');
+      { allowed: 2, recorded: 1, open: true, closedReason: null, nextFillOn: lagosDay(0), endsOn: endsOnFor(2) },
+      'a refill open on its day');
     const editedAfterFill = expectStatus(await ehrCall(doctor, 'PATCH', `${enc}/prescriptions/${rxChanged.id}`,
       { expectedRowVersion: Number(rxChanged.rowVersion), frequency: 'once daily',
         changeReason: 'Synthetic change after the first fill' }), 200, 'edit rxChanged after fill 1');
     assert.equal(editedAfterFill.pharmacyHandoff, undefined, 'an edit after the first fill answers no hand-off');
     const changedRead = await readItem(itemChanged, 'rxChanged\'s item after the edit');
-    assert.deepEqual(changedRead.refills, { allowed: 2, recorded: 1, open: false, closedReason: 'changed', nextFillOn: null },
-      `the edit closes the refills: ${JSON.stringify(changedRead)}`);
+    assert.deepEqual(changedRead.refills, { allowed: 2, recorded: 1, open: false, closedReason: 'changed', nextFillOn: null,
+      endsOn: endsOnFor(2) }, `the edit closes the refills (the day they would have ended unmoved): `
+      + JSON.stringify(changedRead));
     changeShown(changedRead, { change: 'edited', changeCount: 1 });
     refusedWith(await dispenseFill(itemChanged, { fillNumber: 2 }), 409, 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE',
       'a refill after the edit');
@@ -1487,8 +1530,8 @@ try {
       { expectedRowVersion: Number(rxStopped.rowVersion), status: 'on_hold',
         changeReason: 'Synthetic hold after the first fill' }), 200, 'hold rxStopped after fill 1');
     const stoppedRead = await readItem(itemStopped, 'rxStopped\'s item after the hold');
-    assert.deepEqual(stoppedRead.refills, { allowed: 1, recorded: 1, open: false, closedReason: 'stopped', nextFillOn: null },
-      `the hold closes the refills: ${JSON.stringify(stoppedRead)}`);
+    assert.deepEqual(stoppedRead.refills, { allowed: 1, recorded: 1, open: false, closedReason: 'stopped', nextFillOn: null,
+      endsOn: endsOnFor(1) }, `the hold closes the refills: ${JSON.stringify(stoppedRead)}`);
     changeShown(stoppedRead, { change: 'on_hold', changeCount: 1 });
     refusedWith(await dispenseFill(itemStopped, { fillNumber: 2 }), 409, 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE',
       'a refill after the hold');
@@ -1501,9 +1544,9 @@ try {
     assert.deepEqual([rxOpen, rxChanged, rxStopped].map(rx => {
       const row = onlyRow(refillList, rx, 'the list with a refill open');
       return [row.refills, listClass(row)];
-    }), [[{ allowed: 1, recorded: 1, open: true, closedReason: null, nextFillOn: lagosDay(0) }, 1],
-      [{ allowed: 2, recorded: 1, open: false, closedReason: 'changed', nextFillOn: null }, 2],
-      [{ allowed: 1, recorded: 1, open: false, closedReason: 'stopped', nextFillOn: null }, 2]],
+    }), [[{ allowed: 1, recorded: 1, open: true, closedReason: null, nextFillOn: lagosDay(0), endsOn: endsOnFor(1) }, 1],
+      [{ allowed: 2, recorded: 1, open: false, closedReason: 'changed', nextFillOn: null, endsOn: endsOnFor(2) }, 2],
+      [{ allowed: 1, recorded: 1, open: false, closedReason: 'stopped', nextFillOn: null, endsOn: endsOnFor(1) }, 2]],
     'on the list: the refill open is open work; the changed and the held prescriptions\' items are done');
     assertListOrder(refillList, 'the list with a refill open');
     evidence.ord12 = { prescriber: { refillsAllowed: '0-11 on create, answered on reads (none as 0)', twelve: 400,
@@ -1516,8 +1559,9 @@ try {
       keyOfAnotherFill: 'IDEMPOTENCY_CONFLICT', sameKeySameBody: '201 replay', newKeySameBody: '201 replay',
       twoPressesAtOnce: 'one fill, both 201', events: 'MedicationDispensed per fill, fillNumber on refills only',
       acceptance: 'by fill 1 only' },
-    item: { rows: 1, refills: { allowed: 2, recorded: 3, open: false, closedReason: 'none_left', nextFillOn: null },
-      dispensing: 'the latest fill', listOrder: 'first fills, then refills open, then done' },
+    item: { rows: 1, refills: { allowed: 2, recorded: 3, open: false, closedReason: 'none_left', nextFillOn: null,
+      endsOn: 'the Lagos day written + 40 (2 refills of 10 days)' },
+    dispensing: 'the latest fill', listOrder: 'first fills, then refills open, then done' },
     progress: { ownProgress: 'the first fill\'s time', pharmacy: 'lastFilledAt the latest' },
     reversal: { fill2: 'PHARMACY_DISPENSING_NOT_LATEST_FILL', fill3: 201,
       ownProgressAfter: 'dispensed (fills 1 and 2 stand), reversedAt null' },
@@ -1525,6 +1569,54 @@ try {
     heldAfterFill1: { closedReason: 'stopped', notice: 'on_hold (1)', refill: 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE' } };
     step('ORD-12: an edit after fill 1 closes the refills (changed) and shows 0148\'s notice (edited, 1); a hold closes '
       + 'them (stopped; on_hold, 1); a refill of either is refused; a refill open lists after the first fills');
+
+    // The expiry (the clinical owner's D9, 24 November 2026): the refills end on the earliest of the end date, the
+    // Lagos day written plus (refills + 2) x one fill's duration, and that day plus 365. rxEnds: 1 refill, a 1-day
+    // duration, no end date, so its refills end 3 days after the day it was written (and a refill opens 1 day after
+    // the latest fill). The clock is moved on 4 days as the owner moves its writing (created_at) and its fill back, in
+    // replica mode (a fixture: it writes no version, so 0101's check still finds the prescription unchanged, and 0148
+    // records no change).
+    const rxEnds = await newPrescription('active', 'Synthetic amoxicillin 500 mg capsule',
+      { refillsAllowed: 1, durationValue: 1, durationUnit: 'day' });
+    assert.deepEqual(rxEnds.pharmacyHandoff, SENT, 'rxEnds is sent to the hospital\'s own pharmacy');
+    const endsWritten = lagosDay(0);
+    const itemEnds = onlyRow(await ownList('the list with rxEnds'), rxEnds, 'the list with rxEnds');
+    assert.deepEqual(itemEnds.refills, { allowed: 1, recorded: 0, open: false, closedReason: null, nextFillOn: null,
+      endsOn: plusDay(endsWritten, 3) }, `rxEnds before its first fill: ${JSON.stringify(itemEnds.refills)}`);
+    const endsFill = expectStatus(await dispenseFill(itemEnds, { fillNumber: 1 }), 201, 'fill 1 of rxEnds');
+    assert.deepEqual((await readItem(itemEnds, 'rxEnds\'s item after fill 1')).refills, { allowed: 1, recorded: 1,
+      open: false, closedReason: 'not_yet', nextFillOn: lagosDay(1), endsOn: plusDay(endsWritten, 3) },
+    'rxEnds after fill 1: its refill opens tomorrow and can be collected until 3 days after it was written');
+    const movedBack = await prescriptionWrittenEarlier(rxEnds, 4);
+    assert.deepEqual(movedBack, { written: plusDay(endsWritten, -4), version: String(rxEnds.rowVersion) },
+      `rxEnds written 4 days earlier, its version unchanged: ${JSON.stringify(movedBack)}`);
+    await fillRecordedEarlier(endsFill, 4);
+    const endedOn = plusDay(endsWritten, -1);
+    const dbDay = await one(`select to_char(ehr.prescription_refills_end_on(created_at, refills_allowed, duration_value,
+        duration_unit, ends_on), 'YYYY-MM-DD') as day from ehr.prescriptions where id = $1`, [rxEnds.id]);
+    assert.deepEqual([dbDay.day, endedOn], [lagosDay(-1), lagosDay(-1)], `the refills' last day was yesterday: ${dbDay.day}`);
+    const endedRead = await readItem(itemEnds, 'rxEnds\'s item after its refills\' last day');
+    assert.deepEqual(endedRead.refills, { allowed: 1, recorded: 1, open: false, closedReason: 'ended', nextFillOn: null,
+      endsOn: endedOn }, `the refills ended: ${JSON.stringify(endedRead.refills)}`);
+    assert.equal(endedRead.changedAfterDispensing, undefined, 'the fixture recorded no change after dispensing');
+    const endedList = await ownList('the list after rxEnds\'s refills ended');
+    oneRowEach(endedList, 'the list after rxEnds\'s refills ended');
+    const endedRow = onlyRow(endedList, rxEnds, 'the list after rxEnds\'s refills ended');
+    assert.deepEqual([endedRow.refills, listClass(endedRow)], [endedRead.refills, 2],
+      'an item whose refills ended is done work (0152\'s open refills leave it out)');
+    assertListOrder(endedList, 'the list after rxEnds\'s refills ended');
+    const endedRefusal = refusedWith(await dispenseFill(itemEnds, { fillNumber: 2 }), 409,
+      'PHARMACY_REFILL_PRESCRIPTION_ENDED', 'a refill after the refills\' last day');
+    assert.equal(endedRefusal.refillsEndedOn, endedOn, `the refusal says the day they ended: ${JSON.stringify(endedRefusal)}`);
+    assert.deepEqual((await fillsOf(itemEnds)).map(row => row.fill_number), [1], 'no refill recorded after the last day');
+    evidence.ord12.expiry = { rule: 'the earliest of the end date, the Lagos day written + (refills + 2) x one fill, and + 365',
+      oneRefillOneDay: 'endsOn = the day written + 3 (before and after fill 1)', afterTheLastDay: 'closed ended with endsOn; '
+        + 'done work; refill 409 PHARMACY_REFILL_PRESCRIPTION_ENDED with refillsEndedOn (the database\'s own day)',
+      fixture: 'created_at and fill 1 moved back 4 days as the owner in replica mode; version unchanged, no change recorded' };
+    step('ORD-12: the refills\' last day (D9): every item\'s refills carry endsOn (the day written + (refills + 2) fills\' '
+      + 'durations here); with 1 refill and a 1-day duration, once 3 days after the day written have passed, the item reads '
+      + 'closed ended with endsOn, is done work, and its refill is refused (409 PHARMACY_REFILL_PRESCRIPTION_ENDED with '
+      + 'refillsEndedOn, the database\'s own day)');
 
     // ── ORD-12 with the setting off: ehr-api and pharmacy-api booted again, PRESCRIPTION_REFILLS_ENABLED=false (and
     // ehr-api with 0125's details off again, as before this section) ──
