@@ -19,7 +19,7 @@ import { DISPENSING_REPLAY_QUERY, INSERT_DISPENSING, LATER_FILL_QUERY, PharmacyS
 import { PharmacyPrescriptionDetails, PRESCRIPTION_DETAILS_OFF } from './prescription-dispensing-details';
 import { CreateDispensingBodyPipe, DISPENSING_KEY_CONSTRAINT, FILL_KEY_CONSTRAINT, OPEN_REFILLS_QUERY,
   OPEN_REFILLS_TIMEOUT_MS, OPEN_REFILLS_TIMEOUT_QUERY, PharmacyRefills, REFILLS_OFF, WORK_ITEM_REFILLS_QUERY,
-  dispensingDigestInput } from './prescription-refills';
+  dispensingDigestInput, refillPrescriptionEnded } from './prescription-refills';
 import { workListSince } from './work-list-window';
 
 /*
@@ -201,7 +201,9 @@ function harness(options: Options) {
     const standing = latest(fills.filter((row) => !reversalOf(state, row.id)).map((row) => row.dispensed_at));
     const reversed = latest(fills.map((row) => reversalOf(state, row.id)?.reversed_at).filter((at): at is Date => Boolean(at)));
     const opensOn = standing ? plusDays(lagosDay(standing), item.interval ?? 1) : reversed ? lagosDay(reversed) : null;
-    const ended = item.refillsEndOn !== undefined && item.refillsEndOn < LAGOS_TODAY;
+    // Ended: the last day has passed, or the next refill would open only after it (a late fill; 0152's R6).
+    const ended = item.refillsEndOn !== undefined
+      && (item.refillsEndOn < LAGOS_TODAY || (opensOn !== null && opensOn > item.refillsEndOn));
     const mayFill = recorded >= 1 && recorded < 1 + allowed && !item.closed && !ended;
     const closed = recorded === 0 ? null : recorded >= 1 + allowed ? 'none_left' : item.closed
       ?? (ended ? 'ended' : opensOn !== null && opensOn > LAGOS_TODAY ? 'not_yet' : null);
@@ -710,6 +712,24 @@ describe('ORD-12: refills on the work item (setting on)', () => {
       nextFillOn: null, endsOn: yesterday });
   });
 
+  it('F16 a late fill (0152\'s reader): a refill that would open only after the last day reads ended at once, with '
+    + 'endsOn still ahead and no nextFillOn, and is not open work; one that opens on the last day itself reads not_yet',
+  async () => {
+    // Both allow 2 refills with a 23-day interval and end in 10 days. Item 66 was filled 12 days ago: its refill would
+    // open in 11 days, after the last day. Item 67 was filled 13 days ago: its refill opens on the last day.
+    const end = plusDays(LAGOS_TODAY, 10);
+    const items: Item[] = [
+      { n: 66, refills: 2, interval: 23, received: 30, refillsEndOn: end, fills: [{ days: 12 }] },
+      { n: 67, refills: 2, interval: 23, received: 30, refillsEndOn: end, fills: [{ days: 13 }] }];
+    const h = harness({ items, on: true });
+    expect((await readOf(h, 66)).refills).toEqual({ allowed: 2, recorded: 1, open: false, closedReason: 'ended',
+      nextFillOn: null, endsOn: end });
+    expect((await readOf(h, 67)).refills).toEqual({ allowed: 2, recorded: 1, open: false, closedReason: 'not_yet',
+      nextFillOn: plusDays(lagosDay(ago(13)), 23), endsOn: end });
+    await listOf(h);
+    expect(h.sent((sql) => sql === WORK_LIST_QUERY_0133).map((statement) => statement.values[1])).toEqual([[]]);
+  });
+
   it('F15 the two callers of 0152\'s readers ask them in a read-write READ COMMITTED transaction (the readers write '
     + 'the refill scan marker, D8; a READ ONLY transaction would refuse them, 25006)', async () => {
     const calls: [string, (h: ReturnType<typeof harness>) => Promise<unknown>][] = [
@@ -936,6 +956,33 @@ describe('ORD-12: recording a fill', () => {
         .toEqual({ status: 409, code: 'PHARMACY_REFILL_PRESCRIPTION_ENDED', extensions: undefined,
           detail: 'The refills on this prescription have ended. Ask the prescriber for a new one.' });
     }
+  });
+
+  it('D12 a late fill (0152 refuses a refill that would open only after the refills\' last day as '
+    + 'REFILL_PRESCRIPTION_ENDED, DETAIL that day, today or later): the refills end on that day, before this refill '
+    + 'would be due', async () => {
+    const late = harness({ items: ONE, on: true,
+      insertErrors: [sqlError('23514', { message: 'REFILL_PRESCRIPTION_ENDED', detail: '2099-12-31' })] });
+    const problem = await dispense(late, 30, 'ord12-dispense-key-000000000034', { fillNumber: 2 })
+      .catch((error: unknown) => error) as DomainProblem;
+    expect(problem).toBeInstanceOf(DomainProblem);
+    expect({ status: problem.getStatus(), code: problem.code, detail: problem.message, ...problem.extensions }).toEqual({
+      status: 409, code: 'PHARMACY_REFILL_PRESCRIPTION_ENDED', refillsEndedOn: '2099-12-31',
+      detail: 'The refills on this prescription end on 2099-12-31, before this refill would be due. Ask the prescriber '
+        + 'for a new one.' });
+    expect(late.committed.outbox).toEqual([]);
+    expect(late.committed.fills).toHaveLength(1);
+    // The words follow the Lagos day (UTC+1) at Lagos midnight: the last day itself is today ("end on"), a day
+    // before today has passed ("ended on").
+    const lastMoment = new Date('2026-11-24T22:59:59.999Z'); // 23:59:59.999 on 24 November in Lagos
+    const midnight = new Date('2026-11-24T23:00:00.000Z'); // 00:00 on 25 November in Lagos
+    expect(refillPrescriptionEnded('2026-11-24', lastMoment).message).toBe('The refills on this prescription end on '
+      + '2026-11-24, before this refill would be due. Ask the prescriber for a new one.');
+    expect(refillPrescriptionEnded('2026-11-24', midnight).message)
+      .toBe('The refills on this prescription ended on 2026-11-24. Ask the prescriber for a new one.');
+    expect(refillPrescriptionEnded('2026-11-23', lastMoment).message)
+      .toBe('The refills on this prescription ended on 2026-11-23. Ask the prescriber for a new one.');
+    expect(refillPrescriptionEnded('2026-11-25', midnight).extensions).toEqual({ refillsEndedOn: '2026-11-25' });
   });
 
   it('D8 another 23514 is passed on unchanged (a broken session, not a refusal for the pharmacist)', async () => {

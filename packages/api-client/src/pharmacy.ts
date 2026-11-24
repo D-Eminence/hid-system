@@ -233,10 +233,12 @@ export type PharmacyStep = 'received' | 'accepted' | 'dispensed' | 'dispensing_r
  * prescription allows is recorded; a reversed fill counts), `stopped` (the
  * prescription is on hold, completed, cancelled or entered in error),
  * `changed` (the prescribing team changed it after it was accepted: an edit,
- * or a hold then resume), `ended` (the refills' last day, `endsOn`, is past:
- * the earliest of the prescription's end date, the Lagos day it was written
- * plus (refills + 2) times one fill's duration, and that day plus 365; the
- * clinical owner's decision of 24 November 2026),
+ * or a hold then resume), `ended` (no refill can be collected any more: the
+ * refills' last day, `endsOn`, is past, or the next refill would open only
+ * after it, a late fill; the last day is the earliest of the prescription's
+ * end date, the Lagos day it was written plus (refills + 2) times one fill's
+ * duration, and that day plus 365; the clinical owner's decision of 24
+ * November 2026),
  * `not_yet` (the refill interval has not passed: the refill opens on
  * `nextFillOn`, the Lagos day of the latest fill not reversed plus 3/4 of the
  * prescription's duration, rounded up; the clinical owner's rule of 24
@@ -261,7 +263,9 @@ export type PharmacyRefillsClosedReason = 'none_left' | 'changed' | 'stopped' | 
  *   send it;
  * - `endsOn`: the last Lagos day (YYYY-MM-DD) a refill can be collected,
  *   whatever the item's state: show "Refills until <date>" while refills
- *   remain, and "Refills ended on <date>" once `closedReason` is `ended`.
+ *   remain; once `closedReason` is `ended`, "Refills ended on <date>" when
+ *   that day has passed, and "Refills end on <date>, before the next one is
+ *   due" when it is today or later (a late fill).
  *   Null when the prescription allows no refill, for an item from another
  *   facility's order route, and from a pharmacy-api that does not send it (or
  *   sends anything but a day).
@@ -413,7 +417,8 @@ export interface CreatePharmacyDispensingInput {
    * nothing. Refusals (409): PHARMACY_FILL_NUMBER_CHANGED with
    * `fillsRecorded` (another fill was recorded since the item was read: read
    * it again), PHARMACY_NO_REFILLS_LEFT, PHARMACY_REFILL_PRESCRIPTION_ENDED
-   * with `refillsEndedOn` (YYYY-MM-DD, the refills' last day, `endsOn`),
+   * with `refillsEndedOn` (YYYY-MM-DD, the refills' last day, `endsOn`: past,
+   * or today or later when this refill would open only after it),
    * PHARMACY_REFILL_TOO_SOON with `refillOpensOn` (YYYY-MM-DD, the Lagos day
    * the refill opens),
    * PHARMACY_PRESCRIPTION_NOT_DISPENSABLE (held, stopped or changed),

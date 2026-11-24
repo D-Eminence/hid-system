@@ -145,23 +145,27 @@ const WORK_LIST_ORDER = `order by o.open_work desc,o.refill_open asc,case when o
  * pharmacy.work_item_refills once after it, for the own rows shown (at most
  * 200). Both read ehr.prescriptions under 0152's refill scan marker (the
  * clinical owner's D8, 24 November 2026), so that table's read policies no
- * longer run per row under a NOBYPASSRLS owner (about 10 ms a row before);
- * the open refills read only the facility's prescriptions with refills
- * written in the last 365 Lagos days whose refills have not ended (D9: they
- * end one fill's length after the course should have finished, or after a
- * year, at the latest), so their cost is bounded by the prescriptions still
- * refillable, not by the facility's history; what still grows with those is
- * the work items' and the fills' own row-level security, about 0.3 ms each.
- * The whole request (listWorkItems, every reader on), measured on 20,000 own
- * items, 200 of them with a refill open and listed, 11 loads: 4.1-4.9 s
- * under a NOSUPERUSER NOBYPASSRLS owner (8.2-9.8 s before D8; the open
- * refills 0.43-0.60 s, this query 2.7-3.2 s, the per-item reader
- * 0.38-0.50 s, 0133's states 0.37-0.51 s, the audit rows 0.12-0.20 s, the
+ * longer run per row under a NOBYPASSRLS owner (about 10 ms a row before).
+ * The open refills read the facility's prescriptions that allow refills and
+ * were written in the last 365 Lagos days: under a NOBYPASSRLS owner, every
+ * one of them, ended or not, the last day checked on each (about 10
+ * microseconds a row; only an owner that bypasses row-level security leaves
+ * the ended ones out inside the index), and a prescription leaves the set on
+ * its refills' last day at the latest (D9), so their cost no longer grows
+ * with the facility's history. They ask the work items' read policies only of
+ * the due items they answer (at most 200 passing), so their cost does not
+ * grow with how many refills are open at once; what grows is the work items'
+ * and the fills' own row-level security on the live refill prescriptions,
+ * about 0.15 ms each. The whole request (listWorkItems, every reader on),
+ * measured on 20,000 own items, 11 loads, under a NOSUPERUSER NOBYPASSRLS
+ * owner: with 200 refills open at once 3.7-4.3 s (8.2-9.8 s before D8; the
+ * open refills 0.07-0.10 s, this query 2.8-3.4 s, the per-item reader
+ * 0.06-0.08 s, 0133's states 0.37-0.51 s, the audit rows 0.11-0.20 s, the
  * rest under 0.05 s each: that fixture gave 0124's and 0125's readers almost
- * nothing to answer, so add their costs above where they do), 3.7-4.3 s under
- * a superuser owner. With 2,000 prescriptions with refills not ended (200
- * open), 5 loads: 4.8-5.5 s (the open refills 0.99-1.37 s, within their
- * 3-second limit, so no load said refillsUnavailable) and 4.4-5.2 s. The
+ * nothing to answer, so add their costs above where they do); with 2,000
+ * open at once 3.9-4.3 s (the open refills 0.32-0.37 s), with 10,000
+ * 5.0-5.5 s (1.49-1.67 s), no load past the 3-second limit; under a
+ * superuser owner 2.9-3.4 s at each. The
  * setting goes on only after the whole request is measured at the hospital's
  * numbers and the cost accepted in writing, and both staff front ends are
  * ready (INTERFACE_CONTRACT.md, ORD-12, "Before the setting goes on").

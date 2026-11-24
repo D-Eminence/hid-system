@@ -3,6 +3,7 @@ import type { PoolClient } from 'pg';
 import { DomainProblem } from '../common/problem';
 import { createValidationPipe } from '../common/validation-pipe';
 import { CreateDispensingDto, CreateRefillDispensingDto } from './dto/dispensing.dto';
+import { lagosDayAt } from './work-list-window';
 
 /** The body a dispensing carries: today's, or with `fillNumber` while refills are on. */
 export type CreateDispensingInput = CreateDispensingDto | CreateRefillDispensingDto;
@@ -68,15 +69,24 @@ export const OPEN_REFILLS_QUERY = `select work_item_id::text as work_item_id
  * owner (production's kind) 0152's open refills read the facility's
  * prescriptions with refills under its refill scan marker (D8), so the table's
  * own read policies no longer run per row (they cost about 10 ms a row
- * before), and a prescription leaves the set on its refills' last day at the
- * latest (D9: one fill's length after its course should have finished, or a
- * year), so the set no longer grows with the facility's history. Measured at
- * 20,000 items with 200 refills open, inside the whole list request (every
- * reader on, 11 loads): the open refills 0.43-0.60 s and the request 4.1-4.9 s
- * (8.2-9.8 s before D8); with 2,000 prescriptions with refills not ended (200
- * open), 0.99-1.37 s and 4.8-5.5 s (5 loads), no load past this limit. What
- * still grows with those prescriptions is the work items' and the fills' own
- * row-level security, about 0.3 ms each. Past the limit the list stops
+ * before): every one that allows refills and was written in the last 365
+ * Lagos days, ended or not, its last day checked on each (about 10
+ * microseconds a row; only an owner that bypasses row-level security leaves
+ * the ended ones out inside the index). A prescription leaves the set on its
+ * refills' last day at the latest (D9: one fill's length after its course
+ * should have finished, or a year), so the set no longer grows with the
+ * facility's history. The work items' read policies are asked only of the
+ * due items answered (at most 200 passing), so the cost does not grow with
+ * how many refills are open at once; what grows is the work items' and the
+ * fills' own row-level security on the live refill prescriptions, about 0.15
+ * ms each, so this limit would be reached at about 20,000. Measured at 20,000
+ * items inside the whole list request (every reader on, 11 loads): with 200
+ * refills open at once the open refills 0.07-0.10 s and the request 3.7-4.3 s
+ * (8.2-9.8 s before D8); with 2,000, 0.32-0.37 s and 3.9-4.3 s; with 10,000,
+ * 1.49-1.67 s and 5.0-5.5 s; no load past this limit. (Before the
+ * review of 24 November 2026 the open refills asked those policies of every
+ * due item and grew about 2 ms for each refill open at once: they hit this
+ * limit on every load from about 1,400-1,500 open at once.) Past the limit the list stops
  * waiting: it answers without open refills and says so (`refillsUnavailable`),
  * instead of holding every row past the staff client's 10 s timeout
  * (@hid/api-client's default). Set with set_config(..., true) inside the open
@@ -112,9 +122,11 @@ export interface WorkItemRefillsRow {
 
 /**
  * Why no further fill can be recorded now (0152's reader); null while one is
- * open, and before the first fill. `ended`: the refills' last day
- * (`endsOn`) has passed. `not_yet`: the refill interval has not passed (the
- * clinical owner's rule, 24 November 2026); it opens on `nextFillOn`.
+ * open, and before the first fill. `ended`: no refill can be collected any
+ * more: the refills' last day (`endsOn`) has passed, or the next refill would
+ * open only after it (a late fill; `endsOn` is then today or later).
+ * `not_yet`: the refill interval has not passed (the clinical owner's rule,
+ * 24 November 2026); it opens on `nextFillOn`, never after `endsOn`.
  */
 export type RefillsClosedReason = 'none_left' | 'changed' | 'stopped' | 'ended' | 'not_yet';
 const CLOSED_REASONS: ReadonlySet<string> = new Set(['none_left', 'changed', 'stopped', 'ended', 'not_yet']);
@@ -127,7 +139,8 @@ const LAGOS_DAY = /^\d{4}-\d{2}-\d{2}$/;
  * - `open`: another fill may be recorded now ("Dispense" again);
  * - `closedReason`: why not, once at least one fill is recorded (null while
  *   open, and before the first fill); `not_yet` while the refill interval
- *   runs, `ended` once `endsOn` has passed;
+ *   runs, `ended` once `endsOn` has passed or when the next refill would open
+ *   only after it (a late fill);
  * - `nextFillOn`: the Lagos day (YYYY-MM-DD) from which the next fill may be
  *   recorded: in the future while `not_yet` ("Refill from <date>"), today or
  *   earlier while open; null before the first fill and once closed for good;
@@ -135,10 +148,11 @@ const LAGOS_DAY = /^\d{4}-\d{2}-\d{2}$/;
  *   ehr.prescription_refills_end_on, the clinical owner's decision D9 of 24
  *   November 2026: the earliest of the prescription's end date, the Lagos day
  *   it was written plus (allowed + 2) times one fill's duration, and that day
- *   plus 365), whatever the item's state ("Refills until <date>"; "Refills
- *   ended on <date>" once `closedReason` is `ended`); null when the
- *   prescription allows no refill, for an item from another facility's order
- *   route, and when the reader does not give a day.
+ *   plus 365), whatever the item's state ("Refills until <date>"; once
+ *   `closedReason` is `ended`, "Refills ended on <date>" when that day has
+ *   passed, else "Refills end on <date>, before the next one is due"); null
+ *   when the prescription allows no refill, for an item from another
+ *   facility's order route, and when the reader does not give a day.
  * The label "Fill 2 of 3" is fill `recorded` (or `recorded + 1` when
  * dispensing again) of `allowed + 1`.
  */
@@ -185,7 +199,8 @@ interface RefillsWorkRow {
  * - both readers write 0152's refill scan marker (D8), so they are asked
  *   only in read-write transactions (the work list and the single read, READ
  *   COMMITTED);
- * - the refills end on their last day, `endsOn` (D9): after it the item reads
+ * - the refills end on their last day, `endsOn` (D9): after it, or once the
+ *   next refill would open only after it (a late fill), the item reads
  *   `ended`, is not open work, and a refill is refused 409
  *   PHARMACY_REFILL_PRESCRIPTION_ENDED with `refillsEndedOn`;
  * - when either reader fails on the list, the list says so
@@ -342,18 +357,25 @@ export function refillTooSoon(opensOn: string | undefined): DomainProblem {
 }
 
 /**
- * 409: a refill after the refills' last day (0152's REFILL_PRESCRIPTION_ENDED:
- * the earliest of the prescription's end date, the Lagos day it was written
- * plus (refills + 2) times one fill's duration, and that day plus 365; the
- * clinical owner's decision D9, 24 November 2026). `refillsEndedOn` is that
- * day (YYYY-MM-DD, the refusal's DETAIL), as PHARMACY_REFILL_TOO_SOON carries
- * `refillOpensOn`; left out if the DETAIL is not a day.
+ * 409: the refills have ended (0152's REFILL_PRESCRIPTION_ENDED). Their last
+ * day is the earliest of the prescription's end date, the Lagos day it was
+ * written plus (refills + 2) times one fill's duration, and that day plus 365
+ * (the clinical owner's decision D9, 24 November 2026). The database refuses
+ * a refill after that day, and also a refill that would open only after it
+ * (a late fill: the refill interval from the latest fill ends past the last
+ * day, so no refill can be collected again). `refillsEndedOn` is that last
+ * day (YYYY-MM-DD, the refusal's DETAIL), as PHARMACY_REFILL_TOO_SOON
+ * carries `refillOpensOn`; left out if the DETAIL is not a day. The words
+ * follow the day: before today (Lagos, at `now`), "ended on"; today or
+ * later (a late fill), "end on <day>, before this refill would be due".
  */
-export function refillPrescriptionEnded(endedOn?: string): DomainProblem {
+export function refillPrescriptionEnded(endedOn?: string, now: Date = new Date()): DomainProblem {
   const day = lagosDayOrNull(endedOn) ?? undefined;
   return new DomainProblem(409, 'PHARMACY_REFILL_PRESCRIPTION_ENDED',
-    day ? `The refills on this prescription ended on ${day}. Ask the prescriber for a new one.`
-      : 'The refills on this prescription have ended. Ask the prescriber for a new one.',
+    !day ? 'The refills on this prescription have ended. Ask the prescriber for a new one.'
+      : day < lagosDayAt(now) ? `The refills on this prescription ended on ${day}. Ask the prescriber for a new one.`
+        : `The refills on this prescription end on ${day}, before this refill would be due. Ask the prescriber for a `
+          + 'new one.',
     undefined, day ? { extensions: { refillsEndedOn: day } } : undefined);
 }
 
