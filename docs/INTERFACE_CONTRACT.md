@@ -12423,3 +12423,312 @@ when `dateOfBirthEstimated`, and "NIN Not Verified". On `sent_for_review`
 show the message and nobody else's details. After `identified`, offer
 "Verify NIN" (ID-6). Never show `firstName`/`lastName` of a record whose
 `recordKind` is `unknown`.
+
+## ROS-1. Duty roster, leave and licence renewals (Release D, migrations 0199-0202, provisional; not live until signed)
+
+Built exactly as `docs/EHR_PLANNED_CONTRACT.md` ROS-1 says, on the owner's answers of 25 Nov 2026 (Q242 A, Q243 A,
+Q244 A, Q245 A, Q246 A, Q247 A, Q193 A, Q149 A, Q160 A, Q161 A) and at the recommended option of the section's
+smaller choices (not yet answered by the owner; the owner can still change them): Q-ROS-8 A (the administrator names
+each department's in-charges), Q-ROS-9 A (published rosters are seen by every staff role), Q-ROS-10 A (a published
+roster changes until each shift starts), Q-ROS-11 A (overlap and rest checked per person at this facility), Q-ROS-12 A
+(the export shows the last 4 characters of a licence number), Q-ROS-13 A (an administrator's own renewal is allowed
+and marked), Q-ROS-14 A (no renewals at governed facilities in this release), Q-ROS-15 A (no free text). Numbers
+0199-0202 are provisional. 0199-0201 read nothing 0140-0198 create; 0202 needs NUR-1's 0176 (`ehr.clinical_shifts`)
+and 0200.
+
+"Duty roster" (Q193 A): every shift here is one of the facility's clinical shifts from NUR-1 (`GET
+/api/v1/ehr/clinical-shifts`, set up by administrators). The cashier's day is the "till day" (BILL-1), and these
+codes are never `billing.shift.*`.
+
+Two service flags in identity-api, off by default: `HR_CREDENTIALS_ENABLED` (routes 1-5; while off 503
+`HR_CREDENTIALS_NOT_AVAILABLE`) and `DUTY_ROSTER_ENABLED` (routes 6-22; while off 503 `DUTY_ROSTER_NOT_AVAILABLE`).
+Both are on in staging and, in production, at the sealed demo and QA facilities only (fictional staff); on at real
+facilities only after the owner's go-live (Q160 A). A database without the route's migration answers the same 503.
+Screens show their own words for the code: "Licence renewals are not switched on yet." and "The duty roster and leave
+are not switched on yet."
+
+All routes are under `/api/v1/identity/` and need a staff session and `X-Facility-ID` (400 `FACILITY_REQUIRED`
+without it; 403 `FACILITY_ACCESS_DENIED` for a facility the caller is not active at; 403 `PATIENT_SCOPE_DENIED` for a
+patient session). Purpose is always `healthcare-operations`, whatever `X-Purpose-Of-Use` says. Every write needs an
+`Idempotency-Key` (16-128 URL-safe characters; 400 `IDEMPOTENCY_KEY_REQUIRED`); a replay with the same body answers
+the first answer with `"replayed": true`, another body 409 `IDEMPOTENCY_KEY_REUSED`. Writes on an existing record send
+`expectedRowVersion` (409 `VERSION_CONFLICT`, "Someone else changed this. Reload it and try again."). Any other body
+or query field, a wrong type or a length outside the rules: 400 `VALIDATION_FAILED` ("Check the highlighted
+fields."). No Health ID or NIN in any path, query, body or answer. Dates are Lagos calendar dates `YYYY-MM-DD`;
+times are ISO UTC ending in `Z`; screens show both in Lagos (`@hid/ui/display`).
+
+**Who** (three new codes, 0201; HR & Credentials keeps `workforce.manage`):
+
+| Backend role | `workforce.roster.read` | `workforce.leave.request` | `workforce.roster.manage` | `workforce.manage` (today) |
+|---|---|---|---|---|
+| `receptionist`, `nurse`, `clinician`, `doctor`, `lab`, `pharmacist` | yes | yes | no | no |
+| `admin`, `org_admin` | yes | yes | yes | yes |
+| others (`cashier`, `billing_officer`, narrow roles, platform roles) | no | no | no | no |
+
+- **Editors** of a department's roster: holders of `workforce.roster.manage`, and that department's active in-charges
+  (route 7) who hold `workforce.roster.read`. They also decide leave sent to that department; administrators decide
+  all leave.
+- Route 22 needs only an active membership at the facility.
+- Session areas (SX-1): `dutyRoster`, "Duty roster and leave", shown with `workforce.roster.read`, used in full with
+  `workforce.roster.manage` (staff roles: view; administrators: full). HR & Credentials stays in `admin`.
+
+### Licence renewals (routes 1-5, `HR_CREDENTIALS_ENABLED`)
+
+Who: a staff session with `workforce.manage` at a self-signed-up facility (0086's rule, as `GET
+/identity/facility-staff`): 403 `HR_CREDENTIALS_NOT_ALLOWED` ("Only this facility's administrator can see and record
+licence renewals.") without it; 403 `STAFF_MANAGEMENT_NOT_AVAILABLE` at governed and legacy facilities (Q-ROS-14 A).
+Routes 4 and 5 also need support's review of the facility (409 `FACILITY_REVIEW_PENDING`).
+
+**The licence** (every answer):
+
+```json
+{ "role": "nurse", "body": "NMCN", "numberHint": "4567", "status": "expiring_30",
+  "validUntil": "2026-12-31", "daysLeft": 28,
+  "renewal": { "renewalId": "uuid", "period": "licence_year", "licenceYear": 2026, "validUntil": "2026-12-31",
+    "checkedHow": "regulator_register", "checkedOn": "2026-01-10", "checkedByMembershipId": "uuid",
+    "checkedByName": "Bola Fictional", "selfRecorded": false, "recordedAt": "2026-01-10T09:12:00.000Z" } }
+```
+
+- `status`: `valid` (more than 60 days left), `expiring_60` (31-60), `expiring_30` (0-30), `expired` (`validUntil`
+  before today, Lagos), `not_recorded` (a licence is on record, no renewal), `no_licence` (a licensed role with no
+  licence on record). `renewal`, `validUntil` and `daysLeft` are `null` for the last two.
+- The licence of a role is SX-4's (the latest attestation of each active licensed role grant). `renewal` is the latest
+  renewal of that licence (same body and number) not withdrawn.
+- `numberHint`: the last 4 letters or digits, as everywhere. The full number is never answered.
+- `checkedHow`: `regulator_register` ("Checked on the regulator's register"), `certificate_seen` ("Original licence
+  certificate seen"), `in_person` ("Checked in person").
+- `selfRecorded`: the administrator recorded their own renewal (Q-ROS-13 A); screens show "Recorded by the member
+  themselves".
+- A status is a warning only. Nothing is refused or changed because a licence has expired (Q243 A).
+
+**1. `GET /identity/staff-licences`**: the list.
+
+```json
+{ "facilityId": "uuid", "asOf": "2026-12-03",
+  "counts": { "valid": 12, "expiring60": 2, "expiring30": 1, "expired": 1, "notRecorded": 4, "noLicence": 0 },
+  "members": [ { "membershipId": "uuid", "name": "Ada Fictional", "roles": ["nurse"], "isSelf": false,
+    "licences": [ licence ] } ] }
+```
+
+Every active member, most urgent first (expired, then 30, 60, not recorded, no licence, valid), then by name. A member
+with no licensed role has `licences: []`.
+
+**2. `GET /identity/staff-licences/:membershipId`**: one member, each licence with `renewals`: every renewal of it,
+newest first, each as `renewal` above plus `withdrawn: null | { "reasonCode", "withdrawnAt", "withdrawnByMembershipId" }`.
+404 `FACILITY_STAFF_NOT_FOUND` ("This person does not work at this facility.") for an ended membership or another
+facility's.
+
+**3. `GET /identity/staff-licences/export`**: `200 text/csv; charset=utf-8` with a byte-order mark,
+`Content-Disposition: attachment; filename="licence-check-2026-12-03.csv"` (Lagos date), `Cache-Control: no-store`.
+One header row, then one row per licence (members with no licensed role are left out):
+`Staff name,Roles,Licence body,Number ending,Status,Valid until,Checked how,Checked on,Checked by,Recorded by the member themselves`.
+Statuses and methods are in words ("Expires within 30 days", "Checked on the regulator's register"); dates are
+`YYYY-MM-DD` (Lagos). A cell starting with `=`, `+`, `-`, `@`, a tab or a carriage return is prefixed with `'`.
+
+**4. `POST /identity/staff-licences/renewals`**: record a renewal.
+
+```json
+{ "membershipId": "uuid", "role": "nurse", "period": "licence_year", "licenceYear": 2027, "validUntil": null,
+  "checkedHow": "regulator_register", "checkedOn": "2026-12-03", "attested": true }
+```
+
+| Field | Rule |
+|---|---|
+| `membershipId` | an active member of this facility (404 `FACILITY_STAFF_NOT_FOUND`) |
+| `role` | `doctor`, `nurse`, `lab` or `pharmacist`, held now, with a licence on record (409 `LICENCE_NOT_ON_RECORD`) |
+| `period` | `licence_year` (then `licenceYear`, last year to 3 years ahead, and `validUntil` null) or `expiry_date` (then `validUntil`, up to 400 days ago to 5 years ahead, and `licenceYear` null) |
+| `checkedHow` | `regulator_register`, `certificate_seen` or `in_person` |
+| `checkedOn` | today or up to 90 days ago (Lagos) |
+| `attested` | `true`: the administrator confirms the text `facility-licence-renewal-v1` |
+
+Dates outside the rules: 400 `LICENCE_RENEWAL_DATES_INVALID`. Answer 201 `{ "renewal", "licence", "replayed": false }`
+with the licence's new status.
+
+**5. `POST /identity/staff-licences/renewals/:renewalId/withdraw`**: body `{ "reasonCode": "wrong_member" |
+"wrong_dates" | "wrong_licence" | "other" }`. Answer 200 `{ "licence", "replayed" }`. 404
+`LICENCE_RENEWAL_NOT_FOUND`; 409 `LICENCE_RENEWAL_ALREADY_WITHDRAWN`.
+
+### Department in-charges (routes 6-8, `DUTY_ROSTER_ENABLED`)
+
+The in-charge card: `{ "inChargeId", "departmentCode", "membershipId", "since", "setByMembershipId", "rowVersion" }`.
+
+**6. `GET /identity/duty-roster/in-charges`** (`workforce.roster.read`): `{ "departments": [ { "departmentCode",
+"inCharges": [card] } ] }`, one entry per profile department.
+
+**7. `POST /identity/duty-roster/in-charges`** (`workforce.roster.manage`): body `{ "departmentCode", "membershipId" }`.
+The member must be active here and hold `workforce.roster.read` (400 `IN_CHARGE_MEMBER_INVALID`). Up to 5 per
+department (409 `IN_CHARGE_LIMIT_REACHED`); already in charge: 409 `IN_CHARGE_ALREADY`. Answer 201 `{ "inCharge",
+"replayed" }`.
+
+**8. `POST /identity/duty-roster/in-charges/:inChargeId/end`** (`workforce.roster.manage`): body
+`{ "expectedRowVersion" }`. Answer 200 `{ "inCharge", "replayed" }` with `endedAt`. 404 `IN_CHARGE_NOT_FOUND`.
+
+An in-charge whose membership ends, or who no longer holds `workforce.roster.read`, stops being an editor at once.
+
+### Leave (routes 9-14, `DUTY_ROSTER_ENABLED`)
+
+The leave card:
+
+```json
+{ "leaveRequestId": "uuid", "membershipId": "uuid", "leaveType": "annual", "startsOn": "2026-12-14",
+  "endsOn": "2026-12-18", "days": 5, "departmentCode": "maternity", "status": "requested",
+  "requestedAt": "…", "decidedAt": null, "decidedByMembershipId": null, "cancelledAt": null, "rowVersion": 1 }
+```
+
+- `leaveType`: `annual`, `sick`, `maternity`, `study` or `other` (screens: "Annual leave", "Sick leave", "Maternity
+  leave", "Study leave", "Other leave"). It is answered only to the requester and to the deciders of that request.
+- `days`: calendar days, both ends included. `status`: `requested`, `approved`, `declined` or `cancelled`.
+- There is no reason, note or medical field (Q244 A, Q-ROS-15 A).
+
+**9. `GET /identity/me/leave-requests`** (`workforce.leave.request`): `{ "items": [card] }`, the caller's own at this
+facility, newest first (up to 100).
+
+**10. `POST /identity/me/leave-requests`** (`workforce.leave.request`): body `{ "leaveType", "startsOn", "endsOn",
+"departmentCode"? }`. `startsOn` from 30 days ago (sick leave recorded late); `endsOn` on or after it, at most 365 days
+later (400 `LEAVE_DATES_INVALID`). `departmentCode`: one of this facility's profile departments (400
+`DEPARTMENT_INVALID`); left out, administrators decide. Overlapping another of the caller's requested or approved
+leave: 409 `LEAVE_OVERLAPS`. Answer 201 `{ "leaveRequest", "replayed" }`.
+
+**11. `POST /identity/me/leave-requests/:leaveRequestId/cancel`** (the requester): body `{ "expectedRowVersion" }`.
+From `requested`, or from `approved` before `startsOn` (409 `LEAVE_CANCEL_NOT_ALLOWED` otherwise). Duties are not
+put back.
+
+**12. `GET /identity/leave-requests[?status=requested|decided][&departmentCode=]`**: administrators see every request
+here; an in-charge sees those sent to their departments (403 `LEAVE_DECISION_NOT_ALLOWED` for anyone else).
+`status` defaults to `requested`; `decided` lists approved, declined and cancelled requests of the last 90 days.
+`{ "items": [card], "hasMore": false, "limit": 200 }`, earliest `startsOn` first.
+
+**13. `POST /identity/leave-requests/:leaveRequestId/approve`** and **14. `…/decline`**: body `{ "expectedRowVersion" }`.
+Only from `requested` (409 `LEAVE_ALREADY_DECIDED`). Never one's own (409 `LEAVE_OWN_DECISION_NOT_ALLOWED`). Approving
+is refused while the person has duties not yet started on those days (409 `LEAVE_CLASHES_WITH_ROSTER`, `details:
+{ "dates": ["2026-12-15"] }`, from 0202). Answer 200 `{ "leaveRequest", "replayed" }`.
+
+### Duty roster (routes 15-22, `DUTY_ROSTER_ENABLED`)
+
+**The roster card:**
+
+```json
+{ "rosterId": "uuid", "departmentCode": "maternity", "weekStart": "2026-12-07", "weekEnd": "2026-12-13",
+  "status": "published", "publishedAt": "…", "publishedByMembershipId": "uuid", "publishCount": 1,
+  "changedSincePublished": false, "rowVersion": 7, "canEdit": true,
+  "rules": { "minRestHours": 8, "status": "draft" },
+  "shifts": [ { "shiftId": "uuid", "name": "Night", "startsAt": "20:30", "endsAt": "08:00", "active": true } ],
+  "assignments": [ { "assignmentId": "uuid", "membershipId": "uuid", "shiftId": "uuid", "dutyDate": "2026-12-07",
+    "startsAt": "2026-12-07T19:30:00.000Z", "endsAt": "2026-12-08T07:00:00.000Z", "attendance": "not_marked",
+    "coveredByMembershipId": null, "attendanceMarkedAt": null, "attendanceMarkedByMembershipId": null,
+    "rowVersion": 1 } ],
+  "unavailable": [ { "membershipId": "uuid", "from": "2026-12-09", "to": "2026-12-11", "kind": "leave_approved" } ] }
+```
+
+- `shifts`: this facility's active clinical shifts and any shift a duty here uses (Lagos `HH:MM`; a shift may end the
+  next day).
+- `rules.status` is `draft` until the clinical lead signs the minimum rest; screens say "At least 8 hours between
+  duties (draft, awaiting the clinical lead)".
+- `attendance`: `not_marked`, `present`, `absent` or `swapped` (then `coveredByMembershipId`).
+- `unavailable` is answered to editors only (`[]` for others): approved (`leave_approved`) and requested
+  (`leave_requested`) leave in the week. Never the leave type.
+- Drafts are answered to editors only; anyone else gets 404 `ROSTER_NOT_FOUND`.
+
+**15. `GET /identity/duty-rosters?weekStart=YYYY-MM-DD`** (`workforce.roster.read`): `{ "weekStart", "items": [ {
+"rosterId", "departmentCode", "status", "assignmentCount", "publishedAt", "changedSincePublished", "canEdit" } ],
+"inChargeOf": ["maternity"] }`. Editors also get departments with no roster yet (`rosterId: null`, `status: "none"`).
+`weekStart` must be a Monday from 8 weeks ago to 26 weeks ahead (400 `ROSTER_WEEK_INVALID`).
+
+**16. `GET /identity/duty-rosters/:rosterId`**: the roster card. 404 `ROSTER_NOT_FOUND`.
+
+**17. `POST /identity/duty-rosters`** (editors of the department): body `{ "departmentCode", "weekStart" }`. Answer
+201 `{ "outcome": "created" | "already_exists", "roster", "replayed" }`. 400 `DEPARTMENT_INVALID`, 400
+`ROSTER_WEEK_INVALID`, 409 `DUTY_ROSTER_NO_DEPARTMENTS` ("Add this facility's departments to its profile first."),
+403 `DUTY_ROSTER_EDIT_NOT_ALLOWED`.
+
+**18. `PUT /identity/duty-rosters/:rosterId/assignments`** (editors): body `{ "expectedRowVersion", "assignments": [ {
+"membershipId", "shiftId", "dutyDate" } ] }` (0-500 entries, each once; 400 `VALIDATION_FAILED` for a repeat).
+- The week's duties become exactly this list: duties already there are kept (same id and attendance), new ones are
+  added, missing ones are removed (kept as removed in the history).
+- Each member is active here (400 `ROSTER_MEMBER_INVALID`); each shift is an active clinical shift of this facility
+  (400 `ROSTER_SHIFT_INVALID`); each date is in the week (400 `ROSTER_DATE_OUTSIDE_WEEK`).
+- Adding or removing a duty whose shift has started: 409 `ROSTER_SHIFT_STARTED`.
+- For each person across every department's rosters here: 409 `ROSTER_OVERLAP`, 409 `ROSTER_REST_TOO_SHORT`, 409
+  `ROSTER_MEMBER_ON_LEAVE`. These refusals carry `details: { "membershipId", "dutyDate", "shiftId" }` of the first
+  duty refused, and never name another department.
+- Nothing is saved when any entry is refused. Answer 200 `{ "roster", "changes": { "added", "removed", "kept" },
+  "replayed" }`. On a published roster, any change sets `changedSincePublished`.
+
+**19. `POST /identity/duty-rosters/:rosterId/publish`** (editors): body `{ "expectedRowVersion" }`. From `draft`, or
+`published` with changes (else 200 with `outcome: "unchanged"`). An empty roster: 409 `ROSTER_EMPTY`. Answer 200
+`{ "outcome": "published" | "unchanged", "roster", "replayed" }`.
+
+**20. `POST /identity/duty-rosters/:rosterId/assignments/:assignmentId/attendance`** (editors): body
+`{ "expectedRowVersion" (the duty's), "attendance": "present" | "absent" | "swapped", "coveredByMembershipId"? }`.
+- Only on a published roster (409 `ROSTER_NOT_PUBLISHED`), from 1 hour before the shift starts to 7 days after it ends
+  (409 `ATTENDANCE_NOT_OPEN`), never for one's own duty (409 `ATTENDANCE_OWN_NOT_ALLOWED`).
+- `swapped` needs `coveredByMembershipId`: an active member here other than the person rostered (400
+  `ATTENDANCE_COVER_INVALID`); the other marks must leave it out. A mark can be changed in the same window; each mark
+  is kept.
+- Answer 200 `{ "assignment", "replayed" }`. 404 `ROSTER_ASSIGNMENT_NOT_FOUND`.
+
+**21. `GET /identity/duty-roster/on-duty[?departmentCode=]`** (`workforce.roster.read`): `{ "at": "…", "items": [ {
+"departmentCode", "membershipId", "shiftId", "shiftName", "startsAt", "endsAt", "attendance", "coveringForMembershipId"
+} ] }`. Duties on published rosters whose shift is running now. `absent` is left out; for `swapped`, the member who
+worked instead is listed, with `coveringForMembershipId`.
+
+**22. `GET /identity/me/duties`** (any active member here): `{ "items": [ { "assignmentId", "departmentCode",
+"shiftName", "dutyDate", "startsAt", "endsAt", "attendance" } ] }`, the caller's own duties on published rosters from
+7 days ago to 28 days ahead.
+
+### Errors
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | "Check the highlighted fields." |
+| 400 | `LICENCE_RENEWAL_DATES_INVALID` | "Enter a licence year from last year to 3 years ahead, or an expiry date, checked in the last 90 days." |
+| 400 | `DEPARTMENT_INVALID` | "Choose one of this facility's departments." |
+| 400 | `IN_CHARGE_MEMBER_INVALID`, `ROSTER_MEMBER_INVALID` | "Choose a staff member who works at this facility." |
+| 400 | `LEAVE_DATES_INVALID` | "Leave can start up to 30 days ago, must end on or after its start, and can last up to 365 days." |
+| 400 | `ROSTER_WEEK_INVALID` | "Choose a week that starts on a Monday, from 8 weeks ago to 26 weeks ahead." |
+| 400 | `ROSTER_SHIFT_INVALID` | "Choose one of this facility's shifts." |
+| 400 | `ROSTER_DATE_OUTSIDE_WEEK` | "Choose a day in this roster's week." |
+| 400 | `ATTENDANCE_COVER_INVALID` | "Choose who worked this shift instead: someone else who works at this facility." |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED` | as every identity write |
+| 403 | `HR_CREDENTIALS_NOT_ALLOWED` | "Only this facility's administrator can see and record licence renewals." |
+| 403 | `STAFF_MANAGEMENT_NOT_AVAILABLE` | as today (`GET /identity/facility-staff`), at governed and legacy facilities |
+| 403 | `DUTY_ROSTER_NOT_ALLOWED` | "Only staff of this facility can see its duty roster." |
+| 403 | `DUTY_ROSTER_EDIT_NOT_ALLOWED` | "Only the department's in-charge or an administrator can change this roster." |
+| 403 | `IN_CHARGE_SETUP_NOT_ALLOWED` | "Only the facility's administrators can choose who is in charge of a department." |
+| 403 | `LEAVE_REQUEST_NOT_ALLOWED` | "Leave requests are not open to your role here. Ask the administrator." |
+| 403 | `LEAVE_DECISION_NOT_ALLOWED` | "Only the department's in-charge or an administrator can approve or decline this leave." |
+| 404 | `FACILITY_STAFF_NOT_FOUND` | "This person does not work at this facility." |
+| 404 | `LICENCE_RENEWAL_NOT_FOUND`, `IN_CHARGE_NOT_FOUND`, `LEAVE_REQUEST_NOT_FOUND`, `ROSTER_NOT_FOUND`, `ROSTER_ASSIGNMENT_NOT_FOUND` | "This record is not at this facility." |
+| 409 | `FACILITY_REVIEW_PENDING` | as today |
+| 409 | `LICENCE_NOT_ON_RECORD` | "This person has no licence on record for that role. Add it on Staff & access first." |
+| 409 | `LICENCE_RENEWAL_ALREADY_WITHDRAWN` | "This renewal was already withdrawn." |
+| 409 | `IN_CHARGE_ALREADY` | "This person is already in charge of this department." |
+| 409 | `IN_CHARGE_LIMIT_REACHED` | "A department can have up to 5 people in charge." |
+| 409 | `LEAVE_OVERLAPS` | "You already asked for leave on some of these days." |
+| 409 | `LEAVE_ALREADY_DECIDED` | "This leave request was already approved, declined or cancelled." |
+| 409 | `LEAVE_OWN_DECISION_NOT_ALLOWED` | "Someone else must approve or decline your own leave." |
+| 409 | `LEAVE_CANCEL_NOT_ALLOWED` | "Approved leave can be cancelled only before it starts. Ask your in-charge." |
+| 409 | `LEAVE_CLASHES_WITH_ROSTER` | "This person is on the roster during this leave. Take them off those duties first." |
+| 409 | `DUTY_ROSTER_NO_DEPARTMENTS` | "Add this facility's departments to its profile first." |
+| 409 | `ROSTER_SHIFT_STARTED` | "Duties that have started cannot be changed. Mark attendance instead." |
+| 409 | `ROSTER_OVERLAP` | "This person is already on duty at that time." |
+| 409 | `ROSTER_REST_TOO_SHORT` | "This person needs at least 8 hours between duties." (the hours of the rule in force) |
+| 409 | `ROSTER_MEMBER_ON_LEAVE` | "This person is on approved leave that day." |
+| 409 | `ROSTER_EMPTY` | "Add at least one duty before publishing." |
+| 409 | `ROSTER_NOT_PUBLISHED` | "Publish the roster before marking attendance." |
+| 409 | `ATTENDANCE_NOT_OPEN` | "Attendance can be marked from 1 hour before the shift starts until 7 days after it ends." |
+| 409 | `ATTENDANCE_OWN_NOT_ALLOWED` | "Another in-charge or an administrator marks your own attendance." |
+| 409 | `VERSION_CONFLICT`, `IDEMPOTENCY_KEY_REUSED` | as every identity write |
+| 503 | `HR_CREDENTIALS_NOT_AVAILABLE` | flag off, or a database without 0199 |
+| 503 | `DUTY_ROSTER_NOT_AVAILABLE` | flag off, or a database without 0200 (routes 6-14) or 0202 (routes 15-22) |
+
+Staff screens show the message and never the word "permission".
+
+### Audit
+
+Written by the database functions in the request's transaction, refusals included, plus identity-api's usual request
+row: `identity.staff-licence.list`, `.member-read`, `.export`, `.renewal-record`, `.renewal-withdraw`;
+`identity.duty-roster.in-charge-add`, `.in-charge-end`; `identity.staff-leave.request`, `.cancel`, `.approve`,
+`.decline`, `.list-mine`, `.list-to-decide`; `identity.duty-roster.list`, `.read`, `.create`, `.assignments-set`,
+`.publish`, `.attendance`, `.on-duty`, `.my-duties`. Rows hold ids, codes, counts and outcomes, never a name, licence
+number, leave type, leave dates or reason. No patient is read or named.

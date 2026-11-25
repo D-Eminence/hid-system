@@ -1,4 +1,4 @@
-# HID planned contract for the rest of Akos's EHR list (Release B and C, not live)
+# HID planned contract for the rest of Akos's EHR list (Release B, C and D, not live)
 
 This file lists the API that Akos's EHR frontend will need but that is not built yet. With it, he can build each screen once: the shape now, and the fallback he shows until the route ships.
 
@@ -44,6 +44,7 @@ Rules that hold in every section:
 | [ORD-6: Several tests in one lab request](#ord-6-several-tests-in-one-lab-request-planned-release-c-needs-a-migration-yes) | N-7 | C | yes | M |
 | [ORD-8: Order sets, favourites, and note and visit templates](#ord-8-order-sets-favourites-and-note-and-visit-templates-planned-release-c-needs-a-migration-yes) | P0-5, P1-13, P1-12 | C | yes | L |
 | [ORD-11: Result and dispensed notices to the ordering doctor](#ord-11-result-and-dispensed-notices-to-the-ordering-doctor-planned-release-c-needs-a-migration-yes) | P1-6 | C | yes | L |
+| [ROS-1: Duty roster, leave and licence renewals](#ros-1-duty-roster-leave-and-licence-renewals-planned-release-d-needs-a-migration-yes) | department Shifts, rosters, HR and credentials (gap map line 79, hand-off F2) | D | yes (0199-0202, provisional) | L |
 | [ORD-13: No drug-interaction checks](#ord-13-no-drug-interaction-checks-not-planned-no-release-needs-a-migration-no) | P0-5, N-9 (interactions) | not planned | no | — |
 | [P2-1: National ID type per country and a neutral company number](#p2-1-national-id-type-per-country-and-a-neutral-company-number-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-1 | after C | yes, when designed | M |
 | [P2-2: Interface translations and language](#p2-2-interface-translations-and-language-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-2, P1-8 (language) | after C | yes, when designed | L |
@@ -51,7 +52,7 @@ Rules that hold in every section:
 | [P2-4: Time zone, date and phone formats](#p2-4-time-zone-date-and-phone-formats-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-4 | after C | yes, when designed | M |
 | [QA-2: Migrate account test pass and one real save of every drawer form](#qa-2-migrate-account-test-pass-and-one-real-save-of-every-drawer-form-planned-before-the-release-a-go-live-needs-a-migration-no) | R-4, QA question | before A go-live | no | S |
 
-Owner answers of 19 Nov 2026, and the sections that rest on them: Q124 A (ORD-7, ORD-8, ORD-9, ORD-10 phase 2, ORD-6, VIT-1), Q125 B (ORD-4, now planned for Release B), Q126 A (EHR-C6, ORD-8), Q127 A (ID-8, ORD-11), Q128 A (ORD-11, SX-7), Q129 A (SX-4, CHW-1), Q130 A (CHW-1), Q131 A (ORD-12, ORD-13, ORD-10 phase 2, P2-1 to P2-4), Q132 A (Q132 A, now planned for Release B; ORD-4 refers to it). No owner question for these sections is waiting for an answer.
+Owner answers of 19 Nov 2026, and the sections that rest on them: Q124 A (ORD-7, ORD-8, ORD-9, ORD-10 phase 2, ORD-6, VIT-1), Q125 B (ORD-4, now planned for Release B), Q126 A (EHR-C6, ORD-8), Q127 A (ID-8, ORD-11), Q128 A (ORD-11, SX-7), Q129 A (SX-4, CHW-1), Q130 A (CHW-1), Q131 A (ORD-12, ORD-13, ORD-10 phase 2, P2-1 to P2-4), Q132 A (Q132 A, now planned for Release B; ORD-4 refers to it). No owner question for the Release B and C sections is waiting for an answer. Release D sections rest on the owner's sprint answers of 25 Nov 2026 ("I approve Q147–Q290 at the recommended options") and are built at the recommended option of each smaller question, marked as such; the owner can still change them (ROS-1: Q-ROS-8 to Q-ROS-15).
 
 Open points with no decision yet, each to be decided before that section is built:
 
@@ -3712,6 +3713,305 @@ Release C (lane D). Size **L**:
 - four routes;
 - audit;
 - a runtime check across Lab, Pharmacy and EHR.
+
+# Release D
+
+Release D holds the department first versions of the two-week sprint the owner approved on 25 Nov 2026: every department ships a first working version on Akos's blue design, anything that needs outside approval is built but switched off, every change gets an independent agent review and Rahman's final database check, and real patients use it only after the clinical lead's checklist and the owner's go-live.
+
+Decisions in Release D sections are marked **(recommended option, not yet answered by the owner)**. The section is built with that option. The owner can still choose the other option; the PR that builds it says which lines change.
+
+## ROS-1: Duty roster, leave and licence renewals (planned, Release D, needs a migration: yes)
+
+Department: Shifts, rosters, HR and credentials (roadmap Phase 4; one of the 20 departments of owner decision Q148 A, 25 Nov 2026). Gap map line 79 ("No shifts/HR API", hand-off F2).
+
+Named **"Duty roster"** (owner decisions Q193 A and ROS-6, 25 Nov 2026). The word "shift" means one thing: the facility's clinical shifts that NUR-1 defines once (`ehr.clinical_shifts`, migration 0176). The duty roster reuses them and defines no shifts of its own. The cashier's day is the "till day" (BILL-1), and the access codes are `workforce.roster.*`, never `billing.shift.*`.
+
+Status: planned, not live. To be built on claude/sprint-hr-backend (migrations 0199-0202, provisional, unsigned; routes in identity-api; `docs/INTERFACE_CONTRACT.md` ROS-1). Not live until signed and switched on.
+
+Surveyed before writing (health origin/main b44b0d56; hid-system staging 0cfddcc9; NUR-1 on claude/sprint-inpatient-backend at ad5080bc):
+- **Shifts & Roster** (a sample, demo facilities only): `departments/sample/admin.ts:84-133` (`shiftsSample`). Fields: staff member (four fictional staff), shift start and end (date and time), department (General Outpatient, Emergency, Laboratory, Pharmacy, Maternity). It refuses an end before the start and overlapping shifts for one person ("Staff roster conflict."). Statuses `assigned` -> "Simulated clock-in" -> `on-duty` -> "Simulated clock-out" (handover notes) -> `completed`. Navigation `frame/pages.ts:111` (People, clock icon); catalogue `frame/sample/catalog.ts:1120-1149` (kind `roster`); the setup wizard's Staff step links to `shifts/new` (`onboarding/FacilitySetup.tsx:92,105`).
+- **HR & Credentials** (partial, live at real facilities): `departments/hr/page.tsx` (path `hr/*`, `workforce.manage`, shown only where Staff & access is listed), `departments/hr/HrCredentials.tsx`, `departments/hr/liveCredentials.ts` (reads `GET /identity/facility-staff`; each member's licence body, number ending, regulator, who vouched for or checked it, joined date; read only) and `departments/hr/sampleCredentials.ts` (sample half, demo facilities only: staff, credential name, expiry, employment information, optional leave request; one action "Record credential review"). Catalogue `catalog.ts:1150-1173` (kind `credential`). Parity report `docs/BLUE_EHR_PARITY_2026-11-01.md:165,523` hides the sample half at real facilities.
+- **Staff & access** (live, partial): `departments/staff/*`, `frame/pages.ts:113`.
+- **Design roles**: `frame/sampleAccess.ts:18,44`: Owner and Admin have full rights on `shifts` and `hr`; the Medical Director may view, approve and export `hr`. There is no Medical Director role in Health ID (owner decision Q155 A, 25 Nov 2026).
+- **Backend today**: `identity.staff`, `identity.staff_facility_memberships`, `auth.account_roles`, `identity.staff_invitations` and `identity.staff_licence_attestations` (0086:3599-3650; roles doctor, nurse, lab, pharmacist; the body fixed per role by `identity.staff_role_licence_body`: MDCN, NMCN, MLSCN, PCN). Attestation rows are immutable and have no expiry. SX-4 (0139) lists one licence per licensed active role (`identity.staff_role_licences`) and added support's check methods. Facility departments exist only as codes on `identity.facility_profiles.departments` (0114, section 43.6). There is no roster, attendance, leave or licence expiry, and no staff inbox (gap F2). NUR-1 (0176, unsigned) adds `ehr.clinical_shifts` (facility, name, Lagos start and end times, a shift may cross midnight, up to 8 active, never deleted; times never change after creation).
+
+### What staff get
+
+1. **Licence renewals and expiry** (HR & Credentials, the facility's administrator).
+   - Beside each licence on record, the administrator records a renewal: the practising-licence year (valid to 31 December of that year) or an exact expiry date, how it was checked (on the regulator's register, the original licence certificate seen, or in person), and the day it was checked. The record is append-only. A renewal entered by mistake is withdrawn with a reason (never deleted).
+   - The list shows every member with each licensed role and its status: **Valid**, **Expires within 60 days**, **Expires within 30 days**, **Expired**, **No renewal recorded** (a licence is on record but no expiry yet), or **No licence on record**. A banner counts the expired and expiring licences.
+   - A CSV export of the same list, for the facility's annual licence check.
+   - **Warning only** (owner decision Q243 A, 25 Nov 2026): an expired licence never changes a role or access.
+   - **How it is checked** (owner decision Q247 A, 25 Nov 2026): the administrator records how they checked. Health ID connects to no regulator register.
+2. **Duty roster** (the department's in-charge, or an administrator).
+   - The administrator names who is in charge of each department (a nurse in charge, matron or head of department) (owner decision Q245 A, 25 Nov 2026).
+   - A roster is one week (Monday to Sunday, Lagos) for one department code of the facility's profile (0114). Wards come later with Inpatient.
+   - The in-charge puts staff on the facility's clinical shifts (NUR-1) for each day, then publishes it. Published rosters can be printed.
+   - The database refuses two duties of one person that overlap, and a duty that starts less than the minimum rest after the person's previous duty ends (**draft: 8 hours**, awaiting the clinical lead), across every department of the facility. Approved leave blocks a duty on the same day.
+   - Only staff with a Health ID membership at the facility can be on the roster (owner decision Q246 A, 25 Nov 2026).
+   - **Attendance** is marked by the in-charge: present, absent, or swapped (someone else worked the shift, named) (owner decision Q242 A, 25 Nov 2026). Staff never clock in themselves, and no location or device is recorded.
+   - **Who is on duty now**, per department, from the published rosters and the attendance marks.
+3. **Leave.** A staff member asks for leave: dates and type (annual, sick, maternity, study or other), and optionally which department's in-charge should decide. No reason and no medical detail (owner decision Q244 A, 25 Nov 2026). The in-charge of that department, or an administrator, approves or declines. Nobody decides their own leave. Approved leave blocks roster duties on those days.
+4. **My duties and my leave.** Every staff member sees their own published duties (7 days back, 28 days ahead) and their own leave requests.
+
+**Work data only** (owner decision Q244 A, 25 Nov 2026): the roster, leave dates and type, and licence status. Not in this release: payroll, salaries, bank details, contracts, disciplinary records, appraisals, home address, next of kin, medical fitness, self clock-in with location, automated regulator checks (Q247 A), automatic role suspension on expiry (Q243 A), roster-only people without a login (Q246 A), copying last week's roster, shift swaps requested by staff, staff reminders or notices (no staff inbox yet, gap F2), a community health worker's registration number (owner decision Q166 B, 25 Nov 2026: it comes with a later HR licence file), and offline use (owner decision Q161 A, 25 Nov 2026: a paper roster and leave book as the back-up).
+
+### Decisions this section is built on
+
+The owner's answers (25 Nov 2026), each at the recommended option:
+
+| Question | Built as |
+|---|---|
+| Q242 (ROS-1) Attendance | **A:** the in-charge marks present, absent or swapped. No device clock-in, no location |
+| Q243 (ROS-2) An expired licence | **A:** a warning only (the list, a banner and the export). Roles never change |
+| Q244 (ROS-3) HR data | **A:** work data only: roster, leave dates and type, licence status |
+| Q245 (ROS-4) Who makes the roster | **A:** a nurse in charge or head of department, given that right by the administrator (see Q-ROS-8 for how) |
+| Q246 (ROS-5) Staff without a Health ID login | **A:** only memberships (invited staff) can be on the roster |
+| Q193 (ROS-6) One meaning of "shift" | **A:** NUR-1's clinical shifts, reused here; the name "Duty roster" and the `workforce.roster.*` codes |
+| Q247 (ROS-7) Licence checks | **A:** record how the licence was checked; no regulator integration |
+| Q149 Department switch | **A:** the department has its own on/off switch in facility setup (gap F2), seeded off |
+| Q154 A written contract first | **A:** this section |
+| Q160 Go-live gate | **A:** the clinical lead's checklist, a hazard log, a test with real staff at Demo Hospital, a short staff guide, a written paper back-up, and the production switch applied with the owner's AWS access |
+| Q161 Offline | **A:** online only; paper roster and leave book as the back-up |
+| Q166 A community health worker's registration number | **B:** not in this release; it comes with a later HR licence file |
+
+Smaller choices made while writing this section:
+
+| Question | Built with | The other option |
+|---|---|---|
+| Q-ROS-8 How the administrator gives the roster right (Q245 A) | **A:** the administrator names the in-charges of each department (a list per department, up to 5). An in-charge edits, publishes and marks attendance on that department's rosters, and decides leave sent to that department. No new role, so SX-4's role functions, which BILL-1 also replaces, do not change **(recommended option, not yet answered by the owner)** | B: a new role `roster_in_charge` with `workforce.roster.manage`, added through SX-4. It is facility-wide (every department) and replaces the seven role functions BILL-1 replaces |
+| Q-ROS-9 Who sees a published roster | **A:** every staff role at the facility (`workforce.roster.read`), as the paper roster on the notice board. Drafts only for the department's in-charges and administrators **(recommended option, not yet answered by the owner)** | B: only in-charges and administrators; other staff see their own duties only |
+| Q-ROS-10 Changing a published roster | **A:** in-charges change it until each shift starts. Every change is kept, and the roster shows "Changed since published" until it is published again. After a shift starts, only attendance changes **(recommended option, not yet answered by the owner)** | B: locked once published; changes only through attendance (swapped) |
+| Q-ROS-11 Overlap and rest across facilities | **A:** checked for one person across every department of this facility, not across facilities (that would show one facility another's duty times) **(recommended option, not yet answered by the owner)** | B: across every facility the person works at |
+| Q-ROS-12 The licence export | **A:** the last 4 characters of the licence number, as every screen shows **(recommended option, not yet answered by the owner)** | B: the full licence number |
+| Q-ROS-13 The administrator's own licence renewal | **A:** allowed, and marked "Recorded by the member themselves" on the list and the export **(recommended option, not yet answered by the owner)** | B: refused; Health ID support records it (needs support routes) |
+| Q-ROS-14 Licence renewals at governed facilities | **A:** not in this release. As today, HR & Credentials and Staff & access work at self-signed-up facilities; at governed facilities support manages staff and licences **(recommended option, not yet answered by the owner)** | B: support's routes to record and withdraw renewals at any facility |
+| Q-ROS-15 Free text | **A:** none. Leave has a type and dates; a withdrawn renewal has a reason from a list (wrong person, wrong dates, wrong licence, other); declining leave needs no reason **(recommended option, not yet answered by the owner)** | B: an optional note (0-200 characters) on leave and withdrawals, seen only by the requester and deciders |
+
+### Routes
+
+All routes are in identity-api, under `/api/v1/identity/`, which the gateway already sends there. **The gateway nginx template does not change.** They need `X-Facility-ID`; purpose is always `healthcare-operations`. Every write needs an `Idempotency-Key` (16-128 URL-safe characters); a replay with the same body answers the first answer with `"replayed": true`, another body 409 `IDEMPOTENCY_KEY_REUSED`. Writes on an existing record send `expectedRowVersion`; a stale one is 409 `VERSION_CONFLICT` (identity-api's convention). No Health ID or NIN appears in any path, query, body or answer: members are named by membership UUID, and names come from SX-9 (`GET /identity/facility-staff-names`) except on the licence list and export, which carry the member's name as `GET /identity/facility-staff` does.
+
+Two service flags in identity-api, both off by default:
+- `HR_CREDENTIALS_ENABLED`: routes 1-5. While off: 503 `HR_CREDENTIALS_NOT_AVAILABLE`.
+- `DUTY_ROSTER_ENABLED`: routes 6-22. While off: 503 `DUTY_ROSTER_NOT_AVAILABLE`.
+
+Both are on in staging and, in production, at the sealed demo and QA facilities only (fictional staff). They are switched on for real facilities only after the go-live gate (Q160 A). When facility setup (Q149, gap F2) ships, the facility's own Duty roster and HR & Credentials switches must also be on. A database without the route's migration answers the same 503. `DUTY_ROSTER_ENABLED` needs NUR-1's clinical shift setup to be usable at the facility (see "Depends on").
+
+| # | Route | Who | What |
+|---|---|---|---|
+| 1 | `GET /identity/staff-licences` | administrator (`workforce.manage`), self-signed-up facility | every member, each licensed role with its licence status, and the counts |
+| 2 | `GET /identity/staff-licences/:membershipId` | the same | one member's licences, each with every renewal (withdrawn ones marked) |
+| 3 | `GET /identity/staff-licences/export` | the same | the list as CSV (`text/csv`) |
+| 4 | `POST /identity/staff-licences/renewals` | the same, after support's review | record a renewal |
+| 5 | `POST /identity/staff-licences/renewals/:renewalId/withdraw` | the same, after support's review | withdraw a renewal entered by mistake |
+| 6 | `GET /identity/duty-roster/in-charges` | `workforce.roster.read` | who is in charge of each department |
+| 7 | `POST /identity/duty-roster/in-charges` | `workforce.roster.manage` | name an in-charge for a department |
+| 8 | `POST /identity/duty-roster/in-charges/:inChargeId/end` | `workforce.roster.manage` | end it |
+| 9 | `GET /identity/me/leave-requests` | `workforce.leave.request` | my leave requests |
+| 10 | `POST /identity/me/leave-requests` | `workforce.leave.request` | ask for leave |
+| 11 | `POST /identity/me/leave-requests/:leaveRequestId/cancel` | the requester | cancel (before a decision, or approved leave before it starts) |
+| 12 | `GET /identity/leave-requests[?status=requested\|decided][&departmentCode=]` | administrators; in-charges (their departments) | leave to decide, and decided leave |
+| 13 | `POST /identity/leave-requests/:leaveRequestId/approve` | the same, never one's own | approve |
+| 14 | `POST /identity/leave-requests/:leaveRequestId/decline` | the same, never one's own | decline |
+| 15 | `GET /identity/duty-rosters?weekStart=YYYY-MM-DD` | `workforce.roster.read` | the facility's rosters for a week |
+| 16 | `GET /identity/duty-rosters/:rosterId` | `workforce.roster.read` (drafts: editors) | one roster, its duties and the shifts; for editors also who is on leave |
+| 17 | `POST /identity/duty-rosters` | editors of the department | make the week's draft roster for a department |
+| 18 | `PUT /identity/duty-rosters/:rosterId/assignments` | editors | replace the week's duties (the grid's Save) |
+| 19 | `POST /identity/duty-rosters/:rosterId/publish` | editors | publish, or publish again after changes |
+| 20 | `POST /identity/duty-rosters/:rosterId/assignments/:assignmentId/attendance` | editors, never one's own | mark present, absent or swapped |
+| 21 | `GET /identity/duty-roster/on-duty[?departmentCode=]` | `workforce.roster.read` | who is on duty now |
+| 22 | `GET /identity/me/duties` | any active member of the facility | my published duties |
+
+"Editors" of a department's roster: administrators (`workforce.roster.manage`) and that department's in-charges (route 7) who still hold `workforce.roster.read`. Bodies, answers and every error code are in `docs/INTERFACE_CONTRACT.md` ROS-1. Refusals never say "permission".
+
+### Licence status rules
+
+- The licence of a role is the one SX-4 shows: the latest attestation of each active licensed role grant (0139's `identity.staff_role_licences`). A renewal belongs to that licence by its key (body and normalised number), so it still counts after a role is removed and added again with the same licence. A new licence number starts with "No renewal recorded".
+- The status uses the latest renewal not withdrawn, on today's Lagos date: **Expired** when `validUntil` is before today; **Expires within 30 days** from 0 to 30 days left; **Expires within 60 days** from 31 to 60; **Valid** after that. A licensed role with no attestation (members from before 0086) is **No licence on record**. Members with no licensed role are listed with no licence and need none.
+- A renewal's period is a licence year (valid to 31 December of that year, for annual practising licences that run to the end of the year) or an exact expiry date (for a licence that shows one). Licence year: last year to 3 years ahead. Expiry date: up to 400 days ago (recording one already past) to 5 years ahead. Checked on: today or up to 90 days ago.
+- The statuses and the 30 and 60 day windows are a warning only: nothing is refused because of them.
+
+### Roster rules
+
+- Weeks start on Monday (Lagos). A roster may be made from 8 weeks ago to 26 weeks ahead, once per department and week. Its department must be one of the facility profile's departments (0114). A facility with no profile departments cannot make rosters (409 `DUTY_ROSTER_NO_DEPARTMENTS`).
+- A duty is (member, clinical shift, duty date). The duty date is the Lagos day the shift starts; a night shift ends the next day. Its start and end are worked out from the shift's Lagos times when the duty is saved, and kept on the duty (the same rule as NUR-1's `ehr.clinical_shift_window`; NUR-1's times never change after a shift is made).
+- The shift must be one of this facility's active clinical shifts. Every active membership of the facility (any role) can be on the roster.
+- Refused for one person (one account) across every department's rosters, drafts included, at this facility: a duty that overlaps another, and a duty starting less than the minimum rest after the previous one ends, or ending less than the minimum rest before the next one starts. The minimum rest is one platform-wide draft value, **8 hours**, held in `identity.duty_roster_rules` as `draft` until the clinical lead signs a value; a signed migration changes it. A back-to-back "double" (for example Morning then Afternoon) is therefore refused while the rule is 8 hours.
+- Approved leave on the duty date refuses the duty. Approving leave is refused while the person has duties on those days whose shifts have not started (409 `LEAVE_CLASHES_WITH_ROSTER`, with the dates): the in-charge takes them off first. Duties already started stay; their attendance says what happened.
+- Duties are added or removed only before their shift starts. After that, only attendance changes. Attendance is marked from 1 hour before the shift starts until 7 days after it ends, on published rosters, by an editor other than the person on duty. "Swapped" names who worked instead (an active member of this facility, not the person rostered).
+- Who is on duty now: duties on published rosters whose shift is running now; "absent" is left out; for "swapped", the person who worked instead is shown, marked as covering.
+
+### Roles and access codes
+
+Three new codes (0201). HR & Credentials keeps today's `workforce.manage` (administrator and owner only, `0006:79-80`).
+
+| Backend role | `workforce.roster.read` | `workforce.leave.request` | `workforce.roster.manage` | Design role it stands for |
+|---|---|---|---|---|
+| `receptionist` | yes | yes | no | Receptionist |
+| `nurse` | yes | yes | no (in-charge by route 7) | Nurse; a nurse in charge or matron is named by route 7 |
+| `clinician`, `doctor` | yes | yes | no (in-charge by route 7) | Doctor, Consultant; a head of department is named by route 7 |
+| `lab` | yes | yes | no (in-charge by route 7) | Lab Scientist, Lab Manager |
+| `pharmacist` | yes | yes | no (in-charge by route 7) | Pharmacist |
+| `admin`, `org_admin` | yes | yes | yes | Hospital Admin, Hospital Owner (full rights on Shifts and HR) |
+| `cashier`, `billing_officer` (BILL-1), narrow roles, others | no | no | no | — |
+
+- Eighteen role rows: two each for the six staff roles, three each for the two administrator roles.
+- Any active member reads their own duties (route 22) without a code. Leave needs `workforce.leave.request`, so the BILL-1 roles and roles added later need a later file (listed below as an open point).
+- SX-1 (`services/identity-api/src/auth/facility-modules.ts`) gains the area `dutyRoster`, "Duty roster and leave": shown with `workforce.roster.read`, used in full with `workforce.roster.manage`. An in-charge sees it as `view`; the roster answers say which departments they edit (`canEdit`, `inChargeOf`). HR & Credentials stays in the `admin` area.
+- `services/identity-api/test/role-matrix.json` gains the row "Duty roster" (front desk, nurse, doctor, lab and pharmacy: view; facility admin: full) and the new codes in `todayRolePermissions`.
+
+### Database design
+
+Four migrations, **0199 to 0202, provisional** (numbers are given at merge). Each needs the owner's verbatim signature, Rahman's final database check and an independent agent review. Each follows 0147, 0150, 0152 and the wave 1 files:
+- the whole file is one `do` block, so nothing applies if any part raises;
+- every table it touches, including those read by functions it calls (for example `identity.sealed_demo_members` and `identity.sealed_qa_members` behind the closing count), is locked first, NOWAIT, tried 50 times 100 ms apart. If this transaction already holds an earlier file's blocking locks, there is one try and no sleep. A busy refusal raises 55P03 beginning "0199: " (to "0202: ") and ending "run the release again at a quieter time";
+- preconditions are catalog reads that raise 55000 and apply nothing: markers only of the earlier files whose objects the file uses, and the md5 of each function body it calls or replaces. They tolerate other lanes: a role's codes are checked as a subset (codes other lanes add are kept), never an exact md5 of the whole list;
+- running the file again on a database where it is applied raises "0199: already applied" (only when every object is exactly as the file leaves it) and changes nothing; any half state raises "0199: the schema is not in the reviewed state";
+- post-checks in 0148's and 0152's form: tables, row-level security (enabled and forced), policies, owners, privileges (none for any runtime role on any new table or identity sequence), every trigger's `tgtype`, `tgqual`, `tgattr`, `tgnargs`, `tgfoid` and `tgenabled`, every function's owner, `SECURITY DEFINER`, fixed `search_path` and EXECUTE list, and the pinned bodies;
+- every `SECURITY DEFINER` function has `SET search_path = pg_catalog, pg_temp`, names every object with its schema, and uses no temporary table, so nothing can be put in its path by a caller;
+- new tables have row-level security **enabled and forced**, with only the owner's command policies (0086's `staff_licence_attestations` form) and no privilege for any runtime role. Only the functions read or write them, as their owner;
+- append-only tables refuse UPDATE and DELETE (row trigger) and TRUNCATE (statement trigger), both with `platform.reject_mutation()`;
+- every write keeps the `Idempotency-Key` with the request's SHA-256, unique per membership and key;
+- functions are owned like 0139's and get EXECUTE for `hid_identity_runtime` only; helpers no role may execute run only inside them;
+- the file updates `runtime-grants.sql` (the staging file followed by this lane's block) and the declaration in `config/production-schema-compatibility.json`, which stays unsigned until the owner signs.
+
+**0199 Staff licence renewals.** Needs 0086 and 0139 (their objects only); nothing of 0140-0198.
+- `identity.staff_licence_renewals`, append-only: organisation, facility, membership and account (foreign key to the membership as 0086's attestations), `attestation_id` (the attestation it was recorded against), `licence_body` and `licence_key` (copied from it; a CHECK keeps the body one of MDCN, NMCN, MLSCN, PCN), `role_code`, `period` (`licence_year`, `expiry_date`), `licence_year` (exactly for `licence_year`), `valid_until` (31 December of that year, or the date), `checked_how` (`regulator_register`, `certificate_seen`, `in_person`), `checked_on`, `checked_by_account_id`, `checked_by_membership_id`, `self_recorded`, `attestation_version` (references `identity.staff_attestation_texts`), `recorded_at`, the idempotency columns.
+- `identity.staff_licence_renewal_withdrawals`, append-only, one per renewal: `reason_code` (`wrong_member`, `wrong_dates`, `wrong_licence`, `other`), by and when, the idempotency columns.
+- `identity.staff_attestation_texts` gains `facility-licence-renewal-v1`: "I confirm that I checked {name}'s practising licence in the way recorded here, and that it is current until the date recorded. Health ID records this confirmation with my name."
+- Functions (routes 1-5): `identity.staff_licence_status_list`, `identity.staff_licence_member_read`, `identity.staff_licence_export_rows`, `identity.staff_licence_renewal_record`, `identity.staff_licence_renewal_withdraw`. Helpers no role may execute: `identity.staff_licence_status_rows(facility, as_of)` (the list, with 0139's licence rule) and `identity.staff_licence_status_of(valid_until, as_of)`.
+- Each function is admitted by 0086's `identity.staff_management_actor` (md5-pinned): a staff session at a self-signed-up facility with `workforce.manage`; routes 4 and 5 also need support's review (409 `FACILITY_REVIEW_PENDING`), as 0086's commands do.
+- Locks (expected; measured with `pg_locks` before commit and pinned when the file is written): SHARE ROW EXCLUSIVE on `identity.staff_licence_attestations`, `identity.staff_facility_memberships`, `identity.facilities`, `identity.staff_attestation_texts` and `auth.accounts` (foreign keys of new, empty tables; the text row); ACCESS SHARE on the tables the post-checks read.
+- Old images: nothing calls the new functions. Today's `GET /identity/facility-staff` is unchanged.
+
+**0200 Staff leave and department in-charges.** Needs 0086 and 0114 (their objects only).
+- `identity.workforce_department_in_charges`: facility, `department_code` (checked with `identity.facility_department_codes`), membership and account, who named them and when, `ended_at` and by whom, `row_version`. Unique while active per (facility, department, membership); up to 5 active per department. Never deleted.
+- `identity.staff_leave_requests`: facility, organisation, membership and account, `leave_type` (`annual`, `sick`, `maternity`, `study`, `other`), `starts_on`, `ends_on` (CHECK on or after the start, at most 365 days), `department_code` (optional), `status` (`requested`, `approved`, `declined`, `cancelled`), who decided or cancelled it and when, `row_version`. No text column of any kind. Never deleted.
+- `identity.workforce_events`, append-only: one row per leave request, cancel, approve and decline, and per in-charge named or ended (kind, ids, from and to status, actor, when, the idempotency columns). Never the leave type.
+- One person's leave requests and duties are changed under one transaction-scoped advisory lock per (facility, account), so two overlapping requests, or a duty and an approval, cannot both pass.
+- Functions (routes 6-14): `identity.workforce_in_charge_list`, `_add`, `_end`; `identity.staff_leave_request_create`, `_cancel`, `identity.staff_leave_requests_mine`, `identity.staff_leave_requests_to_decide`, `identity.staff_leave_request_decide`. Helpers no role may execute: `identity.workforce_actor(code)` (an active membership with no migration hold at the session facility, an active account and staff record, the code, purpose `healthcare-operations`), `identity.workforce_editor_departments(membership)`, `identity.staff_leave_card(...)`.
+- Without 0201 no role holds `workforce.leave.request` or `workforce.roster.manage`, so every function refuses. This is the database half of "built but switched off".
+- Locks (expected): SHARE ROW EXCLUSIVE on `identity.staff_facility_memberships`, `identity.facilities`, `identity.organizations` and `auth.accounts` (foreign keys of new, empty tables); ACCESS SHARE on `identity.facility_profiles` and the tables the post-checks read.
+
+**0201 Workforce access codes.** Needs nothing of 0199-0200 (it only adds codes and rows; the functions read the codes on each call). Kept as its own file so Rahman can review who gets what apart from the tables, as 0169.
+- `auth.permissions` gains `workforce.roster.read`, `workforce.roster.manage` and `workforce.leave.request`.
+- `auth.role_permissions` gains the eighteen rows of the role table above.
+- One audit row per row added (`auth.role-permission.add`, reason "ROS-1 Duty roster and leave (Release D, owner decisions Q245 A and Q-ROS-8 A)"), as the system actor.
+- Preconditions: none of the three codes or their rows exists (else "already applied" when exactly the eighteen rows are there, or "not in the reviewed state"); the eight roles exist and are active; `auth.membership_has_permission` md5-pinned as 0169 pins it. Other lanes' codes on these roles are kept: the post-check compares every row that is not this file's with the table before.
+- The closing NOTICE prints how many active memberships at real (not sealed) facilities gain each code.
+- Locks: SHARE ROW EXCLUSIVE on `auth.role_permissions`; ROW EXCLUSIVE on `auth.permissions` and `audit.events`; ROW SHARE on `auth.roles`, `auth.accounts`, `identity.staff_facility_memberships`, `identity.organizations`, `identity.facilities` and `identity.patients` (the audit rows' foreign keys); ACCESS SHARE on `auth.account_roles`, `identity.sealed_demo_members` and `identity.sealed_qa_members` (the closing count).
+- No function, policy, grant or table changes, so `runtime-grants.sql` is unchanged by this file.
+
+**0202 Duty roster and attendance.** Needs NUR-1's 0176 (`ehr.clinical_shifts`, its columns checked in the catalog; no 0176 function is called) and 0200 (leave and in-charges). Kept last so 0199-0201 can be cut and released before NUR-1; 0202 follows NUR-1 into a release.
+- `identity.duty_roster_rules`: one row, `min_rest_minutes` (480), `clinical_status` (`draft`, `signed`), `changed_by_migration`. No runtime role may read or write it; a signed migration changes it after the clinical lead signs.
+- `identity.duty_rosters`: facility, `department_code`, `week_start` (a CHECK that it is a Monday), `status` (`draft`, `published`), `published_at`, `published_by_membership_id`, `publish_count`, `changed_since_published`, `row_version`. Unique per (facility, department, week). Never deleted.
+- `identity.duty_roster_assignments`: roster, facility, membership and account, `shift_id` (foreign key to `ehr.clinical_shifts (id, facility_id)`), `duty_date` (within the roster's week), `starts_at`, `ends_at`, `rest_until` (`ends_at` plus the minimum rest when saved), `status` (`active`, `removed`) with who removed it and when, `attendance` (`not_marked`, `present`, `absent`, `swapped`), `covered_by_membership_id` (exactly for `swapped`), who marked it and when, `row_version`. Unique while active per (membership, shift, duty date). Never deleted.
+- `identity.duty_roster_events`, append-only: every roster made, save (counts added, removed and kept), publish and attendance mark, with the idempotency columns.
+- Trigger `duty_roster_assignments_guard` (BEFORE INSERT OR UPDATE OF `status`, `starts_at`, `ends_at`, `rest_until`): takes the person's advisory lock and refuses an overlap, a rest gap shorter than the rule, or approved leave on the duty date (55000 with `DUTY_ROSTER_OVERLAP`, `DUTY_ROSTER_REST_TOO_SHORT` or `DUTY_ROSTER_MEMBER_ON_LEAVE`). This is the database's own refusal, whatever writes the row.
+- Trigger `staff_leave_requests_roster_clash` on 0200's `identity.staff_leave_requests` (BEFORE UPDATE OF `status`, only when it becomes `approved`): takes the same advisory lock and refuses while the person has active duties not yet started on those days (`LEAVE_CLASHES_WITH_ROSTER`). 0200's function bodies do not change.
+- Functions (routes 15-22): `identity.duty_roster_list`, `identity.duty_roster_read`, `identity.duty_roster_create`, `identity.duty_roster_assignments_set`, `identity.duty_roster_publish`, `identity.duty_roster_attendance_mark`, `identity.duty_roster_on_duty`, `identity.duty_roster_my_duties`. Helpers no role may execute: `identity.duty_roster_shift_window(shift, date)` (0176's formula, compared with `ehr.clinical_shift_window` by the suite), `identity.duty_roster_card(...)`, and `identity.duty_roster_on_duty_at(facility, at)`, which Ambulance dispatch and Quality may call from their own functions later (md5-pinned by them).
+- Locks (expected): SHARE ROW EXCLUSIVE on `ehr.clinical_shifts`, `identity.staff_facility_memberships` and `identity.facilities` (foreign keys of new, empty tables) and on `identity.staff_leave_requests` (the new trigger); ACCESS SHARE on `identity.workforce_department_in_charges`, `identity.facility_profiles` and the tables the post-checks read.
+- Old images: nothing calls the new functions. The leave trigger only acts inside 0200's decide function.
+
+Undo (not in the ledger; a migration only if the owner signs it): drop 0202's triggers, functions and tables; take the eighteen rows and three codes out (0201); drop 0200's and 0199's functions and tables. The attestation text row stays (append-only).
+
+### Audit
+
+Every route writes its rows in the request's transaction, refusals included, through the database functions; identity-api's interceptor also writes its usual request row.
+
+- **Licences:** `identity.staff-licence.list` (count), `.member-read` (membership), `.export` (count, never names), `.renewal-record` (membership, role, period kind, how checked, self-recorded), `.renewal-withdraw` (renewal, reason code).
+- **In-charges:** `identity.duty-roster.in-charge-add`, `.in-charge-end`.
+- **Leave:** `identity.staff-leave.request`, `.cancel`, `.approve`, `.decline`, `.list-mine`, `.list-to-decide` (count, ids shown).
+- **Roster:** `identity.duty-roster.list`, `.read`, `.create`, `.assignments-set` (counts added, removed and kept), `.publish`, `.attendance` (the mark), `.on-duty`, `.my-duties`.
+- Rows hold ids, codes, counts and outcomes. **No row ever holds a name, a licence number, a leave type, leave dates or a reason.**
+
+### Notifications
+
+None in this release. There is no staff inbox yet (gap F2; owner decision Q151 A grows ORD-11's notice list into one). Expiry reminders, "roster published" and leave decisions are later items for that inbox. Staff see their duties and leave on their own pages.
+
+### What patients see
+
+Nothing. No patient route, notice or record changes, and no roster, leave or licence answer names a patient.
+
+### Website screens (Lekan; mapped to Akos's existing screens)
+
+| Akos screen (health `apps/patient-web/src/ehr-blue/`) | Live screen | Calls |
+|---|---|---|
+| `departments/sample/admin.ts:84-133` (`shiftsSample`: staff, start, end, department; "Staff roster conflict.") | **Duty roster**: department and week picker; a grid of days and the facility's clinical shifts with the staff on each; "On leave" (never the type) and "Leave requested" for editors; Save, Publish, Print; the draft rule "At least 8 hours between duties (draft, awaiting the clinical lead)" | routes 15-19, SX-9 |
+| `admin.ts` "Simulated clock-in" / "Simulated clock-out" (handover notes) | Replaced by **Attendance** (present, absent, swapped with who worked instead), marked by the in-charge. Handover notes are NUR-1's handover, not here | route 20 |
+| No sample | **On duty now** (per department), **My duties**, **My leave** (ask, cancel), **Leave to decide** (approve, decline), **Department in-charges** (Settings, administrators) | routes 6-14, 21, 22 |
+| `departments/hr/HrCredentials.tsx`, `liveCredentials.ts` (live list, read only) | **HR & Credentials**: the same list with a status badge per licence (Valid, Expires within 60 days, Expires within 30 days, Expired, No renewal recorded, No licence on record), the banner, "Record renewal" and "Withdraw" drawers, history on the record page, and "Export CSV". It says that roles do not change when a licence expires | routes 1-5 |
+| `departments/hr/sampleCredentials.ts` (credential name, expiry, employment information, leave request, "Record credential review") | The sample half goes at real and demo facilities once the flag is on. Employment information is not collected (Q244 A); leave moves to the Duty roster | — |
+| `frame/pages.ts:111` (`shifts`, "Shifts & Roster", sample) | "Duty roster" (live, area `dutyRoster`, People group) | — |
+| `onboarding/FacilitySetup.tsx:92,105` (Staff step links to `shifts/new`) | Links to the Duty roster at real facilities once it is on | — |
+| `frame/sampleAccess.ts:18,44` | Live grants from the role table above | — |
+
+Rules for the screens:
+- Show every date and time in Lagos through `@hid/ui/display` (P2-4), whatever the device's zone; shift times as the 24-hour clock.
+- Never show the word "permission"; show each refusal's own message.
+- No Health ID in any URL; roster, leave and licence pages carry UUIDs only.
+- Print the published roster on one A4 landscape page per department and week, with the department, the week, "Published 7 Dec 2026 by …" and each person's name and shifts. A draft prints with "Draft, not published".
+- The `packages/contracts/src/registry.ts` entries go from `proposed` to `served` only when this ships.
+- **Before this ships:** keep both samples at demo facilities only, with their banners, and send nothing.
+
+### Tests
+
+- **Database** (throwaway local PostgreSQL in Docker, fictional staff only), in `services/ehr-api/test/database/workforce.integration.sql` and `services/ehr-api/test/database/workforce-migrations.integration.sql`:
+  - licence status at each boundary (60, 31, 30, 0 and -1 days), licence year and expiry date, a withdrawn latest renewal, a new licence number, a role removed and added again, members from before 0086, self-recorded renewals; the list agrees with 0139's `identity.staff_role_licences`;
+  - leave: overlapping requests from two sessions at once (one wins), own decision refused, in-charge of another department refused, cancel rules, approval refused while duties are rostered and allowed after they are removed;
+  - roster: overlap and rest across two departments, both orders and from two sessions at once; a night shift across midnight; the rest rule at exactly 8 hours; a duty on approved leave; changes after a shift starts refused; publish, change, publish again; attendance window, own mark refused, swapped with a cover; who is on duty now; the shift window equal to 0176's `ehr.clinical_shift_window`;
+  - no runtime role can read or write any new table or execute any helper; definers have the fixed `search_path`; a temporary table made by the caller changes nothing;
+  - every refusal and its audit row; no name, licence number, leave type, dates or reason in any audit row; idempotent replays and reused keys; version conflicts;
+  - sealed demo and QA facilities see only their own fictional staff; a member of another facility is refused everywhere.
+- **Migration:** each file with a lock held by another session gives its busy refusal and applies nothing; a second run gives "already applied"; a half state is refused; a changed pinned body is refused; 0201 applies with other lanes' codes already on the roles (BILL-1, ED-1, ADT-1, NUR-1) and keeps them; 0202 refuses without 0176 and applies on NUR-1's 0170-0177; post-checks pass; locks measured equal the pinned list.
+- **Release C's live verifiers:** `scripts/tuf-staging-migration-rehearsal.mjs` with the live tree and the four files' final numbers; every live runtime verifier passes after each file. New: `services/identity-api/scripts/verify-workforce-runtime.mjs` (a renewal, a leave request and decision, an in-charge, a roster saved and published, an attendance mark, on duty now).
+- **Services:** controller and service unit specs; each flag off answering its 503; `role-matrix.json`; the SX-1 area spec; the CSV (header, Lagos date, cells starting with `=`, `+`, `-` or `@` made safe).
+- **Website:** roster grid, publish, print, attendance, leave and licence screens with the device zone away from Lagos; no leave type shown to anyone but the requester and deciders; no Health ID in any URL; no "permission" in staff text.
+
+Expected on this branch, and not worked around: release tests 45, 53 and 99 (and similar) fail with "missing migration prefix" because of the numbering gap between 0153 and 0199.
+
+### Depends on
+
+- 0086 (staff, memberships, licence attestations, `identity.staff_management_actor`), 0114 (department codes), 0139 (SX-4's licence per role), SX-9 (names).
+- **NUR-1's 0176** (`ehr.clinical_shifts`) for 0202 only. NUR-1's shift setup routes (`/ehr/clinical-shifts`) are behind `NURSING_ENABLED`; a facility needs its shifts set up before it can make a roster. Open point below.
+- It unblocks: Ambulance dispatch and Quality (who is on duty, through `identity.duty_roster_on_duty_at`), the later staff inbox (expiry and roster notices), and a later HR licence file (community health worker registration, Q166 B).
+
+### Clinical lead checklist (before real use)
+
+- **The minimum rest between duties**: the draft 8 hours, and whether a back-to-back "double" is ever allowed.
+- That one person may never hold two overlapping duties at the facility.
+- The facility shift patterns the roster uses (NUR-1's suggested Morning 07:30-14:30, Afternoon 14:00-21:00 and Night 20:30-08:00, Q-NUR-16 A), reviewed for the roster too.
+- The attendance marks: present, absent, swapped (with who worked instead).
+- **Q243 A**: that an expired licence only warns, and the 30 and 60 day windows. Choosing B (suspension) needs the clinical lead's and legal's sign-off first.
+- Whether NUR-1's ward assignments should later be limited to staff on the published roster (not in this release).
+
+### DPO and legal items (NDPA, Labour Act)
+
+- Employee personal data: work data only (Q244 A). Names, roles, duties, attendance, leave dates and type, licence body, the last 4 characters of the number, and renewal dates.
+- **Leave type**: "sick" and "maternity" are sensitive. The type is seen only by the requester and the deciders (administrators and the in-charge of the department named). The roster shows "On leave" only to editors, never the type, and audit rows never hold it. No reason or medical detail is collected.
+- **Published rosters** name staff and their duties to every staff role at the facility (Q-ROS-9 A), as a paper roster on the notice board does.
+- **Attendance**: absent marks are work records, kept with the roster.
+- **The CSV export** holds names and the last 4 characters of licence numbers (Q-ROS-12 A); the export is audited.
+- **Retention**: rosters, attendance, leave and renewals are kept and never deleted in this release. Legal sets retention (Labour Act records and the NDPA) before go-live.
+- **Staff notice**: staff are told what the roster, leave and licence pages record and who sees it, before go-live.
+
+### Open points
+
+- Q-ROS-8 to Q-ROS-15 above (built at the recommended option).
+- Leave for the BILL-1 roles (`cashier`, `billing_officer`) and the roles wave 3 adds (radiographer, radiologist, dentist): a later file gives them `workforce.roster.read` and `workforce.leave.request` once those roles are live.
+- NUR-1's shift setup is behind `NURSING_ENABLED`. If the Duty roster goes live before NUR-1, the clinical shift setup routes need to open with `DUTY_ROSTER_ENABLED` too (a change in NUR-1's lane).
+- Facilities with no facility profile (some governed facilities) have no department codes, so they cannot make rosters until support records their departments.
+- Front desk, records and cashier teams have no 0114 department code; they are rostered under a clinical department (for example General Outpatient) until facility units come.
+- A community health worker's registration number (Q166 B) comes with a later HR licence file.
+
+### Target
+
+Release D, Phase 4 sprint (from 25 Nov 2026). Size **L**.
+- Backend: 0199-0202, identity-api routes (`src/workforce/`), the SX-1 area and the role matrix.
+- Website: Lekan.
+- Review: Rahman (database, identity and access, release cut), an independent agent review per change, and the owner's verbatim signature on each migration.
+- Go-live: `HR_CREDENTIALS_ENABLED` after the DPO's review; `DUTY_ROSTER_ENABLED` after the DPO's review, the clinical lead's checklist (the rest rule first), NUR-1's shifts, and the owner's go-live (Q160 A).
 
 # Not planned yet
 
