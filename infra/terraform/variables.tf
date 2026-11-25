@@ -448,6 +448,12 @@ variable "prescription_dispensing_details_enabled" {
   default     = false
 }
 
+variable "staff_open_patient_enabled" {
+  description = "identity-api STAFF_OPEN_PATIENT_ENABLED (SX-8, 0140): the patient a staff sign-in has open is kept across a reload, for at most 8 hours, at one facility, granting nothing. Needs migration 0140; with it on, identity-api refuses to start while auth.session_open_patient or its grants are missing."
+  type        = bool
+  default     = false
+}
+
 variable "qoreid_secret_arn" {
   description = "Existing secret containing clientId and secret. Terraform never stores their values."
   type        = string

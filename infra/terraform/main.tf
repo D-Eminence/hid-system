@@ -158,6 +158,7 @@ module "application" {
   staff_facility_selection_mode           = var.staff_facility_selection_mode
   own_work_patient_card_enabled           = var.own_work_patient_card_enabled
   prescription_dispensing_details_enabled = var.prescription_dispensing_details_enabled
+  staff_open_patient_enabled              = var.staff_open_patient_enabled
 
   # Emergency-contact delivery. Each switch adds its keys only while on.
   emergency_contact_notification_enabled = var.emergency_contact_notification_enabled

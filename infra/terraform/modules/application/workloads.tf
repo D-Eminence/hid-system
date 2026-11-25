@@ -249,7 +249,11 @@ locals {
   prescription_dispensing_details_environment = var.prescription_dispensing_details_enabled ? {
     PRESCRIPTION_DISPENSING_DETAILS_ENABLED = "true"
   } : {}
-  staff_feature_keys = ["STAFF_FACILITY_SELECTION_MODE", "OWN_WORK_PATIENT_CARD_ENABLED", "PRESCRIPTION_DISPENSING_DETAILS_ENABLED"]
+  # SX-8 (0140): identity-api STAFF_OPEN_PATIENT_ENABLED true|false.
+  staff_open_patient_environment = var.staff_open_patient_enabled ? {
+    STAFF_OPEN_PATIENT_ENABLED = "true"
+  } : {}
+  staff_feature_keys = ["STAFF_FACILITY_SELECTION_MODE", "OWN_WORK_PATIENT_CARD_ENABLED", "PRESCRIPTION_DISPENSING_DETAILS_ENABLED", "STAFF_OPEN_PATIENT_ENABLED"]
 
   workload_environment = {
     identity-api = merge(local.common_api_environment, local.workload_token_files.identity-api, {
@@ -294,7 +298,7 @@ locals {
       }, local.support_workload_caller ? {
       # The one caller allowed on the support Health ID match route.
       IDENTITY_SUPPORT_CALLER_SUBJECT = lookup(local.identity_subjects, "support", "")
-    } : {}, local.emergency_contact_identity_environment, local.web_push_environment, local.staff_facility_selection_environment)
+    } : {}, local.emergency_contact_identity_environment, local.web_push_environment, local.staff_facility_selection_environment, local.staff_open_patient_environment)
 
     ehr-api = merge(local.common_api_environment, local.workload_token_files.ehr-api, {
       PORT                                    = "3002"
