@@ -14,10 +14,13 @@ export class OcrController {
   constructor(private readonly ocr: OcrService) {}
 
   // Starting or retrying a reading needs ocr.job.start as well as
-  // ocr.job.write (owner decision Q111 A, migration 0136): doctors keep
-  // ocr.job.write for checking readings and confirming their patient under
-  // records processing, but do not start new readings; the front desk,
-  // nurses and clinicians do.
+  // ocr.job.write (owner decision Q111 A, migration 0136). The front desk,
+  // nurses and clinicians hold both. 0136 left doctors only ocr.job.write
+  // (for checking readings and confirming their patient under records
+  // processing); 0150 (owner decision Q141 B) gives every doctor
+  // ocr.job.start again, so doctors start and retry readings too. The routes
+  // ask for the same two codes either way: the role table decides, never a
+  // role name here.
   @Post()
   @RequirePermissions('ocr.job.write', 'ocr.job.start')
   @AuditAction('ocr.job.create.request')
