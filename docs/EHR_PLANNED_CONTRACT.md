@@ -1966,11 +1966,14 @@ copied verbatim (CC BY-ND 3.0 IGO: not shortened, respelled or re-cased).
 Extension codes (X...) and blocks without a code are left out.
 
 Each word of `q` must start a word of the title or of one of our own other
-names. Those come from `DIAGNOSIS_SYNONYMS` in the same file (HTN, DM,
-"MP+", typhoid...), are kept apart from WHO's words, and contain no ICD-10
-content. A code typed exactly comes first, then an entry whose title or
-one of our other names is `q` itself, then those whose title or other name
-starts with `q`, then shorter titles.
+names. Those are `DIAGNOSIS_SYNONYMS`' names in the same file (HTN, DM,
+"MP+", typhoid...), the plain-letter spelling of a title with accented
+letters ("Sjogren syndrome"), and the few names the clinical owner
+approved in the seed's builder (`APPROVED_OTHER_NAMES`: "down syndrome",
+"gallstone", "gallstones"). They are kept apart from WHO's words and
+contain no ICD-10 content. A code typed exactly comes first, then an
+entry whose title or one of our other names is `q` itself, then those
+whose title or other name starts with `q`, then shorter titles.
 
 Example for `q=falciparum`:
 
@@ -2191,10 +2194,15 @@ file's seed in `docs/codes/catalog-approvals.json`.
     each with its code, WHO's title for it and who approved it: "down
     syndrome" for LD40.0 Complete trisomy 21, and "gallstone" and
     "gallstones" for DC11 Cholelithiasis (Ola, clinical owner, 25 Nov
-    2026). The build stops if the release lacks the code or titles it
-    otherwise, or if another entry already has one of the names as its
+    2026, on #320). The build stops if the release lacks the code or titles
+    it otherwise, or if another entry already has one of the names as its
     title or other name, compared as the search compares them. "Down's
-    syndrome" finds LD40.0 through the apostrophe-s rule.
+    syndrome" finds LD40.0 through the apostrophe-s rule. WHO lists "Down
+    syndrome" as an inclusion of LD40.0. WHO's index files "gallstone"
+    under DC11.3 Calculus of gallbladder or cystic duct without
+    cholecystitis or cholangitis; the names stay on DC11, as
+    `DIAGNOSIS_SYNONYMS`' rule has it, because DC11.3 adds "without
+    cholecystitis or cholangitis", which they do not say.
   - 78 entries have an other name.
 - **Search:** `GET /api/v1/ehr/terminology/diagnoses?q=&limit=` as above,
   with ORD-7's rules for `q` (6 words, never raw `to_tsquery`, no Health ID
@@ -2221,8 +2229,9 @@ file's seed in `docs/codes/catalog-approvals.json`.
     which it used to offer. With the seed of 23 Nov, "gallstones" found
     DA91.30 Gallstone ileus of small intestine this way, as "gallstone"
     did. Now that "gallstones" is one of our other names for DC11, it finds
-    DC11 Cholelithiasis on the first attempt, and "gallstone" offers DC11
-    first, then DA91.30.
+    DC11 Cholelithiasis on the first attempt, so the second attempt does
+    not run and "gallstones" no longer offers DA91.30. "gallstone" offers
+    DC11 first, then DA91.30.
   - The order: the entry whose code `q` is; then an entry whose title or
     one of our other names is `q` itself, as words ("ra" is FA20
     Rheumatoid arthritis, whose other name is ra, before shorter titles

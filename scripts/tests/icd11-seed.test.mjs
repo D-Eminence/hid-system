@@ -174,9 +174,9 @@ export const DIAGNOSIS_SYNONYMS: Readonly<Record<string, string>> = {
 test('the approved other names: exactly these, each with its code, WHO\'s title and the approval', () => {
   assert.deepEqual(APPROVED_OTHER_NAMES.map((entry) => ({ ...entry, names: [...entry.names] })), [
     { code: 'LD40.0', title: 'Complete trisomy 21', names: ['down syndrome'],
-      approval: 'approved by Ola as clinical owner, 25 Nov 2026' },
+      approval: 'approved by Ola as clinical owner, 25 Nov 2026 (#320, comments 7141511470 and 7168535216)' },
     { code: 'DC11', title: 'Cholelithiasis', names: ['gallstone', 'gallstones'],
-      approval: 'approved by Ola as clinical owner, 25 Nov 2026' },
+      approval: 'approved by Ola as clinical owner, 25 Nov 2026 (#320, comments 7141511470 and 7168535216)' },
   ])
   assert.ok(Object.isFrozen(APPROVED_OTHER_NAMES) && APPROVED_OTHER_NAMES.every((entry) => Object.isFrozen(entry)
     && Object.isFrozen(entry.names)))
