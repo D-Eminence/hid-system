@@ -68,6 +68,8 @@ This file is for a coordinator session that takes over: a new cloud session, or 
 |---|---|---|
 | wf_877a0c93-e09 | #335 Appointments and #336 Billing: Rahman's fixes, 2-lens review + adversarial verify, then a six-order wave 1 apply check | /home/l2e/hid/wt-appt, wt-bill |
 | wf_9f4a817c-565 | #337 Emergency, then #343 Inpatient (0171 board-marker fix); health #328 #329 #330 #335 #336 | wt-ed, wt-inpatient, wt-web-<pr> |
+| wf_3ebd077f-b91 | Cover: 0154 fixes (claude/ord12-refills-fixes), ORD-11 0159, display follow-ups, Lekan's five blue screens, check:db Docker harness, #342 review | wt-ord12, wt-ord11, wt-display, wt-blue-* |
+| wf_71155cf4-e48 | Cover: Ola's 0155, 0156, 0157, 0158, 0178, 0179, 0180; Rahman's SX-6 0205, SX-7 0206, ID-8 0207-0208, CHW-1 0209 | wt-ord7fac, wt-nameonly, wt-ord9rank, wt-ord6, wt-selfcheck, wt-discussed, wt-ord8, wt-sx6(-web), wt-sx7(-web), wt-id8(-web), wt-chw1(-web) |
 | wf_3cbe4e94-299 | Wave 3: radiology, blood bank, referrals, dental, quality, HR/rosters, reports (backend + website each) | wt-w3-<dept>-be, wt-w3-<dept>-web |
 If this session dies, these commits exist only in those local worktrees: push each branch before anything else.
 
@@ -89,7 +91,8 @@ Numbers are bookings, given finally at integration in release order. A later rel
 | 0170–0177 | Sprint wave 2 (ADT, nursing) |
 | 0178–0180 | Ola: lab self-check (0178), "Discussed with the patient" (0179), ORD-8 (0180) |
 | 0181–0204 | Wave 3 (provisional, see above) |
-| 0205+ | Free. ORD-10 phase 2 takes the next number when WHOCC answers; wave 4 booked per department on #258 |
+| 0205–0209 | SX-6 0205, SX-7 0206, ID-8 0207–0208, CHW-1 0209 (provisional) |
+| 0210+ | Free. ORD-10 phase 2 takes the next number when WHOCC answers; wave 4 booked per department on #258 |
 
 ## Team (sessions don't wake from GitHub; the owner relays, and the team reads hid-system#258)
 - **Rahman** (database, identity, release): #338 and #339 done. He has reviewed all six of Ola's design notes (0155/0156, 0158, 0159, 0181/0182 now 0178/0179, 0183 now 0180); 0159 has one blocking point (each notice stores its recipient). Next: 0154's lock fix, then final checks on wave 1; then refills #331, `createdByMembershipId` and the SX-8 flag for #323; then SX-6, SX-7, ID-8 and CHW-1; then his tooling fixes #325 and #326.
