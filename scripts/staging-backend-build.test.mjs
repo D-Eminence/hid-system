@@ -17,6 +17,8 @@ test('scoped Novu dispatch builds only worker and migration',()=>assert.deepEqua
 test('scoped admin correction builds only Identity and migration',()=>assert.deepEqual(selectComponents([],'admin-update'),['identity-api','database-migration']));
 test('patient chat release builds exactly its three APIs and compatible migration runner',()=>assert.deepEqual(selectComponents([],'patient-chat-update'),['identity-api','ehr-api','lab-api','database-migration']));
 test('database changes also rebuild the migration runner',()=>assert.deepEqual(selectComponents(['services/ehr-api/database/migrations/0063_example.sql']),['ehr-api','database-migration']));
+test('docs/codes, which the migration image carries for the catalogue load, rebuilds only the migration runner',()=>
+  assert.deepEqual(selectComponents(['docs/codes/catalog-approvals.json','docs/codes/hid-medicines.json']),['database-migration']));
 test('shared client and CI changes select the complete backend matrix',()=>assert.deepEqual(selectComponents(['packages/api-client/src/index.ts']),components));
 test('reject unknown/path-injection components',()=>assert.throws(()=>componentConfig('../production')));
 test('migration uses the existing EHR repository with the migration target',()=>assert.equal(componentConfig('database-migration').target,'migration'));

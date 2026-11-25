@@ -79,10 +79,14 @@ export class IdentityService {
     scope: RecordAccessScope,
     purpose: PurposeOfUse,
     context: DataAccessContext,
+    options: { signal?: AbortSignal } = {},
   ): Promise<AuthorizationDecision> {
     let decision: AuthorizationDecision;
     try {
-      decision = await this.provider.authorize({ patientId, scope, purpose, context });
+      // The signal only when a caller gives one, so every other check asks the
+      // provider exactly as before. An aborted check is a failure, audited below.
+      decision = await this.provider.authorize({ patientId, scope, purpose, context,
+        ...(options.signal ? { signal: options.signal } : {}) });
     } catch (error) {
       await this.record(context, 'identity.authorization.check', 'failure', patientId, purpose, {
         scope,

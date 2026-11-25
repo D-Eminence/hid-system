@@ -4,8 +4,8 @@ import type { PoolClient } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
 import { DatabaseService } from '../../database/database.service';
-import { LAB_PROGRESS_UNKNOWN, type LabOwnProgress, PHARMACY_PROGRESS_UNKNOWN, type PharmacyOwnProgress,
-  WorkItemProgressService } from '../../integrations/work-item-progress.service';
+import { LAB_PROGRESS_UNKNOWN, type LabOwnProgress, type OrderItem, OwnProgressSlots, type PatientOrders,
+  PHARMACY_PROGRESS_UNKNOWN, type PharmacyOwnProgress, WorkItemProgressService } from '../../integrations/work-item-progress.service';
 import { OrderRouteReader } from '../order-routes/order-route-reader';
 import type { MyOrdersQueryDto } from './my-orders.dto';
 
@@ -17,8 +17,7 @@ export const MY_ORDERS_SQL = `select kind, order_id::text, encounter_id::text, p
        resume_kind, resume_id::text as resume_id
   from ehr.list_my_orders($1::text[], $2, $3::date, $4::timestamptz, $5, $6::uuid, $7)`;
 
-/** ORD-3's progress calls for one page: at most this many at once, and all of them within this deadline. */
-export const OWN_PROGRESS_CONCURRENCY = 6;
+/** ORD-3's progress for one page: both kinds' calls, and any one-patient fallback calls, within this deadline. */
 export const OWN_PROGRESS_PAGE_DEADLINE_MS = 4_000;
 
 type OrderKind = 'lab_request' | 'prescription';
@@ -104,9 +103,9 @@ export function addYears(day: string, years: number): string {
  * MY-1 (0143): "Ordered by me". The database decides what this member may
  * see now (ehr.list_my_orders, the session's own direct-care rule per
  * patient) and audits the list and each patient shown; this adds each
- * order's own lab or pharmacy progress (ORD-3, one call per patient and kind
- * on the page, at most 6 at once and all within 4 seconds, audited there) and
- * its route summary.
+ * order's own lab or pharmacy progress (ORD-3's several-patient form, one
+ * call per kind on the page, all within 4 seconds, audited there per patient)
+ * and its route summary.
  */
 @Injectable()
 export class MyOrdersService {
@@ -209,43 +208,57 @@ export class MyOrdersService {
   }
 
   /**
-   * ORD-3's own lab or pharmacy progress, one call per patient and kind on
-   * the page: at most OWN_PROGRESS_CONCURRENCY at once, and whatever has not
-   * answered by the page's deadline is unknown. Never throws.
+   * ORD-3's own lab or pharmacy progress for the page (decision 4): one call
+   * per kind with ORD-3's several-patient form, both kinds at once. The page
+   * passes one OwnProgressSlots to both, so against an image without that
+   * form (the client then asks once per patient) the page makes at most 6
+   * one-patient calls at once across both kinds. Each order's progress is
+   * kept as soon as the client knows it (onAnswer): a draft at once, each
+   * patient as its answer is read. At the page's deadline its signal aborts,
+   * which ends both calls in the client, and only what has not answered by
+   * then is unknown, patient by patient, as with the one-patient calls before
+   * decision 4 (one slow patient on the fallback leaves the others answered).
+   * Never throws.
    */
   private async ownProgress(context: DataAccessContext, rows: Array<MyOrderRow & { kind: OrderKind; order_id: string }>) {
     const out = new Map<string, LabOwnProgress | PharmacyOwnProgress>();
-    const byKey = new Map<string, Array<{ id: string; status: string }>>();
+    const byKind = { lab_request: new Map<string, OrderItem[]>(), prescription: new Map<string, OrderItem[]>() };
     for (const row of rows) {
-      const key = `${row.kind}|${row.patient_id}`;
-      byKey.set(key, [...(byKey.get(key) ?? []), { id: row.order_id, status: String(row.status) }]);
+      const patients = byKind[row.kind];
+      const patientId = String(row.patient_id);
+      patients.set(patientId, [...(patients.get(patientId) ?? []), { id: row.order_id, status: String(row.status) }]);
     }
-    const queue = [...byKey];
+    const patientsOf = (kind: OrderKind): PatientOrders[] => [...byKind[kind]].map(([patientId, items]) => ({ patientId, items }));
+    const page = new AbortController();
+    // One limit for the page's one-patient calls (the fallback), across both kinds; made per page, never kept.
+    const slots = new OwnProgressSlots();
     let open = true;
     let timer: NodeJS.Timeout | undefined;
     const deadline = new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, this.progressDeadlineMs);
+      timer = setTimeout(() => {
+        page.abort();
+        resolve();
+      }, this.progressDeadlineMs);
       timer.unref?.();
     });
-    const worker = async () => {
-      for (let next = queue.shift(); next && open; next = queue.shift()) {
-        const [key, items] = next;
-        const [kind, patientId] = key.split('|') as [OrderKind, string];
-        let found: Map<string, LabOwnProgress | PharmacyOwnProgress>;
-        try {
-          found = kind === 'lab_request'
-            ? await this.progress.lab(context, patientId, items)
-            : await this.progress.pharmacy(context, patientId, items);
-        } catch {
-          continue;
-        }
-        if (open) for (const [id, value] of found) out.set(id, value);
-      }
+    // Each answer as the client reads it, until the deadline; nothing after it.
+    const keep = (id: string, value: LabOwnProgress | PharmacyOwnProgress) => {
+      if (open) out.set(id, value);
     };
-    await Promise.race([
-      Promise.all(Array.from({ length: Math.min(OWN_PROGRESS_CONCURRENCY, queue.length) }, () => worker())),
-      deadline,
-    ]);
+    const ask = async (kind: OrderKind) => {
+      if (byKind[kind].size === 0) return;
+      let found: Map<string, LabOwnProgress | PharmacyOwnProgress>;
+      try {
+        found = kind === 'lab_request'
+          ? await this.progress.labForPatients(context, patientsOf(kind), { signal: page.signal, slots, onAnswer: keep })
+          : await this.progress.pharmacyForPatients(context, patientsOf(kind), { signal: page.signal, slots,
+            onAnswer: keep });
+      } catch {
+        return;
+      }
+      for (const [id, value] of found) keep(id, value);
+    };
+    await Promise.race([Promise.all([ask('prescription'), ask('lab_request')]), deadline]);
     open = false;
     clearTimeout(timer);
     for (const row of rows) {
