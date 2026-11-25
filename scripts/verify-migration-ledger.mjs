@@ -166,10 +166,10 @@ const acceptedMigrations = new Map([
   ['0151_sealed_qa_front_desk_and_nurse_logins.sql', 'abab517679255cec2d67aadae9d44f1b629e8e3e9ee30d77cfee33817b2c75f2'],
   ['0162_billing_roles_and_codes.sql', 'e2a8410915bb535641f99be016a5e8444929a0e2cd818c1772bb844af9f6ad8b'],
   ['0163_billing_settings_and_price_list.sql', '8be462a75bde783796b5dc1d521494371cfa6cd4c7db00247cf6a4e27717c5dc'],
-  ['0164_bills_payments_and_hmo_cover.sql', 'd7a90b2eba65e48fa4d6a57b3f8e0b3661839ddd719d422e5e9bc08dada820d0'],
-  ['0165_till_days_and_end_of_day.sql', 'a4119679486333de9efb8d1a8cc971cb698b5fa2e83384d7107fad5f507ec756'],
-  ['0166_pharmacy_point_of_care_stock.sql', '4ad47e731b53ab69561c3a090413d336b9fddb184a14982615eb582fee8247c5'],
-  ['0167_billing_and_stock_hooks.sql', '421fdbbba49d3b5ad333e37287abb20fcbedc445a8926b697979258079734f67'],
+  ['0164_bills_payments_and_hmo_cover.sql', 'f112e9ec03ee6c1c2e30213fcdd06ab7c4bbe4598eace2f1f2dddadc1abf3225'],
+  ['0165_till_days_and_end_of_day.sql', '44d40a744ecfd10684b4932b12cc6d7579b0aa88a39b1f7bb7a546cdc44a6de4'],
+  ['0166_pharmacy_point_of_care_stock.sql', 'a43f500897e6ad3ab7cc36c4abdab89ed1b091d3b6ef91be7ae2c836a1a35d7f'],
+  ['0167_billing_and_stock_hooks.sql', 'aa882dc95c2e8b2ff8462ae69786618c6887599f3a28f21829240992a5f901f1'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

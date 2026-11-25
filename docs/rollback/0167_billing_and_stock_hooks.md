@@ -12,7 +12,7 @@ drop trigger zz_billing_triage on ehr.visit_queue;
 drop trigger zz_billing_acceptance on pharmacy.work_item_acceptances;
 drop trigger zz_billing_lab_work_item on lab.work_items;
 drop trigger zz_billing_stock_and_gate on pharmacy.dispensings;
-drop trigger zz_billing_stock_back on pharmacy.dispensing_reversals;
+drop trigger zz_billing_reversal on pharmacy.dispensing_reversals;
 drop trigger zz_billing_collect_gate on lab.specimens;
 drop function commercial.hook_check_in(), commercial.hook_triage(), commercial.hook_pharmacy_acceptance(),
   commercial.hook_lab_work_item(), commercial.hook_dispensing(), commercial.hook_dispensing_reversal(),

@@ -12380,7 +12380,14 @@ an optional `batchId`; a stock-kept item is taken expiry-first (409
 `OUT_OF_STOCK` with `onHand`, `unit`, `expiredOnHand`; 409
 `STOCK_UNIT_MISMATCH`), and with pay-before on, 409 `PAYMENT_REQUIRED` or
 `PAYMENT_PENDING_CHECK` (audited as the dispensing's denied row); the
-dispensing's audit row gains `stockTaken` (batch ids and counts). Own pharmacy
+dispensing's audit row gains `stockTaken` (batch ids and counts). When that
+dispensing would have accepted the item (ORD-4), the acceptance is recorded on
+its own after the pay-before refusal (audited `pharmacy.work-item.pharmacist-accept`
+with `forPayment: true`), so its bill line stays for the cashier and the next
+Dispense after payment goes through. A dispensing reversal moves no stock; the
+work item's line is cancelled ("Dispensing reversed") when the bill can lose
+it, else kept and marked `dispensingReversed` on the bill and the work item's
+`bill` (a refund is due). Own pharmacy
 work items (list and read) gain `bill` and `stock` when the facility uses
 billing (nothing otherwise, as before). Lab specimen collection answers 409
 `PAYMENT_REQUIRED` or `PAYMENT_PENDING_CHECK` with pay-before on for lab. The
@@ -12395,9 +12402,17 @@ the planned contract's table, schema `commercial`, and the two sealed QA logins
 HMOs, tills, the one item master `commercial.catalogue_items` (BILL-7) with
 prices, events, gap-free number counters, commands and unpriced codes. 0164:
 bills, lines, payments, HMO covers (BILL-8: owed, never paid) and bill events.
-0165: till days (BILL-10) and the money commands. 0166: pharmacy stock
-(batches, receipts, adjustments, the append-only movement ledger,
-`pharmacy.take_stock_expiry_first`) and counter sales. 0167: seven triggers
+0165: till days (BILL-10) and the money commands (a payment, void or online
+payment locks its open day FOR SHARE, so one taken while the day closes is
+refused `TILL_DAY_NOT_OPEN` and a closed day's expected cash counts every
+payment in it). 0166: pharmacy stock (batches, receipts, adjustments, the
+append-only movement ledger, `pharmacy.take_stock_expiry_first`) and counter
+sales (the outside prescriber kept on the bill; the hand-over refuses a
+prescription-only line without one, 422 `PRESCRIPTION_REQUIRED`). On a counter
+sale, `POST /commercial/bills` and `POST .../lines` take no prescription-only
+medicine (422 `PRESCRIPTION_REQUIRED`) and no line after the hand-over (409
+`ALREADY_HANDED_OVER`). A bill whose live lines leave nothing to pay is `paid`
+(a sale of free programme medicines is handed over at once). 0167: seven triggers
 (`zz_billing_*`) on the waiting list, the pharmacist acceptance, own lab work
 items, dispensings, reversals and specimen collection; each returns at once
 where the facility does not use billing. Every new table: `facility_id` on
@@ -12415,10 +12430,12 @@ act `billing.catalogue.manage`), `endOfDay` (`billing.shift.own`),
 The role-matrix fixture gains the Cashier and Billing officer columns and the
 four rows (derived: not rows of Akos's table).
 
-Tests: `services/ehr-api/test/database/patient-billing.integration.sql` (132
+Tests: `services/ehr-api/test/database/patient-billing.integration.sql` (161
 cases), `services/ehr-api/scripts/test-patient-billing-migrations.mjs` (each
 file's precondition, busy and re-run refusals; two sessions paying at once;
-numbers without gaps), ehr-api `src/commercial/commercial.spec.ts`,
-pharmacy-api `src/pharmacy/stock/stock.spec.ts`, lab-api
+numbers without gaps; a payment while the day closes), ehr-api
+`src/commercial/commercial.spec.ts`, pharmacy-api
+`src/pharmacy/stock/stock.spec.ts` and `src/pharmacy/pharmacist-acceptance.spec.ts`
+(the acceptance kept after a pay-before refusal), lab-api
 `src/lab/lab-pay-before.spec.ts`, and the role-matrix and facility-module
 specs.

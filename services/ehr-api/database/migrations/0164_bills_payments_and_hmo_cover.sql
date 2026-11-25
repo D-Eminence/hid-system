@@ -23,13 +23,19 @@
 --    (total, paid, pending check, waived, HMO covered, due), kept by the
 --    functions in the same transaction under FOR UPDATE on the bill; the
 --    status; deferral (reason emergency, inpatient or unknown_patient, by
---    system or staff); void; hand-over of a counter sale.
+--    system or staff); void; hand-over of a counter sale; the outside
+--    prescriber a counter sale of a prescription-only medicine was sold on
+--    (0166 writes it; a counter sale only). A bill with live lines and
+--    nothing left to pay is paid, even when every line is free (a sale of
+--    free programme medicines is handed over like any other).
 -- T2 commercial.bill_lines: the item, its name and kind as they were, a
 --    whole quantity 1-10,000, the unit price in kobo at the time it was
 --    added (a later price change never changes it), the origin (check_in,
 --    pharmacy, lab, counter, manual), the work item (unique while not
 --    cancelled, so a work item gets at most one automatic line), a "check
---    quantity" mark, cancellation with reason and member.
+--    quantity" mark, cancellation with reason and member, and when the
+--    work item's dispensing was reversed (0167 cancels the line then, or
+--    marks it for a refund when it was paid).
 -- T3 commercial.payments: cash, pos, transfer, waiver, online; status
 --    recorded, pending_check (a transfer until a second person confirms it)
 --    or confirmed; a receipt number unique per facility; the till day it was
@@ -41,14 +47,19 @@
 --    pending_claim or cancelled (Release 2 adds claimed, accepted, rejected);
 --    never a payment, never in paid or a day's totals, no receipt.
 -- T5 commercial.bill_events: every create, line, payment, confirm, void,
---    defer and attach, append-only.
+--    defer, attach and dispensing reversal, append-only.
 -- Every table: facility_id on every row; row-level security forced with one
 -- policy, for the owner at the session's facility only; no privilege for any
 -- runtime; no DELETE or TRUNCATE (UPDATE too on T5); money bigint kobo >= 0.
 -- F1 Helpers (owner only): commercial.patient_card, commercial.bill_json,
 --    commercial.bill_recompute, commercial.bill_totals_agree (the post-check
 --    the tests and the rehearsal use), commercial.bill_lock,
---    commercial.bill_event, commercial.bill_new, commercial.bill_line_put,
+--    commercial.bill_event, commercial.bill_new, commercial.bill_line_put
+--    (on a counter sale: never after its hand-over, ALREADY_HANDED_OVER;
+--    a prescription-only medicine only as a counter-sale line on a sale with
+--    its outside prescriber, else HB422 PRESCRIPTION_REQUIRED, so neither
+--    POST /commercial/bills nor a manual line sells one with no
+--    prescription),
 --    commercial.bill_defer_put, commercial.bill_for_work (which bill an
 --    automatic line joins: the patient's open waiting-list entry's bill at
 --    this facility, else the bill of the patient's latest entry closed
@@ -103,14 +114,14 @@ declare
     "commercial.bill_event(uuid,uuid,text,uuid,jsonb)": "96ab26ee8e6ef1706820d0fb8d2af7ba",
     "commercial.bill_for_work(uuid,uuid,text)": "ef364a4d5104462ccbdca575302b55a4",
     "commercial.bill_get(uuid)": "1cb53c93da1ed4f63599298cccdade93",
-    "commercial.bill_json(uuid)": "12526a6d974a627e7173364a771da28a",
+    "commercial.bill_json(uuid)": "2d759b2f3e1736991c351b0fe0169d9a",
     "commercial.bill_line_add(uuid,jsonb,bigint,text,text)": "8187254afca47cbd8a6801d1a11a1791",
     "commercial.bill_line_cancel(uuid,uuid,text,bigint,text,text)": "4f5688921056a3896a28d28242d7ee53",
-    "commercial.bill_line_put(uuid,uuid,integer,text,text,uuid,boolean,text,uuid,text,text)": "981cf8f8cb935594642559b945dd5cb5",
+    "commercial.bill_line_put(uuid,uuid,integer,text,text,uuid,boolean,text,uuid,text,text)": "3bd0607d682ebe97f3921303ed5bd8fc",
     "commercial.bill_list(text,text,text,date,integer)": "2133b8cbb626092c193a0356ea73b272",
     "commercial.bill_lock(uuid,uuid,bigint)": "10056a5864f81b6310e3acd35dfad566",
     "commercial.bill_new(uuid,text,uuid,uuid,text,boolean,uuid,text,text)": "8f3f64785861919b6f603d8ba53d48fa",
-    "commercial.bill_recompute(uuid)": "daa183c8d7ccc092df79a9beb40b5c45",
+    "commercial.bill_recompute(uuid)": "a343bb9089c0dade20cf8bc4b1d7b813",
     "commercial.bill_summary(date)": "8d3315e77d0def44e712b497e33da2b4",
     "commercial.bill_sums(uuid)": "c6fd7055dfa3c85b0dfe77c285484fcd",
     "commercial.bill_totals_agree(uuid)": "58e3a323ea3adfb94631e0e6f6816d1d",
@@ -121,7 +132,7 @@ declare
     "commercial.patient_card(uuid)": "b51e6a898739b4219696ccedca1877ec",
     "commercial.resolve_health_id(text,text)": "99e6d5e1a4c27dea25f9b2cb7799eb7e",
     "commercial.staff_source(uuid)": "df47a040ca9124981981cccb083bb8f1",
-    "commercial.work_item_bills(text,uuid[])": "84a9dee954a939db7905ca997c1deb05"}';
+    "commercial.work_item_bills(text,uuid[])": "c5f0ce2094e57bb4afff0a68fb93ab4d"}';
   present integer;
   differing text;
 begin
@@ -202,6 +213,8 @@ create table commercial.bills (
   voided_by_membership_id uuid references identity.staff_facility_memberships(id) on delete restrict,
   handed_over_at timestamptz,
   handed_over_by_membership_id uuid references identity.staff_facility_memberships(id) on delete restrict,
+  outside_prescriber_name text check (outside_prescriber_name is null
+    or length(btrim(outside_prescriber_name)) between 2 and 120),
   created_by_membership_id uuid references identity.staff_facility_memberships(id) on delete restrict,
   idempotency_key text check (idempotency_key ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$'),
   request_sha256 char(64) check (request_sha256 ~ '^[0-9a-f]{64}$'),
@@ -216,6 +229,7 @@ create table commercial.bills (
   constraint bills_anonymous_ck check (patient_id is null or anonymous_name is null),
   constraint bills_counter_ck check (not counter or (source = 'pharmacy' and visit_queue_entry_id is null)),
   constraint bills_anonymous_counter_ck check (patient_id is not null or counter),
+  constraint bills_outside_ck check (outside_prescriber_name is null or counter),
   constraint bills_deferred_ck check ((deferred_reason is null) = (deferred_by is null)
     and (deferred_reason is null) = (deferred_at is null)),
   constraint bills_void_ck check ((voided_at is null) = (void_reason is null)
@@ -247,6 +261,7 @@ create table commercial.bill_lines (
   cancel_reason text check (cancel_reason is null or length(btrim(cancel_reason)) between 8 and 500),
   cancelled_by_membership_id uuid references identity.staff_facility_memberships(id) on delete restrict,
   cancelled_at timestamptz,
+  dispensing_reversed_at timestamptz,
   created_by_membership_id uuid references identity.staff_facility_memberships(id) on delete restrict,
   idempotency_key text check (idempotency_key ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$'),
   request_sha256 char(64) check (request_sha256 ~ '^[0-9a-f]{64}$'),
@@ -255,6 +270,7 @@ create table commercial.bill_lines (
   foreign key (catalogue_item_id, facility_id) references commercial.catalogue_items (id, facility_id) on delete restrict,
   constraint bill_lines_total_ck check (total_kobo = quantity * unit_kobo),
   constraint bill_lines_work_ck check ((work_item_kind is null) = (work_item_id is null)),
+  constraint bill_lines_reversed_ck check (dispensing_reversed_at is null or work_item_kind = 'pharmacy'),
   constraint bill_lines_cancel_ck check (cancelled = (cancel_reason is not null)
     and cancelled = (cancelled_at is not null) and cancelled = (cancelled_by_membership_id is not null))
 );
@@ -341,7 +357,7 @@ create table commercial.bill_events (
   facility_id uuid not null references identity.facilities(id) on delete restrict,
   bill_id uuid not null,
   kind text not null check (kind in ('create', 'line-add', 'line-cancel', 'payment', 'hmo-cover', 'confirm',
-    'payment-void', 'hmo-cover-cancel', 'void', 'defer', 'attach-patient', 'hand-over')),
+    'payment-void', 'hmo-cover-cancel', 'void', 'defer', 'attach-patient', 'hand-over', 'dispensing-reversed')),
   membership_id uuid references identity.staff_facility_memberships(id) on delete restrict,
   details jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default clock_timestamp(),
@@ -420,7 +436,8 @@ as $$
     'lines', coalesce((select jsonb_agg(jsonb_build_object('id', line.id, 'catalogueItemId', line.catalogue_item_id,
                 'name', line.name, 'kind', line.kind, 'quantity', line.quantity, 'unitKobo', line.unit_kobo,
                 'totalKobo', line.total_kobo, 'workItemId', line.work_item_id, 'origin', line.origin,
-                'checkQuantity', line.check_quantity, 'note', line.note, 'cancelled', line.cancelled)
+                'checkQuantity', line.check_quantity, 'note', line.note, 'cancelled', line.cancelled,
+                'dispensingReversed', line.dispensing_reversed_at is not null)
                 order by line.created_at, line.id)
               from commercial.bill_lines line where line.bill_id = bill.id), '[]'::jsonb),
     'totalKobo', bill.total_kobo, 'paidKobo', bill.paid_kobo, 'waivedKobo', bill.waived_kobo,
@@ -500,7 +517,9 @@ begin
     when sums.all_lines > 0 and sums.live_lines = 0 and sums.paid_kobo + sums.pending_check_kobo + sums.waived_kobo
          + sums.hmo_covered_kobo = 0 then 'void'
     when bill.deferred_reason is not null and due > 0 then 'deferred'
-    when due = 0 and sums.total_kobo > 0 then 'paid'
+    -- Nothing left to pay on live lines is paid, free lines too (a sale of
+    -- free programme medicines has nothing to take and is handed over).
+    when due = 0 and sums.live_lines > 0 then 'paid'
     when sums.paid_kobo + sums.pending_check_kobo + sums.waived_kobo + sums.hmo_covered_kobo > 0 then 'part_paid'
     else 'unpaid' end;
   update commercial.bills bill_row
@@ -622,7 +641,10 @@ begin
 end
 $$;
 
--- Adds a line to a locked bill at the item's cash price now (BILL-15).
+-- Adds a line to a locked bill at the item's cash price now (BILL-15). A
+-- counter sale takes no line once handed over (its goods have gone), and a
+-- prescription-only medicine only as a counter-sale line (0166's
+-- pharmacy.counter_sale_create) on a sale with its outside prescriber.
 create function commercial.bill_line_put(requested_bill uuid, requested_item uuid, quantity_value integer,
   origin_value text, work_kind_value text, work_id_value uuid, check_value boolean, note_value text, member_value uuid,
   key_value text, sha_value text)
@@ -641,6 +663,13 @@ begin
    where catalogue_item.id = requested_item and catalogue_item.facility_id = bill.facility_id and catalogue_item.active;
   if not found then
     raise exception using errcode = 'HB404', message = 'CATALOGUE_ITEM_NOT_FOUND';
+  end if;
+  if bill.counter and bill.handed_over_at is not null then
+    raise exception using errcode = 'HB409', message = 'ALREADY_HANDED_OVER';
+  end if;
+  if bill.counter and item.prescription_only
+     and (origin_value is distinct from 'counter' or bill.outside_prescriber_name is null) then
+    raise exception using errcode = 'HB422', message = 'PRESCRIPTION_REQUIRED';
   end if;
   if quantity_value is null or quantity_value not between 1 and 10000 then
     raise exception using errcode = 'HB400', message = 'VALIDATION_FAILED', detail = '{"field": "quantity"}';
@@ -1318,8 +1347,10 @@ end
 $$;
 
 -- The bill badge of the caller's own work items (pharmacy or lab): the bill,
--- its status, what is due and its latest receipt. A work item with no line
--- (or a cancelled one) has no badge ("Not billed").
+-- its status, what is due and its latest receipt, and whether the work
+-- item's dispensing was reversed on a line that could not come off the bill
+-- (paid: a refund is due). A work item with no line (or a cancelled one) has
+-- no badge ("Not billed").
 create function commercial.work_item_bills(requested_kind text, requested_ids uuid[])
 returns table (work_item_id uuid, bill jsonb)
 language plpgsql
@@ -1341,6 +1372,7 @@ begin
     select line.work_item_id,
            jsonb_build_object('billId', bill_row.id, 'status', bill_row.status, 'dueKobo', bill_row.due_kobo,
              'pendingCheckKobo', bill_row.pending_check_kobo,
+             'dispensingReversed', line.dispensing_reversed_at is not null,
              'deferred', case when bill_row.deferred_reason is null then null else bill_row.deferred_reason end,
              'receiptNumber', (select payment.receipt_number from commercial.payments payment
                                 where payment.bill_id = bill_row.id and payment.voided_at is null
@@ -1410,14 +1442,14 @@ declare
     "commercial.bill_event(uuid,uuid,text,uuid,jsonb)": "96ab26ee8e6ef1706820d0fb8d2af7ba",
     "commercial.bill_for_work(uuid,uuid,text)": "ef364a4d5104462ccbdca575302b55a4",
     "commercial.bill_get(uuid)": "1cb53c93da1ed4f63599298cccdade93",
-    "commercial.bill_json(uuid)": "12526a6d974a627e7173364a771da28a",
+    "commercial.bill_json(uuid)": "2d759b2f3e1736991c351b0fe0169d9a",
     "commercial.bill_line_add(uuid,jsonb,bigint,text,text)": "8187254afca47cbd8a6801d1a11a1791",
     "commercial.bill_line_cancel(uuid,uuid,text,bigint,text,text)": "4f5688921056a3896a28d28242d7ee53",
-    "commercial.bill_line_put(uuid,uuid,integer,text,text,uuid,boolean,text,uuid,text,text)": "981cf8f8cb935594642559b945dd5cb5",
+    "commercial.bill_line_put(uuid,uuid,integer,text,text,uuid,boolean,text,uuid,text,text)": "3bd0607d682ebe97f3921303ed5bd8fc",
     "commercial.bill_list(text,text,text,date,integer)": "2133b8cbb626092c193a0356ea73b272",
     "commercial.bill_lock(uuid,uuid,bigint)": "10056a5864f81b6310e3acd35dfad566",
     "commercial.bill_new(uuid,text,uuid,uuid,text,boolean,uuid,text,text)": "8f3f64785861919b6f603d8ba53d48fa",
-    "commercial.bill_recompute(uuid)": "daa183c8d7ccc092df79a9beb40b5c45",
+    "commercial.bill_recompute(uuid)": "a343bb9089c0dade20cf8bc4b1d7b813",
     "commercial.bill_summary(date)": "8d3315e77d0def44e712b497e33da2b4",
     "commercial.bill_sums(uuid)": "c6fd7055dfa3c85b0dfe77c285484fcd",
     "commercial.bill_totals_agree(uuid)": "58e3a323ea3adfb94631e0e6f6816d1d",
@@ -1428,7 +1460,7 @@ declare
     "commercial.patient_card(uuid)": "b51e6a898739b4219696ccedca1877ec",
     "commercial.resolve_health_id(text,text)": "99e6d5e1a4c27dea25f9b2cb7799eb7e",
     "commercial.staff_source(uuid)": "df47a040ca9124981981cccb083bb8f1",
-    "commercial.work_item_bills(text,uuid[])": "84a9dee954a939db7905ca997c1deb05"}';
+    "commercial.work_item_bills(text,uuid[])": "c5f0ce2094e57bb4afff0a68fb93ab4d"}';
   own constant text[] := array['commercial.staff_source(uuid)', 'commercial.patient_card(uuid)', 'commercial.bill_json(uuid)',
     'commercial.bill_sums(uuid)', 'commercial.bill_recompute(uuid)', 'commercial.bill_totals_agree(uuid)',
     'commercial.bill_lock(uuid,uuid,bigint)', 'commercial.bill_event(uuid,uuid,text,uuid,jsonb)',

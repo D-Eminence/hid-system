@@ -14,6 +14,7 @@ drop function commercial.payment_record_online(uuid, bigint, text), commercial.r
   commercial.day_list(date, boolean), commercial.day_close(uuid, bigint, text, bigint, text, text),
   commercial.day_open(uuid, bigint, text, text), commercial.day_current(uuid), commercial.day_json(uuid),
   commercial.counter_staff_only(uuid), commercial.open_day(uuid, text, uuid, uuid),
+  commercial.open_day_locked(uuid, text, uuid, uuid),
   commercial.day_scope(uuid, uuid, uuid), commercial.till_day_closed_guard() cascade;
 drop table commercial.till_days;
 delete from migration.schema_migrations where version = '0165_till_days_and_end_of_day.sql';

@@ -716,19 +716,19 @@
       },
       {
         "name": "0164_bills_payments_and_hmo_cover.sql",
-        "sha256": "d7a90b2eba65e48fa4d6a57b3f8e0b3661839ddd719d422e5e9bc08dada820d0"
+        "sha256": "f112e9ec03ee6c1c2e30213fcdd06ab7c4bbe4598eace2f1f2dddadc1abf3225"
       },
       {
         "name": "0165_till_days_and_end_of_day.sql",
-        "sha256": "a4119679486333de9efb8d1a8cc971cb698b5fa2e83384d7107fad5f507ec756"
+        "sha256": "44d40a744ecfd10684b4932b12cc6d7579b0aa88a39b1f7bb7a546cdc44a6de4"
       },
       {
         "name": "0166_pharmacy_point_of_care_stock.sql",
-        "sha256": "4ad47e731b53ab69561c3a090413d336b9fddb184a14982615eb582fee8247c5"
+        "sha256": "a43f500897e6ad3ab7cc36c4abdab89ed1b091d3b6ef91be7ae2c836a1a35d7f"
       },
       {
         "name": "0167_billing_and_stock_hooks.sql",
-        "sha256": "421fdbbba49d3b5ad333e37287abb20fcbedc445a8926b697979258079734f67"
+        "sha256": "aa882dc95c2e8b2ff8462ae69786618c6887599f3a28f21829240992a5f901f1"
       }
     ]
   },

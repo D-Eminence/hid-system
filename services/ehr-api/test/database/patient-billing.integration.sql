@@ -26,11 +26,16 @@
 --      difference, a closed day never changes;
 --   7. stock: settings, receipts by batch, expiry first across three
 --      batches, expired batches never given out, OUT_OF_STOCK takes nothing,
---      adjustments, counter sale and hand-over, the ledger agrees;
+--      adjustments, counter sale and hand-over, the ledger agrees; a
+--      prescription-only medicine never sold through the bill routes or
+--      handed over without its outside prescriber; no line on a sale already
+--      handed over; a sale of free medicines is paid as made and handed over;
 --   8. hooks: an accepted priced prescription adds a line with its quantity,
---      an unpriced code is counted, a dispensing takes stock expiry first and
---      a reversal puts it back, pay-before refuses an unpaid bill and never a
---      deferred one, a lab work item adds its line and the collection gate;
+--      an unpriced code is counted, a dispensing takes stock expiry first,
+--      pay-before refuses an unpaid bill and never a deferred one, a reversal
+--      moves no stock and takes its line off an unpaid bill or marks a paid
+--      one for a refund, a lab work item adds its line and the collection
+--      gate;
 --   9. audit rows never hold a name, Health ID, reference or reason text.
 --
 -- Each case records its outcome; the suite fails at the end listing every
@@ -124,7 +129,10 @@ insert into ehr.prescriptions (id, encounter_id, patient_id, facility_id, create
    'HID-MED', 'MED-00042', 'Amoxicillin 500 mg capsule', 'three times a day', 'After food', 'active', 6, 'Capsule'),
   ('b1620610-0000-4000-8000-000000000002', 'b1620600-0000-4000-8000-000000000001', 'b1620400-0000-4000-8000-000000000001',
    'b1620000-0000-4000-8000-000000000002', 'b1620100-0000-4000-8000-000000000004', 'b1620300-0000-4000-8000-000000000004',
-   'HID-MED', 'MED-00099', 'Fictional syrup', 'daily', 'At night', 'active', null, null);
+   'HID-MED', 'MED-00099', 'Fictional syrup', 'daily', 'At night', 'active', null, null),
+  ('b1620610-0000-4000-8000-000000000003', 'b1620600-0000-4000-8000-000000000001', 'b1620400-0000-4000-8000-000000000001',
+   'b1620000-0000-4000-8000-000000000002', 'b1620100-0000-4000-8000-000000000004', 'b1620300-0000-4000-8000-000000000004',
+   'HID-MED', 'MED-00042', 'Amoxicillin 500 mg capsule', 'twice a day', 'After food', 'active', 2, 'Capsule');
 insert into ehr.lab_requests (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
   test_code_system, test_code, test_display, status) values
   ('b1620630-0000-4000-8000-000000000001', 'b1620600-0000-4000-8000-000000000001', 'b1620400-0000-4000-8000-000000000001',
@@ -143,7 +151,7 @@ alter table lab.work_items disable trigger lab_work_item_validate;
 alter table lab.specimens disable trigger lab_specimen_transition;
 alter table pharmacy.work_items disable trigger pharmacy_work_item_validate;
 alter table pharmacy.work_items disable trigger work_items_claim_prescription;
--- p1's two pharmacy work items, sent automatically (0133), written in the desk doctor's session so 0133's own-work
+-- p1's three pharmacy work items, sent automatically (0133), written in the desk doctor's session so 0133's own-work
 -- listing trigger lists the patient for this facility's pharmacy.
 select set_config('app.facility_id', 'b1620000-0000-4000-8000-000000000002', true),
   set_config('app.correlation_id', 'billing-suite-fixture', true);
@@ -154,12 +162,12 @@ insert into pharmacy.work_items (id, patient_id, facility_id, ordering_facility_
 select ('b1620620-0000-4000-8000-00000000000' || n)::uuid, 'b1620400-0000-4000-8000-000000000001',
   'b1620000-0000-4000-8000-000000000002', 'b1620000-0000-4000-8000-000000000002',
   ('b1620610-0000-4000-8000-00000000000' || n)::uuid, 1, 'b1620600-0000-4000-8000-000000000001', 'active', 'accepted',
-  'HID-MED', case n when 1 then 'MED-00042' else 'MED-00099' end,
-  case n when 1 then 'Amoxicillin 500 mg capsule' else 'Fictional syrup' end, 'daily', 'As directed',
+  'HID-MED', case n when 2 then 'MED-00099' else 'MED-00042' end,
+  case n when 2 then 'Fictional syrup' else 'Amoxicillin 500 mg capsule' end, 'daily', 'As directed',
   'b1620100-0000-4000-8000-000000000004', clock_timestamp(), 'b1620100-0000-4000-8000-000000000004',
   'b1620300-0000-4000-8000-000000000004', clock_timestamp(), 'Sent automatically when the prescription was activated',
   'own-pharmacy-send:billing-' || n, repeat('0', 64), 'billing-suite-correlation'
-from generate_series(1, 2) n;
+from generate_series(1, 3) n;
 
 create temporary table b_outcomes (seq serial, name text primary key, expected text not null, actual text)
   on commit drop;
@@ -498,6 +506,10 @@ select pg_temp.check_case('7 a count adjustment needs a note', 'HB400 VALIDATION
     pg_temp.ids('amox'), (select id from pharmacy.stock_batches where batch_number = 'LATE' and facility_id = 'b1620000-0000-4000-8000-000000000002'))));
 select pg_temp.check_case('7 a prescription-only sale needs the prescriber', 'HB422 PRESCRIPTION_REQUIRED',
   pg_temp.pharm('x', 3, format($s$select pharmacy.counter_sale_create('{"patient":{"kind":"anonymous"},"counter":true,"items":[{"catalogueItemId":"%s","quantity":8}]}', 'kbillingsale000000001', repeat('1', 64))$s$, pg_temp.ids('amox'))));
+select pg_temp.check_case('7 an anonymous pharmacy bill cannot sell a prescription-only medicine', 'HB422 PRESCRIPTION_REQUIRED',
+  pg_temp.ehr('x', 3, format($s$select commercial.bill_create('{"source":"pharmacy","patient":{"anonymous":true},"lines":[{"catalogueItemId":"%s","quantity":2}]}', 'kbillingrxbill0000001', repeat('1', 64))$s$, pg_temp.ids('amox'))));
+select pg_temp.check_case('7 nor can the front desk', 'HB422 PRESCRIPTION_REQUIRED',
+  pg_temp.ehr('x', 5, format($s$select commercial.bill_create('{"source":"pharmacy","patient":{"anonymous":true},"lines":[{"catalogueItemId":"%s","quantity":2}]}', 'kbillingrxbill0000002', repeat('2', 64))$s$, pg_temp.ids('amox'))));
 select pg_temp.check_case('7 queueing an outside prescription is not available', 'HB409 WALK_IN_QUEUE_NOT_AVAILABLE',
   pg_temp.pharm('x', 3, format($s$select pharmacy.counter_sale_create('{"patient":{"kind":"anonymous"},"counter":false,"outside":{"prescriberName":"Dr Test"},"items":[{"catalogueItemId":"%s","quantity":8}]}', 'kbillingsale000000002', repeat('2', 64))$s$, pg_temp.ids('amox'))));
 select pg_temp.check_case('7 a counter sale of 8', 'ok',
@@ -517,6 +529,39 @@ select pg_temp.check_case('7 expiry first: SOON emptied, then 3 from MID; LATE a
     where facility_id = 'b1620000-0000-4000-8000-000000000002'));
 select pg_temp.check_case('7 a second hand-over', 'HB409 ALREADY_HANDED_OVER',
   pg_temp.pharm('x', 3, format($s$select pharmacy.sale_hand_over('%s', null, 'kbillinghand000000003', repeat('3', 64))$s$, pg_temp.v('sale')->'bill'->>'id')));
+select pg_temp.check_case('7 no line is added to a sale already handed over', 'HB409 ALREADY_HANDED_OVER',
+  pg_temp.ehr('x', 1, format($s$select commercial.bill_line_add('%s', '{"catalogueItemId":"%s","quantity":1}', null, 'kbillinglineadd000001', repeat('1', 64))$s$,
+    pg_temp.v('sale')->'bill'->>'id', pg_temp.ids('amox'))));
+select pg_temp.check_case('7 nor an item that needs no prescription', 'HB409 ALREADY_HANDED_OVER',
+  pg_temp.ehr('x', 1, format($s$select commercial.bill_line_add('%s', '{"catalogueItemId":"%s","quantity":1}', null, 'kbillinglineadd000002', repeat('2', 64))$s$,
+    pg_temp.v('sale')->'bill'->>'id', pg_temp.ids('consult'))));
+select pg_temp.check_case('7 the handed-over sale is as it was paid', 'paid/120000/1',
+  (select format('%s/%s/%s', status, total_kobo, (select count(*) from commercial.bill_lines where bill_id = bill.id))
+     from commercial.bills bill where id = (pg_temp.v('sale')->'bill'->>'id')::uuid));
+-- An anonymous pharmacy bill of an item that needs no prescription, which a prescription-only line then joins as the
+-- suite's owner writes it (as a line made before this rule, or by any other way): the hand-over checks again.
+select pg_temp.check_case('7 an anonymous pharmacy bill of an item that needs no prescription', 'ok',
+  pg_temp.ehr('rxfree', 3, format($s$select commercial.bill_create('{"source":"pharmacy","patient":{"anonymous":true},"lines":[{"catalogueItemId":"%s","quantity":1}]}', 'kbillingrxbill0000003', repeat('3', 64))$s$, pg_temp.ids('consult'))));
+select pg_temp.check_case('7 it is a counter sale', 'true', (select pg_temp.v('rxfree')->'bill'->>'counter'));
+do $$
+declare
+  bill_value uuid := (pg_temp.v('rxfree')->'bill'->>'id')::uuid;
+begin
+  perform pg_temp.as_member(3);
+  insert into commercial.bill_lines (facility_id, bill_id, catalogue_item_id, name, kind, quantity, unit_kobo, total_kobo,
+    origin, created_by_membership_id)
+  values ('b1620000-0000-4000-8000-000000000002', bill_value, (pg_temp.ids('amox'))::uuid, 'Amoxicillin 500 mg capsule',
+    'drug', 1, 15000, 15000, 'manual', pg_temp.member(3));
+  perform commercial.bill_recompute(bill_value);
+end $$;
+select pg_temp.check_case('7 that bill is paid', 'ok',
+  pg_temp.ehr('x', 3, format($s$select commercial.payment_record('%s', '{"method":"cash","amountKobo":415000}', null, 'kbillingpay0000000014', repeat('e', 64))$s$, pg_temp.v('rxfree')->'bill'->>'id')));
+select pg_temp.check_case('7 a prescription-only medicine is not handed over with no prescriber on the sale', 'HB422 PRESCRIPTION_REQUIRED',
+  pg_temp.pharm('x', 3, format($s$select pharmacy.sale_hand_over('%s', null, 'kbillinghand000000005', repeat('5', 64))$s$, pg_temp.v('rxfree')->'bill'->>'id')));
+select pg_temp.check_case('7 the sale''s prescriber is kept on its bill', 'Dr Test/',
+  (select format('%s/%s', bill.outside_prescriber_name, (select outside_prescriber_name from commercial.bills
+     where id = (pg_temp.v('rxfree')->'bill'->>'id')::uuid))
+     from commercial.bills bill where id = (pg_temp.v('sale')->'bill'->>'id')::uuid));
 select pg_temp.check_case('7 a sale of 13 (12 good on hand, 7 expired)', 'ok',
   pg_temp.pharm('sale2', 3, format($s$select pharmacy.counter_sale_create('{"patient":{"kind":"anonymous"},"counter":true,"outside":{"prescriberName":"Dr Test"},"items":[{"catalogueItemId":"%s","quantity":13}]}', 'kbillingsale000000004', repeat('4', 64))$s$, pg_temp.ids('amox'))));
 select pg_temp.check_case('7 the sale of 13 is paid', 'ok',
@@ -559,6 +604,28 @@ select pg_temp.check_case('7 only the bill is put on the patient', 'AF22/0',
      (select count(*) from pharmacy.dispensings where patient_id = pg_temp.patient(6)))));
 select pg_temp.check_case('7 the Health ID lookup is audited', '1',
   (select count(*)::text from audit.events where action = 'identity.patient.lookup' and patient_id = pg_temp.patient(6)));
+select pg_temp.check_case('7 a manual prescription-only line on a counter sale is refused, prescriber or not', 'HB422 PRESCRIPTION_REQUIRED',
+  pg_temp.ehr('x', 1, format($s$select commercial.bill_line_add('%s', '{"catalogueItemId":"%s","quantity":3}', null, 'kbillinglineadd000003', repeat('3', 64))$s$,
+    pg_temp.v('sale3')->'bill'->>'id', pg_temp.ids('amox'))));
+select pg_temp.check_case('7 an item that needs no prescription joins an open counter sale', 'ok',
+  pg_temp.ehr('x', 1, format($s$select commercial.bill_line_add('%s', '{"catalogueItemId":"%s","quantity":1}', null, 'kbillinglineadd000004', repeat('4', 64))$s$,
+    pg_temp.v('sale3')->'bill'->>'id', pg_temp.ids('consult'))));
+-- Free programme medicines (priced at 0): the sale has nothing to pay, so it is paid as made and handed over.
+select pg_temp.check_case('7 a free programme medicine', 'ok',
+  pg_temp.ehr('ors', 2, $s$select commercial.catalogue_create('{"kind":"drug","name":"ORS sachet","prescriptionOnly":false,"prices":{"cashKobo":0,"hmo":[]}}', 'kbillingcatalogue00009', repeat('9', 64))$s$));
+select pg_temp.check_case('7 its stock is counted', 'ok',
+  pg_temp.pharm('orsstk', 3, format($s$select pharmacy.stock_settings_put('%s', 'sachet', 5, 0, 'kbillingstock00000009', repeat('9', 64))$s$, pg_temp.ids('ors'))));
+select pg_temp.check_case('7 ten sachets received', 'ok',
+  pg_temp.pharm('orsrcv', 3, format($s$select pharmacy.stock_receive(jsonb_build_object('lines', jsonb_build_array(
+      jsonb_build_object('catalogueItemId', '%s', 'batchNumber', 'ORS-1', 'expiresOn', (clock_timestamp() at time zone 'Africa/Lagos')::date + 200, 'quantity', 10))), 'kbillingstock00000010', repeat('a', 64))$s$, pg_temp.ids('ors'))));
+select pg_temp.check_case('7 a sale of two free sachets', 'ok',
+  pg_temp.pharm('freesale', 3, format($s$select pharmacy.counter_sale_create('{"patient":{"kind":"anonymous"},"counter":true,"items":[{"catalogueItemId":"%s","quantity":2}]}', 'kbillingsale000000006', repeat('6', 64))$s$, pg_temp.ids('ors'))));
+select pg_temp.check_case('7 a sale with nothing to pay is paid as made', 'paid/0/0',
+  (select format('%s/%s/%s', v->'bill'->>'status', v->'bill'->>'totalKobo', v->'bill'->>'dueKobo') from pg_temp.v('freesale') v));
+select pg_temp.check_case('7 the free sale is handed over', 'ok',
+  pg_temp.pharm('freehand', 3, format($s$select pharmacy.sale_hand_over('%s', null, 'kbillinghand000000006', repeat('6', 64))$s$, pg_temp.v('freesale')->'bill'->>'id')));
+select pg_temp.check_case('7 the free sachets leave the stock', '8',
+  (select sum(on_hand)::text from pharmacy.stock_batches where catalogue_item_id = (pg_temp.ids('ors'))::uuid));
 
 -- 8. Hooks.
 do $$ begin
@@ -598,7 +665,7 @@ do $$ begin
 end $$;
 select pg_temp.check_case('8 the dispensing took stock expiry first', 'LATE:6,MID:0,OLD:0,SOON:0',
   (select string_agg(batch_number || ':' || on_hand, ',' order by batch_number) from pharmacy.stock_batches
-    where facility_id = 'b1620000-0000-4000-8000-000000000002'));
+    where facility_id = 'b1620000-0000-4000-8000-000000000002' and catalogue_item_id = (pg_temp.ids('amox'))::uuid));
 do $$
 declare
   answer text;
@@ -617,19 +684,6 @@ begin
   end;
   perform pg_temp.check_case('8 a dispensing in another unit is refused', 'HB409 STOCK_UNIT_MISMATCH', answer);
 end $$;
-do $$ begin
-  perform pg_temp.as_member(3, 'direct-care');
-  insert into pharmacy.dispensing_reversals (dispensing_id, dispensing_version, work_item_id, patient_id, facility_id,
-    status, reversed_by, reversed_by_membership_id, reason, idempotency_key, request_sha256, correlation_id)
-  values ('b1620640-0000-4000-8000-000000000001', 1, 'b1620620-0000-4000-8000-000000000001', pg_temp.patient(1),
-    'b1620000-0000-4000-8000-000000000002', 'reversed', 'b1620100-0000-4000-8000-000000000003', pg_temp.member(3),
-    'Dispensed to the wrong patient', 'billing-reverse-key-001', repeat('0', 64), 'billing-suite-correlation');
-end $$;
-select pg_temp.check_case('8 the reversal put the stock back where it came from', 'LATE:10,MID:2,OLD:0,SOON:0',
-  (select string_agg(batch_number || ':' || on_hand, ',' order by batch_number) from pharmacy.stock_batches
-    where facility_id = 'b1620000-0000-4000-8000-000000000002'));
-select pg_temp.check_case('8 the ledger still agrees', 'true',
-  (select pharmacy.stock_ledger_agrees('b1620000-0000-4000-8000-000000000002')::text));
 -- Pay-before (the database takes the server's availability as given): on for pharmacy and lab.
 select pg_temp.check_case('8 pay-before switched on where available', 'ok',
   pg_temp.ehr('s3', 7, format($s$select commercial.settings_put('{"wherePaid":"both","methods":["cash","pos","transfer","hmo","waiver"],"payBefore":{"pharmacy":true,"lab":true},"allowDeferredFor":["emergency"],"transferAccount":null,"hmos":%s,"tills":%s,"dayCloseBy":"cashier","receiptFooter":"Thank you","checkInChargeItemId":"%s"}', 2, true, false, 'kbillingsettings000007', repeat('7', 64))$s$,
@@ -671,6 +725,29 @@ begin
   perform pg_temp.check_case('8 pay-before never holds up a deferred bill', 'passed the gate', answer);
   update commercial.bills set deferred_reason = null, deferred_by = null, deferred_at = null where id = pg_temp.bill_of(1);
 end $$;
+-- A reversal (dispensed to the wrong patient: the capsules went home with them) moves no stock, and the medicine's
+-- line comes off p1's bill, which can lose it (430000 left on the bill, 360000 paid, waived or covered).
+do $$ begin
+  perform pg_temp.as_member(3, 'direct-care');
+  insert into pharmacy.dispensing_reversals (dispensing_id, dispensing_version, work_item_id, patient_id, facility_id,
+    status, reversed_by, reversed_by_membership_id, reason, idempotency_key, request_sha256, correlation_id)
+  values ('b1620640-0000-4000-8000-000000000001', 1, 'b1620620-0000-4000-8000-000000000001', pg_temp.patient(1),
+    'b1620000-0000-4000-8000-000000000002', 'reversed', 'b1620100-0000-4000-8000-000000000003', pg_temp.member(3),
+    'Dispensed to the wrong patient', 'billing-reverse-key-001', repeat('0', 64), 'billing-suite-correlation');
+end $$;
+select pg_temp.check_case('8 the reversal moves no stock: the capsules did not come back', 'LATE:6,MID:0,OLD:0,SOON:0',
+  (select string_agg(batch_number || ':' || on_hand, ',' order by batch_number) from pharmacy.stock_batches
+    where facility_id = 'b1620000-0000-4000-8000-000000000002' and catalogue_item_id = (pg_temp.ids('amox'))::uuid));
+select pg_temp.check_case('8 the ledger still agrees', 'true',
+  (select pharmacy.stock_ledger_agrees('b1620000-0000-4000-8000-000000000002')::text));
+select pg_temp.check_case('8 the reversed medicine''s line comes off the unpaid bill', 't/Dispensing reversed/t/b1620300-0000-4000-8000-000000000003',
+  (select format('%s/%s/%s/%s', cancelled, cancel_reason, dispensing_reversed_at is not null, cancelled_by_membership_id)
+     from commercial.bill_lines where work_item_id = 'b1620620-0000-4000-8000-000000000001'));
+select pg_temp.check_case('8 what is due drops by the line', '430000/70000/part_paid',
+  (select format('%s/%s/%s', total_kobo, due_kobo, status) from commercial.bills where id = pg_temp.bill_of(1)));
+select pg_temp.check_case('8 a work item whose line came off has no badge', '0',
+  (select count(*)::text from (select pg_temp.as_member(3)) s,
+     commercial.work_item_bills('pharmacy', array['b1620620-0000-4000-8000-000000000001'::uuid])));
 -- An own lab work item: a line for the priced test; the collection gate.
 do $$ begin
   perform pg_temp.as_member(8, 'direct-care');
@@ -715,6 +792,55 @@ begin
   end;
   perform pg_temp.check_case('8 pay-before for lab refuses collection on an unpaid bill', 'HB409 PAYMENT_REQUIRED', answer);
 end $$;
+-- p1's third prescription (2 capsules) is accepted, the bill is paid in full, the medicine dispensed and then reversed:
+-- the paid line cannot come off, so it stays, marked reversed, for billing staff to refund.
+do $$ begin
+  perform pg_temp.as_member(3, 'direct-care');
+  insert into pharmacy.work_item_acceptances (work_item_id, patient_id, facility_id, accepted_by, accepted_by_membership_id,
+    accepted_with, idempotency_key, request_sha256, correlation_id)
+  values ('b1620620-0000-4000-8000-000000000003', pg_temp.patient(1), 'b1620000-0000-4000-8000-000000000002',
+    'b1620100-0000-4000-8000-000000000003', pg_temp.member(3), 'accept', 'billing-accept-key-0003', repeat('0', 64),
+    'billing-suite-correlation');
+end $$;
+select pg_temp.check_case('8 the third prescription''s line', 'pharmacy/2/30000',
+  (select format('%s/%s/%s', origin, quantity, total_kobo) from commercial.bill_lines
+    where work_item_id = 'b1620620-0000-4000-8000-000000000003'));
+select pg_temp.check_case('8 the pharmacist takes what is due on p1''s bill', 'ok',
+  pg_temp.ehr('p1paid', 3, format($s$select commercial.payment_record('%s', '{"method":"cash","amountKobo":%s}', null, 'kbillingpay0000000015', repeat('f', 64))$s$,
+    pg_temp.bill_of(1), (select due_kobo from commercial.bills where id = pg_temp.bill_of(1)))));
+do $$ begin
+  perform pg_temp.as_member(3, 'direct-care');
+  insert into pharmacy.dispensings (id, work_item_id, work_item_version, patient_id, facility_id, medication_code_system,
+    medication_code, medication_display, quantity_dispensed, quantity_unit, status, dispensed_by, dispensed_by_membership_id,
+    reason, idempotency_key, request_sha256, correlation_id)
+  values ('b1620640-0000-4000-8000-000000000003', 'b1620620-0000-4000-8000-000000000003', 1, pg_temp.patient(1),
+    'b1620000-0000-4000-8000-000000000002', 'HID-MED', 'MED-00042', 'Amoxicillin 500 mg capsule', 2, 'capsule', 'dispensed',
+    'b1620100-0000-4000-8000-000000000003', pg_temp.member(3), 'Dispensed as prescribed', 'billing-dispense-key-05',
+    repeat('0', 64), 'billing-suite-correlation');
+  insert into pharmacy.dispensing_reversals (dispensing_id, dispensing_version, work_item_id, patient_id, facility_id,
+    status, reversed_by, reversed_by_membership_id, reason, idempotency_key, request_sha256, correlation_id)
+  values ('b1620640-0000-4000-8000-000000000003', 1, 'b1620620-0000-4000-8000-000000000003', pg_temp.patient(1),
+    'b1620000-0000-4000-8000-000000000002', 'reversed', 'b1620100-0000-4000-8000-000000000003', pg_temp.member(3),
+    'Wrong strength picked', 'billing-reverse-key-003', repeat('0', 64), 'billing-suite-correlation');
+end $$;
+select pg_temp.check_case('8 the paid line stays on the paid bill, marked reversed', 'f/t/paid',
+  (select format('%s/%s/%s', line.cancelled, line.dispensing_reversed_at is not null, bill.status)
+     from commercial.bill_lines line join commercial.bills bill on bill.id = line.bill_id
+    where line.work_item_id = 'b1620620-0000-4000-8000-000000000003'));
+select pg_temp.check_case('8 the bill shows billing staff the line was reversed', 'true',
+  (select line->>'dispensingReversed' from jsonb_array_elements(commercial.bill_json(pg_temp.bill_of(1))->'lines') line
+    where line->>'workItemId' = 'b1620620-0000-4000-8000-000000000003'));
+select pg_temp.check_case('8 so does the work item''s badge', 'true/paid',
+  (select format('%s/%s', bill->>'dispensingReversed', bill->>'status') from (select pg_temp.as_member(3)) s,
+     commercial.work_item_bills('pharmacy', array['b1620620-0000-4000-8000-000000000003'::uuid])));
+select pg_temp.check_case('8 the bill''s log has both reversals', 'dispensing-reversed:1,line-cancel:1',
+  (select string_agg(kind || ':' || count, ',' order by kind) from (
+     select kind, count(*) from commercial.bill_events where bill_id = pg_temp.bill_of(1)
+        and (details->>'dispensingReversed')::boolean group by kind) counted));
+select pg_temp.check_case('8 the second reversal moves no stock either', 'LATE:4',
+  (select string_agg(batch_number || ':' || on_hand, ',' order by batch_number) from pharmacy.stock_batches
+    where facility_id = 'b1620000-0000-4000-8000-000000000002' and catalogue_item_id = (pg_temp.ids('amox'))::uuid
+      and on_hand > 0));
 -- A facility with no settings: a dispensing-like hook and a lab line do nothing (facility B check-in made no bill above).
 select pg_temp.check_case('8 hooks are silent for another facility''s session', 'true',
   (select (not commercial.hook_facility('b1620000-0000-4000-8000-000000000012'))::text

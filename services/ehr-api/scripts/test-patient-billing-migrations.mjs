@@ -22,7 +22,10 @@
 //   4. two sessions paying the same bill at once never overpay: the second
 //      waits for the first's lock and answers OVERPAYMENT;
 //   5. bill and receipt numbers from four sessions at once have no gaps and no
-//      repeats, and a new year starts its receipts at 1.
+//      repeats, and a new year starts its receipts at 1;
+//   6. a payment taken while its day is being closed waits for the close and
+//      is refused TILL_DAY_NOT_OPEN, so the closed day's expected cash counts
+//      every payment recorded in it.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -115,7 +118,7 @@ for (const file of files) {
 }
 assert(await applied('hid_bill_steps', files[0]));
 
-// 4 and 5. Two sessions at once, on fictional rows (ids start b1680).
+// 4, 5 and 6. Two sessions at once, on fictional rows (ids start b1680).
 const ids = { org: 'b1680000-0000-4000-8000-000000000001', facility: 'b1680000-0000-4000-8000-000000000002',
   account: 'b1680100-0000-4000-8000-000000000001', staff: 'b1680200-0000-4000-8000-000000000001',
   member: 'b1680300-0000-4000-8000-000000000001', item: 'b1680400-0000-4000-8000-000000000001' };
@@ -185,6 +188,38 @@ await second.query('rollback');
 assert.equal(one.rows[0].answer.paidKobo, 600);
 assert.equal(two, 'HB409 OVERPAYMENT', 'the second payment must wait for the first and be refused');
 results.concurrent_payments = { first: 'paid 600', second: two };
+
+// 6. The cashier closes the day (600 cash taken) while a second session takes 100 more on the same bill.
+await begin(first);
+const open = (await first.query('select commercial.day_current(null) as answer')).rows[0].answer.shift;
+await first.query('select commercial.day_close($1, $2, null, $3, $4, $5)',
+  [open.id, Number(open.expectedCashKobo), open.version, key('close'), sha('close')]);
+await begin(second);
+const closingStarted = Date.now();
+const late = second.query(`select commercial.payment_record($1, '{"method":"cash","amountKobo":100}', null, $2, $3) as answer`,
+  [billId, key('pay-late'), sha('pay-late')]).then(() => 'paid', (error) => `${error.code} ${error.message}`);
+await new Promise((done) => setTimeout(done, 300));
+await first.query('commit');
+const lateAnswer = await late;
+const waited = Date.now() - closingStarted;
+await second.query('rollback');
+assert.equal(lateAnswer, 'HB409 TILL_DAY_NOT_OPEN', 'a payment must wait for the day close and find no open day');
+assert(waited >= 250, `the payment must wait for the day close (${waited} ms)`);
+const dayCheck = await client('hid_bill_steps');
+await dayCheck.query('begin');
+await dayCheck.query("select set_config('app.facility_id', $1, true)", [ids.facility]);
+await dayCheck.query(`set local role ${owner}`);
+const closed = (await dayCheck.query(`select day_row.expected_cash_kobo::bigint as expected,
+  (day_row.opening_cash_kobo + coalesce((select sum(payment.amount_kobo) from commercial.payments payment
+     where payment.till_day_id = day_row.id and payment.method = 'cash'), 0))::bigint as counted_in_day,
+  (select count(*) from commercial.payments payment where payment.till_day_id = day_row.id
+     and payment.received_at > day_row.closed_at)::int as after_close
+  from commercial.till_days day_row where day_row.id = $1`, [open.id])).rows[0];
+await dayCheck.query('rollback');
+await dayCheck.end();
+assert.deepEqual([closed.expected, closed.after_close], [closed.counted_in_day, 0],
+  'the closed day\'s expected cash counts every payment recorded in it');
+results.payment_while_closing = { answer: lateAnswer, waitedMs: waited, expectedCashKobo: Number(closed.expected) };
 
 // 5. Bills from four sessions at once: numbers without gaps or repeats; a new year's receipts start at 1.
 const sessions = [first, second, await session(), await session()];

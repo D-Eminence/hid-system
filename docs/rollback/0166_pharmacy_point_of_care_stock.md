@@ -12,7 +12,6 @@ drop function pharmacy.stock_for_codes(jsonb), pharmacy.sale_hand_over(uuid, big
   pharmacy.stock_adjust(jsonb, text, text), pharmacy.stock_receive(jsonb, text, text),
   pharmacy.stock_settings_put(uuid, text, integer, bigint, text, text), pharmacy.stock_list(text, text, integer),
   pharmacy.stock_ledger_agrees(uuid), pharmacy.stock_item_for_code(uuid, text, text),
-  pharmacy.stock_put_back(uuid, uuid, uuid, uuid),
   pharmacy.take_stock_expiry_first(uuid, uuid, integer, uuid, text, uuid, uuid, uuid), pharmacy.stock_line_json(uuid);
 -- The tables refuse TRUNCATE and DELETE; DROP TABLE is not refused.
 drop table pharmacy.stock_movements, pharmacy.stock_adjustments, pharmacy.stock_receipt_lines,

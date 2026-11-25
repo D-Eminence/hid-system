@@ -284,6 +284,8 @@ function routedDispensingRefusal(error: unknown): DomainProblem | undefined {
 /** BILL-1 (0167): the dispensing hook's refusals (pay-before and stock), in the contract's words. */
 const DISPENSING_BILLING_REFUSALS = new Set(['PAYMENT_REQUIRED', 'PAYMENT_PENDING_CHECK', 'OUT_OF_STOCK',
   'STOCK_UNIT_MISMATCH']);
+/** BILL-1 (0167): the pay-before refusals, which leave the medicine's line on the bill for the cashier to collect. */
+const PAY_BEFORE_REFUSALS = new Set(['PAYMENT_REQUIRED', 'PAYMENT_PENDING_CHECK']);
 export const STOCK_BATCH_SQL = "select set_config('hid.stock_batch_id', $1, true), set_config('hid.billing_source', 'pharmacy-api', true)";
 export const STOCK_TAKEN_SQL = "select current_setting('hid.stock_taken', true) as taken";
 function dispensingBillingRefusal(error: unknown): DomainProblem | undefined {
@@ -811,20 +813,52 @@ export class PharmacyService {
   }
 
   async dispense(context: DataAccessContext, workItemId: string, input: CreateDispensingDto, key: string) {
+    const attempt = { acceptedWithDispensing: false };
     try {
-      return await this.dispenseOnce(context, workItemId, input, key);
+      return await this.dispenseOnce(context, workItemId, input, key, attempt);
     } catch (error) {
       // BILL-1 (0167): a pay-before or stock refusal rolled the dispensing back; its refusal row is written now.
       if (error instanceof DomainProblem && DISPENSING_BILLING_REFUSALS.has(error.code)) {
         await this.database.withTransaction(context, (client) => this.audit.recordWithClient(client, context,
           'pharmacy.dispensing.create', { resourceType: 'pharmacy-work-item', resourceId: workItemId },
           { code: error.code }, 'denied')).catch(() => undefined);
+        // The refusal also rolled back the acceptance this dispensing made, and with it the medicine's line (0167
+        // adds it as the item is accepted): with nothing on the bill to pay, every Dispense would be refused again.
+        // The acceptance is recorded on its own now, so the cashier has the line to collect and, once it is paid,
+        // the next Dispense goes through.
+        if (attempt.acceptedWithDispensing && PAY_BEFORE_REFUSALS.has(error.code)) {
+          await this.acceptForPayment(context, workItemId, key,
+            requestDigest('pharmacy.dispensing.create', { workItemId, ...input })).catch((failure: unknown) => {
+            this.logger.warn({ message: 'The acceptance was not recorded for the bill', sqlState: sqlState(failure),
+              correlationId: context.correlationId });
+          });
+        }
       }
       throw error;
     }
   }
 
-  private async dispenseOnce(context: DataAccessContext, workItemId: string, input: CreateDispensingDto, key: string) {
+  /**
+   * BILL-1 (0167) with ORD-4: a pay-before refusal of a dispensing that would have accepted the item first records
+   * that acceptance (as the dispensing's: by the dispensing pharmacist, with its key and digest) in its own
+   * transaction, under the same rules as acceptWithDispensing, and audits it as the accept route does. Nothing is
+   * recorded when the item was accepted or dispensed meanwhile, or can no longer be accepted.
+   */
+  private async acceptForPayment(context: DataAccessContext, workItemId: string, key: string, digest: string) {
+    await this.database.withTransaction(context, async (client) => {
+      const work = (await client.query<WorkItemRow>(`${WORK_ITEM_SELECT} where w.id=$1`, [workItemId])).rows[0];
+      if (!work || work.dispensing_id) return;
+      const basis = await this.routeAccess.authorize(client, context, 'work_item', work.id, work.patient_id,
+        'write_records');
+      if (!await this.acceptWithDispensing(client, context, work, key, digest)) return;
+      await this.audit.recordWithClient(client, context, 'pharmacy.work-item.pharmacist-accept', {
+        patientId: work.patient_id, resourceType: 'pharmacy-work-item', resourceId: work.id,
+      }, { outcome: 'accepted', acceptedWith: 'dispensing', forPayment: true, ...acceptanceBasis(basis) });
+    }, { isolationLevel: 'SERIALIZABLE' });
+  }
+
+  private async dispenseOnce(context: DataAccessContext, workItemId: string, input: CreateDispensingDto, key: string,
+    attempt: { acceptedWithDispensing: boolean } = { acceptedWithDispensing: false }) {
     return this.database.withTransaction(context, async (client) => {
       const work = (await client.query<WorkItemRow>(`${WORK_ITEM_SELECT} where w.id=$1`,
         [workItemId])).rows[0];
@@ -843,6 +877,7 @@ export class PharmacyService {
       }
       // ORD-4: a received item is accepted by its first dispensing; never a reason to refuse it.
       const acceptedWithDispensing = await this.acceptWithDispensing(client, context, work, key, digest);
+      attempt.acceptedWithDispensing = acceptedWithDispensing;
       // BILL-1 (0167): the batch to take a stock-kept item from (else expiry first), for the dispensing's hook.
       await client.query(STOCK_BATCH_SQL, [input.batchId ?? '']);
       const inserted = await client.query<DispensingRow>(`insert into pharmacy.dispensings (

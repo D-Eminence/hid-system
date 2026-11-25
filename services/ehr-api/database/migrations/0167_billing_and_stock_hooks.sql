@@ -52,9 +52,15 @@
 --    batch named by pharmacy-api in hid.stock_batch_id (transaction-local) is
 --    used when set; what was taken is left in hid.stock_taken for the
 --    dispensing's audit row.
--- H6 pharmacy.dispensing_reversals BEFORE INSERT (zz_billing_stock_back): the
---    stock goes back into the batches it came from (0166's
---    pharmacy.stock_put_back), as dispensing_reversal movements.
+-- H6 pharmacy.dispensing_reversals BEFORE INSERT (zz_billing_reversal): the
+--    work item's automatic line (a reversed item is never dispensed again,
+--    and a corrected medicine comes as a new prescription with its own line)
+--    is marked reversed and, when the bill can lose it without falling below
+--    what was paid, waived or covered, cancelled by the reversing pharmacist
+--    ("Dispensing reversed"); else it stays, marked reversed, so billing
+--    staff see a refund is due (on the bill and the work item's badge). No
+--    stock moves: a reversal corrects the record, and the medicine may never
+--    have come back; what does come back is counted back on the Stock page.
 -- H7 lab.specimens BEFORE UPDATE OF status (zz_billing_collect_gate): a
 --    specimen becoming collected meets the pay-before gate for lab.
 -- Pay-before is off everywhere until the clinical lead signs BILL-3
@@ -98,7 +104,7 @@ declare
   made constant jsonb := '{
     "commercial.hook_check_in()": "0132c9412cbb3b0f3b73d2ebbbe60e90",
     "commercial.hook_dispensing()": "f1bf808db6a26acb8bbd3a795d20b055",
-    "commercial.hook_dispensing_reversal()": "78f666f4534ee661b60f1eeeecec3a47",
+    "commercial.hook_dispensing_reversal()": "4fb8a4e2b325347149d5ac098e69c68a",
     "commercial.hook_facility(uuid)": "4efd0ae0c3c4ad8ce694a74b223cafa5",
     "commercial.hook_lab_work_item()": "903edbb2d3a10fc4a91610cec007349a",
     "commercial.hook_pharmacy_acceptance()": "2f5cabce9719e94cfc88d1e9bd7ca665",
@@ -145,7 +151,7 @@ begin
 
   if to_regclass('pharmacy.stock_movements') is null or to_regclass('commercial.till_days') is null
      or to_regprocedure('pharmacy.take_stock_expiry_first(uuid,uuid,integer,uuid,text,uuid,uuid,uuid)') is null
-     or to_regprocedure('pharmacy.stock_put_back(uuid,uuid,uuid,uuid)') is null
+     or to_regprocedure('commercial.bill_recompute(uuid)') is null
      or to_regprocedure('commercial.bill_for_work(uuid,uuid,text)') is null
      or to_regprocedure('commercial.bill_line_put(uuid,uuid,integer,text,text,uuid,boolean,text,uuid,text,text)') is null
      or to_regprocedure('commercial.bill_defer_put(uuid,text,text,text,uuid)') is null then
@@ -434,12 +440,44 @@ language plpgsql
 security definer
 set search_path = pg_catalog, pg_temp
 as $$
+declare
+  line commercial.bill_lines%rowtype;
+  bill commercial.bills%rowtype;
+  can_cancel boolean;
 begin
   if not commercial.hook_facility(new.facility_id) then
     return new;
   end if;
-  perform set_config('hid.stock_taken',
-    pharmacy.stock_put_back(new.facility_id, new.dispensing_id, new.id, new.reversed_by_membership_id)::text, true);
+  select bill_line.* into line from commercial.bill_lines bill_line
+   where bill_line.facility_id = new.facility_id and bill_line.work_item_kind = 'pharmacy'
+     and bill_line.work_item_id = new.work_item_id and not bill_line.cancelled;
+  if not found then
+    return new;
+  end if;
+  select bill_row.* into bill from commercial.bills bill_row where bill_row.id = line.bill_id for update;
+  if bill.voided_at is not null then
+    return new;
+  end if;
+  can_cancel := bill.total_kobo - line.total_kobo
+    >= bill.paid_kobo + bill.pending_check_kobo + bill.waived_kobo + bill.hmo_covered_kobo;
+  if can_cancel then
+    update commercial.bill_lines bill_line
+       set dispensing_reversed_at = clock_timestamp(), cancelled = true, cancel_reason = 'Dispensing reversed',
+           cancelled_by_membership_id = new.reversed_by_membership_id, cancelled_at = clock_timestamp()
+     where bill_line.id = line.id;
+  else
+    update commercial.bill_lines bill_line set dispensing_reversed_at = clock_timestamp() where bill_line.id = line.id;
+  end if;
+  perform commercial.bill_recompute(bill.id);
+  perform commercial.bill_event(bill.id, bill.facility_id, case when can_cancel then 'line-cancel' else 'dispensing-reversed' end,
+    new.reversed_by_membership_id,
+    jsonb_build_object('lineId', line.id, 'totalKobo', line.total_kobo, 'dispensingReversed', true,
+      'refundDue', not can_cancel));
+  perform commercial.audit(case when can_cancel then 'commercial.bill.line-cancel' else 'commercial.bill.dispensing-reversed' end,
+    'success', 'bill', bill.id::text, bill.patient_id,
+    jsonb_build_object('lineId', line.id, 'totalKobo', line.total_kobo, 'origin', line.origin, 'dispensingReversed', true,
+      'refundDue', not can_cancel, 'by', 'system'),
+    commercial.staff_source(null));
   return new;
 end
 $$;
@@ -488,7 +526,7 @@ create trigger zz_billing_lab_work_item after insert on lab.work_items
   for each row execute function commercial.hook_lab_work_item();
 create trigger zz_billing_stock_and_gate before insert on pharmacy.dispensings
   for each row execute function commercial.hook_dispensing();
-create trigger zz_billing_stock_back before insert on pharmacy.dispensing_reversals
+create trigger zz_billing_reversal before insert on pharmacy.dispensing_reversals
   for each row execute function commercial.hook_dispensing_reversal();
 create trigger zz_billing_collect_gate before update of status on lab.specimens
   for each row execute function commercial.hook_specimen_collected();
@@ -502,7 +540,7 @@ declare
   made constant jsonb := '{
     "commercial.hook_check_in()": "0132c9412cbb3b0f3b73d2ebbbe60e90",
     "commercial.hook_dispensing()": "f1bf808db6a26acb8bbd3a795d20b055",
-    "commercial.hook_dispensing_reversal()": "78f666f4534ee661b60f1eeeecec3a47",
+    "commercial.hook_dispensing_reversal()": "4fb8a4e2b325347149d5ac098e69c68a",
     "commercial.hook_facility(uuid)": "4efd0ae0c3c4ad8ce694a74b223cafa5",
     "commercial.hook_lab_work_item()": "903edbb2d3a10fc4a91610cec007349a",
     "commercial.hook_pharmacy_acceptance()": "2f5cabce9719e94cfc88d1e9bd7ca665",
@@ -527,7 +565,7 @@ declare
     'pharmacy.work_item_acceptances|zz_billing_acceptance|5|commercial.hook_pharmacy_acceptance',
     'lab.work_items|zz_billing_lab_work_item|5|commercial.hook_lab_work_item',
     'pharmacy.dispensings|zz_billing_stock_and_gate|7|commercial.hook_dispensing',
-    'pharmacy.dispensing_reversals|zz_billing_stock_back|7|commercial.hook_dispensing_reversal',
+    'pharmacy.dispensing_reversals|zz_billing_reversal|7|commercial.hook_dispensing_reversal',
     'lab.specimens|zz_billing_collect_gate|19|commercial.hook_specimen_collected'];
 begin
   select jsonb_object_agg(signature, md5(proc.prosrc)) into computed

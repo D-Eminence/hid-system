@@ -27,10 +27,13 @@
 -- T5 pharmacy.stock_adjustments: a signed change with a reason (damaged,
 --    expired, count, returned) and a note (required for count).
 -- T6 pharmacy.stock_movements: the append-only ledger: every receipt,
---    adjustment, dispensing, dispensing reversal and counter sale, with the
---    signed change, the batch and what it refers to. A batch's on hand always
---    equals the sum of its movements (pharmacy.stock_ledger_agrees, used by
---    the tests and the rehearsal).
+--    adjustment, dispensing and counter sale, with the signed change, the
+--    batch and what it refers to. A batch's on hand always equals the sum of
+--    its movements (pharmacy.stock_ledger_agrees, used by the tests and the
+--    rehearsal). A dispensing reversal moves no stock: it corrects the
+--    record, and the medicine may never have come back (a wrong-patient
+--    report's reversal certainly did not); what does come back to the shelf
+--    is counted back with a count correction.
 -- Every table: facility_id on every row, row-level security forced with one
 -- policy for the owner at the session's facility, no privilege for any
 -- runtime, no DELETE or TRUNCATE (UPDATE too on T3, T4, T5 and T6).
@@ -42,19 +45,20 @@
 --    expires first, then the next; or, with a batch named, from that batch
 --    only; an expired batch is never used; when the batches hold less, HB409
 --    OUT_OF_STOCK with onHand, unit and expiredOnHand, and nothing is
---    taken), pharmacy.stock_put_back (a reversal puts the stock back into the
---    batches it came from), pharmacy.stock_item_for_code (the stock-kept
---    item of a medication code at a facility), pharmacy.stock_ledger_agrees.
+--    taken), pharmacy.stock_item_for_code (the stock-kept item of a
+--    medication code at a facility), pharmacy.stock_ledger_agrees.
 -- F2 For the Pharmacy runtime and the schema test runtime (SECURITY DEFINER,
 --    search_path pg_catalog, pg_temp): pharmacy.stock_list,
 --    pharmacy.stock_settings_put, pharmacy.stock_receive,
 --    pharmacy.stock_adjust, pharmacy.stock_movement_list,
 --    pharmacy.counter_sale_create (a counter sale's bill; a prescription-only
---    item needs the outside prescriber; queueing is refused
+--    item needs the outside prescriber, kept on the bill; queueing is refused
 --    WALK_IN_QUEUE_NOT_AVAILABLE; a Health ID is a patient lookup, audited,
 --    and only the bill is put on that patient, no dispensing record) and
---    pharmacy.sale_hand_over (only a paid counter sale; takes every
---    stock-kept drug line expiry-first, all or nothing; once).
+--    pharmacy.sale_hand_over (only a paid counter sale, and one with a
+--    prescription-only medicine only when the sale has its outside
+--    prescriber, else HB422 PRESCRIPTION_REQUIRED; takes every stock-kept
+--    drug line expiry-first, all or nothing; once).
 -- Grants: EXECUTE on F2 to hid_pharmacy_runtime and hid_schema_test_runtime,
 -- where they exist (and in runtime-grants.sql).
 --
@@ -84,8 +88,8 @@ declare
        and held.mode in ('ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
        and namespace.nspname <> 'migration');
   made constant jsonb := '{
-    "pharmacy.counter_sale_create(jsonb,text,text)": "ad3363d113221c8c2ed10d4f4dfb5fd9",
-    "pharmacy.sale_hand_over(uuid,bigint,text,text)": "6892fba41511093e018686dbb74517d9",
+    "pharmacy.counter_sale_create(jsonb,text,text)": "a6332ceb9df5d351719d96a41a8e65b5",
+    "pharmacy.sale_hand_over(uuid,bigint,text,text)": "1afc2a76b88dcd13e57435f38c5c864d",
     "pharmacy.stock_adjust(jsonb,text,text)": "e4dd58dfab08d478776610cc860a4a55",
     "pharmacy.stock_for_codes(jsonb)": "43704ba1515810af6a53e1ce722f241b",
     "pharmacy.stock_item_for_code(uuid,text,text)": "08796082b6e770b346546f921690027b",
@@ -93,7 +97,6 @@ declare
     "pharmacy.stock_line_json(uuid)": "0a7e1acead9c386d4bd2d53d3a59d971",
     "pharmacy.stock_list(text,text,integer)": "0f5bec7fd52be30c18900f418462c622",
     "pharmacy.stock_movement_list(uuid,integer)": "3af24dd992eb5d8de566a38b7fd1c207",
-    "pharmacy.stock_put_back(uuid,uuid,uuid,uuid)": "19078fe0215f418b02dd4ae2885c6e74",
     "pharmacy.stock_receive(jsonb,text,text)": "adfcdb3316b588a80810a5a1f06fb303",
     "pharmacy.stock_settings_put(uuid,text,integer,bigint,text,text)": "e671fcc0534789f36dfdf56d7c6bd82e",
     "pharmacy.take_stock_expiry_first(uuid,uuid,integer,uuid,text,uuid,uuid,uuid)": "45339666f7904c888dd7d675044c156f"}';
@@ -219,11 +222,10 @@ create table pharmacy.stock_movements (
   catalogue_item_id uuid not null,
   batch_id uuid not null,
   change integer not null check (change <> 0),
-  kind text not null check (kind in ('receipt', 'adjustment', 'dispensing', 'dispensing_reversal', 'counter_sale')),
+  kind text not null check (kind in ('receipt', 'adjustment', 'dispensing', 'counter_sale')),
   receipt_id uuid,
   adjustment_id uuid references pharmacy.stock_adjustments(id) on delete restrict,
   dispensing_id uuid,
-  reversal_id uuid,
   bill_line_id uuid,
   membership_id uuid references identity.staff_facility_memberships(id) on delete restrict,
   created_at timestamptz not null default clock_timestamp(),
@@ -231,9 +233,8 @@ create table pharmacy.stock_movements (
   foreign key (receipt_id, facility_id) references pharmacy.stock_receipts (id, facility_id) on delete restrict,
   constraint stock_movements_reference_ck check (
     (kind = 'receipt') = (receipt_id is not null) and (kind = 'adjustment') = (adjustment_id is not null)
-    and (kind in ('dispensing', 'dispensing_reversal')) = (dispensing_id is not null)
-    and (kind = 'dispensing_reversal') = (reversal_id is not null) and (kind = 'counter_sale') = (bill_line_id is not null)
-    and (kind not in ('receipt', 'dispensing_reversal') or change > 0)
+    and (kind = 'dispensing') = (dispensing_id is not null) and (kind = 'counter_sale') = (bill_line_id is not null)
+    and (kind <> 'receipt' or change > 0)
     and (kind not in ('dispensing', 'counter_sale') or change < 0))
 );
 create index stock_movements_item_idx on pharmacy.stock_movements (catalogue_item_id, created_at desc, id);
@@ -357,41 +358,6 @@ begin
     remaining := remaining - step;
   end loop;
   return taken;
-end
-$$;
-
--- Puts a reversed dispensing's stock back into the batches it came from.
-create function pharmacy.stock_put_back(requested_facility uuid, dispensing_value uuid, reversal_value uuid,
-  member_value uuid)
-returns jsonb
-language plpgsql
-set search_path = pg_catalog, pg_temp
-as $$
-declare
-  movement record;
-  returned jsonb := '[]'::jsonb;
-begin
-  for movement in
-    select taken.batch_id, taken.catalogue_item_id, -sum(taken.change)::integer as quantity
-      from pharmacy.stock_movements taken
-     where taken.facility_id = requested_facility and taken.dispensing_id = dispensing_value
-       and taken.kind in ('dispensing', 'dispensing_reversal')
-     group by taken.batch_id, taken.catalogue_item_id
-    having -sum(taken.change) > 0
-     order by taken.batch_id
-  loop
-    update pharmacy.stock_batches stock_batch
-       set on_hand = stock_batch.on_hand + movement.quantity, row_version = stock_batch.row_version + 1,
-           updated_at = clock_timestamp()
-     where stock_batch.id = movement.batch_id;
-    insert into pharmacy.stock_movements (facility_id, catalogue_item_id, batch_id, change, kind, dispensing_id,
-      reversal_id, membership_id)
-    values (requested_facility, movement.catalogue_item_id, movement.batch_id, movement.quantity, 'dispensing_reversal',
-      dispensing_value, reversal_value, member_value);
-    returned := returned || jsonb_build_array(jsonb_build_object('batchId', movement.batch_id,
-      'quantity', movement.quantity));
-  end loop;
-  return returned;
 end
 $$;
 
@@ -742,7 +708,8 @@ $$;
 -- A counter sale (BILL-13: counter only in release 1): a new pharmacy bill,
 -- anonymous (a name the customer gave, optional) or on a Health ID (a patient
 -- lookup, audited; only the bill is put on the patient). A prescription-only
--- item needs the outside prescriber. The phone is checked, never stored.
+-- item needs the outside prescriber, kept on the bill (the hand-over checks it
+-- again). The phone is checked, never stored.
 create function pharmacy.counter_sale_create(requested jsonb, requested_key text, requested_sha256 text)
 returns jsonb
 language plpgsql
@@ -810,6 +777,10 @@ begin
   bill_id := commercial.bill_new(actor.facility_id, 'pharmacy', patient_value, null,
     case when patient_value is null then patient_input->>'name' end, true, actor.membership_id, requested_key,
     requested_sha256);
+  if char_length(btrim(coalesce(outside->>'prescriberName', ''))) between 2 and 120 then
+    update commercial.bills bill_row set outside_prescriber_name = btrim(outside->>'prescriberName')
+     where bill_row.id = bill_id;
+  end if;
   for line in select value from jsonb_array_elements(requested->'items') loop
     if not exists (select 1 from commercial.catalogue_items item where item.id = (line->>'catalogueItemId')::uuid
                     and item.facility_id = actor.facility_id and item.active and item.kind <> 'lab_test') then
@@ -828,7 +799,9 @@ $$;
 
 -- Hands over a paid counter sale: every stock-kept drug line is taken
 -- expiry-first (all or nothing); items not stock-kept are handed over
--- without a count. A counter sale is always paid first.
+-- without a count. A counter sale is always paid first (a sale of free items
+-- only is paid as made), and a prescription-only medicine leaves only on a
+-- sale that has its outside prescriber.
 create function pharmacy.sale_hand_over(requested_bill uuid, expected_version bigint, requested_key text,
   requested_sha256 text)
 returns jsonb
@@ -856,6 +829,12 @@ begin
   end if;
   if bill.handed_over_at is not null then
     raise exception using errcode = 'HB409', message = 'ALREADY_HANDED_OVER';
+  end if;
+  if bill.outside_prescriber_name is null
+     and exists (select 1 from commercial.bill_lines bill_line
+                   join commercial.catalogue_items item on item.id = bill_line.catalogue_item_id
+                  where bill_line.bill_id = bill.id and not bill_line.cancelled and item.prescription_only) then
+    raise exception using errcode = 'HB422', message = 'PRESCRIPTION_REQUIRED';
   end if;
   if bill.status <> 'paid' then
     raise exception using errcode = 'HB409', message = 'PAYMENT_REQUIRED';
@@ -922,7 +901,7 @@ $$;
 -- Grants (here and in runtime-grants.sql).
 revoke all on function pharmacy.stock_line_json(uuid),
   pharmacy.take_stock_expiry_first(uuid, uuid, integer, uuid, text, uuid, uuid, uuid),
-  pharmacy.stock_put_back(uuid, uuid, uuid, uuid), pharmacy.stock_item_for_code(uuid, text, text),
+  pharmacy.stock_item_for_code(uuid, text, text),
   pharmacy.stock_ledger_agrees(uuid), pharmacy.stock_list(text, text, integer),
   pharmacy.stock_settings_put(uuid, text, integer, bigint, text, text), pharmacy.stock_receive(jsonb, text, text),
   pharmacy.stock_adjust(jsonb, text, text), pharmacy.stock_movement_list(uuid, integer),
@@ -948,14 +927,14 @@ $grants$;
 comment on table pharmacy.stock_batches is
   '0166 (POC section 5, BILL-12): stock by batch and expiry in whole units of the item''s stock unit; issued expiry-first, never from an expired batch; on hand equals the sum of its movements (pharmacy.stock_ledger_agrees).';
 comment on table pharmacy.stock_movements is
-  '0166: the append-only stock ledger: receipt, adjustment, dispensing, dispensing_reversal, counter_sale. No patient.';
+  '0166: the append-only stock ledger: receipt, adjustment, dispensing, counter_sale (a dispensing reversal moves no stock; what comes back is counted back). No patient.';
 
 -- Post-checks.
 do $post$
 declare
   made constant jsonb := '{
-    "pharmacy.counter_sale_create(jsonb,text,text)": "ad3363d113221c8c2ed10d4f4dfb5fd9",
-    "pharmacy.sale_hand_over(uuid,bigint,text,text)": "6892fba41511093e018686dbb74517d9",
+    "pharmacy.counter_sale_create(jsonb,text,text)": "a6332ceb9df5d351719d96a41a8e65b5",
+    "pharmacy.sale_hand_over(uuid,bigint,text,text)": "1afc2a76b88dcd13e57435f38c5c864d",
     "pharmacy.stock_adjust(jsonb,text,text)": "e4dd58dfab08d478776610cc860a4a55",
     "pharmacy.stock_for_codes(jsonb)": "43704ba1515810af6a53e1ce722f241b",
     "pharmacy.stock_item_for_code(uuid,text,text)": "08796082b6e770b346546f921690027b",
@@ -963,13 +942,12 @@ declare
     "pharmacy.stock_line_json(uuid)": "0a7e1acead9c386d4bd2d53d3a59d971",
     "pharmacy.stock_list(text,text,integer)": "0f5bec7fd52be30c18900f418462c622",
     "pharmacy.stock_movement_list(uuid,integer)": "3af24dd992eb5d8de566a38b7fd1c207",
-    "pharmacy.stock_put_back(uuid,uuid,uuid,uuid)": "19078fe0215f418b02dd4ae2885c6e74",
     "pharmacy.stock_receive(jsonb,text,text)": "adfcdb3316b588a80810a5a1f06fb303",
     "pharmacy.stock_settings_put(uuid,text,integer,bigint,text,text)": "e671fcc0534789f36dfdf56d7c6bd82e",
     "pharmacy.take_stock_expiry_first(uuid,uuid,integer,uuid,text,uuid,uuid,uuid)": "45339666f7904c888dd7d675044c156f"}';
   own constant text[] := array['pharmacy.stock_line_json(uuid)',
     'pharmacy.take_stock_expiry_first(uuid,uuid,integer,uuid,text,uuid,uuid,uuid)',
-    'pharmacy.stock_put_back(uuid,uuid,uuid,uuid)', 'pharmacy.stock_item_for_code(uuid,text,text)',
+    'pharmacy.stock_item_for_code(uuid,text,text)',
     'pharmacy.stock_ledger_agrees(uuid)', 'pharmacy.stock_list(text,text,integer)',
     'pharmacy.stock_settings_put(uuid,text,integer,bigint,text,text)', 'pharmacy.stock_receive(jsonb,text,text)',
     'pharmacy.stock_adjust(jsonb,text,text)', 'pharmacy.stock_movement_list(uuid,integer)',

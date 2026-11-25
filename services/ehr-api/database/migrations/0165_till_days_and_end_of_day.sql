@@ -34,6 +34,10 @@
 --    only; expected cash = opening + cash taken - cash voided; overdue from
 --    06:00 Lagos the next day), commercial.day_scope (the scope a member's
 --    day has), commercial.open_day (the open day of a scope),
+--    commercial.open_day_locked (the same, locked FOR SHARE: a payment, a
+--    void or an online payment takes its day with it, so a day being closed
+--    is waited for and then refused TILL_DAY_NOT_OPEN, and a closed day's
+--    expected cash always counts every payment recorded in it),
 --    commercial.counter_staff_only (the member's roles here are only
 --    pharmacist and lab).
 -- F2 For the EHR runtime and the schema test runtime: commercial.day_current,
@@ -85,10 +89,11 @@ declare
     "commercial.day_open(uuid,bigint,text,text)": "6fc0ed7510afc308baec9c2357013234",
     "commercial.day_scope(uuid,uuid,uuid)": "8566e0d7bac1aad56398e605c5e4371c",
     "commercial.open_day(uuid,text,uuid,uuid)": "32cfdd2e39dbc54d2ac9b170bdcb3b7e",
+    "commercial.open_day_locked(uuid,text,uuid,uuid)": "5016c4e0b55e28efa2c80c1d09fc91c5",
     "commercial.payment_confirm(uuid,uuid,bigint,text,text)": "f3e5670564647a04af1bdaf72a396868",
-    "commercial.payment_record(uuid,jsonb,bigint,text,text)": "6c8508f08ac39235ee70f765addf94ab",
-    "commercial.payment_record_online(uuid,bigint,text)": "78745468a013ccd1eb8945b28dbedfc6",
-    "commercial.payment_void(uuid,uuid,text,bigint,uuid,text,text)": "61db3fcf0e35490c223a46231085e1c4",
+    "commercial.payment_record(uuid,jsonb,bigint,text,text)": "61c88da07fae036d859071519071e676",
+    "commercial.payment_record_online(uuid,bigint,text)": "f83e3f675446586606710ac8a924f213",
+    "commercial.payment_void(uuid,uuid,text,bigint,uuid,text,text)": "6c6151f8517b360d3b1d7dcf49260c4b",
     "commercial.receipt(uuid,uuid)": "c8966d9f317b4a4771af010ae42dd76d",
     "commercial.till_day_closed_guard()": "3201a28156e7eadb975afd56adc0c9ea"}';
   present integer;
@@ -247,6 +252,23 @@ as $$
    where day_row.facility_id = requested_facility and day_row.scope = scope_value
      and day_row.membership_id is not distinct from membership_value and day_row.till_id is not distinct from till_value
      and day_row.closed_at is null
+$$;
+
+-- The open day of a scope, locked FOR SHARE until the command commits: a day
+-- close (FOR UPDATE) running meanwhile is waited for, and then the day is no
+-- longer open (READ COMMITTED reads the closed row again), so the command
+-- finds no open day. Commands at the same day share the lock.
+create function commercial.open_day_locked(requested_facility uuid, scope_value text, membership_value uuid,
+  till_value uuid)
+returns uuid
+language sql
+set search_path = pg_catalog, pg_temp
+as $$
+  select day_row.id from commercial.till_days day_row
+   where day_row.facility_id = requested_facility and day_row.scope = scope_value
+     and day_row.membership_id is not distinct from membership_value and day_row.till_id is not distinct from till_value
+     and day_row.closed_at is null
+     for share
 $$;
 
 -- The member's roles here are only pharmacy or lab roles (wherePaid cashier
@@ -582,7 +604,8 @@ begin
   if method_value <> 'hmo' then
     begin
       select * into scope_row from commercial.day_scope(actor.facility_id, actor.membership_id, till_value);
-      day_id := commercial.open_day(actor.facility_id, scope_row.scope, scope_row.membership_id, scope_row.till_id);
+      day_id := commercial.open_day_locked(actor.facility_id, scope_row.scope, scope_row.membership_id,
+        scope_row.till_id);
     exception when sqlstate 'HB400' then
       if method_value <> 'waiver' then raise; end if;
     end;
@@ -712,7 +735,8 @@ begin
   if payment.method <> 'waiver' then
     begin
       select * into scope_row from commercial.day_scope(actor.facility_id, actor.membership_id, requested_till);
-      day_id := commercial.open_day(actor.facility_id, scope_row.scope, scope_row.membership_id, scope_row.till_id);
+      day_id := commercial.open_day_locked(actor.facility_id, scope_row.scope, scope_row.membership_id,
+        scope_row.till_id);
     exception when sqlstate 'HB400' then
       if payment.method = 'cash' then raise; end if;
     end;
@@ -812,7 +836,7 @@ begin
   if amount > bill.due_kobo then
     raise exception using errcode = 'HB409', message = 'OVERPAYMENT';
   end if;
-  day_id := commercial.open_day(facility_value, 'facility', null, null);
+  day_id := commercial.open_day_locked(facility_value, 'facility', null, null);
   insert into commercial.payments (facility_id, bill_id, method, amount_kobo, status, receipt_number, till_day_id,
     online_reference_sha256)
   values (facility_value, bill.id, 'online', amount, 'recorded',
@@ -831,7 +855,8 @@ $$;
 
 -- Grants (here and in runtime-grants.sql).
 revoke all on function commercial.till_day_closed_guard(), commercial.day_scope(uuid, uuid, uuid),
-  commercial.open_day(uuid, text, uuid, uuid), commercial.counter_staff_only(uuid), commercial.day_json(uuid),
+  commercial.open_day(uuid, text, uuid, uuid), commercial.open_day_locked(uuid, text, uuid, uuid),
+  commercial.counter_staff_only(uuid), commercial.day_json(uuid),
   commercial.day_current(uuid), commercial.day_open(uuid, bigint, text, text),
   commercial.day_close(uuid, bigint, text, bigint, text, text), commercial.day_list(date, boolean),
   commercial.payment_record(uuid, jsonb, bigint, text, text),
@@ -870,14 +895,16 @@ declare
     "commercial.day_open(uuid,bigint,text,text)": "6fc0ed7510afc308baec9c2357013234",
     "commercial.day_scope(uuid,uuid,uuid)": "8566e0d7bac1aad56398e605c5e4371c",
     "commercial.open_day(uuid,text,uuid,uuid)": "32cfdd2e39dbc54d2ac9b170bdcb3b7e",
+    "commercial.open_day_locked(uuid,text,uuid,uuid)": "5016c4e0b55e28efa2c80c1d09fc91c5",
     "commercial.payment_confirm(uuid,uuid,bigint,text,text)": "f3e5670564647a04af1bdaf72a396868",
-    "commercial.payment_record(uuid,jsonb,bigint,text,text)": "6c8508f08ac39235ee70f765addf94ab",
-    "commercial.payment_record_online(uuid,bigint,text)": "78745468a013ccd1eb8945b28dbedfc6",
-    "commercial.payment_void(uuid,uuid,text,bigint,uuid,text,text)": "61db3fcf0e35490c223a46231085e1c4",
+    "commercial.payment_record(uuid,jsonb,bigint,text,text)": "61c88da07fae036d859071519071e676",
+    "commercial.payment_record_online(uuid,bigint,text)": "f83e3f675446586606710ac8a924f213",
+    "commercial.payment_void(uuid,uuid,text,bigint,uuid,text,text)": "6c6151f8517b360d3b1d7dcf49260c4b",
     "commercial.receipt(uuid,uuid)": "c8966d9f317b4a4771af010ae42dd76d",
     "commercial.till_day_closed_guard()": "3201a28156e7eadb975afd56adc0c9ea"}';
   own constant text[] := array['commercial.till_day_closed_guard()', 'commercial.day_scope(uuid,uuid,uuid)',
-    'commercial.open_day(uuid,text,uuid,uuid)', 'commercial.counter_staff_only(uuid)', 'commercial.day_json(uuid)',
+    'commercial.open_day(uuid,text,uuid,uuid)', 'commercial.open_day_locked(uuid,text,uuid,uuid)',
+    'commercial.counter_staff_only(uuid)', 'commercial.day_json(uuid)',
     'commercial.day_current(uuid)', 'commercial.day_open(uuid,bigint,text,text)',
     'commercial.day_close(uuid,bigint,text,bigint,text,text)', 'commercial.day_list(date,boolean)',
     'commercial.payment_record(uuid,jsonb,bigint,text,text)', 'commercial.payment_confirm(uuid,uuid,bigint,text,text)',
