@@ -170,12 +170,13 @@ export const DIAGNOSIS_SYNONYMS: Readonly<Record<string, string>> = {
   assert.deepEqual(seedProblems(seed), [])
 })
 
-// Promised on #320 (Ola, clinical owner): "Down syndrome" for LD40.0 and "gallstone", "gallstones" for DC11.
+// Promised on #320 (Ola, clinical owner): "Down syndrome" for LD40.0 and "gallstone" for DC11. Ola dropped "gallstones"
+// on 25 Nov 2026: 0152's second attempt finds DC11 for it through "gallstone", then DA91.30 Gallstone ileus.
 test('the approved other names: exactly these, each with its code, WHO\'s title and the approval', () => {
   assert.deepEqual(APPROVED_OTHER_NAMES.map((entry) => ({ ...entry, names: [...entry.names] })), [
     { code: 'LD40.0', title: 'Complete trisomy 21', names: ['down syndrome'],
       approval: 'approved by Ola as clinical owner, 25 Nov 2026 (#320, comments 7141511470 and 7168535216)' },
-    { code: 'DC11', title: 'Cholelithiasis', names: ['gallstone', 'gallstones'],
+    { code: 'DC11', title: 'Cholelithiasis', names: ['gallstone'],
       approval: 'approved by Ola as clinical owner, 25 Nov 2026 (#320, comments 7141511470 and 7168535216)' },
   ])
   assert.ok(Object.isFrozen(APPROVED_OTHER_NAMES) && APPROVED_OTHER_NAMES.every((entry) => Object.isFrozen(entry)
@@ -195,7 +196,7 @@ test('the approved other names join their entry\'s other names; a code or title 
     buildIcd11Seed(rows, { release: '2026-01', releaseFile: RELEASE_FILE, otherNames, approvedNames })
   const seed = build(APPROVED_OTHER_NAMES, new Map([['DC11', ['cholelithiasis stones']]]))
   assert.deepEqual(seed.items.map((item) => [item.code, item.title, item.otherNames]), [
-    ['DC11', 'Cholelithiasis', ['cholelithiasis stones', 'gallstone', 'gallstones']],
+    ['DC11', 'Cholelithiasis', ['cholelithiasis stones', 'gallstone']],
     ['DC11.Z', 'Cholelithiasis, unspecified', []],
     ['LD40', 'Complete trisomies of the autosomes', []],
     ['LD40.0', 'Complete trisomy 21', ['down syndrome']],
@@ -294,7 +295,9 @@ test('the draft ICD-11 MMS 2026-01 seed in docs/codes/drafts loads as it stands'
   ])
   // The approved other names (Ola, 25 Nov 2026), each on its entry and nowhere else.
   assert.deepEqual(named('LD40.0'), ['down syndrome'])
-  assert.deepEqual(named('DC11'), ['gallstone', 'gallstones'])
+  assert.deepEqual(named('DC11'), ['gallstone'])
+  // "gallstones" is no entry's other name (dropped by Ola, 25 Nov 2026), so 0152's second attempt still runs for it.
+  assert.deepEqual(seed.items.filter((item) => item.otherNames.some((name) => name.toLowerCase() === 'gallstones')), [])
   for (const { code, title, names } of APPROVED_OTHER_NAMES) {
     assert.equal(seed.items.find((item) => item.code === code).title, title)
     assert.deepEqual(seed.items.filter((item) => item.otherNames.some((name) => names.includes(name))).map((item) => item.code),

@@ -41,19 +41,22 @@ export const LEFT_OUT_CHAPTERS = {
  * Promised on #320: no "Down" query reached LD40.0 Complete trisomy 21, and "gallstones" reached DA91.30 Gallstone
  * ileus of small intestine but not DC11 Cholelithiasis.
  * - LD40.0: WHO lists "Down syndrome" as an inclusion of LD40.0. "Down's syndrome" needs no name of its own: the
- *   search drops a word-final 's from what is typed and from our names alike (0152).
+ *   search drops a word-final 's from what is typed and from our names alike (0152). The name is in lower case, as
+ *   every hand-written other name is; the search ignores case.
  * - DC11: as in DIAGNOSIS_SYNONYMS, a name that does not say which narrower entry is meant names the broader title
- *   true of all of them. "gallstones" says neither where the stones are nor whether there is cholecystitis or
+ *   true of all of them. "gallstone" says neither where the stones are nor whether there is cholecystitis or
  *   cholangitis, so it is DC11, not one of DC11.0-DC11.7. WHO's index files "gallstone" under DC11.3 Calculus of
  *   gallbladder or cystic duct without cholecystitis or cholangitis; DC11.3 adds "without cholecystitis or
- *   cholangitis", which the names do not say, so they stay on DC11.
- * - "gallstones" is found on the search's first attempt, so the second (a final s dropped) does not run: it offers
- *   DC11 alone, where it used to offer DA91.30 through "gallstone". "gallstone" offers DC11, then DA91.30.
+ *   cholangitis", which a chart saying "gallstones" does not state, so the name stays on DC11, knowingly.
+ * - "gallstones" is not one of DC11's names: 0152's second attempt (a final s dropped) finds it through "gallstone",
+ *   so "gallstones" finds DC11 first, then DA91.30 Gallstone ileus of small intestine, as "gallstone" does. Listed,
+ *   it would be found on the first attempt, the second would not run, and "gallstones" would offer DC11 alone,
+ *   without DA91.30. Ola, clinical owner, dropped "gallstones" from the list on 25 Nov 2026 for that reason.
  */
 export const APPROVED_OTHER_NAMES = Object.freeze([
   Object.freeze({ code: 'LD40.0', title: 'Complete trisomy 21', names: Object.freeze(['down syndrome']),
     approval: 'approved by Ola as clinical owner, 25 Nov 2026 (#320, comments 7141511470 and 7168535216)' }),
-  Object.freeze({ code: 'DC11', title: 'Cholelithiasis', names: Object.freeze(['gallstone', 'gallstones']),
+  Object.freeze({ code: 'DC11', title: 'Cholelithiasis', names: Object.freeze(['gallstone']),
     approval: 'approved by Ola as clinical owner, 25 Nov 2026 (#320, comments 7141511470 and 7168535216)' }),
 ]);
 
