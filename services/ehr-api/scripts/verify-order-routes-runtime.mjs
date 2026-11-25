@@ -55,6 +55,12 @@
 // hospital's own pharmacy and laboratory (dispensed with its time, results ready) under the doctor's own grant
 // only; routed orders stay not received; one sent elsewhere reads sent_elsewhere; a doctor without a grant is
 // refused by all three services, audited.
+// ORD-3 for several patients in one call (decision 4, step 10c): as ehr-api with the doctor's cookie, the patient and a
+// second patient without a grant in one call to each service: the first answered exactly as the one-patient route
+// answers it, the second denied with no items, each audited by itself with "via": "batch"; bad bodies and an
+// emergency purpose 400 with nothing read or checked; an unknown form under progress/, asked with no cookie and no
+// service token (only x-hid-internal-caller), 404 NOT_FOUND where a guard would answer 401, so before any guard,
+// with no audit row (what ehr-api reads as an image without the batch form).
 // 0133 D14 (owner's Q121 A, step 10): a prescription the hospital's own pharmacy holds is sent to the outside
 // pharmacy before it is dispensed: the hospital's list no longer shows it, its item reads withdrawnReason
 // sent_elsewhere and cannot be dispensed (409), the outside pharmacy accepts and dispenses it, and the database
@@ -1739,6 +1745,137 @@ try {
     audit: { reads: 'success, with the patient', withoutGrant: 'denied, with the patient' } };
   step('ORD-3: the doctor\'s cookie read shows own pharmacy dispensed (with its time) and own lab results ready; '
     + 'routed orders not received; without a grant 403 and audited');
+
+  // ── 10c. ORD-3 for several patients in one call (decision 4), asked as ehr-api with the doctor's cookie ──
+  // The patient (the doctor's grant) and the second patient (no grant, never part of these orders) in one call:
+  // each patient is checked and audited as by a call of its own, so one refusal does not refuse the call. Each
+  // request has its own correlation id, so the audit rows counted below are that request's alone.
+  const bothVersions = { 'x-hid-own-progress': '0133', 'x-hid-own-progress-accepted': 'ord4' };
+  const progressAsEhr = async (base, path, token, body, { purpose = 'direct-care', headers = {} } = {}) => {
+    const correlationId = `verifier-own-progress-batch-${randomUUID()}`;
+    const began = Date.now();
+    const response = await http(base, 'POST', path, { cookie: doctor.cookie, facility: hospital.facilityId, purpose, body,
+      headers: { 'x-correlation-id': correlationId, 'x-hid-internal-caller': 'ehr-api', 'x-hid-service-token': token,
+        ...headers } });
+    return { correlationId, response, ms: Date.now() - began };
+  };
+  const auditCount = async (correlationId, action) => (await one(`select count(*)::int as n from audit.events
+    where correlation_id = $1 and ($2::text is null or action = $2)`, [correlationId, action])).n;
+  const checksByPatient = async correlationId => Object.fromEntries((await all(`select patient_id, count(*)::int as n
+    from audit.events where correlation_id = $1 and action = 'identity.authorization.check' group by patient_id`,
+  [correlationId])).map(row => [row.patient_id, row.n]));
+  const batchReads = async (correlationId, action) => all(`select outcome, patient_id, details->>'via' as via
+    from audit.events where correlation_id = $1 and action = $2 order by outcome desc`, [correlationId, action]);
+  // One service's batch: the allowed patient's entry equals the one-patient route's answer, asked the same way.
+  const batchOf = async ({ base, kind, token, idsField, ids, headers, shownOnlyWhenAnswered }) => {
+    const single = await progressAsEhr(base, `/${kind}/work-items/progress`, token,
+      { patientId: patient.id, [idsField]: ids }, { headers });
+    const singleItems = expectStatus(single.response, 200, `${kind} progress for one patient`).items;
+    const batch = await progressAsEhr(base, `/${kind}/work-items/progress/batch`, token, { patients: [
+      { patientId: patient.id, [idsField]: ids }, { patientId: otherPatient.id, [idsField]: [randomUUID()] }] },
+    { headers });
+    const answer = expectStatus(batch.response, 200, `${kind} progress for two patients`);
+    assert.equal(batch.response.headers.get('cache-control'), 'no-store', `${kind} batch Cache-Control`);
+    assert.equal(answer.patients?.length, 2, `${kind} batch entries: ${JSON.stringify(answer)}`);
+    const [allowed, other] = answer.patients;
+    assert.deepEqual(allowed, { patientId: patient.id, outcome: 'answered', items: singleItems },
+      `the allowed patient in the ${kind} batch, against the one-patient route: ${JSON.stringify(answer)}`);
+    assert.deepEqual(Object.keys(allowed), ['patientId', 'outcome', 'items'], `${kind} answered entry's keys`);
+    assert.deepEqual([Object.keys(other), other.patientId, other.outcome, typeof other.code],
+      [['patientId', 'outcome', 'code'], otherPatient.id, 'denied', 'string'],
+    `the patient without a grant in the ${kind} batch: ${JSON.stringify(other)}`);
+    assert(!JSON.stringify(other).includes(shownOnlyWhenAnswered), `${kind} progress in the denied patient's entry`);
+    return { correlationId: batch.correlationId, other: other.code, ms: batch.ms, singleItems };
+  };
+  const rxBatch = await batchOf({ base: pharmacy, kind: 'pharmacy', token: tokens.pharmacy,
+    idsField: 'sourceEhrPrescriptionIds', ids: [rx7.id, rx2.id], headers: bothVersions, shownOnlyWhenAnswered: 'dispensed' });
+  // The comparison means something only if the one-patient answer does: rx7 dispensed here, rx2 routed elsewhere.
+  assert.deepEqual(rxBatch.singleItems.map(item => item.status), ['dispensed', 'not_received'],
+    `the one-patient pharmacy answer compared against: ${JSON.stringify(rxBatch.singleItems)}`);
+  const lrBatch = await batchOf({ base: lab, kind: 'lab', token: tokens.lab, idsField: 'sourceEhrOrderIds',
+    ids: [lr7.id, lr1.id], headers: {}, shownOnlyWhenAnswered: 'results_ready' });
+  assert.deepEqual(lrBatch.singleItems.map(item => item.status), ['results_ready', 'not_received'],
+    `the one-patient lab answer compared against: ${JSON.stringify(lrBatch.singleItems)}`);
+  // Audit: per patient, as the one-patient lookup, with "via": "batch"; the denial before the read.
+  const bothRows = [{ outcome: 'success', patient_id: patient.id, via: 'batch' },
+    { outcome: 'denied', patient_id: otherPatient.id, via: 'batch' }];
+  assert.deepEqual(await batchReads(rxBatch.correlationId, 'pharmacy.work-item.progress.read'), bothRows,
+    'the pharmacy batch\'s read rows');
+  assert.deepEqual(await checksByPatient(rxBatch.correlationId), { [patient.id]: 1, [otherPatient.id]: 1 },
+    'Identity\'s check rows for the pharmacy batch: one per patient');
+  assert.equal(await auditCount(rxBatch.correlationId, 'api.identity.service.authorization.check.request'), 2,
+    'Identity\'s request rows for the pharmacy batch: one per patient check');
+  assert.deepEqual(await batchReads(lrBatch.correlationId, 'lab.work-item.progress.read'), bothRows,
+    'the lab batch\'s read rows');
+  // lab-api writes its own identity.authorization.check beside Identity's.
+  assert.deepEqual(await checksByPatient(lrBatch.correlationId), { [patient.id]: 2, [otherPatient.id]: 2 },
+    'the check rows for the lab batch: Identity\'s and lab-api\'s per patient');
+  const labRequestRows = await all(`select outcome, patient_id, details->>'route' as route from audit.events
+    where correlation_id = $1 and action = 'api.lab.work-item.progress.batch.request'`, [lrBatch.correlationId]);
+  assert.equal(labRequestRows.length, 1, `lab's request row for the batch: ${JSON.stringify(labRequestRows)}`);
+  assert.deepEqual([labRequestRows[0].outcome, labRequestRows[0].patient_id], ['success', null]);
+  assert(labRequestRows[0].route?.endsWith('progress/batch'), `lab's request row's route: ${labRequestRows[0].route}`);
+  // Refusals: the body rules and the purpose, each before any Identity check; nothing read or checked.
+  const refusals = {};
+  for (const [kind, base, token, idsField] of [['pharmacy', pharmacy, tokens.pharmacy, 'sourceEhrPrescriptionIds'],
+    ['lab', lab, tokens.lab, 'sourceEhrOrderIds']]) {
+    const sharedId = randomUUID();
+    const cases = [
+      ['101 ids in all', { patients: [{ patientId: patient.id, [idsField]: Array.from({ length: 51 }, () => randomUUID()) },
+        { patientId: otherPatient.id, [idsField]: Array.from({ length: 50 }, () => randomUUID()) }] }, {},
+      'VALIDATION_FAILED'],
+      ['a patient twice', { patients: [{ patientId: patient.id, [idsField]: [randomUUID()] },
+        { patientId: patient.id.toUpperCase(), [idsField]: [randomUUID()] }] }, {}, 'VALIDATION_FAILED'],
+      ['an id under two patients', { patients: [{ patientId: patient.id, [idsField]: [sharedId] },
+        { patientId: otherPatient.id, [idsField]: [sharedId] }] }, {}, 'VALIDATION_FAILED'],
+      ['an emergency purpose', { patients: [{ patientId: patient.id, [idsField]: [randomUUID()] }] },
+        { purpose: 'emergency' }, 'PURPOSE_OF_USE_REQUIRED'],
+    ];
+    refusals[kind] = {};
+    for (const [label, body, options, code] of cases) {
+      const refused = await progressAsEhr(base, `/${kind}/work-items/progress/batch`, token, body,
+        { ...options, headers: kind === 'pharmacy' ? bothVersions : {} });
+      const problem = expectProblem(refused.response, 400, code, `${kind} batch with ${label}`);
+      if (code === 'PURPOSE_OF_USE_REQUIRED') {
+        assert.equal(problem.detail, 'X-Purpose-Of-Use must be direct-care for this route', `${kind} purpose detail`);
+      }
+      assert.equal(await auditCount(refused.correlationId, `${kind}.work-item.progress.read`), 0,
+        `${kind} batch with ${label}: a read row`);
+      assert.equal(await auditCount(refused.correlationId, 'identity.authorization.check'), 0,
+        `${kind} batch with ${label}: a check row`);
+      if (kind === 'lab') {
+        // Pipes run inside lab-api's audit interceptor, so its request row records the refusal.
+        assert.deepEqual(await all(`select outcome from audit.events where correlation_id = $1
+          and action = 'api.lab.work-item.progress.batch.request'`, [refused.correlationId]), [{ outcome: 'failure' }],
+        `lab batch with ${label}: its request row`);
+      }
+      refusals[kind][label] = code;
+    }
+  }
+  // What ehr-api reads as an image without the batch form: an unknown path under progress/ is 404 NOT_FOUND
+  // before any guard, so nothing is checked or audited. The probe carries NO credentials: no cookie and no
+  // x-hid-service-token, only x-hid-internal-caller: ehr-api. A guard that ran would answer 401
+  // (INTERNAL_SERVICE_AUTH_REQUIRED or AUTHENTICATION_REQUIRED), so the 404 itself shows that none ran. With full
+  // credentials it could not: a guard that ran and passed Identity's GET /auth/service-session leaves no audit row
+  // either (that route audits failures only), so the zero below alone would not tell the two apart.
+  for (const [kind, base] of [['pharmacy', pharmacy], ['lab', lab]]) {
+    const correlationId = `verifier-own-progress-batch-${randomUUID()}`;
+    const unknownForm = await http(base, 'POST', `/${kind}/work-items/progress/unknown-form`, {
+      facility: hospital.facilityId, purpose: 'direct-care', body: { patients: [{ patientId: patient.id }] },
+      headers: { 'x-correlation-id': correlationId, 'x-hid-internal-caller': 'ehr-api',
+        ...(kind === 'pharmacy' ? bothVersions : {}) } });
+    expectProblem(unknownForm, 404, 'NOT_FOUND', `${kind} progress/unknown-form without credentials`);
+    assert.equal(await auditCount(correlationId, null), 0, `${kind} progress/unknown-form: an audit row`);
+  }
+  evidence.ownProgressBatch = {
+    pharmacy: { answered: 'equals the single route', other: rxBatch.other },
+    lab: { answered: 'equals the single route', other: lrBatch.other },
+    audit: { reads: 'success and denied, each naming its patient, via batch', identityChecks: { pharmacy: '1 per patient',
+      lab: '2 per patient (Identity\'s and lab-api\'s)' }, identityRequests: { pharmacy: 2 },
+    labRequestRow: 'api.lab.work-item.progress.batch.request, no patient, success' },
+    refusals, notFound: 404, ms: { pharmacyBatch: rxBatch.ms, labBatch: lrBatch.ms } };
+  step('ORD-3 batch (decision 4): two patients in one call, the allowed one answered as by the single route, the other '
+    + 'denied and audited; bad bodies 400; an unknown form 404');
 
   // ── 11. The switches ──
   const rx4 = await newPrescription('active');

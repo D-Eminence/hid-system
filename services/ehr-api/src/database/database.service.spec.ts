@@ -2,8 +2,9 @@ import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService, OWN_FACILITY_WORK, VITALS_STATUS_AWARE } from './database.service';
 
 // 0133 D13 and D14 (owner's Q120 B and Q121 A): the new ehr-api sets app.own_facility_work to '0133' in every staff
-// transaction, so the order-route send and its resend flag follow D14's rule. It never sets it in a patient-self,
-// system or workload transaction. Fictional values only.
+// transaction of withTransaction, so the order-route send and its resend flag follow D14's rule. It never sets it in
+// withStaffTransaction's (ORD-9's recent diagnoses, which read no order route) or in a patient-self, system or workload
+// transaction. Fictional values only.
 const context = { correlationId: 'correlation-own-facility-work', facilityId: 'facility', membershipId: 'membership',
   purposeOfUse: 'direct-care', authorization: 'Bearer user',
   actor: { id: 'account', subject: 'synthetic:doctor', accountId: 'account' } } as unknown as DataAccessContext;
@@ -42,9 +43,16 @@ const vitalsSwitchValue = (calls: Call[]) => {
   const parameter = VITALS_SWITCH.exec(settings.sql);
   return parameter ? settings.values[Number(parameter[1]) - 1] : undefined;
 };
+/** The value a transaction-local set_config of app.<name> is given, from its parameter; undefined when it is not set. */
+const staffSetting = (calls: Call[], name: string) => {
+  const pattern = new RegExp(`set_config\\('app\\.${name}',\\s*\\$(\\d+),\\s*true\\)`);
+  const settings = calls.find((call) => pattern.test(call.sql));
+  const parameter = settings && pattern.exec(settings.sql);
+  return settings && parameter ? settings.values[Number(parameter[1]) - 1] : undefined;
+};
 
 describe('EHR DatabaseService staff session (0133 D13 and D14, owner\'s Q120 B and Q121 A)', () => {
-  it('sets app.own_facility_work to 0133 in every staff transaction, beside the staff context', async () => {
+  it('sets app.own_facility_work to 0133 in every withTransaction staff transaction, beside the staff context', async () => {
     const { database, connections } = service();
     await database.withTransaction(context, async () => 'done');
     expect(OWN_FACILITY_WORK).toBe('0133');
@@ -67,12 +75,33 @@ describe('EHR DatabaseService staff session (0133 D13 and D14, owner\'s Q120 B a
     expect(connections.map(switchValue)).toEqual(['0133', '0133', '0133', '0133']);
   });
 
-  it('sets app.vitals_status to 0142 in every staff transaction (0142 D2: this image reads withdrawn readings)', async () => {
+  it('sets app.vitals_status to 0142 in every withTransaction staff transaction (0142 D2: this image reads withdrawn readings)', async () => {
     const { database, connections } = service();
     await database.withTransaction(context, async () => 'done');
     await database.withTransaction(context, async () => 'read', { readOnly: true });
     expect(VITALS_STATUS_AWARE).toBe('0142');
     expect(connections.map(vitalsSwitchValue)).toEqual(['0142', '0142']);
+  });
+
+  it('sets the membership and no purpose of use in a staff transaction (ORD-9\'s recent diagnoses, 0153)', async () => {
+    // 0153's record and read find the caller by app.membership_id (and app.facility_id and app.actor_subject); the
+    // recent list reads no patient, so withStaffTransaction sets no purpose of use (Rahman's re-review of #321, nit 5).
+    const { database, connections } = service();
+    await database.withStaffTransaction({ subject: 'synthetic:doctor', facilityId: 'facility', membershipId: 'membership',
+      correlationId: 'correlation-staff' }, async () => 'read');
+    expect(connections).toHaveLength(1);
+    const calls = connections[0]!;
+    expect(calls[0]!.sql).toBe('BEGIN');
+    expect(calls.at(-1)!.sql).toBe('COMMIT');
+    expect(staffSetting(calls, 'membership_id')).toBe('membership');
+    expect(staffSetting(calls, 'facility_id')).toBe('facility');
+    expect(staffSetting(calls, 'actor_subject')).toBe('synthetic:doctor');
+    expect(staffSetting(calls, 'correlation_id')).toBe('correlation-staff');
+    expect(calls.some((call) => /purpose_of_use/.test(call.sql))).toBe(false);
+    expect(calls.flatMap((call) => call.values)).not.toContain('direct-care');
+    // The recent list reads no order route and no vitals, so neither switch is set here (database.service.ts's
+    // OWN_FACILITY_WORK and VITALS_STATUS_AWARE: withTransaction's staff transactions only).
+    expect(mentionsSwitch(calls)).toBe(false);
   });
 
   it('never sets either switch in a patient-self, system or workload transaction', async () => {
