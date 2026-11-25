@@ -12517,9 +12517,12 @@ appointments to see it." through notification-api's new `POST /api/v1/notificati
 for check-in or no-show; a patient with no account gets nothing. SMS: the Platform control
 `appointment_sms_reminders_enabled` (seeded off, switchable in the Platform console) gates both the queue and the
 sender; the text is "Reminder: you have an appointment at {facility} on {day} at {time}." to the phone this facility
-recorded, never the clinic or reason. At most one unsent SMS per appointment: a rescheduled appointment keeps its
-unsent one (the sender reads the new time when it claims it), and gets a new one only after the earlier one was sent
-or failed.
+recorded, never the clinic or reason, and only to an active patient with notices on (the email's rule, 0063), checked
+when the sweep queues it and again when the sender claims it: a queued SMS whose patient has since become inactive,
+merged, deceased or deleted, or turned notices off, is closed unsent (`PATIENT_NOT_REACHABLE`), as one whose
+appointment is no longer booked is (`APPOINTMENT_NOT_BOOKED`). At most one unsent SMS per appointment: a rescheduled
+appointment keeps its unsent one (the sender reads the new time when it claims it), and gets a new one only after the
+earlier one was sent or failed.
 
 Deviation from the planned contract, for the reviewers: the planned email path was a producer `ehr` on
 `integration.outbox_envelopes` for the event-dispatcher and notification-worker. The worker's claim functions are

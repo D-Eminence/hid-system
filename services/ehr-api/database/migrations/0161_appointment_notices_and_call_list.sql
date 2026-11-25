@@ -49,19 +49,24 @@
 --    before their start; only between 07:00 and 21:00 Lagos (otherwise 0).
 --    Each gets APPOINTMENT_REMINDER (inbox, then push and email as B1-B2),
 --    reminder_sent_at, an SMS outbox row only while the control below is on
---    (at most one unsent per appointment: a rescheduled appointment keeps its
---    unsent one, which carries the new time; after a sent one it gets a new
---    row), and one system audit row (ehr.appointment.reminder) naming the
---    channels.
+--    and only for an active patient with notices on (the email's rule, 0063;
+--    the inbox, 0037, needs an active patient too), at most one unsent per
+--    appointment (a rescheduled appointment keeps its unsent one, which
+--    carries the new time; after a sent one it gets a new row), and one
+--    system audit row (ehr.appointment.reminder) naming the channels.
 -- B4 SMS, built but switched off. The control appointment_sms_reminders_enabled
 --    is added and seeded OFF (the control_settings key CHECK and
 --    platform.control_enabled carry the 11 existing keys plus this one: 0086's
 --    rule; 0115 is the last file that set them, both md5-pinned).
---    ehr.appointment_sms_outbox gets a row only while it is on, and only for a
---    patient with a phone this facility recorded.
+--    ehr.appointment_sms_outbox gets a row only while it is on, and only for an
+--    active patient with notices on and a phone this facility recorded.
 --    identity.appointment_sms_claim and identity.appointment_sms_record (system
 --    actor, Identity runtime) are what identity-api's sender uses, only while
 --    the control is on; each send is audited (notification.appointment-sms.send).
+--    The claim checks the patient again: a row whose patient is no longer
+--    active (inactive, merged, deceased, deleted) or has turned notices off is
+--    closed unsent (failed, PATIENT_NOT_REACHABLE) and never claimed, as a row
+--    whose appointment is no longer booked is (APPOINTMENT_NOT_BOOKED).
 --    The fixed message: "Reminder: you have an appointment at {facility} on
 --    {day} at {time}." No clinic or reason. Switching it on waits for the SMS
 --    budget, the Termii sender ID and the DPO's NDPA notice.
@@ -445,7 +450,11 @@ begin
       if inboxed then
         channels := channels || array['inbox', 'email'];
       end if;
-      if sms_on then
+      -- An SMS only for an active patient with notices on (the email's rule, 0063): never to a patient who is
+      -- inactive, merged, deceased or deleted, or who turned notices off.
+      if sms_on and exists (select 1 from identity.patients patient
+                             where patient.id = due.patient_id and patient.status = 'active'
+                               and patient.notifications_enabled) then
         select facility_contact.id into contact
           from identity.patient_facility_contacts facility_contact
          where facility_contact.patient_id = due.patient_id and facility_contact.facility_id = due.facility_id
@@ -475,7 +484,7 @@ begin
   end
   $fn$;
   comment on function ehr.appointment_send_reminders(integer) is
-    '0161 (APPT-1, Q-APPT-3 A): the reminder sweep, as system:auth only, between 07:00 and 21:00 Lagos: booked appointments that start within 24 hours, without a reminder, booked at least 12 hours before their start, at most the batch (1-500). Each gets APPOINTMENT_REMINDER (inbox, push, email), an SMS outbox row only while appointment_sms_reminders_enabled is on (at most one unsent per appointment: a rescheduled appointment keeps its unsent one), reminder_sent_at, and one system audit row naming the channels. Answers how many.';
+    '0161 (APPT-1, Q-APPT-3 A): the reminder sweep, as system:auth only, between 07:00 and 21:00 Lagos: booked appointments that start within 24 hours, without a reminder, booked at least 12 hours before their start, at most the batch (1-500). Each gets APPOINTMENT_REMINDER (inbox, push, email), an SMS outbox row only while appointment_sms_reminders_enabled is on and only for an active patient with notices on and a phone this facility recorded (at most one unsent per appointment: a rescheduled appointment keeps its unsent one), reminder_sent_at, and one system audit row naming the channels. Answers how many.';
   revoke all on function ehr.appointment_send_reminders(integer) from public;
 
   -- B4. The SMS sender's two calls (identity-api, system:auth, only while the control is on).
@@ -508,11 +517,21 @@ begin
      where (sms.state = 'pending' or (sms.state = 'claimed' and sms.claimed_until < clock_timestamp()))
        and not exists (select 1 from ehr.appointments appointment
                         where appointment.id = sms.appointment_id and appointment.status = 'booked');
+    -- So is one whose patient is no longer active (inactive, merged, deceased, deleted) or has turned notices off
+    -- since it was queued (the email's rule, 0063). The lease below checks the same rule itself, so such a row is
+    -- never claimed or sent.
+    update ehr.appointment_sms_outbox sms
+       set state = 'failed', claimed_until = null, last_error_code = 'PATIENT_NOT_REACHABLE'
+     where (sms.state = 'pending' or (sms.state = 'claimed' and sms.claimed_until < clock_timestamp()))
+       and not exists (select 1 from identity.patients patient
+                        where patient.id = sms.patient_id and patient.status = 'active' and patient.notifications_enabled);
     return query
       with picked as (
         select sms.id from ehr.appointment_sms_outbox sms
          where (sms.state = 'pending' or (sms.state = 'claimed' and sms.claimed_until < clock_timestamp()))
            and sms.attempt_count < 5
+           and exists (select 1 from identity.patients patient
+                        where patient.id = sms.patient_id and patient.status = 'active' and patient.notifications_enabled)
          order by sms.created_at, sms.id
          limit requested_batch
          for update skip locked
@@ -533,7 +552,7 @@ begin
   end
   $fn$;
   comment on function identity.appointment_sms_claim(integer) is
-    '0161 (APPT-1): claims up to the batch (1-100) of reminder SMS for identity-api''s sender, as system:auth, only while appointment_sms_reminders_enabled is on (otherwise none). Each with the facility name, the start time and the facility-recorded phone ciphertext and its registration case (the associated data). Lapsed claims come back; at most 5 attempts. A reminder whose appointment is no longer booked is closed unsent (failed, APPOINTMENT_NOT_BOOKED).';
+    '0161 (APPT-1): claims up to the batch (1-100) of reminder SMS for identity-api''s sender, as system:auth, only while appointment_sms_reminders_enabled is on (otherwise none). Each with the facility name, the start time and the facility-recorded phone ciphertext and its registration case (the associated data). Lapsed claims come back; at most 5 attempts. A reminder whose appointment is no longer booked is closed unsent (failed, APPOINTMENT_NOT_BOOKED), and so is one whose patient is no longer active or has turned notices off (failed, PATIENT_NOT_REACHABLE); neither is claimed.';
   revoke all on function identity.appointment_sms_claim(integer) from public;
 
   create function identity.appointment_sms_record(requested_sms_id uuid, requested_outcome text,

@@ -22,8 +22,12 @@
 --      only for a patient with a phone this facility recorded; a reschedule
 --      with it on keeps one unsent SMS row and the sweep goes on for every
 --      facility, and after a sent one the moved appointment gets a new row;
---   4. the SMS sender: nothing claimed while the control is off; claim and
---      record (sent, stale) with one audit row; system:auth only;
+--      with it on, no SMS row for a deceased patient or one who turned
+--      notices off (the email's rule);
+--   4. the SMS sender: nothing claimed while the control is off; a queued SMS
+--      whose patient has since died or turned notices off is closed unsent
+--      (PATIENT_NOT_REACHABLE) and never claimed; claim and record (sent,
+--      stale) with one audit row; system:auth only;
 --   5. the email sender: a patient without a verified email is skipped;
 --      rows without a recipient are never leased, however many wait beyond
 --      one claim's limit (unverified email, notices turned off); claim and
@@ -505,6 +509,40 @@ select pg_temp.check_case('3 SMS on: r6 keeps its one unsent SMS; r8''s reminder
 select pg_temp.check_case('3 SMS on: moved again after that SMS was sent', 'updated', :'n161_move_2');
 select pg_temp.check_case('3 SMS on: the next sweep queues a new SMS beside the sent one', '1/sent:02,pending:02',
   :'n161_sweep_moved_again' || '/' || :'n161_sms_moved_again');
+-- The patient rule with SMS on (each rolled back after, so 4 sees the state above): r9, p1's (a phone A recorded),
+-- is due. Once p1 has died the sweep still sets its reminder, but writes no inbox item (0037), no email and no SMS;
+-- with p1 active but notices turned off, the inbox item and the email row (skipped when claimed, 0063) and no SMS.
+savepoint n161_sms_patient_rule;
+set local role hid_ehr_api_runtime;
+select pg_temp.book(1, 'r9', 1, pg_temp.slot(60 * 24 * 13)) as n161_r9_booked \gset
+reset role;
+select pg_temp.place('r9', pg_temp.slot(19 * 60), clock_timestamp() - interval '30 hours');
+update identity.patients set status = 'deceased' where id = pg_temp.patient(1);
+set local role hid_ehr_api_runtime;
+select pg_temp.sweep(50) as n161_sweep_deceased \gset
+reset role;
+select (select count(*) from ehr.appointment_sms_outbox where appointment_id = pg_temp.id('r9')) || '/'
+       || (select details ->> 'channels' from audit.events where action = 'ehr.appointment.reminder'
+            and resource_id = pg_temp.id('r9')::text) as n161_r9_deceased \gset
+rollback to savepoint n161_sms_patient_rule;
+set local role hid_ehr_api_runtime;
+select pg_temp.book(1, 'r9', 1, pg_temp.slot(60 * 24 * 13)) as n161_r9_booked_again \gset
+reset role;
+select pg_temp.place('r9', pg_temp.slot(19 * 60), clock_timestamp() - interval '30 hours');
+update identity.patients set notifications_enabled = false where id = pg_temp.patient(1);
+set local role hid_ehr_api_runtime;
+select pg_temp.sweep(50) as n161_sweep_notices_off \gset
+reset role;
+select (select count(*) from ehr.appointment_sms_outbox where appointment_id = pg_temp.id('r9')) || '/'
+       || (select details ->> 'channels' from audit.events where action = 'ehr.appointment.reminder'
+            and resource_id = pg_temp.id('r9')::text) as n161_r9_notices_off \gset
+rollback to savepoint n161_sms_patient_rule;
+select pg_temp.check_case('3 SMS on: r9 booked (twice, each rolled back)', 'booked/booked',
+  :'n161_r9_booked' || '/' || :'n161_r9_booked_again');
+select pg_temp.check_case('3 SMS on, p1 deceased: the reminder is set, with no channel and no SMS row', '1/0/[]',
+  :'n161_sweep_deceased' || '/' || :'n161_r9_deceased');
+select pg_temp.check_case('3 SMS on, p1''s notices off: inbox and email, no SMS row', '1/0/["inbox", "email"]',
+  :'n161_sweep_notices_off' || '/' || :'n161_r9_notices_off');
 \else
 select pg_temp.check_case('3 outside 07:00-21:00 Lagos the sweep sends nothing', '0', pg_temp.sweep(50));
 reset role;
@@ -548,6 +586,29 @@ set local role hid_identity_api_runtime;
 select pg_temp.check_case('4 nothing is claimed while the control is off', '(none)', pg_temp.sms_claim(10));
 reset role;
 update platform.control_settings set enabled = true where control_key = 'appointment_sms_reminders_enabled';
+-- p1's queued SMS, once p1 has died or turned notices off since (each rolled back after): closed unsent at the
+-- next claim, never claimed.
+create function pg_temp.sms_states(patient integer) returns text language sql security definer as $f$
+  select coalesce(string_agg(sms.state || ':' || coalesce(sms.last_error_code, '-'), ',' order by sms.created_at), '(none)')
+    from ehr.appointment_sms_outbox sms where sms.patient_id = pg_temp.patient(patient)
+$f$;
+savepoint n161_sms_claim_patient_rule;
+update identity.patients set status = 'deceased' where id = pg_temp.patient(1);
+set local role hid_identity_api_runtime;
+select pg_temp.sms_claim(10) as n161_claim_deceased \gset
+reset role;
+select pg_temp.sms_states(1) as n161_sms_deceased \gset
+rollback to savepoint n161_sms_claim_patient_rule;
+update identity.patients set notifications_enabled = false where id = pg_temp.patient(1);
+set local role hid_identity_api_runtime;
+select pg_temp.sms_claim(10) as n161_claim_notices_off \gset
+reset role;
+select pg_temp.sms_states(1) as n161_sms_notices_off \gset
+rollback to savepoint n161_sms_claim_patient_rule;
+select pg_temp.check_case('4 p1 deceased: nothing claimed; p1''s SMS closed unsent', '(none)/failed:PATIENT_NOT_REACHABLE',
+  :'n161_claim_deceased' || '/' || :'n161_sms_deceased');
+select pg_temp.check_case('4 p1''s notices off: nothing claimed; p1''s SMS closed unsent', '(none)/failed:PATIENT_NOT_REACHABLE',
+  :'n161_claim_notices_off' || '/' || :'n161_sms_notices_off');
 set local role hid_identity_api_runtime;
 select pg_temp.check_case('4 the control on: the SMS with the facility name and A''s phone ciphertext',
   'Reminder Clinic A:0202:v1:01', pg_temp.sms_claim(10));
