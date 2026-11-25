@@ -259,6 +259,17 @@ describe('EHR-C7 the waiting list (0135)', () => {
       expect(problem.code).toBe('VISIT_QUEUE_NOT_PERMITTED');
     });
 
+    it('answers a change of an emergency department patient\'s row as 409, in plain words (0168\'s guard)', async () => {
+      const { database } = fakeDatabase(Object.assign(new Error('VISIT_QUEUE_ON_ED_BOARD'), { code: '55000' }));
+      const problem = await problemOf(new VisitQueueService(database).update(context, entryId,
+        { expectedRowVersion: 2, stage: 'finished' }));
+      expect(problem.getStatus()).toBe(409);
+      expect(problem.code).toBe('VISIT_QUEUE_ON_ED_BOARD');
+      expect(problem.message).toBe('This patient is on the emergency department board. Make this change on the board.');
+      const other = Object.assign(new Error('something else'), { code: '55000' });
+      expect(translate(other)).toBe(other);
+    });
+
     it('keeps the routes closed (503) on a schema without 0135', () => {
       const problem = translate(Object.assign(new Error('function missing'), { code: '42883' })) as DomainProblem;
       expect(problem.getStatus()).toBe(503);

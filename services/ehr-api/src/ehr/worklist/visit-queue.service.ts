@@ -256,6 +256,11 @@ export function translate(error: unknown): unknown {
     return new DomainProblem(400, 'VISIT_QUEUE_UPDATE_INVALID',
       'Choose a stage, a triage level from 1 to 5, or a person to see the patient.');
   }
+  if (code === '55000' && message === 'VISIT_QUEUE_ON_ED_BOARD') {
+    // 0168's guard: an emergency department patient's stage, triage level and who sees them belong to the board.
+    return new DomainProblem(409, 'VISIT_QUEUE_ON_ED_BOARD',
+      'This patient is on the emergency department board. Make this change on the board.');
+  }
   if (code === '42883' || code === '42P01') {
     // A new image on a schema without 0135: the routes stay closed until the migration is applied.
     return new DomainProblem(503, 'VISIT_QUEUE_UNAVAILABLE', 'The waiting list is not available yet. Try again later.');

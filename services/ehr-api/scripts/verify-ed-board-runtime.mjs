@@ -4,7 +4,7 @@
 // context ehr-api's transactions set) and identity-api's staff patient search (as hid_identity_api_runtime): arrival
 // by each basis (a desk search's matchRef, this facility's own patient, an emergency search's matchRef with the
 // member's own break-glass grant), triage, start care, the visit link, each kind of disposition, "Left the
-// department", cancel, the waiting-list helper and the mirror of a close on the waiting list. The emergency search's
+// department", cancel, the waiting-list helper and the waiting list's guard. The emergency search's
 // matchRef and the break-glass grant are fixtures written as 0132 and 0031 write them (ID-5's own verifier covers
 // the activation). Executes only against the owned disposable synthetic rehearsal. No delivery or cloud calls;
 // fictional people, places and identifiers only.
@@ -189,16 +189,22 @@ try {
   const cancelled = (await board.cancel(context('desk'), four.attendance.attendanceId,
     { expectedRowVersion: four.attendance.rowVersion, reason: 'Added to the board by mistake' }, key('cancel-4'))).attendance;
   assert.deepEqual([cancelled.status, cancelled.stage], ['closed', 'cancelled']);
-  // The waiting list marks an open board patient; a close there closes the ED record (the mirror).
+  // The waiting list marks an open board patient, and refuses to change its row (the guard): the stage, the triage
+  // level and who sees the patient belong to the board. The board then closes it.
   const five = await board.arrive(context('desk'), { patientId: ids.p5, arrivalMode: 'police' }, key('arrive-5'));
   const waiting = await queue.list(context('desk'), false);
   const row = waiting.items.find((item) => item.patientId === ids.p5);
   assert.equal(row?.edAttendanceId, five.attendance.attendanceId);
   assert.equal(waiting.items.find((item) => item.patientId === ids.p2)?.edAttendanceId, null);
-  await queue.update(context('nurse'), row.entryId, { expectedRowVersion: row.rowVersion, stage: 'left' });
-  const mirrored = await board.read(context('desk'), five.attendance.attendanceId);
-  assert.equal(mirrored.attendance.status, 'closed');
-  assert.deepEqual(mirrored.history.map((entry) => entry.kind), ['arrived', 'closed_on_waiting_list']);
+  for (const change of [{ stage: 'left' }, { triageLevel: 1 }]) {
+    await assert.rejects(queue.update(context('nurse'), row.entryId, { expectedRowVersion: row.rowVersion, ...change }),
+      (error) => error.code === 'VISIT_QUEUE_ON_ED_BOARD' && error.getStatus() === 409);
+  }
+  const guarded = await board.read(context('desk'), five.attendance.attendanceId);
+  assert.equal(guarded.attendance.status, 'open');
+  assert.equal(guarded.attendance.rowVersion, five.attendance.rowVersion);
+  await board.cancel(context('desk'), five.attendance.attendanceId,
+    { expectedRowVersion: five.attendance.rowVersion, reason: 'Added to the board by mistake' }, key('cancel-5'));
   // The board now: nobody open; with closed today, all five.
   const shown = await board.board(context('desk'), true);
   assert.deepEqual(shown.counts, { waiting: 0, beingSeen: 0, disposition: 0 });
@@ -214,7 +220,7 @@ try {
   process.stdout.write(JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', roles: ['hid_ehr_api_runtime',
     'hid_identity_api_runtime'], arrival_bases: ['search', 'own-facility', 'emergency'], replay: true,
     triage_move_visit: true, dispositions: ['admit_requested', 'sent_to_outpatients', 'left_before_seen'],
-    leave: true, cancel: true, waiting_list_helper: true, close_mirror: true, complaint_hidden_from_desk: true,
+    leave: true, cancel: true, waiting_list_helper: true, waiting_list_guard: true, complaint_hidden_from_desk: true,
     audit_without_personal_text: true }) + '\n');
 } finally {
   await pool.end();

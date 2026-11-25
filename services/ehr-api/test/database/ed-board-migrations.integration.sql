@@ -79,7 +79,7 @@ create function pg_temp.made0168() returns text language sql as $$
                           where namespace.nspname = 'ehr'
                             and (proc.proname like 'ed\_%' or proc.proname like 'visit\_queue\_ed\_%'))
       || ' functions, ' || (select count(*) from pg_trigger
-                             where tgname in ('visit_queue_ed_close_mirror', 'ed_attendance_events_immutable'))
+                             where tgname in ('visit_queue_ed_close_mirror', 'visit_queue_ed_guard', 'ed_attendance_events_immutable'))
       || ' triggers, basis ' || (select replace(replace(substring(pg_get_constraintdef(oid) from 'ARRAY\[(.*)\]'),
                                    '::text', ''), '''', '')
                                    from pg_constraint where conrelid = 'ehr.visit_queue'::regclass
@@ -146,7 +146,7 @@ select setval('pg_temp.m168_passed', coalesce(nullif(current_setting('m168.passe
 select pg_temp.made0168() as made0168_applied \gset
 select pg_temp.made0169() as made0169_applied \gset
 select pg_temp.expect('2a 0168 and 0169 are applied here',
-  '2 tables, 16 functions, 2 triggers, basis search, own_facility, emergency | 4 codes, 13 role rows, 13 audit rows',
+  '2 tables, 17 functions, 3 triggers, basis search, own_facility, emergency | 4 codes, 13 role rows, 13 audit rows',
   :'made0168_applied' || ' | ' || :'made0169_applied');
 :run0168
 select pg_temp.expect('2b 0168 again: already applied, nothing changed', '55000 0168: already applied | ' || :'made0168_applied',
@@ -300,6 +300,7 @@ create temporary table queue_before as select md5(string_agg(to_jsonb(entry)::te
   from ehr.visit_queue entry;
 
 drop trigger visit_queue_ed_close_mirror on ehr.visit_queue;
+drop trigger visit_queue_ed_guard on ehr.visit_queue;
 drop function ehr.ed_arrive(text, uuid, text, timestamptz, smallint, text, text, text), ehr.ed_board(boolean),
   ehr.ed_read(uuid), ehr.ed_triage(uuid, bigint, smallint, text, boolean, text, text),
   ehr.ed_move(uuid, bigint, text, uuid, boolean, text, text), ehr.ed_link_visit(uuid, bigint, uuid, text, text),
@@ -308,7 +309,7 @@ drop function ehr.ed_arrive(text, uuid, text, timestamptz, smallint, text, text,
   ehr.visit_queue_ed_attendances(uuid[]), ehr.ed_cards(uuid[], uuid, uuid, uuid, boolean),
   ehr.ed_caller(text, text[]),
   ehr.ed_audit(text, uuid, uuid, uuid, uuid, text, text, uuid, text, text, text, text, jsonb),
-  ehr.ed_idempotency(uuid, text, text), ehr.visit_queue_ed_close_mirror();
+  ehr.ed_idempotency(uuid, text, text), ehr.visit_queue_ed_close_mirror(), ehr.visit_queue_ed_guard();
 drop table ehr.ed_attendance_events, ehr.ed_attendances;
 drop function ehr.ed_attendance_events_immutable();
 alter table ehr.visit_queue drop constraint visit_queue_check_in_basis_check;
@@ -365,7 +366,7 @@ alter table ehr.visit_queue add constraint visit_queue_check_in_basis_check
   check (check_in_basis in ('search', 'own_facility', 'appointment'));
 :run0168
 select pg_temp.expect('4g on APPT-1''s CHECK: applies and keeps appointment',
-  'applied | 2 tables, 16 functions, 2 triggers, basis search, own_facility, appointment, emergency',
+  'applied | 2 tables, 17 functions, 3 triggers, basis search, own_facility, appointment, emergency',
   pg_temp.answer('0168', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0168());
 select pg_temp.expect('4h every waiting-list row kept', 'true',
   ((select md5(string_agg(to_jsonb(entry)::text, ',' order by entry.id)) from ehr.visit_queue entry)
@@ -380,7 +381,7 @@ delete from locks_seen;
 select pg_temp.record_locks('before');
 :run0168
 select pg_temp.record_locks('after');
-select pg_temp.expect('4j on 0135''s CHECK: applies', 'applied | 2 tables, 16 functions, 2 triggers, basis search, own_facility, emergency',
+select pg_temp.expect('4j on 0135''s CHECK: applies', 'applied | 2 tables, 17 functions, 3 triggers, basis search, own_facility, emergency',
   pg_temp.answer('0168', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0168());
 select pg_temp.expect('4k every waiting-list row kept', 'true',
   ((select md5(string_agg(to_jsonb(entry)::text, ',' order by entry.id)) from ehr.visit_queue entry)

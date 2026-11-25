@@ -9198,7 +9198,8 @@ facility (`ehr.encounter.write` and `ehr.note.write`). Answer 200 with the card.
 clinician or doctor who works at this facility."); 404 `VISIT_QUEUE_ENTRY_NOT_FOUND` (also another facility's row);
 409 `VISIT_QUEUE_ENTRY_CHANGED` ("Someone else changed this patient's place on the waiting list. Reload the list and
 try again."), `VISIT_QUEUE_ENTRY_CLOSED` ("This patient is no longer on the waiting list. Check them in again if they
-are back."). 503 `VISIT_QUEUE_UNAVAILABLE` on a database without 0135.
+are back."), `VISIT_QUEUE_ON_ED_BOARD` (once 0168 is applied: the row's patient is on the emergency department
+board, whose own routes change it; see ED-1). 503 `VISIT_QUEUE_UNAVAILABLE` on a database without 0135.
 
 Audit, written by the database functions in the request's transaction (refusals included): `ehr.visit-queue.check-in`
 (success with the patient; denied with the internal refusal kind, naming the patient only when one was found and is
@@ -12520,7 +12521,7 @@ to `ready`. The board stays on after a break-glass grant ends; the chart still n
 basis for opening the chart (0131 is unchanged).
 
 **2. `GET /api/v1/ehr/ed-board[?includeClosedToday=true]`**: this facility's open and decided records (with the flag
-also the closed ones that arrived today, Lagos day), by column (waiting, being seen, disposition, closed), then triage
+also the closed ones that left the department today, Lagos day, whenever they arrived), by column (waiting, being seen, disposition, closed), then triage
 level (1 first, no level last), then arrival time. Answer `{ "items": [card], "counts": { "waiting", "beingSeen",
 "disposition" }, "hasMore": false, "limit": 200 }` (the counts cover every open and decided record). Read it again
 every 30 seconds while shown.
@@ -12547,8 +12548,11 @@ decided record: 409 `ED_ATTENDANCE_DECIDED`). Sets the waiting-list row's level,
 
 **6. `POST /api/v1/ehr/ed-attendances/:attendanceId/visit`**: `{ "expectedRowVersion", "encounterId" }`.
 `ehr.ed.triage`; while `open` or `decided`; a linked visit can be replaced. The visit must be this patient's, at this
-facility, not `cancelled` or `entered_in_error`, started no earlier than one hour before `arrivedAt`; anything else
-400 `ED_VISIT_INVALID`, the same for every reason. The link reads no clinical content. The screen gets the visit from
+facility, not `cancelled` or `entered_in_error`, and either started no earlier than one hour before `arrivedAt`, or
+still open (`planned`, `in_progress` or `on_hold`, not imported from paper) and started earlier on the arrival's Lagos
+day (EHR-C1's one open visit of the day, which the screen's request reuses: a patient moved from the outpatient
+waiting list, or back in the department later the same day); anything else 400 `ED_VISIT_INVALID`, the same for
+every reason. The link reads no clinical content. The screen gets the visit from
 EHR-C1 (`encounterType: "emergency"`, `reuseOpenVisit: true`) after the chart opens under the usual access.
 
 **7. `POST /api/v1/ehr/ed-attendances/:attendanceId/disposition`**: `{ "expectedRowVersion", "outcome",
@@ -12562,7 +12566,8 @@ From `open`; from `decided` to change the decision, with `reason` (8-500 charact
   column until route 8.
 - `left_before_seen` and `left_against_advice` close the record and the waiting-list row (stage `left`); `died` closes
   both (stage `finished`; no death certificate and no notice of any kind); `sent_to_outpatients` closes the ED record
-  only and puts the waiting-list row back to `waiting`, with its triage level.
+  only and puts the waiting-list row back to `waiting`, with its triage level and nobody down to see the patient (the
+  ED clinician has handed over).
 - Never completes or changes the visit (EHR-C5 as today).
 
 **8. `POST /api/v1/ehr/ed-attendances/:attendanceId/leave`**: `{ "expectedRowVersion" }`. "Left the department" (for an
@@ -12573,17 +12578,25 @@ admission request, "Handed over to the ward"). `ehr.ed.triage`; only while `deci
 **9. `POST /api/v1/ehr/ed-attendances/:attendanceId/cancel`**: `{ "expectedRowVersion", "reason" }` (8-500; 400
 `ED_REASON_REQUIRED`). For an arrival made in error. `ehr.ed.arrive`; only while `open` with no visit linked and no
 decision (409 `ED_CANCEL_NOT_ALLOWED`). The waiting-list row the arrival made closes as `cancelled`; a row moved from
-the outpatient waiting list stays open as it was. The record is kept.
+the outpatient waiting list stays open and is put back as it was before the move (its stage, triage level, assignee
+and stage time, kept on the ED record), so nothing the mistaken arrival wrote stays on the outpatient row. The record
+is kept.
 
 Other answers: 404 `ED_ATTENDANCE_NOT_FOUND` ("This patient is not on this facility's emergency board.", also another
 facility's record); 409 `ED_ATTENDANCE_CLOSED` ("This patient has left the emergency department. Add them again if they
 are back."); 409 `ED_ATTENDANCE_DECIDED`; 400 `VALIDATION_FAILED` for a body outside the rules (the request
-validation's own wording); 400 `PURPOSE_OF_USE_REQUIRED`; 400 `IDEMPOTENCY_KEY_REQUIRED`. A close on the waiting list
-at the same moment as a board write for the same patient answers 412 `ED_VERSION_CONFLICT` (reload and try again).
+validation's own wording); 400 `PURPOSE_OF_USE_REQUIRED`; 400 `IDEMPOTENCY_KEY_REQUIRED`. A close by 0145's cancel of
+an unknown record at the same moment as a board write for the same patient answers 412 `ED_VERSION_CONFLICT` (reload
+and try again).
 
-**The waiting list.** EHR-C7's routes are unchanged; their card gains `edAttendanceId` (above). A board patient's row
-closed on the waiting list (finished, left or cancelled) closes the ED record too (history `closed_on_waiting_list`).
-Stage and triage changes made on the waiting list are the board's own (the same fields).
+**The waiting list.** EHR-C7's routes are unchanged; their card gains `edAttendanceId` (above). While a row has an open
+or decided ED record, its stage, triage level, assignee and close belong to the board: EHR-C7's
+`PATCH /api/v1/ehr/visit-queue/:entryId` answers 409 `VISIT_QUEUE_ON_ED_BOARD` ("This patient is on the emergency
+department board. Make this change on the board.") for it, for every role (0168's guard). So the ED record's
+`rowVersion` covers every field the board writes, the triage on the board is the only triage (with who did it in the
+history), and the board's roles, reasons and cancel rule cannot be gone around on the waiting list. The one exception
+is 0145's cancel of an unknown record, which makes the patient inactive and cancels the row: the ED record then closes
+too (history `closed_on_waiting_list`).
 
 ### Audit
 

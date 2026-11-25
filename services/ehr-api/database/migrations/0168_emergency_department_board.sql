@@ -39,7 +39,10 @@
 --                              emergency), how they arrived (arrival_mode),
 --                              arrived_at and its Lagos day, whether the
 --                              patient was moved from the outpatient waiting
---                              list, the presenting complaint (1-120, no
+--                              list and, if so, that row's stage, triage
+--                              level, assignee and stage time before the move
+--                              (a cancel puts them back), the presenting
+--                              complaint (1-120, no
 --                              control characters), who triaged and when (the
 --                              level itself stays on ehr.visit_queue), the
 --                              linked visit, the status (open, decided, closed),
@@ -65,16 +68,33 @@
 --                              CHECK found must be exactly 0135's ('search',
 --                              'own_facility') or APPT-1's ('search',
 --                              'own_facility', 'appointment'); every value
---                              found is kept. A trigger,
---                              visit_queue_ed_close_mirror (AFTER UPDATE OF
---                              closed_at, only when a row closes), closes the
---                              open or decided ED record of that row with a
---                              closed_on_waiting_list event and one
---                              ehr.ed.closed-on-waiting-list audit row, unless
---                              the change came from an ED function (which sets
---                              a transaction-local marker naming the row
---                              first). Nothing else in 0135 changes: its three
---                              functions and its card are not replaced.
+--                              found is kept. Two triggers. The guard,
+--                              visit_queue_ed_guard (BEFORE UPDATE OF stage,
+--                              triage_level, assigned_membership_id,
+--                              closed_at): while a row has an open or decided
+--                              ED record, its stage, triage level, assignee and
+--                              close belong to the board, so 0135's
+--                              ehr.visit_queue_update (the waiting list's
+--                              next-step button and Change form) is refused
+--                              for it (55000 VISIT_QUEUE_ON_ED_BOARD), whoever
+--                              calls it; the ED functions name the row in a
+--                              transaction-local marker first. So the ED
+--                              record's row version covers every field the
+--                              board writes, and the board's roles, reasons
+--                              and cancel rule cannot be gone around on the
+--                              waiting list. The one exception is a row of a
+--                              patient whose record is no longer active
+--                              (0145's cancel of an unknown record makes the
+--                              patient inactive, then cancels the row). The
+--                              mirror, visit_queue_ed_close_mirror (AFTER
+--                              UPDATE OF closed_at, only when a row closes),
+--                              closes the open or decided ED record of a row
+--                              closed that way with a closed_on_waiting_list
+--                              event and one ehr.ed.closed-on-waiting-list
+--                              audit row, unless the change came from an ED
+--                              function (the same marker). Nothing else in
+--                              0135 changes: its three functions and its card
+--                              are not replaced.
 -- E4 SECURITY DEFINER functions (search_path pg_catalog, pg_temp), owned like
 --    0135's (the owner of identity.has_active_consent_grant), EXECUTE for
 --    hid_ehr_runtime only: ehr.ed_arrive, ehr.ed_board, ehr.ed_read,
@@ -85,7 +105,7 @@
 --    ehr.ed_cards (0135's card fields, 0145's record kind and label, the ED
 --    fields; the complaint only for a caller holding ehr.ed.triage),
 --    ehr.ed_caller, ehr.ed_audit, ehr.ed_idempotency, the history's
---    immutability trigger and the mirror trigger.
+--    immutability trigger, the waiting-list guard and the mirror trigger.
 --    Each function checks the caller: an active membership not held by the
 --    cutover at the session facility, ehr.ed.read and the function's own code
 --    (ehr.ed.arrive, ehr.ed.triage or ehr.ed.disposition), 0135's pair
@@ -127,9 +147,11 @@
 --
 -- Every write locks the ED record, then the waiting-list row, FOR UPDATE, in
 -- that order, checks the ED record's row version and raises both rows'
--- versions. 0135's ehr.visit_queue_update locks the waiting-list row first and
--- its close runs the mirror, which then locks the ED record: a close on the
--- waiting list at the same moment as a board write for the same patient can
+-- versions. While the record is open or decided only the ED functions change
+-- the row's stage, triage level and assignee (the guard), so that one version
+-- covers them. 0145's cancel of an unknown record locks the waiting-list row
+-- first and its close runs the mirror, which then locks the ED record: that
+-- close at the same moment as a board write for the same patient can
 -- deadlock; PostgreSQL ends one of the two after deadlock_timeout (40P01, the
 -- whole request rolled back), and ehr-api answers it as a version conflict
 -- ("reload and try again").
@@ -160,13 +182,14 @@
 -- Old images on this schema: nothing calls the new functions. Today's ehr-api
 -- maps any waiting-list basis other than own_facility to "search"
 -- (visit-queue.service.ts), so an emergency arrival shows as "search" on the
--- waiting list until the new image ships; no access depends on it. The mirror
--- trigger runs inside 0135's own update function for old and new images alike,
--- and only writes ED rows (none exist until the new image puts a patient on
--- the board).
+-- waiting list until the new image ships; no access depends on it. The guard
+-- and the mirror run inside 0135's and 0145's own functions for old and new
+-- images alike; the guard refuses only rows with an open or decided ED record
+-- and the mirror only writes ED rows, and none exist until the new image puts
+-- a patient on the board.
 --
 -- Undo (not in the ledger; a migration only if the owner signs it): drop the
--- trigger, the functions and the two tables, and put back the CHECK found
+-- triggers, the functions and the two tables, and put back the CHECK found
 -- (without 'emergency') once no waiting-list row has basis emergency.
 --
 -- The whole file is one statement (do $ed0168$), so whatever raises in it,
@@ -183,8 +206,8 @@
 -- 3. Post-checks: the CHECK is the found one plus 'emergency'; the tables have
 --    row-level security and no privilege; the functions are SECURITY DEFINER
 --    with the fixed search_path and EXECUTE only for hid_ehr_runtime; the
---    helpers have no EXECUTE for any role; the two triggers are there; no row
---    of any existing table changed (this file writes none).
+--    helpers have no EXECUTE for any role; the three triggers are there; no
+--    row of any existing table changed (this file writes none).
 
 do $ed0168$
 declare
@@ -264,12 +287,16 @@ begin
                  (to_regprocedure('ehr.ed_board(boolean)')::oid),
                  (to_regprocedure('ehr.visit_queue_ed_attendances(uuid[])')::oid),
                  (to_regprocedure('ehr.visit_queue_ed_close_mirror()')::oid),
+                 (to_regprocedure('ehr.visit_queue_ed_guard()')::oid),
                  ((select trigger_row.oid from pg_trigger trigger_row
                     where trigger_row.tgrelid = 'ehr.visit_queue'::regclass
-                      and trigger_row.tgname = 'visit_queue_ed_close_mirror')))
+                      and trigger_row.tgname = 'visit_queue_ed_close_mirror')),
+                 ((select trigger_row.oid from pg_trigger trigger_row
+                    where trigger_row.tgrelid = 'ehr.visit_queue'::regclass
+                      and trigger_row.tgname = 'visit_queue_ed_guard')))
          present(object_id)
    where present.object_id is not null;
-  if v_present = 8 and v_check_found in (v_check_0135_ed, v_check_appt_ed) then
+  if v_present = 10 and v_check_found in (v_check_0135_ed, v_check_appt_ed) then
     raise exception using errcode = '55000', message = '0168: already applied';
   end if;
   if v_present <> 0
@@ -330,6 +357,7 @@ begin
       ('ehr.visit_queue', 'closed_at', 'timestamp with time zone'),
       ('ehr.visit_queue', 'updated_by_membership_id', 'uuid'),
       ('ehr.visit_queue', 'updated_at', 'timestamp with time zone'), ('ehr.visit_queue', 'row_version', 'bigint'),
+      ('identity.patients', 'id', 'uuid'), ('identity.patients', 'status', 'text'),
       ('identity.unknown_patients', 'patient_id', 'uuid'), ('identity.unknown_patients', 'status', 'text'),
       ('identity.unknown_patients', 'label', 'text'),
       ('identity.consent_grants', 'patient_id', 'uuid'), ('identity.consent_grants', 'account_id', 'uuid'),
@@ -342,6 +370,7 @@ begin
       ('identity.consent_grants', 'revoked_at', 'timestamp with time zone'),
       ('ehr.encounters', 'patient_id', 'uuid'), ('ehr.encounters', 'facility_id', 'uuid'),
       ('ehr.encounters', 'status', 'text'), ('ehr.encounters', 'started_at', 'timestamp with time zone'),
+      ('ehr.encounters', 'imported_paper_records', 'boolean'),
       ('identity.facility_profiles', 'facility_id', 'uuid'), ('identity.facility_profiles', 'departments', 'text[]'),
       ('identity.facility_profiles', 'created_at', 'timestamp with time zone')
     ) wanted(relation, column_name, type_name)
@@ -376,6 +405,12 @@ begin
     arrived_at timestamptz not null,
     arrival_day date not null,
     moved_from_waiting_list boolean not null default false,
+    -- The outpatient row as it was before the move (a cancel puts it back).
+    moved_from_stage text check (moved_from_stage is null
+      or moved_from_stage in ('waiting', 'triage', 'ready', 'with_clinician')),
+    moved_from_triage_level smallint check (moved_from_triage_level between 1 and 5),
+    moved_from_assigned_membership_id uuid,
+    moved_from_stage_changed_at timestamptz,
     presenting_complaint text check (presenting_complaint is null
       or (presenting_complaint = btrim(presenting_complaint) and length(presenting_complaint) between 1 and 120
           and presenting_complaint !~ '[[:cntrl:]]')),
@@ -404,6 +439,10 @@ begin
       references identity.facilities(id, organization_id) on delete restrict,
     constraint ed_attendances_day_ck check (arrival_day = (arrived_at at time zone 'Africa/Lagos')::date),
     constraint ed_attendances_triaged_ck check ((triaged_at is null) = (triaged_by_membership_id is null)),
+    constraint ed_attendances_moved_ck check (
+      moved_from_waiting_list = (moved_from_stage is not null)
+      and moved_from_waiting_list = (moved_from_stage_changed_at is not null)
+      and (moved_from_waiting_list or (moved_from_triage_level is null and moved_from_assigned_membership_id is null))),
     -- Closed exactly when it has left, and then it says how.
     constraint ed_attendances_closed_ck check (
       (status = 'closed') = (left_at is not null) and (status = 'closed') = (closed_via is not null)),
@@ -428,7 +467,9 @@ begin
       referred_to_facility_name is null or disposition_outcome is not distinct from 'referred_out')
   );
   create index ed_attendances_open_idx on ehr.ed_attendances (facility_id, status, arrived_at) where status <> 'closed';
-  create index ed_attendances_closed_day_idx on ehr.ed_attendances (facility_id, arrival_day) where status = 'closed';
+  -- The closed records of a day by the Lagos day they left the department (the board's "left today").
+  create index ed_attendances_closed_day_idx on ehr.ed_attendances (facility_id, ((left_at at time zone 'Africa/Lagos')::date))
+    where status = 'closed';
   create index ed_attendances_patient_idx on ehr.ed_attendances (patient_id);
   create unique index ed_attendances_entry_open_ux on ehr.ed_attendances (visit_queue_entry_id) where status <> 'closed';
   create unique index ed_attendances_patient_open_ux on ehr.ed_attendances (facility_id, patient_id)
@@ -440,7 +481,7 @@ begin
   alter table ehr.ed_attendances enable row level security;
   revoke all on ehr.ed_attendances from public;
   comment on table ehr.ed_attendances is
-    '0168 (ED-1): one row per arrival on the emergency department board, beside its waiting-list row (0135), which keeps the stage, the triage level and the assignee. The presenting complaint is shown only to members holding ehr.ed.triage. Cancelled records are kept. Only the ED functions read and write it, as its owner.';
+    '0168 (ED-1): one row per arrival on the emergency department board, beside its waiting-list row (0135), which keeps the stage, the triage level and the assignee (for a patient moved from the outpatient waiting list, that row as it was before the move is kept too, so a cancel puts it back). The presenting complaint is shown only to members holding ehr.ed.triage. Cancelled records are kept. Only the ED functions read and write it, as its owner.';
 
   -- E2. The history.
   create table ehr.ed_attendance_events (
@@ -711,6 +752,7 @@ begin
     arrived_value timestamptz;
     existing_row ehr.ed_attendances%rowtype;
     entry_row ehr.visit_queue%rowtype;
+    moved_row ehr.visit_queue%rowtype;
     stage_before text;
     outcome_value text;
     new_id uuid;
@@ -845,6 +887,8 @@ begin
      for update;
     if found then
       outcome_value := 'moved_from_waiting_list';
+      -- The outpatient row as it was: a cancel of this arrival puts it back.
+      moved_row := entry_row;
     else
       outcome_value := 'arrived';
       insert into ehr.visit_queue (facility_id, patient_id, queue_day, check_in_basis, checked_in_by_account_id,
@@ -861,6 +905,7 @@ begin
     stage_before := entry_row.stage;
     -- Triage on arrival (nurses, clinicians and doctors): the level on the waiting-list row, ready to be seen.
     if requested_triage_level is not null then
+      perform set_config('hid.ed_board_write', entry_row.id::text, true);
       update ehr.visit_queue entry
          set triage_level = requested_triage_level,
              stage = case when entry.stage in ('waiting', 'triage') then 'ready' else entry.stage end,
@@ -870,14 +915,17 @@ begin
              row_version = entry.row_version + 1
        where entry.id = entry_row.id
       returning * into entry_row;
+      perform set_config('hid.ed_board_write', '', true);
     end if;
 
     insert into ehr.ed_attendances (facility_id, organization_id, patient_id, visit_queue_entry_id, arrival_basis,
-      arrival_mode, arrived_at, arrival_day, moved_from_waiting_list, presenting_complaint, triaged_at,
+      arrival_mode, arrived_at, arrival_day, moved_from_waiting_list, moved_from_stage, moved_from_triage_level,
+      moved_from_assigned_membership_id, moved_from_stage_changed_at, presenting_complaint, triaged_at,
       triaged_by_membership_id, arrived_by_account_id, arrived_by_membership_id, updated_by_membership_id, updated_at)
     values (caller.actor_facility, caller.actor_organization, patient_value, entry_row.id, basis_value,
       requested_arrival_mode, arrived_value, (arrived_value at time zone 'Africa/Lagos')::date,
-      outcome_value = 'moved_from_waiting_list', complaint_value,
+      outcome_value = 'moved_from_waiting_list', moved_row.stage, moved_row.triage_level,
+      moved_row.assigned_membership_id, moved_row.stage_changed_at, complaint_value,
       case when requested_triage_level is not null or complaint_value is not null then now_value end,
       case when requested_triage_level is not null or complaint_value is not null then caller.actor_membership end,
       caller.actor_account, caller.actor_membership, caller.actor_membership, now_value)
@@ -937,7 +985,8 @@ begin
           join ehr.visit_queue entry on entry.id = attendance.visit_queue_entry_id
          where attendance.facility_id = caller.actor_facility
            and (attendance.status <> 'closed'
-                or (coalesce(requested_include_closed_today, false) and attendance.arrival_day = today))
+                or (coalesce(requested_include_closed_today, false)
+                    and (attendance.left_at at time zone 'Africa/Lagos')::date = today))
          order by 2, 3, attendance.arrived_at, attendance.id
          limit board_limit + 1
       ) listed;
@@ -977,7 +1026,7 @@ begin
   end
   $fn$;
   comment on function ehr.ed_board(boolean) is
-    '0168 (ED-1): this facility''s open and decided ED records (and, when asked, the closed ones that arrived today, Lagos day), by column (waiting, being seen, disposition, closed), then triage level (1 first, no level last), then arrival, at most 200, has_more when there are more, with the counts of the three columns. Needs ehr.ed.read and 0135''s pair, for direct care. The complaint only for members holding ehr.ed.triage. Audited: one ehr.ed.board row and one ehr.ed.board.shown row per patient shown.';
+    '0168 (ED-1): this facility''s open and decided ED records (and, when asked, the closed ones that left the department today, Lagos day, whenever they arrived), by column (waiting, being seen, disposition, closed), then triage level (1 first, no level last), then arrival, at most 200, has_more when there are more, with the counts of the three columns. Needs ehr.ed.read and 0135''s pair, for direct care. The complaint only for members holding ehr.ed.triage. Audited: one ehr.ed.board row and one ehr.ed.board.shown row per patient shown.';
   revoke all on function ehr.ed_board(boolean) from public;
 
   -- Route 3: one record with its history.
@@ -1121,12 +1170,14 @@ begin
     end if;
 
     stage_after := case when entry_row.stage in ('waiting', 'triage') then 'ready' else entry_row.stage end;
+    perform set_config('hid.ed_board_write', entry_row.id::text, true);
     update ehr.visit_queue entry
        set triage_level = requested_triage_level, stage = stage_after,
            stage_changed_at = case when stage_after <> entry.stage then now_value else entry.stage_changed_at end,
            updated_by_membership_id = caller.actor_membership, updated_at = now_value,
            row_version = entry.row_version + 1
      where entry.id = entry_row.id;
+    perform set_config('hid.ed_board_write', '', true);
     update ehr.ed_attendances attendance
        set presenting_complaint = case when coalesce(requested_set_complaint, false) then complaint_value
                                        else attendance.presenting_complaint end,
@@ -1252,6 +1303,7 @@ begin
       return;
     end if;
 
+    perform set_config('hid.ed_board_write', entry_row.id::text, true);
     update ehr.visit_queue entry
        set stage = coalesce(requested_stage, entry.stage),
            stage_changed_at = case when requested_stage is not null and requested_stage <> entry.stage then now_value
@@ -1261,6 +1313,7 @@ begin
            updated_by_membership_id = caller.actor_membership, updated_at = now_value,
            row_version = entry.row_version + 1
      where entry.id = entry_row.id;
+    perform set_config('hid.ed_board_write', '', true);
     update ehr.ed_attendances attendance
        set updated_by_membership_id = caller.actor_membership, updated_at = now_value,
            row_version = attendance.row_version + 1
@@ -1348,13 +1401,20 @@ begin
       refusal := 'changed';
     end if;
     -- This patient's visit at this facility, not cancelled or entered in error, started no earlier than one hour
-    -- before the arrival. Only these four facts are read; no clinical content.
+    -- before the arrival, or still open (planned, in progress or on hold, not imported from paper) and started on the
+    -- arrival's Lagos day: EHR-C1's one open visit of the day, which the visit request reuses (a patient moved from
+    -- the outpatient waiting list, or back in the department later the same day). Only these facts are read; no
+    -- clinical content.
     if refusal is null
        and not exists (select 1 from ehr.encounters encounter
                         where encounter.id = requested_encounter_id and encounter.patient_id = current_row.patient_id
                           and encounter.facility_id = caller.actor_facility
                           and encounter.status not in ('cancelled', 'entered_in_error')
-                          and encounter.started_at >= current_row.arrived_at - interval '1 hour') then
+                          and (encounter.started_at >= current_row.arrived_at - interval '1 hour'
+                               or (encounter.status in ('planned', 'in_progress', 'on_hold')
+                                   and not encounter.imported_paper_records
+                                   and (encounter.started_at at time zone 'Africa/Lagos')::date = current_row.arrival_day
+                                   and encounter.started_at <= current_row.arrived_at))) then
       refusal := 'visit_invalid';
     end if;
     if refusal is not null then
@@ -1391,7 +1451,7 @@ begin
   end
   $fn$;
   comment on function ehr.ed_link_visit(uuid, bigint, uuid, text, text) is
-    '0168 (ED-1): link this patient''s visit at this facility (not cancelled or entered in error, started no earlier than one hour before the arrival) to an open or decided ED record; a linked visit can be replaced, and the change is kept in the history. Reads no clinical content and answers none. Needs ehr.ed.triage. Outcomes updated (replayed), not_found, closed, changed, visit_invalid (the same for every reason), key_reused. Audited (ehr.ed.link-visit).';
+    '0168 (ED-1): link this patient''s visit at this facility (not cancelled or entered in error, started no earlier than one hour before the arrival, or still open and started earlier on the arrival''s Lagos day: EHR-C1''s open visit of the day) to an open or decided ED record; a linked visit can be replaced, and the change is kept in the history. Reads no clinical content and answers none. Needs ehr.ed.triage. Outcomes updated (replayed), not_found, closed, changed, visit_invalid (the same for every reason), key_reused. Audited (ehr.ed.link-visit).';
   revoke all on function ehr.ed_link_visit(uuid, bigint, uuid, text, text) from public;
 
   -- Route 7: where the patient goes next (Q-ED-5 A, Q-ED-6 A).
@@ -1519,21 +1579,22 @@ begin
     end if;
 
     -- The waiting-list row: left before being seen or against advice: left; died: finished (both close it);
-    -- sent to outpatients: back to waiting, still open, with its triage level; otherwise unchanged.
+    -- sent to outpatients: back to waiting, still open, with its triage level and nobody down to see them (the ED
+    -- clinician has handed over); otherwise unchanged.
     queue_stage := case requested_outcome when 'left_before_seen' then 'left' when 'left_against_advice' then 'left'
                                           when 'died' then 'finished' when 'sent_to_outpatients' then 'waiting' end;
-    if queue_stage in ('left', 'finished') then
-      perform set_config('hid.ed_board_closing', entry_row.id::text, true);
-    end if;
+    perform set_config('hid.ed_board_write', entry_row.id::text, true);
     update ehr.visit_queue entry
        set stage = coalesce(queue_stage, entry.stage),
            stage_changed_at = case when queue_stage is not null and queue_stage <> entry.stage then now_value
                                    else entry.stage_changed_at end,
            closed_at = case when queue_stage in ('left', 'finished') then now_value else entry.closed_at end,
+           assigned_membership_id = case when requested_outcome = 'sent_to_outpatients' then null
+                                         else entry.assigned_membership_id end,
            updated_by_membership_id = caller.actor_membership, updated_at = now_value,
            row_version = entry.row_version + 1
      where entry.id = entry_row.id;
-    perform set_config('hid.ed_board_closing', '', true);
+    perform set_config('hid.ed_board_write', '', true);
     update ehr.ed_attendances attendance
        set status = case when closes then 'closed' else 'decided' end,
            disposition_outcome = requested_outcome,
@@ -1563,7 +1624,7 @@ begin
   end
   $fn$;
   comment on function ehr.ed_record_disposition(uuid, bigint, text, text, uuid, text, text, text, text) is
-    '0168 (ED-1, Q-ED-5 A, Q-ED-6 A): record where the patient goes next. discharged, admit_requested (a department of this facility other than emergency, optionally the admitting clinician or doctor) and referred_out (optionally the facility''s name) make the record decided (it stays in Disposition); left_before_seen and left_against_advice close it and the waiting-list row (left); died closes both (finished; no notice of any kind); sent_to_outpatients closes the ED record only and puts the waiting-list row back to waiting. From decided the decision can be changed with a reason (8-500). Never completes or changes the visit. Needs ehr.ed.disposition. Outcomes updated (replayed), not_found, closed, changed, reason_required, admit_department_invalid, admitting_invalid, key_reused. Audited (ehr.ed.disposition; never the referral name or the reason).';
+    '0168 (ED-1, Q-ED-5 A, Q-ED-6 A): record where the patient goes next. discharged, admit_requested (a department of this facility other than emergency, optionally the admitting clinician or doctor) and referred_out (optionally the facility''s name) make the record decided (it stays in Disposition); left_before_seen and left_against_advice close it and the waiting-list row (left); died closes both (finished; no notice of any kind); sent_to_outpatients closes the ED record only and puts the waiting-list row back to waiting with nobody down to see the patient. From decided the decision can be changed with a reason (8-500). Never completes or changes the visit. Needs ehr.ed.disposition. Outcomes updated (replayed), not_found, closed, changed, reason_required, admit_department_invalid, admitting_invalid, key_reused. Audited (ehr.ed.disposition; never the referral name or the reason).';
   revoke all on function ehr.ed_record_disposition(uuid, bigint, text, text, uuid, text, text, text, text) from public;
 
   -- Route 8: "Left the department".
@@ -1642,14 +1703,14 @@ begin
       return;
     end if;
 
-    perform set_config('hid.ed_board_closing', entry_row.id::text, true);
+    perform set_config('hid.ed_board_write', entry_row.id::text, true);
     update ehr.visit_queue entry
        set stage = 'finished', stage_changed_at = case when entry.stage <> 'finished' then now_value
                                                        else entry.stage_changed_at end,
            closed_at = now_value, updated_by_membership_id = caller.actor_membership, updated_at = now_value,
            row_version = entry.row_version + 1
      where entry.id = entry_row.id;
-    perform set_config('hid.ed_board_closing', '', true);
+    perform set_config('hid.ed_board_write', '', true);
     update ehr.ed_attendances attendance
        set status = 'closed', left_at = now_value, closed_via = 'board',
            updated_by_membership_id = caller.actor_membership, updated_at = now_value,
@@ -1751,21 +1812,26 @@ begin
       return;
     end if;
 
-    -- The row the arrival made closes as cancelled; a row moved from the outpatient waiting list stays open.
+    -- The row the arrival made closes as cancelled; a row moved from the outpatient waiting list stays open and is
+    -- put back as it was before the move (its stage, triage level, assignee and stage time), so nothing the
+    -- mistaken arrival or the board wrote stays on another patient's outpatient row.
+    perform set_config('hid.ed_board_write', entry_row.id::text, true);
     if not current_row.moved_from_waiting_list then
-      perform set_config('hid.ed_board_closing', entry_row.id::text, true);
       update ehr.visit_queue entry
          set stage = 'cancelled', stage_changed_at = now_value, closed_at = now_value,
              updated_by_membership_id = caller.actor_membership, updated_at = now_value,
              row_version = entry.row_version + 1
        where entry.id = entry_row.id;
-      perform set_config('hid.ed_board_closing', '', true);
     else
       update ehr.visit_queue entry
-         set updated_by_membership_id = caller.actor_membership, updated_at = now_value,
+         set stage = current_row.moved_from_stage, triage_level = current_row.moved_from_triage_level,
+             assigned_membership_id = current_row.moved_from_assigned_membership_id,
+             stage_changed_at = current_row.moved_from_stage_changed_at,
+             updated_by_membership_id = caller.actor_membership, updated_at = now_value,
              row_version = entry.row_version + 1
        where entry.id = entry_row.id;
     end if;
+    perform set_config('hid.ed_board_write', '', true);
     update ehr.ed_attendances attendance
        set status = 'closed', left_at = now_value, closed_via = 'cancel',
            updated_by_membership_id = caller.actor_membership, updated_at = now_value,
@@ -1775,7 +1841,7 @@ begin
       by_membership_id, from_stage, to_stage, reason, idempotency_key, request_sha256)
     values (current_row.id, caller.actor_facility, current_row.patient_id, 'cancelled', now_value,
       caller.actor_account, caller.actor_membership, entry_row.stage,
-      case when current_row.moved_from_waiting_list then entry_row.stage else 'cancelled' end, reason_value,
+      case when current_row.moved_from_waiting_list then current_row.moved_from_stage else 'cancelled' end, reason_value,
       requested_idempotency_key, requested_request_sha256);
     perform ehr.ed_audit(caller.actor_subject, caller.actor_account, caller.actor_membership,
         caller.actor_organization, caller.actor_facility, caller.actor_correlation, caller.actor_purpose,
@@ -1786,7 +1852,7 @@ begin
   end
   $fn$;
   comment on function ehr.ed_cancel(uuid, bigint, text, text, text) is
-    '0168 (ED-1): cancel an arrival made in error: only an open ED record with no visit linked and no disposition, with a reason (8-500). The waiting-list row the arrival made closes as cancelled; a row moved from the outpatient waiting list stays open as it was. The record is kept. Needs ehr.ed.arrive. Outcomes updated (replayed), not_found, closed, cancel_not_allowed, changed, key_reused. Audited (ehr.ed.cancel; never the reason).';
+    '0168 (ED-1): cancel an arrival made in error: only an open ED record with no visit linked and no disposition, with a reason (8-500). The waiting-list row the arrival made closes as cancelled; a row moved from the outpatient waiting list stays open and is put back as it was before the move (stage, triage level, assignee). The record is kept. Needs ehr.ed.arrive. Outcomes updated (replayed), not_found, closed, cancel_not_allowed, changed, key_reused. Audited (ehr.ed.cancel; never the reason).';
   revoke all on function ehr.ed_cancel(uuid, bigint, text, text, text) from public;
 
   -- The waiting-list helper: the open or decided ED record of each given waiting-list row at this facility.
@@ -1841,7 +1907,7 @@ begin
     now_value timestamptz := clock_timestamp();
   begin
     if new.closed_at is null or old.closed_at is not null
-       or coalesce(current_setting('hid.ed_board_closing', true), '') = new.id::text then
+       or coalesce(current_setting('hid.ed_board_write', true), '') = new.id::text then
       return null;
     end if;
     select attendance.* into attendance_row from ehr.ed_attendances attendance
@@ -1897,6 +1963,41 @@ begin
     for each row when (old.closed_at is null and new.closed_at is not null)
     execute function ehr.visit_queue_ed_close_mirror();
 
+  -- The guard: while a waiting-list row has an open or decided ED record, its stage, triage level, assignee and close
+  -- belong to the board. Only the ED functions change them (their transaction-local marker names the row); 0135's
+  -- ehr.visit_queue_update (the waiting list's next-step button and Change form) is refused for it, whoever calls it.
+  -- So the ED record's row version covers every field the board writes, the triage on the board is the only triage
+  -- (with its history and who did it), and the board's roles, reasons and cancel rule cannot be gone around on the
+  -- waiting list. One exception: a row of a patient whose record is no longer active (0145's cancel of an unknown
+  -- record makes the patient inactive, then cancels the row; the mirror then closes the ED record).
+  create function ehr.visit_queue_ed_guard()
+  returns trigger
+  language plpgsql
+  security definer
+  set search_path = pg_catalog, pg_temp
+  as $fn$
+  begin
+    if coalesce(current_setting('hid.ed_board_write', true), '') = old.id::text then
+      return new;
+    end if;
+    if not exists (select 1 from ehr.ed_attendances attendance
+                    where attendance.visit_queue_entry_id = old.id and attendance.status <> 'closed') then
+      return new;
+    end if;
+    if exists (select 1 from identity.patients patient where patient.id = old.patient_id and patient.status <> 'active') then
+      return new;
+    end if;
+    raise exception using errcode = '55000', message = 'VISIT_QUEUE_ON_ED_BOARD';
+  end
+  $fn$;
+  comment on function ehr.visit_queue_ed_guard() is
+    '0168 (ED-1): refuses (55000 VISIT_QUEUE_ON_ED_BOARD) a change of the stage, triage level, assignee or close of a waiting-list row that has an open or decided ED record, unless it comes from an ED function (its transaction-local marker names the row) or the patient''s record is no longer active (0145''s cancel of an unknown record). No role may execute it.';
+  revoke all on function ehr.visit_queue_ed_guard() from public;
+  create trigger visit_queue_ed_guard
+    before update of stage, triage_level, assigned_membership_id, closed_at on ehr.visit_queue
+    for each row
+    execute function ehr.visit_queue_ed_guard();
+
   -- Owners and EXECUTE (as 0135: the owner of identity.has_active_consent_grant).
   if v_owner <> current_user then
     execute format('alter table ehr.ed_attendances owner to %I', v_owner);
@@ -1949,14 +2050,15 @@ begin
                 and acl.grantee <> proc.proowner
                 and (acl.grantee = 0 or pg_get_userbyid(acl.grantee) <> 'hid_ehr_runtime'
                      or proc.proname in ('ed_cards', 'ed_caller', 'ed_audit', 'ed_idempotency',
-                                         'ed_attendance_events_immutable', 'visit_queue_ed_close_mirror')))
+                                         'ed_attendance_events_immutable', 'visit_queue_ed_close_mirror',
+                                         'visit_queue_ed_guard')))
      or (select count(*) from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
           where namespace.nspname = 'ehr'
             and (proc.proname like 'ed\_%' or proc.proname like 'visit\_queue\_ed\_%') and proc.prosecdef
-            and proc.proconfig = array['search_path=pg_catalog, pg_temp']) <> 11
+            and proc.proconfig = array['search_path=pg_catalog, pg_temp']) <> 12
      or (select count(*) from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
           where namespace.nspname = 'ehr'
-            and (proc.proname like 'ed\_%' or proc.proname like 'visit\_queue\_ed\_%')) <> 16
+            and (proc.proname like 'ed\_%' or proc.proname like 'visit\_queue\_ed\_%')) <> 17
      or exists (select 1 from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
                  where namespace.nspname = 'ehr'
                    and (proc.proname like 'ed\_%' or proc.proname like 'visit\_queue\_ed\_%')
@@ -1965,11 +2067,12 @@ begin
   end if;
   if (select count(*) from pg_trigger trigger_row
        where (trigger_row.tgrelid, trigger_row.tgname) in (('ehr.visit_queue'::regclass, 'visit_queue_ed_close_mirror'),
+               ('ehr.visit_queue'::regclass, 'visit_queue_ed_guard'),
                ('ehr.ed_attendance_events'::regclass, 'ed_attendance_events_immutable'))
-         and trigger_row.tgenabled = 'O') <> 2 then
+         and trigger_row.tgenabled = 'O') <> 3 then
     raise exception using errcode = '55000', message = '0168: post-check failed (the triggers)';
   end if;
 
-  raise notice '0168: the emergency department board is installed (2 tables, 16 functions, the waiting-list close mirror; basis emergency on the waiting list). Nobody can use it until 0169 gives the codes.';
+  raise notice '0168: the emergency department board is installed (2 tables, 17 functions, the waiting-list guard and close mirror; basis emergency on the waiting list). Nobody can use it until 0169 gives the codes.';
 end
 $ed0168$;

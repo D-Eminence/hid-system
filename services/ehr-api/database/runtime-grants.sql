@@ -2103,5 +2103,6 @@ revoke all on function
   ehr.ed_audit(text, uuid, uuid, uuid, uuid, text, text, uuid, text, text, text, text, jsonb),
   ehr.ed_idempotency(uuid, text, text),
   ehr.ed_attendance_events_immutable(),
-  ehr.visit_queue_ed_close_mirror() from public;
+  ehr.visit_queue_ed_close_mirror(),
+  ehr.visit_queue_ed_guard() from public;
 revoke all on ehr.ed_attendances, ehr.ed_attendance_events from public;

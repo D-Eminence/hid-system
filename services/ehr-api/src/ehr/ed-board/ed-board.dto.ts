@@ -74,7 +74,10 @@ export class EdArriveDto {
   presentingComplaint?: string;
 }
 
-/** Route 2, GET ehr/ed-board?includeClosedToday=true also lists the records closed that arrived today (Lagos day). */
+/**
+ * Route 2, GET ehr/ed-board?includeClosedToday=true also lists the records that left the department today (Lagos day),
+ * whenever they arrived.
+ */
 export class EdBoardQueryDto {
   @IsOptionalButNotNull()
   @Transform(queryFlag)

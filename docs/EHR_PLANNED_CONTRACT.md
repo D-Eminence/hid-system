@@ -3836,7 +3836,7 @@ Until the owner's go-live, the service flag `ED_BOARD_ENABLED` (ehr-api) is off 
 Answer `201 { "outcome": "arrived" | "moved_from_waiting_list" | "already_on_board", "attendance": card, "replayed": false }`. With `already_on_board`, the triage fields of the body are not applied (the screen shows the existing card).
 
 **2. `GET /ehr/ed-board[?includeClosedToday=true]`**: the board.
-- This facility's open and decided ED records, and with the flag also those closed today (Lagos day).
+- This facility's open and decided ED records, and with the flag also those that left the department today (Lagos day), whenever they arrived.
 - Answer `{ "items": [card], "counts": { "waiting": 4, "beingSeen": 2, "disposition": 1 }, "hasMore": false, "limit": 200 }`. Sorted by column, then triage level (1 first, no level last), then arrival time.
 - The screen reads it again every 30 seconds while shown, as the waiting list does.
 
@@ -3856,7 +3856,7 @@ Answer `201 { "outcome": "arrived" | "moved_from_waiting_list" | "already_on_boa
 
 **6. `POST /ehr/ed-attendances/:attendanceId/visit`**: body `{ "expectedRowVersion", "encounterId" }`. Links the visit.
 - Needs `ehr.ed.triage`. While `open` or `decided`; a linked visit can be replaced by another, and the change is kept in the history.
-- The visit must be this patient's, at this facility, not `cancelled` or `entered_in_error`, and started no earlier than one hour before `arrivedAt`. Anything else answers 400 `ED_VISIT_INVALID`, the same for every reason.
+- The visit must be this patient's, at this facility, not `cancelled` or `entered_in_error`, and either started no earlier than one hour before `arrivedAt`, or still open (planned, in progress or on hold, not imported from paper) and started earlier on the arrival's Lagos day. The second case is EHR-C1's one open visit of the day, which the screen's request reuses: a patient moved from the outpatient waiting list, or back in the department later the same day. Anything else answers 400 `ED_VISIT_INVALID`, the same for every reason.
 - The screen gets the visit from EHR-C1 (`POST /ehr/patients/:patientId/encounters`, `encounterType: "emergency"`, `reuseOpenVisit: true`), after the chart opens under the usual access. The link reads no clinical content and answers none.
 
 **7. `POST /ehr/ed-attendances/:attendanceId/disposition`**: body `{ "expectedRowVersion", "outcome", "admitToDepartmentCode"?, "admittingMembershipId"?, "referredToFacilityName"?, "reason"? }`.
@@ -3866,7 +3866,7 @@ Answer `201 { "outcome": "arrived" | "moved_from_waiting_list" | "already_on_boa
 - `discharged`, `admit_requested` and `referred_out` make the status `decided`. The patient stays in the Disposition column.
 - `left_before_seen` and `left_against_advice` close at once: waiting-list stage `left`.
 - `died` closes at once: waiting-list stage `finished`. No death certificate and no notice of any kind.
-- `sent_to_outpatients` closes the ED record only. The waiting-list row stays open at stage `waiting`, with its triage level, so the patient is back on the outpatient waiting list.
+- `sent_to_outpatients` closes the ED record only. The waiting-list row stays open at stage `waiting`, with its triage level and nobody down to see the patient (the ED clinician has handed over), so the patient is back on the outpatient waiting list.
 - Recording a disposition never completes or changes the visit. The clinician completes it as today (EHR-C5), with the follow-up plan in the visit's note.
 
 **8. `POST /ehr/ed-attendances/:attendanceId/leave`**: body `{ "expectedRowVersion" }`. "Left the department".
@@ -3876,12 +3876,12 @@ Answer `201 { "outcome": "arrived" | "moved_from_waiting_list" | "already_on_boa
 
 **9. `POST /ehr/ed-attendances/:attendanceId/cancel`**: body `{ "expectedRowVersion", "reason": "8-500 characters" }`. For an arrival made in error.
 - Needs `ehr.ed.arrive`. Only while `open`, with no visit linked and no disposition.
-- If the arrival made the waiting-list row, the row closes as `cancelled`. If the patient was moved from the outpatient waiting list, the row stays open there, as it was.
+- If the arrival made the waiting-list row, the row closes as `cancelled`. If the patient was moved from the outpatient waiting list, the row stays open there and is put back as it was before the move: its stage, triage level, assignee and stage time, which the ED record keeps from the move.
 - The record is kept, never deleted.
 
 **The waiting list.** EHR-C7's routes are unchanged. Its card gains `edAttendanceId` (`null`, or the open or decided ED record's id), read through a new helper beside 0145's `ehr.visit_queue_record_kinds`. The waiting-list page marks those rows "Emergency department" and links to the board.
 
-If a board patient's row is closed on the waiting list (finished, left or cancelled), the ED record closes too, with history kind `closed_on_waiting_list`. Stage and triage changes made on the waiting list are the board's own, because they are the same fields.
+While a row has an open or decided ED record, its stage, triage level, assignee and close belong to the board. The waiting list's update answers 409 `VISIT_QUEUE_ON_ED_BOARD` for it, for every role, and the waiting list's card offers no next step or Change form for it, only the link to the board. So the ED record's row version covers every field the board writes, the triage on the board is the only triage, with who did it in the history, and the board's roles, reasons and cancel rule cannot be gone around on the waiting list. The one exception is 0145's cancel of an unknown record, which makes the patient inactive and cancels the row; the ED record then closes too, with history kind `closed_on_waiting_list`.
 
 ### Errors
 
@@ -3957,7 +3957,8 @@ Both files follow 0147, 0150 and 0151:
 - Both tables have row-level security enabled and no policy or privilege for any runtime role. Only the functions read or write them, as their owner (0135's rule).
 - `ehr.visit_queue`:
   - The `check_in_basis` CHECK gains `'emergency'`. The precondition accepts exactly one of two reviewed definitions, 0135's `('search', 'own_facility')` or APPT-1's `('search', 'own_facility', 'appointment')`, and keeps every value it finds. So 0168 applies whether or not APPT-1's 0160 is in the same cut.
-  - A trigger, `visit_queue_ed_close_mirror` (AFTER UPDATE OF `closed_at`, only when a row closes), closes the open or decided ED record of that row. It writes the `closed_on_waiting_list` event and one audit row. It does nothing when the change came from an ED function, which sets a transaction-local marker first.
+  - A trigger, `visit_queue_ed_guard` (BEFORE UPDATE OF `stage`, `triage_level`, `assigned_membership_id`, `closed_at`), refuses (55000 `VISIT_QUEUE_ON_ED_BOARD`) a change to a row that has an open or decided ED record, unless the change comes from an ED function (which names the row in a transaction-local marker first) or the patient's record is no longer active (0145's cancel of an unknown record).
+  - A trigger, `visit_queue_ed_close_mirror` (AFTER UPDATE OF `closed_at`, only when a row closes), closes the open or decided ED record of that row. It writes the `closed_on_waiting_list` event and one audit row. It does nothing when the change came from an ED function (the same marker).
   - Nothing else in 0135 changes: its three functions and its card are not replaced.
 - SECURITY DEFINER functions with `search_path = pg_catalog, pg_temp`, owned like 0135's, EXECUTE for `hid_ehr_runtime` only:
   - `ehr.ed_arrive`, `ehr.ed_board`, `ehr.ed_read`;
