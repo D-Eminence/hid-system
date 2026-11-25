@@ -9,6 +9,7 @@ import type { DataAccessContext } from '../common/request-context';
 import { WORK_ITEM_PROGRESS_BATCH_MAX_PATIENTS, WORK_ITEM_PROGRESS_MAX_IDS, WorkItemProgressBatchDto,
   progressBatchProblems } from './dto/work-item-progress.dto';
 import { PharmacyOwnWork } from './own-work-access';
+import { PharmacyRefills } from './prescription-refills';
 import { PharmacyWorkItemProgressController, progressVersions } from './work-item-progress.controller';
 import { PROGRESS_BATCH_CHECK_BUDGET_MS, PROGRESS_BATCH_CHECK_CONCURRENCY, PharmacyWorkItemProgressService,
   WORK_ITEM_PROGRESS_QUERY } from './work-item-progress.service';
@@ -628,5 +629,83 @@ describe('progressVersions', () => {
       .toEqual({ current: false, accepted: false });
     expect(versions({ 'x-hid-own-progress': '0133', 'x-hid-own-progress-accepted': 'ORD4' }))
       .toEqual({ current: true, accepted: false });
+  });
+});
+
+/*
+ * ORD-12 (refills, 0154) with the batch: while PRESCRIPTION_REFILLS_ENABLED is
+ * on, the one-patient answer carries `lastFilledAt` (the latest fill's time,
+ * null whenever `dispensedAt` is); each answered batch entry must carry it the
+ * same way, so readBatch answers each patient exactly as read() does. Off,
+ * neither answer carries it. Rows as WORK_ITEM_PROGRESS_QUERY gives them with
+ * 0154: the first fill (`dispensed_at`), the latest (`last_filled_at`), the
+ * latest fill's reversal and whether any fill stands.
+ */
+describe('A18 ORD-12: with refills, each answered entry is still exactly the one-patient answer', () => {
+  const at = (day: number, hour: number) => new Date(Date.UTC(2026, 10, day, hour, 5));
+  const fills = (n: number, fill: { first?: Date; latest?: Date; reversed?: Date; standing?: boolean } = {}) => ({
+    ...row(n), dispensed_at: fill.first ?? null, last_filled_at: fill.latest ?? null, reversed_at: fill.reversed ?? null,
+    fill_standing: fill.standing ?? null });
+  const rows = {
+    // Two fills, both standing; a refill reversed while the first stands; every fill reversed; not yet dispensed.
+    [patient(1)]: [fills(1, { first: at(18, 11), latest: at(21, 9), standing: true }),
+      fills(2, { first: at(18, 12), latest: at(22, 9), reversed: at(22, 10), standing: true }),
+      fills(3, { first: at(18, 13), latest: at(23, 9), reversed: at(23, 10), standing: false }), fills(4)],
+    // One fill: the latest is the first.
+    [patient(2)]: [fills(6, { first: at(19, 8), latest: at(19, 8), standing: true }), fills(7)],
+    [patient(3)]: [fills(12, { first: at(19, 9), latest: at(24, 9), standing: true })],
+  };
+  const one = entry(1, [10, 4, 3, 2, 1]);
+  const two = entry(2, [7, 6]);
+  const refused = entry(3, [12]);
+  const build = (on: boolean) => {
+    const built = harness(rows as never);
+    built.identity.authorize.mockImplementation(async (patientId) => ({ ...allowed, patientId,
+      allowed: patientId !== patient(3) }));
+    return new PharmacyWorkItemProgressService(built.database as never, built.identity as never, built.audit as never,
+      undefined, new PharmacyRefills(on));
+  };
+
+  it.each([['on', true], ['off', false]])('refills %s: the batch items equal read()\'s, lastFilledAt included',
+    async (_name, on) => {
+      for (const [current, accepted] of [[true, true], [false, false]] as const) {
+        const answer = await build(on).readBatch(context, { patients: [one, refused, two] }, current, accepted);
+        expect(answer.patients.map((patientEntry) => patientEntry.outcome)).toEqual(['answered', 'denied', 'answered']);
+        expect(answer.patients[1]).toStrictEqual({ patientId: patient(3), outcome: 'denied',
+          code: 'PHARMACY_ACCESS_DENIED' });
+        for (const [index, asked] of [[0, one], [2, two]] as const) {
+          const alone = await build(on).read(context, asked, current, accepted);
+          expect(answer.patients[index]).toStrictEqual({ patientId: asked.patientId, outcome: 'answered',
+            items: alone.items });
+        }
+      }
+    });
+
+  it('refills on: every item of both answers carries lastFilledAt, the latest fill\'s time or null', async () => {
+    const answer = await build(true).readBatch(context, { patients: [one, two] }, true, true);
+    const alone = await build(true).read(context, one, true, true);
+    const latest = (entryAnswer: (typeof answer.patients)[number]) => 'items' in entryAnswer
+      ? entryAnswer.items.map((item) => [item.sourceEhrPrescriptionId, item.status, item.lastFilledAt]) : [];
+    expect(latest(answer.patients[0]!)).toEqual([[rx(10), 'not_received', null], [rx(4), 'received', null],
+      [rx(3), 'dispensing_reversed', at(23, 9).toISOString()], [rx(2), 'dispensed', at(22, 9).toISOString()],
+      [rx(1), 'dispensed', at(21, 9).toISOString()]]);
+    expect(latest(answer.patients[1]!)).toEqual([[rx(7), 'received', null],
+      [rx(6), 'dispensed', at(19, 8).toISOString()]]);
+    expect(alone.items.map((item) => item.lastFilledAt)).toEqual(latest(answer.patients[0]!).map(([, , time]) => time));
+    for (const item of [...alone.items, ...answer.patients.flatMap((patientEntry) =>
+      'items' in patientEntry ? patientEntry.items : [])]) {
+      expect(Object.keys(item)).toEqual(['sourceEhrPrescriptionId', 'status', 'receivedAt', 'dispensedAt', 'reversedAt',
+        'acceptedAt', 'lastFilledAt']);
+    }
+  });
+
+  it('refills off: neither answer carries lastFilledAt', async () => {
+    const answer = await build(false).readBatch(context, { patients: [one, two] }, true, true);
+    const alone = await build(false).read(context, one, true, true);
+    for (const item of [...alone.items, ...answer.patients.flatMap((patientEntry) =>
+      'items' in patientEntry ? patientEntry.items : [])]) {
+      expect(item).not.toHaveProperty('lastFilledAt');
+    }
+    expect(JSON.stringify(answer)).not.toContain('lastFilledAt');
   });
 });
