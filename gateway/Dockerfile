@@ -13,7 +13,7 @@ FROM nginxinc/nginx-unprivileged@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451
 # libxml2 2.13.9-r3 fixes CVE-2026-86144 (High; 2.13.9-r2 in the base, XInclude parse flags).
 # libssl3 and libcrypto3 3.5.9-r1 fix CVE-2026-88823, CVE-2026-95691, CVE-2026-95692 and
 # CVE-2026-107496 (High) and CVE-2026-88822 in the base's 3.5.9-r0 (aports 0f4c7e8d0f5f);
-# the five OpenSSL CVEs they do not fix stay in security/gateway-runtime.vex.json.
+# the five OpenSSL CVEs they do not fix stay in the gateway OpenVEX.
 # nginx 1.30.7-r1 and its modules fix CVE-2026-113425, CVE-2026-121810,
 # CVE-2026-123007, CVE-2026-123633, CVE-2026-123634 (Critical) and CVE-2026-118899
 # (High) in the base's 1.30.6-r1. They come from the nginx.org Alpine 3.24 repository
