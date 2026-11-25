@@ -2065,3 +2065,58 @@ grant execute on function ehr.record_recent_diagnosis(text, text, text), ehr.rec
   to hid_ehr_runtime, hid_schema_test_runtime;
 revoke all on function ehr.record_recent_diagnosis(text, text, text), ehr.recent_diagnoses(integer) from public;
 revoke all on ehr.clinician_recent_diagnoses from public;
+
+-- Quality and safety reporting (0197, QUAL-1 of Release D; owner decisions
+-- Q248 A-Q253 A of 25 November 2026, built at the recommended options
+-- Q-QUAL-1 A to Q-QUAL-8 A, not yet answered by the owner), exactly as 0197
+-- grants and revokes them: the fifteen functions (what this member can do,
+-- report, list, read, assign, investigation, add and change an action,
+-- resolve, reopen, correct, the monthly counts, and the quality leads' list,
+-- naming and end) to the EHR runtime only. No privilege for any runtime on the
+-- seven tables (row-level security forced, one owner-only policy each: only
+-- these functions read and write them, as their owner) and none on the
+-- caller, patient-of-facility, detail, audit and idempotency helpers or the
+-- three trigger functions. No sequence: 0197 makes none. 0198 (who holds the
+-- two codes) adds no grant.
+grant execute on function
+  ehr.quality_me(),
+  ehr.quality_incident_report(text, text, timestamptz, text, text, text, text, text, text, uuid, text, text),
+  ehr.quality_incident_list(text, text, text, text, date, date, text, integer, timestamptz, uuid),
+  ehr.quality_incident_read(uuid),
+  ehr.quality_incident_assign(uuid, bigint, uuid, text, text),
+  ehr.quality_incident_investigate(uuid, bigint, text, text, text),
+  ehr.quality_incident_action_add(uuid, bigint, text, uuid, date, text, text),
+  ehr.quality_incident_action_update(uuid, uuid, bigint, text, text, uuid, date, text, text),
+  ehr.quality_incident_resolve(uuid, bigint, text, text, text),
+  ehr.quality_incident_reopen(uuid, bigint, text, text, text),
+  ehr.quality_incident_correct(uuid, bigint, text, text[], text, text, text, text, text, uuid, text, text),
+  ehr.quality_incident_counts(text, text),
+  ehr.quality_lead_list(),
+  ehr.quality_lead_name(uuid, text, text),
+  ehr.quality_lead_end(uuid, text, text, text) to hid_ehr_runtime;
+revoke all on function
+  ehr.quality_me(),
+  ehr.quality_incident_report(text, text, timestamptz, text, text, text, text, text, text, uuid, text, text),
+  ehr.quality_incident_list(text, text, text, text, date, date, text, integer, timestamptz, uuid),
+  ehr.quality_incident_read(uuid),
+  ehr.quality_incident_assign(uuid, bigint, uuid, text, text),
+  ehr.quality_incident_investigate(uuid, bigint, text, text, text),
+  ehr.quality_incident_action_add(uuid, bigint, text, uuid, date, text, text),
+  ehr.quality_incident_action_update(uuid, uuid, bigint, text, text, uuid, date, text, text),
+  ehr.quality_incident_resolve(uuid, bigint, text, text, text),
+  ehr.quality_incident_reopen(uuid, bigint, text, text, text),
+  ehr.quality_incident_correct(uuid, bigint, text, text[], text, text, text, text, text, uuid, text, text),
+  ehr.quality_incident_counts(text, text),
+  ehr.quality_lead_list(),
+  ehr.quality_lead_name(uuid, text, text),
+  ehr.quality_lead_end(uuid, text, text, text),
+  ehr.quality_caller(text),
+  ehr.quality_patient_of_facility(uuid, uuid),
+  ehr.quality_detail(uuid, uuid, boolean),
+  ehr.quality_audit(text, uuid, uuid, uuid, uuid, text, uuid, text, text, text, text, jsonb),
+  ehr.quality_idempotency(uuid, text, text),
+  ehr.quality_incident_fixed_fields(),
+  ehr.quality_action_fixed_fields(),
+  ehr.quality_lead_end_once() from public;
+revoke all on ehr.quality_list_versions, ehr.quality_list_items, ehr.quality_switches, ehr.quality_leads,
+  ehr.quality_incidents, ehr.quality_incident_actions, ehr.quality_incident_events from public;
