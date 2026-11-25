@@ -1,4 +1,4 @@
-# HID planned contract for the rest of Akos's EHR list (Release B and C, not live)
+# HID planned contract for the rest of Akos's EHR list (Release B, C and D, not live)
 
 This file lists the API that Akos's EHR frontend will need but that is not built yet. With it, he can build each screen once: the shape now, and the fallback he shows until the route ships.
 
@@ -44,6 +44,8 @@ Rules that hold in every section:
 | [ORD-6: Several tests in one lab request](#ord-6-several-tests-in-one-lab-request-planned-release-c-needs-a-migration-yes) | N-7 | C | yes | M |
 | [ORD-8: Order sets, favourites, and note and visit templates](#ord-8-order-sets-favourites-and-note-and-visit-templates-planned-release-c-needs-a-migration-yes) | P0-5, P1-13, P1-12 | C | yes | L |
 | [ORD-11: Result and dispensed notices to the ordering doctor](#ord-11-result-and-dispensed-notices-to-the-ordering-doctor-planned-release-c-needs-a-migration-yes) | P1-6 | C | yes | L |
+| [ADT-1: Inpatient admission, wards and beds, transfers and discharge](#adt-1-inpatient-admission-wards-and-beds-transfers-and-discharge-planned-release-d-needs-a-migration-yes) | department Inpatient admission, wards and beds, and ICU (gap map row 69, F1) | D | yes (0170-0173, provisional) | L |
+| [NUR-1: Nursing on the ward: observation chart, medicine round, tasks, fluid balance and shift handover](#nur-1-nursing-on-the-ward-observation-chart-medicine-round-tasks-fluid-balance-and-shift-handover-planned-release-d-needs-a-migration-yes) | department Nursing observations beyond what exists, ICU chart | D | yes (0174-0177, provisional) | L |
 | [ORD-13: No drug-interaction checks](#ord-13-no-drug-interaction-checks-not-planned-no-release-needs-a-migration-no) | P0-5, N-9 (interactions) | not planned | no | — |
 | [P2-1: National ID type per country and a neutral company number](#p2-1-national-id-type-per-country-and-a-neutral-company-number-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-1 | after C | yes, when designed | M |
 | [P2-2: Interface translations and language](#p2-2-interface-translations-and-language-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-2, P1-8 (language) | after C | yes, when designed | L |
@@ -51,7 +53,7 @@ Rules that hold in every section:
 | [P2-4: Time zone, date and phone formats](#p2-4-time-zone-date-and-phone-formats-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-4 | after C | yes, when designed | M |
 | [QA-2: Migrate account test pass and one real save of every drawer form](#qa-2-migrate-account-test-pass-and-one-real-save-of-every-drawer-form-planned-before-the-release-a-go-live-needs-a-migration-no) | R-4, QA question | before A go-live | no | S |
 
-Owner answers of 19 Nov 2026, and the sections that rest on them: Q124 A (ORD-7, ORD-8, ORD-9, ORD-10 phase 2, ORD-6, VIT-1), Q125 B (ORD-4, now planned for Release B), Q126 A (EHR-C6, ORD-8), Q127 A (ID-8, ORD-11), Q128 A (ORD-11, SX-7), Q129 A (SX-4, CHW-1), Q130 A (CHW-1), Q131 A (ORD-12, ORD-13, ORD-10 phase 2, P2-1 to P2-4), Q132 A (Q132 A, now planned for Release B; ORD-4 refers to it). No owner question for these sections is waiting for an answer.
+Owner answers of 19 Nov 2026, and the sections that rest on them: Q124 A (ORD-7, ORD-8, ORD-9, ORD-10 phase 2, ORD-6, VIT-1), Q125 B (ORD-4, now planned for Release B), Q126 A (EHR-C6, ORD-8), Q127 A (ID-8, ORD-11), Q128 A (ORD-11, SX-7), Q129 A (SX-4, CHW-1), Q130 A (CHW-1), Q131 A (ORD-12, ORD-13, ORD-10 phase 2, P2-1 to P2-4), Q132 A (Q132 A, now planned for Release B; ORD-4 refers to it). No owner question for the Release B and C sections is waiting for an answer. Release D sections rest on the owner's approval of the sprint decision sheet on 25 Nov 2026 (Q147 to Q290 at the recommended options; ADT-1 and NUR-1: Q149, Q151, Q155-Q161, Q163, Q173, Q176, Q181-Q202), and mark any smaller choice built at its recommended option (ADT-1: Q-ADT-9 to Q-ADT-18; NUR-1: Q-NUR-6 to Q-NUR-16).
 
 Open points with no decision yet, each to be decided before that section is built:
 
@@ -3102,6 +3104,1024 @@ Release C (lane D). Size **L**:
 - four routes;
 - audit;
 - a runtime check across Lab, Pharmacy and EHR.
+
+# Release D
+
+Release D holds the department first versions of the two-week sprint the owner approved on 25 Nov 2026: every department ships a first working version on Akos's blue design, anything that needs outside approval is built but switched off, every change gets an independent agent review and Rahman's final database check, and real patients use it only after the clinical lead's checklist and the owner's go-live.
+
+This Release D holds the roadmap's department releases (Phase 1 outpatient and cashier, Phase 2 inpatient core). It is not the separate release the ID-8 section mentions for ID-8b, which would take another name if it is needed.
+
+Decisions in Release D sections are marked **(recommended option, not yet answered by the owner)**. The section is built with that option. The owner can still choose the other option; the PR that builds it says which lines change.
+
+On 25 Nov 2026 the owner approved the whole decision sheet (hid-system#332), verbatim: "I approve Q147–Q290 at the recommended options". A line that rests on one of those answers is marked **(owner decision Qnnn A, 25 Nov 2026)**. The owner can still change any of them; the PR that rebuilds it says which lines change.
+
+## ADT-1: Inpatient admission, wards and beds, transfers and discharge (planned, Release D, needs a migration: yes)
+
+Department: Inpatient admission, wards and beds (ADT), with ICU as a ward type (owner decision Q201 A, 25 Nov 2026). Gap map row 69 "Inpatient/ICU" (health `docs/HEALTH_ID_COMPLETE_FRONTEND_GAP_MAP.md:69`), hand-off F1. Roadmap Phase 2.
+
+Status: planned, not live.
+
+Surveyed before writing (health origin/main 8168ec3d; hid-system staging 95fa1e52):
+- **Inpatient / Wards** sample: `clinical/sample/definitions.ts:152-161` (fields Admission reason, Assigned care team; ICU admissions also listed, `alsoLists: ['icu']`), its actions at `:89-95` (requested -> "Admit and allocate bed" -> admitted -> "Transfer bed" with Nursing handover -> "Prepare discharge" with Follow-up plan -> discharge-ready -> "Discharge patient" with Discharge summary -> discharged) and its hand-off to Nursing tasks at `:97-100`. The design source is `frame/sample/catalog.ts:444-490`.
+- **Wards & Beds** sample: `definitions.ts:162-173` and `catalog.ts:491-524`. A bed has a name and a ward. Statuses available, occupied, cleaning, maintenance. Actions "Complete bed turnover", "Place in maintenance", "Release from maintenance".
+- **Ward configuration** sample: `definitions.ts:270-277` and `catalog.ts:1247-1255`. A ward name only: no type, sex, capacity or price.
+- **ICU** sample: `definitions.ts:211-220` and `catalog.ts:692-700`; the design gives it the Inpatient actions (`catalog.ts:1234-1236`). Demo reasons in `frame/sample/store.ts:74-77`.
+- Seed: `clinical/sample/seed.ts:226-239` (Taylor admitted to Bed 1 on "Example ward", Sam awaiting a bed, Riley in ICU Bed 2, wards "Example ward" and "Female Medical Ward"; all fictional).
+- Navigation and roles: `clinical/pages.ts:29-30,34,45`, `frame/pages.ts:84-85,90,120`, `frame/BlueFrame.tsx:49-51` (group "Wards & units"), `home/RoleDashboard.tsx:23,26`, `frame/sampleAccess.ts:14-18,26,49` (nurses view, create, edit and assign; doctors also sign; ward configuration for owners and admins), `onboarding/roleTemplates.ts:14-17,24,44`, `frame/sample/SampleWorkspace.tsx:59` (inpatient and ICU hand off to Nursing observations and Nursing tasks).
+- Backend today: `ehr.encounters.encounter_type` already allows `inpatient` (0004:43), with statuses `planned`, `in_progress`, `on_hold`, `completed`, `cancelled`, `entered_in_error`. Notes, vitals, diagnoses, prescriptions, lab requests and documents all hang off an encounter. Department codes `inpatient` and `icu` exist as a fixed profile list (0114:175-182). There is no ward, bed, admission or transfer table, route or access code.
+- No sample has a census, a bed-occupancy view, a discharge-outcome list, a printable discharge summary, a wristband or a death record. Those screens are new and follow the blue design's list, record and drawer patterns.
+
+### What staff get
+
+- **Ward setup** (facility admins, owner decision Q191 A, 25 Nov 2026). A ward has a name, a type (general, paediatric, maternity, ICU, private or other), who it takes (any sex, men only or women only), its beds and its named overflow spaces (for example "Extra mattress 1"). A ward has a staff list, used for "my wards" and, when switched on, for ward-team access (Q156).
+- **Beds** (owner decision Q186 A, 25 Nov 2026). One patient per bed or overflow space, always. A bed is available, occupied, cleaning or under maintenance. After a patient leaves a bed it goes to cleaning; "Complete bed turnover" makes it available again.
+- **Admission request.** A doctor or clinician asks for an admission from a consultation, from the emergency board (ED-1 "admission requested"), from the waiting list, or directly. The request carries the reason, the responsible doctor, the care team and, if known, the ward wanted. It makes the patient's inpatient visit at once (owner decision Q184 A, 25 Nov 2026), so orders written before a bed is found attach to the stay.
+- **Admit and allocate a bed.** A nurse, clinician or doctor puts the patient in a free bed or overflow space (owner decision Q185 A, 25 Nov 2026).
+- **Bed board and census.** One board per ward: every bed, its status, who is in it, days since admission, and "discharge ready". A census for the facility: beds, occupied, free, cleaning, maintenance, overflow in use, and today's admissions, transfers, discharges and deaths.
+- **Transfers.** To another bed in the ward, or to another ward, ICU included (a step-down from ICU is a transfer to a general ward). Each transfer can carry a nursing handover. Every movement is kept.
+- **Discharge.** "Prepare discharge" (follow-up plan, expected date, medicines on discharge), then "Discharge patient" with an outcome: routine, discharged against medical advice (DAMA), referred out, absconded or died (owner decision Q187 A, 25 Nov 2026). The doctor signs a discharge summary, which prints.
+- **Deaths** (owner decision Q188 A, 25 Nov 2026). The outcome "died" with the time of death is always recorded. The cause-of-death certificate content and the printed notice for death registration are built but switched off until the clinical lead and legal sign.
+- **Wristbands** (owner decision Q192 A, 25 Nov 2026). An inpatient wristband prints at admission, and a newborn band matched to the mother's band.
+- **ICU** (owner decisions Q201 A and Q202 A, 25 Nov 2026). ICU wards are wards of type ICU, with the same admit, transfer and discharge, one bed count, and their own filtered board. The ICU chart (hourly vitals, GCS, oxygen and FiO2, glucose, fluid balance) is NUR-1's observation chart.
+- **Charges** (owner decision Q189 A, 25 Nov 2026). When the facility uses patient billing (BILL-1): an admission bill, bed-day and ward charges, deposits and a printed interim bill. **Discharge is never held for an unpaid bill.** This is fixed and no facility can change it.
+- **Ward-team access for the whole stay** (owner decision Q156 A, 25 Nov 2026). Built, and switched off until Rahman and the DPO agree. Until then staff open an admitted patient's chart as today (0131's own-facility opening, 24 hours, or the patient's PIN or approval).
+- **Names on the bed board** (owner decision Q190 A, 25 Nov 2026). Every ward staff member at the facility sees patient names on the board, after the DPO check. Until the DPO signs, the board shows a name only to staff who hold that patient's grant (see "Names on ward lists").
+
+Not in this release: bed booking ahead of arrival, HMO pre-authorisation, home leave, a death register or a deceased mark on the Health ID record, ward-level stock, ventilator settings and infusion titration (owner decision Q202 A, 25 Nov 2026), offline use (owner decision Q161 A, 25 Nov 2026: online only, with a paper ward register as the back-up), and staff notices (they come with ORD-11's staff inbox, owner decision Q151 A, 25 Nov 2026).
+
+### Decisions this section is built on
+
+The owner's answers (25 Nov 2026), each at the recommended option:
+
+| Question | Built as |
+|---|---|
+| Q184 What an admission is | **A:** an inpatient encounter plus an admission row. Every live clinical screen (notes, vitals, orders, chart summary) works on the stay unchanged |
+| Q185 Who admits and discharges | **A:** doctors and clinicians request, decide and discharge; nurses (and doctors and clinicians) allocate and move beds |
+| Q186 Beds | **A:** one patient per bed, with named overflow spaces |
+| Q187 Discharge outcomes | **A:** routine, DAMA, referred out, absconded, died. The clinical lead signs the list |
+| Q188 Deaths | **A:** cause-of-death certificate content and a printed notice for death registration, built but off until the clinical lead and legal sign |
+| Q189 Charging | **A:** bed-day and ward charges, deposits and interim bills on the bill, and discharge is never held for an unpaid bill |
+| Q190 Names on the bed board | **A:** all ward staff at the facility, switched on after the DPO check |
+| Q191 Who sets up wards | **A:** facility admins |
+| Q192 Wristbands | **A:** an inpatient wristband, and a newborn band matched to the mother's |
+| Q193 One meaning of "shift" | **A:** clinical shifts are NUR-1's; the cashier's day is the "till day" (BILL-1). ADT uses no shift |
+| Q194 Critical results on wards | **A:** also to the ward team or on-call doctor. ADT gives ORD-11 the recipients (see Notifications) |
+| Q156 Ward-team access | **A:** an admission gives the ward team access for the whole stay, audited, built but off until Rahman and the DPO agree |
+| Q149 Department switch | **A:** the Inpatient department has its own on/off switch in facility setup (gap map F2), seeded off |
+| Q201, Q202 ICU | **A:** a ward type inside Inpatient; the first ICU chart is NUR-1's (no ventilator settings or infusions) |
+| Q160 Go-live gate | **A:** see "Go-live gate" below |
+
+Smaller choices made while writing this section:
+
+| Question | Built with | The other option |
+|---|---|---|
+| Q-ADT-9 When the inpatient visit is made | **A:** at the request, as a `planned` inpatient encounter. It becomes `in_progress` when a bed is given, `completed` at discharge, and `cancelled` if the request is cancelled. Orders written while the patient waits for a bed attach to the stay **(recommended option, not yet answered by the owner)** | B: only when a bed is given; orders written before that stay on the earlier visit |
+| Q-ADT-10 Admission reason on ward lists | **A:** shown to nurses, clinicians and doctors on the admissions list and the board (0-300 characters), never to admins and never in an audit row, like ED-1's complaint **(recommended option, not yet answered by the owner)** | B: reason only inside the chart |
+| Q-ADT-11 Which steps need chart access | **A:** the request, "Prepare discharge", the discharge, the summary, the death record and a transfer's handover text are clinical, so they need write access to the chart. Giving a bed, moving beds, bed status and wristbands are ward logistics and need only the ward codes **(recommended option, not yet answered by the owner)** | B: every step needs chart access, so a nurse must open the chart to give a bed |
+| Q-ADT-12 Prepare discharge first | **A:** routine and referred-out discharges need "Prepare discharge" first, as the design draws. DAMA, absconded and died are recorded straight from admitted, because they do not wait **(recommended option, not yet answered by the owner)** | B: every outcome needs "Prepare discharge" first |
+| Q-ADT-13 What counts as a bed-day | **A:** one bed-day for each midnight (Lagos) the patient is admitted, at the rate of the ward they are in at midnight. A stay with no midnight counts one day. The day of discharge is not charged **(recommended option, not yet answered by the owner)** | B: every started calendar day is charged |
+| Q-ADT-14 Deposits | **A:** recorded on the admission bill, never required by the system. Admission, care and discharge never wait for a deposit **(recommended option, not yet answered by the owner)** | B: a facility can make a deposit required before a bed is given |
+| Q-ADT-15 How long ward-team access lasts, once switched on | **A:** from admission until discharge, or until 2 hours after the patient leaves the member's ward. The patient can end it, as they can end an own-facility opening **(recommended option, not yet answered by the owner)** | B: until discharge, with no end on transfer |
+| Q-ADT-16 What the wristband shows | **A:** name (or "Unknown patient U-0007"), sex, date of birth (or "Estimated age"), the Health ID as text (as ID-7's band), the admission number, the facility and ward, and "Allergy: check the chart" when any allergy is recorded. The barcode holds the admission number only **(recommended option, not yet answered by the owner)** | B: the allergy names printed on the band |
+| Q-ADT-17 Newborn band | **A:** the baby has its own record (registered, or an unknown record from ID-7) and its own admission, linked to the mother's open admission. Both bands print the same pair code (the mother's admission number and "B1", "B2"…). The full mother and baby link is Maternity's (Phase 3) **(recommended option, not yet answered by the owner)** | B: one band for the mother listing the baby |
+| Q-ADT-18 ED admission requests | **A:** ED-1's "admission requested" records are adopted: "Admit" on the ED card opens the admission request with the ED record linked. When the patient gets a bed, the ED record closes by itself (`closed_via = 'admission'`) and the waiting-list row finishes **(recommended option, not yet answered by the owner)** | B: staff close the ED record by hand ("Handed over to the ward") and make the request separately |
+
+### Routes
+
+All routes are under `/api/v1`. They need `X-Facility-Id` and `X-Purpose-Of-Use: direct-care` (ward setup takes `healthcare-operations`). Every write needs an `Idempotency-Key`; a replay with the same body answers the first answer with `"replayed": true`, and the same key with another body is 409 `IDEMPOTENCY_KEY_REUSED`. Writes on an admission, bed or ward send `expectedRowVersion`; a stale one is 412.
+
+No Health ID or NIN appears in any path or query. Patients, admissions, wards and beds are named by UUID. The one Health ID in any answer is the wristband print's, in the body, for printing (as ID-7's).
+
+All ehr-api routes are under `/api/v1/ehr/`, which the gateway already sends to ehr-api. **The gateway nginx template does not change.**
+
+Until the owner's go-live, the service flag `INPATIENT_ENABLED` (ehr-api) is off in production, and every route below answers 503 `INPATIENT_NOT_AVAILABLE`. It is on in staging and at the sealed demo and QA facilities. When facility setup (Q149, gap map F2) ships, the facility's own `inpatient` switch must also be on.
+
+Times are ISO UTC in the API. Screens show Lagos time, "18 Nov 2026" dates and the 24-hour clock (owner decisions Q181 A and Q182 A, 25 Nov 2026).
+
+#### Ward setup (`ehr.ward.manage`)
+
+**1. `GET /ehr/wards[?includeInactive=true]`**: the facility's wards. Also allowed with `ehr.ward.read`.
+
+```json
+{ "items": [ { "wardId": "uuid", "name": "Female Medical Ward", "wardType": "general", "takes": "female",
+    "active": true, "bedCount": 20, "overflowCount": 3, "occupied": 18, "available": 1, "cleaning": 1,
+    "maintenance": 0, "overflowInUse": 2, "staffCount": 9, "rowVersion": 4 } ] }
+```
+
+- `wardType`: `general`, `paediatric`, `maternity`, `icu`, `private` or `other`.
+- `takes`: `any`, `male` or `female`. A patient whose recorded sex differs can still be admitted; the screen asks the member to confirm.
+- Counts never name a patient.
+
+**2. `POST /ehr/wards`**: body `{ "name": "2-80 characters, unique among the facility's active wards (any case)", "wardType", "takes" }`.
+
+**3. `PATCH /ehr/wards/:wardId`**: body `{ "expectedRowVersion", "name"?, "wardType"?, "takes"?, "active"? }`. `wardType` and `active: false` only while no bed of the ward is occupied (409 `WARD_NOT_EMPTY`).
+
+**4. `POST /ehr/wards/:wardId/beds`**: body `{ "name": "1-40 characters, unique in the ward (any case)", "kind": "bed" | "overflow" }`. Up to 200 beds and 50 overflow spaces per ward.
+
+**5. `PATCH /ehr/beds/:bedId`**: body `{ "expectedRowVersion", "name"?, "active"? }`. A bed is never deleted. `active: false` only while it is not occupied (409 `BED_OCCUPIED`).
+
+**6. `PUT /ehr/wards/:wardId/staff`**: body `{ "expectedRowVersion", "membershipIds": ["uuid", …] }` (0-200). Each must be an active nurse, clinician or doctor membership at this facility (400 `WARD_STAFF_INVALID`). The list says who works on the ward. It is used for "my wards" and, once switched on, for ward-team access (Q156). Holding a place on the list never opens a chart by itself.
+
+#### Bed board and census (`ehr.ward.read`)
+
+**7. `GET /ehr/bed-board?wardId=…` or `?wardType=icu`**: one ward, or every active ward of a type.
+
+```json
+{ "wards": [ { "wardId": "uuid", "name": "Female Medical Ward", "wardType": "general",
+    "beds": [ { "bedId": "uuid", "name": "Bed 4", "kind": "bed", "status": "occupied", "rowVersion": 7,
+      "statusSince": "2026-12-03T09:12:00.000Z",
+      "patient": { "admissionId": "uuid", "patientId": "uuid", "fullName": "Ada Wardone", "nameHidden": false,
+        "initials": "A W", "recordKind": "standard", "unknownLabel": null, "sex": "female", "ageYears": 54,
+        "ageEstimated": false, "admittedAt": "2026-12-01T14:20:00.000Z", "daysAdmitted": 2,
+        "reason": "Community-acquired pneumonia (fictional)", "reasonHidden": false,
+        "responsibleMembershipId": "uuid", "careTeam": "Medical team A", "status": "admitted",
+        "dischargeReady": false, "chartBlocked": false } } ] } ],
+  "waitingForBed": [ { "admissionId": "uuid", "patientId": "uuid", "fullName": "…", "requestedWardId": "uuid",
+    "requestedAt": "…", "source": "ed" } ] }
+```
+
+- `status`: `available`, `occupied`, `cleaning` or `maintenance`. `occupied` is set by an admission, never by hand.
+- `patient` is `null` unless the bed is occupied. `waitingForBed` lists requested admissions for this ward or for no ward.
+- `fullName`, `nameHidden`: see "Names on ward lists". With `nameHidden: true`, `fullName` is `null` and the card shows the initials, sex and age.
+- `reason`: `null` with `reasonHidden: true` for a member without `ehr.admission.read` (Q-ADT-10).
+- `chartBlocked`: as EHR-C7 (an active deny directive).
+- `recordKind` and `unknownLabel`: as ID-7 (0145). For an unknown record the card shows "Unknown patient U-0007" and "Estimated age".
+- Staff names come from SX-9 (`GET /identity/facility-staff-names`).
+- The screen reads it again every 60 seconds while shown.
+
+**8. `GET /ehr/census[?date=YYYY-MM-DD]`**: today (Lagos) or a past Lagos day, up to 90 days back.
+
+```json
+{ "date": "2026-12-03", "facility": { "beds": 64, "occupied": 51, "available": 9, "cleaning": 3, "maintenance": 1,
+    "overflowInUse": 2, "admitted": 7, "transfersIn": 3, "transfersOut": 3, "discharged": 6, "died": 1,
+    "waitingForBed": 2, "midnightCount": 50 },
+  "wards": [ { "wardId": "uuid", "name": "ICU", "wardType": "icu", "beds": 6, "occupied": 5, "…": "same counts" } ] }
+```
+
+Counts only. No patient appears in a census answer.
+
+**9. `POST /ehr/beds/:bedId/status`**: body `{ "expectedRowVersion", "status": "available" | "cleaning" | "maintenance", "note"? }`. Needs `ehr.bed.allocate` or `ehr.ward.manage`.
+- The design's three actions: cleaning -> available ("Complete bed turnover", `note` is the cleaning record, optional, up to 300), available -> maintenance ("Place in maintenance", `note` is the reason, 8-300, required), maintenance -> available ("Release from maintenance", `note` optional, up to 300). Also available -> cleaning.
+- An occupied bed's status cannot be set by hand (409 `BED_OCCUPIED`).
+
+#### Admissions
+
+**The admission card** (every answer):
+
+```json
+{ "admissionId": "uuid", "admissionNumber": "A-2026-000123", "patientId": "uuid", "fullName": "Ada Wardone",
+  "nameHidden": false, "recordKind": "standard", "unknownLabel": null, "sex": "female", "dateOfBirth": "1972-05-14",
+  "dateOfBirthEstimated": false, "healthIdLast4": "WW12", "ninStatus": "verified", "chartBlocked": false,
+  "encounterId": "uuid", "status": "admitted", "source": "ed", "edAttendanceId": "uuid",
+  "fromEncounterId": null, "visitQueueEntryId": "uuid", "motherAdmissionId": null,
+  "reason": "Community-acquired pneumonia (fictional)", "reasonHidden": false, "careTeam": "Medical team A",
+  "responsibleMembershipId": "uuid", "requestedWardId": "uuid", "requestedAt": "…", "requestedByMembershipId": "uuid",
+  "admittedAt": "…", "admittedByMembershipId": "uuid", "wardId": "uuid", "bedId": "uuid",
+  "expectedDischargeOn": "2026-12-06", "preparedAt": null, "discharge": null, "deathRecorded": false,
+  "billId": null, "rowVersion": 5 }
+```
+
+- `status`: `requested` (waiting for a bed), `admitted`, `discharge_ready`, `discharged` or `cancelled`.
+- `source`: `ed`, `consultation`, `waiting_list` or `direct`.
+- `ninStatus` shows as "NIN Verified" or "NIN Not Verified".
+- `discharge`: `null`, or `{ "outcome", "dischargedAt", "dischargedByMembershipId", "summaryNoteId", "referredToFacilityName", "diedAt" }`.
+- `outcome`: `routine`, `dama`, `referred_out`, `absconded` or `died`.
+- `billId`: the admission bill (Q189), when the facility uses billing; else `null`.
+- `fullName` and `reason` follow the same hiding rules as the board.
+
+**10. `POST /ehr/admissions`**: request an admission. Needs `ehr.admission.decide` and write access to the patient's chart (`ehr.context_allows(patient, facility, 'write_records')`).
+
+```json
+{ "patientId": "uuid", "source": "consultation", "fromEncounterId": "uuid", "reason": "Community-acquired pneumonia",
+  "careTeam": "Medical team A", "responsibleMembershipId": "uuid", "requestedWardId": "uuid" }
+```
+
+| Field | Rule |
+|---|---|
+| `patientId` | required. The member must hold write access to this patient's chart (an approval, PIN, own-facility opening, or ward-team access when on). Without it: 403 `ADMISSION_CHART_ACCESS_REQUIRED` |
+| `source` | `consultation` (with `fromEncounterId`: this patient's visit at this facility, not cancelled), `ed` (with `edAttendanceId`: an ED-1 record of this patient here, `decided` with outcome `admit_requested`), `waiting_list` (with `visitQueueEntryId`: this patient's open waiting-list row here) or `direct` |
+| `reason` | 1-300 characters, trimmed, no control characters |
+| `careTeam` | optional, 1-80 characters (the design's "Assigned care team") |
+| `responsibleMembershipId` | required: an active doctor or clinician membership here (400 `RESPONSIBLE_DOCTOR_INVALID`). For `ed`, it defaults to ED-1's admitting doctor |
+| `requestedWardId` | optional: an active ward here |
+| `motherAdmissionId` | optional, for a newborn (Q-ADT-17): an open admission here of another patient |
+
+- One open admission per patient per facility. A second request answers 409 `ADMISSION_ALREADY_OPEN` with the open admission's id.
+- The request makes the inpatient encounter (`encounter_type 'inpatient'`, status `planned`, `started_at` now) in the same transaction (Q-ADT-9).
+- Answer `201 { "admission": card, "replayed": false }`.
+
+**11. `GET /ehr/admissions?status=…&wardId=…&wardType=icu`**: the admissions list (the design's "Inpatient / Wards" list; `wardType=icu` is the ICU page). Default: open admissions (requested, admitted, discharge ready) plus those discharged or cancelled today. Sorted: waiting for a bed first, then ward, then bed name. Up to 500, then `hasMore`.
+
+**12. `GET /ehr/admissions/:admissionId`**: the card plus `movements` (`{ kind, at, byMembershipId, fromWardId, fromBedId, toWardId, toBedId, handoverRecorded }`, kinds `requested`, `admitted`, `transferred`, `prepared`, `discharged`, `cancelled`, `details_changed`, `wristband_printed`). The handover text is never in this answer (see route 14).
+
+**13. `POST /ehr/admissions/:admissionId/admit`**: "Admit and allocate bed". Body `{ "expectedRowVersion", "bedId", "confirmSexMismatch"? }`. Needs `ehr.bed.allocate`.
+- Only from `requested`. The bed must be active, in an active ward here, and `available` (409 `BED_NOT_AVAILABLE` when it is cleaning, under maintenance, or someone took it a moment ago).
+- Sets the admission to `admitted`, the bed to `occupied`, and the encounter to `in_progress`.
+- For `source = ed`: closes the ED record (`closed_via = 'admission'`) and finishes its waiting-list row. For `source = waiting_list`: finishes the waiting-list row (0135 stage `finished`).
+- A ward that takes one sex and a patient of the other: 409 `WARD_SEX_MISMATCH` unless `confirmSexMismatch: true`. The confirmation is audited.
+
+**14. `POST /ehr/admissions/:admissionId/transfer`**: "Transfer bed". Body `{ "expectedRowVersion", "bedId", "handover"?, "confirmSexMismatch"? }`. Needs `ehr.bed.allocate`.
+- From `admitted` or `discharge_ready`, to an available bed in any active ward here, ICU included.
+- The old bed goes to `cleaning`. The new bed becomes `occupied`.
+- `handover`: optional nursing handover, 1-2000 characters. Giving it needs write access to the chart (Q-ADT-11). It is clinical content: stored with the movement and shown only to members who can read the chart, through `GET /ehr/admissions/:admissionId/movements/:movementId/handover`.
+
+**15. `POST /ehr/admissions/:admissionId/prepare-discharge`**: body `{ "expectedRowVersion", "followUpPlan": "1-2000 characters", "expectedDischargeOn"?, "dischargeMedicineIds"?: ["prescription uuid", …] }`. Needs `ehr.admission.decide` and chart write access.
+- From `admitted` to `discharge_ready`. Can be sent again while `discharge_ready` to change it.
+- `dischargeMedicineIds`: prescriptions on this stay's encounter that are the medicines on discharge (0-50). They print on the summary. They are ordinary prescriptions; the pharmacy sees them as usual.
+
+**16. `POST /ehr/admissions/:admissionId/discharge`**: "Discharge patient". Needs `ehr.admission.decide` and chart write access.
+
+```json
+{ "expectedRowVersion": 6, "outcome": "routine", "dischargedAt": "2026-12-06T10:00:00.000Z",
+  "summary": { "presentingProblem": "…", "courseInHospital": "…", "proceduresDone": "…", "conditionAtDischarge": "improved",
+               "followUpPlan": "…", "patientAdvice": "…" },
+  "referredToFacilityName": null, "diedAt": null, "signature": "SIGN" }
+```
+
+| Field | Rule |
+|---|---|
+| `outcome` | `routine` or `referred_out` only from `discharge_ready` (409 `DISCHARGE_NOT_PREPARED`); `dama`, `absconded` and `died` also from `admitted` (Q-ADT-12) |
+| `dischargedAt` | optional; left out, now. Not in the future, not before admission, no more than 24 hours ago |
+| `summary` | required for `routine`, `dama` and `referred_out` (400 `DISCHARGE_SUMMARY_REQUIRED`); optional for `absconded` and `died`. Each text 0-4000 characters, `presentingProblem` and `courseInHospital` at least 1. `conditionAtDischarge`: `improved`, `unchanged`, `worse` or `not_applicable`. `followUpPlan` defaults to the one from "Prepare discharge" |
+| `referredToFacilityName` | 2-120 characters, required for `referred_out` |
+| `diedAt` | required for `died` (400 `DIED_AT_REQUIRED`): the time of death, not in the future and not before admission |
+| `signature` | the typed word "SIGN", as the design's sign actions (`TYPED_WORD_ACTIONS`) |
+
+- In one transaction: the admission becomes `discharged`; the bed goes to `cleaning`; the encounter becomes `completed` with `ended_at`; the summary is written as a signed clinical note of type "Discharge summary" on the stay's encounter, holding the summary text, the stay's diagnoses at the time, and the medicines on discharge; every ward-team grant of this admission ends (when switched on).
+- **The discharge never reads the bill.** No setting, unpaid balance or deposit can refuse or delay it (owner decision Q189 A, 25 Nov 2026). The test suite proves it.
+- `died` records the outcome and `diedAt` only. The cause-of-death content is route 22, switched off.
+- Answer `200 { "admission": card, "summaryNoteId": "uuid" | null }`.
+
+**17. `POST /ehr/admissions/:admissionId/cancel`**: body `{ "expectedRowVersion", "reason": "8-500 characters" }`. Needs `ehr.admission.decide`. Only from `requested`. The encounter becomes `cancelled`. An ED record goes back to "Waiting for admission" on the board.
+
+**18. `PATCH /ehr/admissions/:admissionId`**: body `{ "expectedRowVersion", "careTeam"?, "responsibleMembershipId"?, "expectedDischargeOn"?, "reason"? }`. Needs `ehr.admission.decide`. Only while open.
+
+**19. `GET /ehr/admissions/:admissionId/discharge-summary`**: the printable summary. Needs `ehr.admission.read` and chart read access.
+
+```json
+{ "facility": { "name": "Demo Hospital", "address": "…", "phone": "+234 803 123 4567" },
+  "patient": { "fullName": "Ada Wardone", "sex": "female", "dateOfBirth": "1972-05-14", "healthId": null,
+               "ninStatus": "verified" },
+  "admissionNumber": "A-2026-000123", "admittedAt": "…", "dischargedAt": "…", "wards": ["Female Medical Ward"],
+  "responsibleDoctor": "Dr Demo Doctor", "outcome": "routine", "summary": { "…": "as signed" },
+  "diagnoses": [ { "display": "Pneumonia, unspecified", "code": "CA40.Z", "codeSystem": "ICD-11" } ],
+  "medicinesOnDischarge": [ { "medicationDisplay": "Amoxicillin", "strength": "500 mg", "doseForm": "capsule",
+    "dose": "1 capsule", "frequency": "three times a day", "duration": "5 days" } ],
+  "signedBy": "Dr Demo Doctor", "signedAt": "…", "printedAt": "…" }
+```
+
+- The print shows the Health ID's last 4 characters only (`healthId` is always `null` here). The phone shows as the facility enters it, formatted on screen (owner decision Q183 B, 25 Nov 2026).
+- Each print writes one audit row. The patient sees the signed summary in their records as any completed visit's signed note.
+
+**20. `POST /ehr/admissions/:admissionId/wristband`**: body `{ "reprintReason"? }`. Needs `ehr.wristband.print`. From `admitted` or `discharge_ready`.
+
+```json
+{ "fullName": "Ada Wardone", "unknownLabel": null, "sex": "female", "dateOfBirth": "1972-05-14",
+  "ageEstimated": false, "healthId": "HID-…", "admissionNumber": "A-2026-000123", "facilityName": "Demo Hospital",
+  "wardName": "Female Medical Ward", "allergyAlert": true, "barcode": "A-2026-000123", "pairCode": null,
+  "printNumber": 1, "printedAt": "…" }
+```
+
+- The first print needs no reason. A reprint needs `reprintReason`: `lost`, `damaged`, `details_changed` or `moved_ward` (400 `REPRINT_REASON_REQUIRED`).
+- `allergyAlert`: true when the patient has any active allergy record (read by the function; the names are not returned). The band says "Allergy: check the chart" (Q-ADT-16).
+- `healthId` is in this answer only, for printing, as ID-7's band. It is never logged or written to an audit row.
+- `pairCode`: for a mother with a linked newborn admission, and for the newborn (route 21).
+
+**21. `POST /ehr/admissions/:admissionId/newborn-band`**: the newborn band for an admission with `motherAdmissionId`. Body `{ "reprintReason"? }`. Needs `ehr.wristband.print`.
+- Answer as route 20, plus `"motherName": "Ada Wardone"`, `"motherAdmissionNumber": "A-2026-000123"`, `"pairCode": "A-2026-000123 / B1"` and the baby's `bornAt` when Maternity records it (else `null`).
+- The mother's band is reprinted with the same pair code (reason `details_changed`).
+
+**22. Death record (switched off, owner decision Q188 A, 25 Nov 2026).**
+- `POST /ehr/admissions/:admissionId/death-record`: needs `ehr.death-record.write`, which **no role holds** in this release, and chart write access; only for an admission discharged with outcome `died`.
+- Body (the WHO international form of the medical certificate of cause of death):
+
+```json
+{ "diedAt": "…", "causes": [ { "line": "a", "text": "…", "interval": "2 days", "icd11Code": null },
+    { "line": "b", "text": "…", "interval": "1 week", "icd11Code": null } ],
+  "otherConditions": "…", "manner": "natural", "autopsy": "not_requested", "pregnancyStatus": "not_applicable",
+  "placeOfDeath": "ward", "signature": "SIGN" }
+```
+
+- `causes`: lines `a` (required) to `d`, each 1-300 characters with an optional interval (1-40) and optional ICD-11 code (when ORD-9 is live). `manner`: `natural`, `accident`, `intentional_self_harm`, `assault`, `pending_investigation` or `unknown`. `autopsy`: `not_requested`, `requested` or `done`.
+- `GET …/death-record` reads it (chart read access). `POST …/death-record/amend` (reason 8-500) keeps every version.
+- `GET …/death-record/print?form=certificate|registration-notice`: the certificate, and the notice the family takes to the death registrar (National Population Commission). Each print is audited.
+- Until the clinical lead and legal sign and the code is granted by a later signed file, these routes answer 503 `DEATH_RECORD_NOT_AVAILABLE`. The outcome `died` and its time are still recorded by route 16.
+- A death record never changes the patient's Health ID record or account, and sends no notice. A deceased mark is a separate later item with the DPO.
+
+**23. `POST /identity/ward-stay-access`** (identity-api; switched off, owner decision Q156 A, 25 Nov 2026): body `{ "admissionId" }`. "Open chart for this stay".
+- The caller must be an active nurse, clinician or doctor membership here, on the ward-team for this admission: on the staff list of the ward the patient is in, the responsible doctor, or (with NUR-1) assigned to the patient on the current clinical shift.
+- The admission must be `admitted` or `discharge_ready`. The patient must have no active deny directive for this facility.
+- It gives a write grant for direct care (`authorization_method 'ward_stay'`) tied to the admission. The grant ends at discharge, or 2 hours after the patient leaves a ward the member is on the staff list of (Q-ADT-15). It reuses this member's active one.
+- The patient sees it in their access history ("Opened by the ward team during your stay") and can end it.
+- While switched off it answers 503 `WARD_STAY_ACCESS_NOT_AVAILABLE`, and the screen offers the usual "Open this facility's patient" (0131) instead.
+
+#### Charges (Q189, needs BILL-1)
+
+These change BILL-1's routes and need its migrations (0162-0167). Codes are BILL-1's.
+
+- **The admission bill.** When the facility uses billing (has payment settings), the admission request opens one bill for the stay (`source: "admission"`, `admissionId`), one bill per encounter (owner decision Q173 A, 25 Nov 2026). Lab and pharmacy lines of the stay's encounter go on it (BILL-1's automatic lines find it). If the facility's `allowDeferredFor` lists `inpatient`, the bill is deferred by the system with reason `inpatient` when it is made (BILL-1's `DEFERRAL_REASON_NOT_AVAILABLE` no longer applies once ADT-1 ships).
+- **Ward charges: `PUT /commercial/ward-charges/:wardId`** (`billing.catalogue.manage`): body `{ "expectedVersion", "bedDayItemId": "uuid or null", "admissionFeeItemId": "uuid or null" }`, each an active price-list item of kind `other`. `GET /commercial/ward-charges` lists them.
+- **Bed-days.** One line per bed-day (Q-ADT-13), `origin: "bed_day"`, name "Bed-day: <ward> (<Lagos date>)", at the ward's bed-day price on that day. Lines are added by ehr-api's existing sweep every hour, and on every read of the admission bill and at discharge, so they never wait. A bed-day is never added twice (one per admission and day). A ward with no bed-day item adds nothing.
+- **Admission fee.** One line, `origin: "admission"`, when the bed is given, if the ward has an admission-fee item.
+- **Deposits.** `POST /commercial/bills/:billId/payments` gains `"kind": "deposit"` for an admission bill while the stay is open. A deposit may be more than what is due today; the bill then shows `creditKobo`. At the end, a credit is paid back by a void with reason "Refund: deposit not used" (BILL-1's manager rule, owner decision Q176 A, 25 Nov 2026). Nothing waits for a deposit (Q-ADT-14).
+- **Interim bill: `GET /commercial/bills/:billId/interim-statement`** (`billing.bill.read`): the bill to date, with bed-days counted up to now, deposits and what is due, numbered `I-2026-000045`, for printing. Each print is audited.
+- **Discharged with a balance.** The admission bill stays open after discharge and shows on BILL-1's outstanding list as "Discharged, balance due". It is never a reason to keep the patient.
+- With the facility's billing off (no payment settings), none of this happens and the admission works the same.
+
+### Names on ward lists
+
+The bed board (route 7), the admissions list (route 11), "waiting for a bed", and NUR-1's medicine round and task lists name patients.
+
+- **After the DPO check** (owner decision Q190 A, 25 Nov 2026): every member with `ehr.ward.read` at the facility sees every name, as the owner allowed for the waiting list (EHR-C7).
+- **Until then**, a member sees a name only for patients whose chart they can read now (an active grant). For other patients the card shows initials, sex and age (`nameHidden: true`). The ward still works: beds, statuses, days and flags all show.
+- The switch is a database row (see 0170), changed only by a signed migration after the DPO's check. It is not a service flag.
+- A patient with an active deny directive for this facility always shows the initials only, and `chartBlocked: true`.
+- Screens show this line on every ward list: "Do not show this list on a screen patients or visitors can see."
+
+### Errors
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | "Check the highlighted fields." |
+| 400 | `ADMISSION_SOURCE_INVALID` | "Choose where this admission comes from: a visit, the emergency board, the waiting list, or direct." |
+| 400 | `RESPONSIBLE_DOCTOR_INVALID` | "Choose a doctor or clinician who works at this facility." |
+| 400 | `WARD_STAFF_INVALID` | "Choose nurses, clinicians and doctors who work at this facility." |
+| 400 | `MOTHER_ADMISSION_INVALID` | "Choose the mother's current admission at this facility." |
+| 400 | `DISCHARGE_SUMMARY_REQUIRED` | "Write the discharge summary before discharging the patient." |
+| 400 | `DIED_AT_REQUIRED` | "Enter the time of death." |
+| 400 | `DISCHARGE_TIME_INVALID` | "The discharge time must be after admission, and not in the future." |
+| 400 | `SIGNATURE_REQUIRED` | "Type SIGN to sign." |
+| 400 | `REPRINT_REASON_REQUIRED` | "Say why the band is being printed again." |
+| 400 | `PURPOSE_OF_USE_REQUIRED`, `IDEMPOTENCY_KEY_REQUIRED` | as EHR-C7 and ID-6 |
+| 403 | `INPATIENT_NOT_ALLOWED` | "Only nurses, clinicians and doctors of this facility can use the wards." |
+| 403 | `WARD_SETUP_NOT_ALLOWED` | "Only the facility's admins can set up wards and beds." |
+| 403 | `ADMISSION_DECIDE_NOT_ALLOWED` | "Only doctors and clinicians can admit, change or discharge a patient." |
+| 403 | `BED_ALLOCATE_NOT_ALLOWED` | "Only nurses, clinicians and doctors can give or change a bed." |
+| 403 | `ADMISSION_CHART_ACCESS_REQUIRED` | "Open this patient's record first, then try again." |
+| 403 | `WARD_STAY_ACCESS_REFUSED` | "You are not on the ward team for this patient. Open the record the usual way." |
+| 404 | `WARD_NOT_FOUND`, `BED_NOT_FOUND`, `ADMISSION_NOT_FOUND` | "This ward, bed or admission is not at this facility." |
+| 409 | `WARD_NAME_TAKEN`, `BED_NAME_TAKEN` | "This name is already used. Choose another." |
+| 409 | `WARD_NOT_EMPTY` | "Move every patient out of this ward first." |
+| 409 | `BED_OCCUPIED` | "A patient is in this bed. Move or discharge them first." |
+| 409 | `BED_NOT_AVAILABLE` | "This bed is not free. Choose another bed or overflow space." |
+| 409 | `WARD_SEX_MISMATCH` | "This ward takes only men (or only women). Confirm to admit this patient here." |
+| 409 | `ADMISSION_ALREADY_OPEN` | "This patient is already admitted or waiting for a bed here." |
+| 409 | `ADMISSION_STATE_INVALID` | "This admission has moved on. Reload it to see where it is now." |
+| 409 | `DISCHARGE_NOT_PREPARED` | "Prepare the discharge first." |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | as ID-6 |
+| 412 | `ADMISSION_VERSION_CONFLICT`, `WARD_VERSION_CONFLICT` | "Someone else changed this. Reload it and try again." |
+| 503 | `INPATIENT_NOT_AVAILABLE` | "Inpatient care is not switched on yet." (flag off, or a database without 0170) |
+| 503 | `DEATH_RECORD_NOT_AVAILABLE` | "The death certificate is not switched on yet. The outcome and time of death are recorded." |
+| 503 | `WARD_STAY_ACCESS_NOT_AVAILABLE` | "Ward-team access is not switched on yet. Open the record the usual way." |
+
+Staff screens show the message and never the word "permission".
+
+### Roles and access codes
+
+Seven new codes. Every ADT function also checks an active, unheld membership and the facility's seal (a sealed demo or QA facility sees only its own sealed patients).
+
+| Backend role | `ehr.ward.read` | `ehr.admission.read` | `ehr.bed.allocate` | `ehr.wristband.print` | `ehr.admission.decide` | `ehr.ward.manage` | `ehr.death-record.write` | Design role |
+|---|---|---|---|---|---|---|---|---|
+| `nurse` | yes | yes | yes | yes | no | no | no | Nurse (view, create, edit, assign) |
+| `clinician` | yes | yes | yes | yes | yes | no | no | Doctor's clinical grant |
+| `doctor` | yes | yes | yes | yes | yes | no | no (later: yes, when switched on) | Doctor, Consultant, Medical Director (also sign) |
+| `admin`, `org_admin` | no | no | no | no | no | yes | no | Hospital Admin and Owner (ward configuration) |
+| `receptionist`, `lab`, `pharmacist`, `cashier`, `billing_officer`, others | no | no | no | no | no | no | no | — |
+
+- Sixteen role rows: four for nurses, five each for clinicians and doctors, one each for admins and org admins.
+- `ehr.death-record.write` is created with no holder. A later signed file gives it to doctors once the clinical lead and legal sign (Q188).
+- When the midwife role ships (owner decision Q155 A, 25 Nov 2026), its own file gives it the nurse's four codes.
+- SX-1 (`services/identity-api/src/auth/facility-modules.ts`) gains two areas: `inpatient`, "Inpatient and wards" (shown with `ehr.ward.read`, used in full with `ehr.admission.read` and `ehr.bed.allocate`), and `wardSetup`, "Ward configuration" (`ehr.ward.manage`).
+
+### Database design
+
+Four migrations, **0170 to 0173, provisional** (numbers are given at merge, after the files booked before them: 0152-0153 ORD-9, 0154 ORD-12, APPT-1's 0160-0161, BILL-1's 0162-0167, ED-1's 0168-0169). Each needs the owner's verbatim signature, Rahman's final database check and an independent agent review.
+
+Every file follows 0147, 0150 and 0151:
+- the whole file is one `do` block, so nothing applies if any part raises;
+- locks are taken first, NOWAIT, tried 50 times 100 ms apart. If this transaction already holds an earlier file's blocking locks, there is one try and no sleep. A busy refusal raises 55P03 beginning with the file's own number ("0170: ", "0171: ", "0172: " or "0173: ") and ending "nothing was applied; run the release again at a quieter time";
+- preconditions are catalog reads that raise 55000 and apply nothing: markers of every earlier file it needs, and the md5 of each function body it calls or replaces;
+- running the file again on a database where it is applied raises "0170: already applied" (and so on) and changes nothing; any half state raises "0170: the schema is not in the reviewed state";
+- post-checks compare the tables, constraints, the role rows and the pinned bodies afterwards;
+- audit rows are written as the system actor;
+- each file updates `runtime-grants.sql` and the declaration in `config/production-schema-compatibility.json` (which stays unsigned until the owner signs).
+
+New tables have row-level security enabled and no policy or privilege for any runtime role. Only SECURITY DEFINER functions read or write them (`search_path = pg_catalog, pg_temp`, owned like 0135's, EXECUTE for `hid_ehr_runtime` only, or `hid_identity_runtime` for route 23). Each function checks the caller: an active, unheld membership; the access code; the purpose; and the facility's seal. Clinical steps also call `ehr.context_allows(patient, facility, 'write_records')` (or `'read_records'`) as the caller.
+
+**0170 Inpatient wards and beds.** Needs 0114 and 0135.
+- `ehr.wards`: facility, organization, `name` (2-80, unique per facility among active, any case), `ward_type` (`general`, `paediatric`, `maternity`, `icu`, `private`, `other`), `takes` (`any`, `male`, `female`), `active`, created and updated by, `row_version`.
+- `ehr.beds`: ward, facility, `name` (1-40, unique per ward among active, any case), `kind` (`bed`, `overflow`), `status` (`available`, `occupied`, `cleaning`, `maintenance`), `status_since`, `active`, `row_version`. CHECK: an inactive bed is not occupied.
+- `ehr.bed_status_events`: every status change with the note (cleaning record, reason or review, never patient content), actor and time. A trigger refuses any update or delete.
+- `ehr.ward_staff`: ward, membership, added by and when. Unique (ward, membership).
+- `ehr.ward_events`: every ward and bed setup change, with the `Idempotency-Key` and the request's SHA-256 (unique per membership and key). Append-only.
+- `ehr.inpatient_switches`: one row per switch, `key` (`board_names_for_ward_staff`, `ward_stay_access`, `death_record`), `enabled` (all `false`), `changed_by_migration`. No runtime role may read or write it; only the functions read it. A later signed migration turns a switch on after its review.
+- Functions: `ehr.ward_list`, `ehr.ward_create`, `ehr.ward_update`, `ehr.bed_create`, `ehr.bed_update`, `ehr.ward_staff_set`, `ehr.bed_set_status`, `ehr.bed_board`, `ehr.inpatient_census`, and `ehr.ward_patient_name_visible(member, patient)` (no role may execute it; it reads the switch, the deny directives and `ehr.context_allows`).
+- Without 0173, no role holds an inpatient code, so every function refuses. This is the database half of "built but switched off".
+- Locks (expected; measured with `pg_locks` before commit and pinned when the file is written): SHARE ROW EXCLUSIVE on `identity.facilities`, `identity.organizations` and `identity.staff_facility_memberships` (foreign keys of new, empty tables); ACCESS SHARE on the consent directive tables and the access-code tables (body checks); ROW EXCLUSIVE on `audit.events`.
+
+**0171 Admissions, transfers, discharge, wristbands and the death record.** Needs 0170, 0135, 0145 and ED-1's 0168.
+- `ehr.admissions`:
+  - who and where: facility, organization, patient, `encounter_id` (the inpatient encounter; unique), `admission_number` (`A-YYYY-nnnnnn`, unique per facility, from a per-facility, per-year counter taken `FOR UPDATE`);
+  - source: `source` (`ed`, `consultation`, `waiting_list`, `direct`), `ed_attendance_id` (references `ehr.ed_attendances`), `from_encounter_id`, `visit_queue_entry_id`, `mother_admission_id` (references `ehr.admissions`);
+  - request: `reason` (1-300), `care_team` (1-80), `responsible_membership_id`, `requested_ward_id`, `requested_at`, `requested_by_membership_id`;
+  - stay: `status` (`requested`, `admitted`, `discharge_ready`, `discharged`, `cancelled`), `admitted_at`, `admitted_by_membership_id`, `ward_id`, `bed_id`, `expected_discharge_on`, `follow_up_plan` (1-2000), `prepared_at`, `prepared_by_membership_id`;
+  - end: `outcome` (`routine`, `dama`, `referred_out`, `absconded`, `died`), `discharged_at`, `discharged_by_membership_id`, `summary_note_id` (references `ehr.clinical_notes`), `referred_to_facility_name` (2-120), `died_at`, `cancelled_at`, `cancel_reason` (8-500);
+  - `updated_by_membership_id`, `updated_at`, `row_version`;
+  - CHECKs: a bed and ward exactly while `admitted` or `discharge_ready`; an outcome and `discharged_at` exactly when `discharged`; `died_at` exactly for `died`; a facility name exactly for `referred_out`; the source columns match `source`;
+  - indexes: one open admission per (facility, patient) (unique, where status in requested, admitted, discharge_ready); one open admission per bed (unique on `bed_id` where admitted or discharge_ready), which is what makes "one patient per bed" hold under any race; (facility, status, ward); (patient); (facility, discharged_at) where discharged.
+- `ehr.admission_movements`: one row per request, admit, transfer, prepare, discharge, cancel, change and band print, with from and to ward and bed, the actor, the time, the `Idempotency-Key` with the request's SHA-256, and `handover` (1-2000, transfer only). Append-only (a trigger refuses update and delete).
+- `ehr.admission_discharge_medicines`: admission, prescription (on the stay's encounter). Replaced as a set by "Prepare discharge".
+- `ehr.wristband_prints`: admission, kind (`inpatient`, `newborn`), print number, reprint reason, `pair_code`, actor and time. Append-only. Never holds a Health ID.
+- `ehr.death_records` and `ehr.death_record_versions`: the admission (outcome `died`), the certificate content as above, the certifier, signed at, and every amendment with its reason. Append-only versions. Built and empty: no role holds `ehr.death-record.write`, and the `death_record` switch is off.
+- ED-1 link: `ehr.ed_attendances`' `closed_via` CHECK gains `'admission'`, and its events' kind CHECK gains `'admitted'`. The precondition accepts exactly 0168's reviewed definitions, and keeps every value it finds.
+- Functions:
+  - `ehr.admission_request`, `ehr.admission_list`, `ehr.admission_read`, `ehr.admission_admit`, `ehr.admission_transfer`, `ehr.admission_handover_read`, `ehr.admission_prepare_discharge`, `ehr.admission_discharge`, `ehr.admission_cancel`, `ehr.admission_update`, `ehr.discharge_summary_print`, `ehr.wristband_print`, `ehr.newborn_band_print`;
+  - `ehr.death_record_write`, `ehr.death_record_read`, `ehr.death_record_amend`, `ehr.death_record_print` (each refuses while the switch is off);
+  - `ehr.admission_cards`, which no role may execute: the card fields, 0145's record kind and label, and the name and reason hiding;
+  - `ehr.admission_notice_recipients(admission)`, which no role may execute, for ORD-11 (Q194): the responsible doctor. NUR-1's 0176 replaces it to add the nurses on shift and the on-call doctor.
+- `ehr.admission_request` makes the encounter with `encounter_type 'inpatient'` and status `planned` as the function owner, after checking `ehr.context_allows(patient, facility, 'write_records')` for the caller (Q-ADT-9). `ehr.admission_admit` sets it to `in_progress`; `ehr.admission_discharge` to `completed` with `ended_at`; `ehr.admission_cancel` to `cancelled`. Each change writes the encounter's version row as EHR-C1 does.
+- `ehr.admission_discharge` writes the discharge summary as a clinical note and its first revision (note type "Discharge summary"), signed, as EHR-C5 writes a consultation note. It reads no bill.
+- Every write locks the admission, then the beds involved in id order, then the ED record and the waiting-list row, `FOR UPDATE`, always in that order. It checks `row_version` and raises the versions of the rows it changes.
+- Locks: SHARE ROW EXCLUSIVE on `identity.patients`, `identity.facilities`, `identity.staff_facility_memberships`, `ehr.encounters`, `ehr.clinical_notes`, `ehr.prescriptions`, `ehr.visit_queue`, `ehr.wards` and `ehr.beds` (foreign keys of new, empty tables); ACCESS EXCLUSIVE on `ehr.ed_attendances` and `ehr.ed_attendance_events` (the CHECK swaps; both tables are small, so this takes milliseconds); ACCESS SHARE on `identity.unknown_patients`, `identity.consent_grants`, the consent directive tables, `ehr.recorded_allergies` (0117) and the access-code tables (body checks); ROW EXCLUSIVE on `audit.events`.
+- Old images on this schema: nothing calls the new functions. ED-1's image never writes `closed_via = 'admission'`; it shows an ED record closed that way as closed.
+
+**0172 Admission charges** (Q189). Needs 0171 and BILL-1's 0162-0167. If BILL-1 is not in the same cut, this file waits and takes a later number; 0173 does not need it.
+- `commercial.bills`: `source` CHECK gains `'admission'`; new column `admission_id` (references `ehr.admissions`, unique where not void); `bills_source_ck` replaced so that `admission` has `admission_id` and no waiting-list row; new column `credit_kobo` (0 or more) kept by the functions.
+- `commercial.bill_lines`: `origin` CHECK gains `'bed_day'` and `'admission'`.
+- `commercial.payments`: new column `kind` (`payment` default, `deposit`), CHECK that a deposit is only on an admission bill.
+- `commercial.number_counters`: `kind` CHECK gains `'interim'`.
+- `commercial.ward_charge_items`: ward, bed-day item, admission-fee item, version.
+- `commercial.bed_day_charges`: admission, Lagos `census_day`, ward, bill line. Unique (admission, census_day): a bed-day is never added twice.
+- Functions: `commercial.admission_bill_open` (called by `ehr.admission_request` through a hook below), `commercial.accrue_bed_days(admission)` and `commercial.accrue_bed_days_due(facility)` (the hourly sweep), `commercial.ward_charges_set`, `commercial.ward_charges_list`, `commercial.interim_statement`.
+- Replaced, md5-pinned before and after: `commercial.bill_for_work` (0164), so that work on an inpatient encounter finds the admission bill; BILL-1's payment-recording function, for deposits and credit.
+- Hooks, as triggers (not edits of 0171's functions): AFTER INSERT on `ehr.admissions` opens the admission bill; AFTER UPDATE OF `status` on `ehr.admissions` adds the admission fee when the bed is given, and runs `accrue_bed_days` at discharge. Each trigger function returns at once when the facility has no payment settings row.
+- **No hook, function or CHECK reads a bill to allow or refuse an admission step.** A post-check scans the bodies of every `ehr.admission_*` function for any reference to the `commercial` schema and raises if it finds one.
+- Locks: ACCESS EXCLUSIVE on `commercial.bills`, `commercial.bill_lines`, `commercial.payments` and `commercial.number_counters` (CHECK swaps and column adds; small tables); SHARE ROW EXCLUSIVE on `ehr.admissions`, `ehr.wards` and `commercial.catalogue_items` (foreign keys, triggers); ROW EXCLUSIVE on `audit.events`.
+
+**0173 Inpatient access codes, ward-team access (switched off) and sealed test wards.** Needs 0170 and 0171 (not 0172).
+- The access-code tables gain the seven codes, and the sixteen role rows of the table above. One audit row per row added (`auth.role-permission.add`, reason "ADT-1 Inpatient (Release D, owner decisions Q185 A and Q191 A)").
+- The post-check prints how many real (not sealed) staff gain each code. `services/identity-api/test/role-matrix.json` and the SX-1 areas change in the same pull request.
+- **Ward-team access (Q156), built but off:**
+  - `identity.consent_grants`: `authorization_method` CHECK gains `'ward_stay'`; a new shape CHECK holds such a grant to direct care, write records, not break-glass, no access request, no patient as grantor, and an `admission_id` (new nullable column) that is set exactly for `ward_stay`;
+  - `identity.open_ward_stay(admission uuid)` (SECURITY DEFINER, EXECUTE for `hid_identity_runtime`) does route 23's checks, refuses while `ehr.inpatient_switches.ward_stay_access` is false, and writes one audit row per call;
+  - `ehr.admission_discharge` and `ehr.admission_transfer` end the admission's ward-stay grants through `identity.end_ward_stay_grants(admission, reason)`, which no runtime role may execute;
+  - replaced, md5-pinned before and after, as 0131 did: `identity.patient_self_access_history` (basis `ward-stay`), `identity.revoke_my_consent_grant` (accepts it) and `identity.note_record_access` (access kind `ward_stay`, "Opened by the ward team during your stay"), with the notice table's CHECK;
+  - 0104's records-processing cover never counts a ward-stay grant (no access request), as for own-facility grants.
+  - Rahman reviews this part as an identity and consent change, and the DPO reviews it, before 0173 is signed. If they do not agree in time, 0173 is signed without this part and it moves to a later file.
+- **Sealed test wards** (only where 0123 installed QA Hospital, and at the four sealed demo facilities, as 0151): one general ward "QA Ward A" (8 beds, 2 overflow spaces), one ICU ward "QA ICU" (4 beds), all fictional, with the sealed QA nurse and doctor logins on their staff lists. No patient is admitted by the file. Sealed QA unknown records can be admitted in tests (owner decision Q163 A, 25 Nov 2026).
+- Locks: SHARE ROW EXCLUSIVE on the role-row table; ROW EXCLUSIVE on the code table and `audit.events`; ROW SHARE on `auth.roles`; ACCESS EXCLUSIVE on `identity.consent_grants` and `identity.record_access_notices` (CHECK swaps and the column add, one validating scan each); ROW EXCLUSIVE on `ehr.wards`, `ehr.beds` and `ehr.ward_staff` (sealed step).
+- Old images on this schema: today's identity image never writes `ward_stay` grants, and reads them as "other" in the access history until the new image ships. That is harmless, because the switch is off and no such grant exists.
+
+### Audit
+
+Every route writes its rows in the request's transaction, refusals included, as 0135 does.
+
+- **Staff actions:** `ehr.ward.create`, `.update`, `ehr.bed.create`, `.update`, `.status`, `ehr.ward.staff-set`; `ehr.admission.request` (with the source), `.read`, `.admit`, `.transfer` (whether a handover was given), `.handover-read`, `.prepare-discharge`, `.discharge` (with the outcome), `.cancel`, `.update`; `ehr.discharge-summary.print`; `ehr.wristband.print` and `ehr.newborn-band.print` (print number and reprint reason); `ehr.death-record.write`, `.read`, `.amend`, `.print` (once switched on); `ehr.admission.sex-mismatch-confirmed`.
+- **Lists:** `ehr.bed-board` and `ehr.admission.list`: one collection row (the count, `hasMore`, the patient ids shown), plus one `.shown` row per patient on every read, with whether the name was shown. The census writes one row with no patient.
+- **Ward-team access:** `identity.ward-stay.open` (success or refusal kind), and `identity.ward-stay.end` (discharge, transfer, patient, or expiry) as the system actor.
+- **Charges:** BILL-1's `commercial.bill.*` rows, plus `commercial.bed-day.add`, `commercial.ward-charges.set`, `commercial.interim-statement.print`.
+- Rows hold ids, outcomes, refusal kinds, the source and the outcome. **No row ever holds a name, date of birth, Health ID, admission reason, handover, summary, cause of death, referral facility name or reason text.**
+
+### Notifications
+
+- None to the patient on admission, transfer or discharge: the patient is on the ward. The signed discharge summary appears in their records as any completed visit's signed note.
+- `died` and the death record send nothing to anyone. Break-glass keeps its own emergency-contact alert (0084).
+- A ward-stay opening is in the patient's access history and gives the usual "Your records were opened" notice (0131's pattern), once switched on.
+- **Staff notices come with ORD-11's staff inbox** (owner decision Q151 A, 25 Nov 2026). When it ships: a new admission request goes to the requested ward's nurse in charge for the shift (NUR-1), and critical lab results and urgent imaging findings for an admitted patient also go to the people `ehr.admission_notice_recipients` names: the responsible doctor, the nurses assigned to the patient this shift and the ward's on-call doctor (owner decision Q194 A, 25 Nov 2026). This changes ORD-11's "only the person who placed the order" rule for admitted patients only. Until then the board's refresh shows new requests.
+
+### Website screens (Lekan; mapped to Akos's existing sample screens)
+
+| Akos sample (health `apps/patient-web/src/ehr-blue/`) | Live screen | Calls |
+|---|---|---|
+| `clinical/sample/definitions.ts:152-161`, `frame/sample/catalog.ts:444-490` (Inpatient / Wards list, create with Admission reason and Assigned care team) | "Inpatient / Wards": open admissions (waiting for a bed, admitted, discharge ready) and today's discharges, with the record page. "New admission" drawer: patient (the open patient, or from a visit, the ED board or the waiting list), Admission reason, Assigned care team, Responsible doctor, Ward wanted | routes 10, 11, 12, 18 |
+| `definitions.ts:91` ("Admit and allocate bed", ref Available bed, `assign`) | "Admit and allocate bed" drawer: the free beds and overflow spaces of the wanted ward first, then the others; the sex check asks to confirm; then offers "Print wristband" | routes 7, 13, 20 |
+| `definitions.ts:92` ("Transfer bed": Destination bed, Nursing handover) | "Transfer bed" drawer: any free bed, ICU included; Nursing handover (shown only when the chart is open) | route 14 |
+| `definitions.ts:93` ("Prepare discharge": Follow-up plan, `sign`) | "Prepare discharge" drawer: Follow-up plan, Expected discharge date, Medicines on discharge (from the stay's prescriptions) | route 15 |
+| `definitions.ts:94` ("Discharge patient": Discharge summary, `sign`) and `CONFIRMED_ACTIONS` / `TYPED_WORD_ACTIONS` (`definitions.ts`, "sign") | "Discharge patient" drawer: the five outcomes; the summary fields; Time of death for "died"; facility name for "referred out"; type SIGN. Then "Print discharge summary" | routes 16, 19 |
+| `definitions.ts:97-100` (Continue care to Nursing tasks, carrying the admission), `frame/sample/SampleWorkspace.tsx:59` | The admission page links to the patient's observation chart, medicine round, fluid balance and tasks for this stay (NUR-1) | NUR-1 |
+| `definitions.ts:162-173`, `catalog.ts:491-524` (Wards & Beds: Bed name, Ward; Complete bed turnover, Place in maintenance, Release from maintenance) | "Wards & Beds": the bed board per ward (bed grid with status colours, patient cards, waiting for a bed), the census tab, and the three bed actions | routes 7, 8, 9 |
+| `definitions.ts:270-277`, `catalog.ts:1247-1255` (Ward configuration: Ward name) | "Ward configuration" (Settings): wards with type (ICU included), who the ward takes, beds and overflow spaces, ward staff list, active; with billing on, the bed-day and admission-fee items | routes 1-6, ward charges |
+| `definitions.ts:211-220`, `catalog.ts:692-700,1234-1236` (ICU: ICU admission reason, Care team; Inpatient's actions) | "ICU": the admissions list and the bed board for ICU wards (`wardType=icu`), with the same drawers, plus NUR-1's ICU chart | routes 7, 11; NUR-1 |
+| `clinical/sample/seed.ts:226-239`, `frame/sample/store.ts:74-77` (fictional admissions, beds, wards and ICU reasons) | Removed from the live pages. Sealed demo and QA facilities show their sealed test wards from the backend | — |
+| No sample | Census (in Wards & Beds), discharge summary print, wristband and newborn band print (the ID-7 band print pattern), death record and its two prints (switched off), interim bill print (in Payments) | routes 8, 19-22; charges |
+| `clinical/pages.ts:29-30,34,45`, `frame/pages.ts:84-85,90,120`, `frame/BlueFrame.tsx:49-51` | Navigation under "Wards & units": Inpatient / Wards and Wards & Beds (live, `ehr.ward.read`), ICU (live, shown when the facility has an active ICU ward); Ward configuration under Settings (`ehr.ward.manage`) | — |
+| `frame/sampleAccess.ts:14-18,26,49`, `onboarding/roleTemplates.ts:14-17,24,44` | Live grants from the role table above | — |
+| `home/RoleDashboard.tsx:23,26` | Nurse home: "Waiting for a bed", "Discharge ready" and free beds on my wards; admin home: Ward configuration | routes 1, 7, 11 |
+| ED-1's board card "Waiting for admission" (health ED pages) | "Admit" opens "New admission" with the ED record linked (Q-ADT-18) | route 10 |
+
+Rules for the screens:
+- Show Lagos time, "18 Nov 2026" dates and the 24-hour clock whatever the device's zone (owner decisions Q181 A and Q182 A, 25 Nov 2026). Show "NIN Verified" / "NIN Not Verified" where a card shows NIN status.
+- Never put a Health ID in a URL. Admission, ward and bed URLs carry UUIDs only. The wristband's Health ID is printed and never shown in the URL or kept in the page's state after printing.
+- Names on ward lists follow "Names on ward lists". Every ward list says: "Do not show this list on a screen patients or visitors can see."
+- An unknown patient shows "Unknown patient U-0007" and "Estimated age".
+- "Print discharge summary" and the band prints use the browser's print, with the 24-hour time and full dates.
+- The `packages/contracts/src/registry.ts` entries go from `proposed` to `served` only when this ships.
+- **Before this ships:** keep the samples at demo facilities only, with their banner, and send nothing.
+
+### Tests
+
+- **Database** (throwaway local PostgreSQL clusters, fictional patients only), in `services/ehr-api/test/database/inpatient-adt.integration.sql` and `services/ehr-api/src/ehr/inpatient/inpatient.pg.spec.ts`:
+  - ward and bed setup, names unique, a ward with a patient cannot change type or close;
+  - one patient per bed: two sessions admitting two patients to the same bed at once, exactly one wins (`BED_NOT_AVAILABLE`); one open admission per patient;
+  - each source (consultation, ED, waiting list, direct): the ED record closes with `closed_via = 'admission'` and its waiting-list row finishes; cancel sends the ED record back to "Waiting for admission";
+  - the encounter's states follow the admission (planned, in progress, completed, cancelled);
+  - transfer into and out of ICU; the old bed goes to cleaning; handover text readable only with chart access;
+  - each outcome, the prepare-first rule, `diedAt`, `dischargedAt` limits; the summary written as a signed note;
+  - **discharge with an unpaid admission bill succeeds**, and discharge works the same with billing off;
+  - names hidden while the switch is off, shown when the member has a grant, never shown with a deny directive; reason hidden from members without `ehr.admission.read`;
+  - wristband and newborn band content; reprint needs a reason; no Health ID in any audit or print row;
+  - death record routes refuse while the switch is off and no role holds the code;
+  - ward-stay access refuses while off; with the switch turned on in the test cluster only: granted to the ward team, refused to others, ended at discharge and 2 hours after a transfer, revocable by the patient, in the access history;
+  - charges (with BILL-1 applied): the admission bill, bed-days at midnight (Lagos) with one per day under concurrent sweeps, a stay with no midnight, the ward at midnight sets the rate, admission fee, deposit and credit, interim statement numbers, outstanding after discharge; nothing at a facility with no payment settings;
+  - version conflicts, idempotent replays, every refusal and its audit row; no name, Health ID, reason, handover or summary in any audit row; sealed demo and QA isolation; a member of another facility.
+- **Migration:** each file with a lock held by another session gives the "0170: … busy" (or 0171, 0172, 0173) refusal and nothing applied; a second run gives "already applied"; a half state is refused; a changed pinned body is refused; 0171's ED CHECK swap from 0168's definitions only; 0172 refused without BILL-1; post-checks pass, including 0172's scan that no admission function reads the `commercial` schema.
+- **Release C's live verifiers:** `scripts/tuf-staging-migration-rehearsal.mjs` with `HID_REHEARSAL_LIVE_TREE` set to a `git archive` of the live commit 95fa1e52 and `HID_REHEARSAL_LIVE_POINTS` set to the four files' final numbers. All twelve live runtime verifiers must pass after each file.
+- **New runtime verifier:** `services/ehr-api/scripts/verify-inpatient-adt-runtime.mjs` (ward setup, request, admit, transfer, discharge by each outcome, prints, census, charges when BILL-1 is present), added to the rehearsal.
+- **Services:** controller and service unit specs; the flag off answering `INPATIENT_NOT_AVAILABLE`; `role-matrix.json`; the SX-1 area spec; the hourly bed-day sweep.
+- **Website:** list, bed board, census, every drawer, the prints, and the ICU page, with the device zone set away from Lagos; names hidden and shown; no Health ID in any URL; no "permission" in staff text.
+
+### Depends on
+
+- 0004 (encounters, notes, prescriptions), EHR-C1 and EHR-C5 (visits and signed notes), EHR-C7 / 0135 (waiting list), 0131 (own-facility opening, the way into the chart until Q156 is on), ID-7 / 0145 (unknown records), SX-9 (names), 0114 (department codes).
+- ED-1 (0168): ADT adopts its admission requests (0171 changes two of its CHECKs).
+- BILL-1 (0162-0167): only for 0172.
+- Facility setup and department switches (Q149, gap map F2): when it ships, the facility's `inpatient` switch must be on as well as the service flag.
+- ORD-11 and the staff inbox (Q151, Q194): use `ehr.admission_notice_recipients`.
+- ID-8 (merge), when built: a merge must move an open admission and its bills to the target record.
+- It unblocks: NUR-1 (observation chart, medicine round, tasks, fluid balance, handover), ICU, Maternity's labour ward and newborns, Theatre's inpatient surgery, and Blood bank's ward requests.
+
+### Go-live gate (owner decision Q160 A, 25 Nov 2026)
+
+Real patients use ADT-1 at a facility only when all of these are done:
+- the clinical lead's checklist below, signed;
+- a hazard log for wards and beds (wrong patient in a bed, a lost transfer, discharge without a summary, a death without its time, a missed band);
+- a test with real clinicians at Demo Hospital with fictional patients;
+- a short staff guide (admit, move, discharge, print) in `frame/pageGuides.ts` and the Help page;
+- a written paper back-up: a paper ward register and bed list, admission and discharge entered later (owner decision Q161 A, 25 Nov 2026);
+- the owner's go-live, and the production switch applied with the owner's AWS access.
+
+### Clinical lead checklist (before real patients)
+
+- The five discharge outcomes and what each means, including DAMA and absconded (Q187).
+- The minimum discharge summary (the fields of route 16) and that it is signed by a doctor or clinician.
+- The admission and transfer handover fields (reason, responsible doctor, care team, nursing handover).
+- The cause-of-death content (the WHO form) and the registration notice, with legal (Q188).
+- The rule that discharge is never held for an unpaid bill (Q189), and the bed-day rule (Q-ADT-13).
+- The wristband content, the allergy line, and the newborn pair code (Q192, Q-ADT-16, Q-ADT-17).
+- That nurses give and move beds, and doctors and clinicians admit and discharge (Q185).
+- The ward types, ICU among them, and who an ICU bed is for.
+- Who gets critical results on wards (Q194), with NUR-1's shifts.
+
+### DPO items
+
+- **Names on ward lists (Q190):** every ward staff member sees patient names on the bed board, admissions list and NUR-1's ward lists. Switched on only by a signed migration after this check. Lists must not be shown where patients or visitors can see them.
+- **Ward-team access for the stay (Q156):** a new consent basis, `ward_stay`. With Rahman. Who counts as the ward team, how long it lasts (Q-ADT-15), the patient's view and their right to end it.
+- **The admission reason on ward lists (Q-ADT-10):** shown to nurses, clinicians and doctors without a chart grant; never to admins, never in an audit row, log or notice.
+- **Death certificate and the registration notice (Q188):** what is kept, who can read and print it, and the hand-off to the registrar. No deceased mark on the Health ID record in this release.
+- **Discharge is never held for an unpaid bill (Q189):** a fixed rule, with legal.
+- **Wristbands:** the Health ID printed on the band (as ID-7's), and the allergy line.
+- **Retention:** admissions, movements, bands and death records are part of the record. Nothing is deleted; cancelled requests are kept.
+
+### Target
+
+Release D, Phase 2. Size **L**: four migrations (0170-0173, provisional), about 26 routes in ehr-api, one in identity-api and five billing changes, no gateway change, one new runtime verifier, and the screens' wiring (Lekan).
+
+## NUR-1: Nursing on the ward: observation chart, medicine round, tasks, fluid balance and shift handover (planned, Release D, needs a migration: yes)
+
+Department: Nursing observations beyond what exists (observation chart, medicine administration record, nursing tasks, fluid balance, handover), and the first ICU chart (owner decision Q202 A, 25 Nov 2026). Roadmap Phase 2. Stacked on ADT-1: every chart, dose, task and fluid entry here belongs to an admission.
+
+Status: planned, not live.
+
+Surveyed before writing (health origin/main 8168ec3d; hid-system staging 95fa1e52):
+- **Nursing observations** (live): `clinical/pages.ts:31` (`ehr.note.read`), `clinical/nursing/observations.ts:15-21,37-60`. An observation is a clinical note of type "Nursing observation" with the categories Medication administration, Handover and Care task; "Vitals" was withdrawn on 1 Nov 2026. It is tied to a visit picked from a list (`NewObservation.tsx:43-46`), not to an admission.
+- The design's own version: `frame/sample/catalog.ts:527-556` (ref Admission, categories Vitals, Medication administration, Handover, Care task; "Units / dose if applicable"). Demo notes in `frame/sample/store.ts:61-64`.
+- **Nursing tasks** sample: `clinical/sample/definitions.ts:278-290` and `catalog.ts:1289-1322` (Admission, Care task, Assigned nurse, Due time; "Start task", "Complete task" with Completion record, "Cancel task" with Reason). Seed `clinical/sample/seed.ts:241-245` ("4-hourly observations", "Wound dressing check"). Every clinical role may view, create, edit and assign them (`frame/sampleAccess.ts:26`).
+- **Triage & Vitals** (live): `clinical/triage/vitals.ts:42-51` (`VITAL_FIELDS`: the eight measures and their limits), `clinical/triage/ranges.ts`, `clinical/triage/VitalsForm.tsx`.
+- Navigation: `clinical/pages.ts:31,40`, `frame/pages.ts:86,93`, `frame/BlueFrame.tsx:49`, `home/RoleDashboard.tsx:26` (Nurse home: nursing, nursing tasks, inpatient, wards).
+- Backend today: `ehr.vitals` (0004:116-160) holds height, weight, temperature, pulse, breathing rate, blood pressure and SpO2, with corrections and entered in error (0142). `ehr.prescriptions` (0004, 0125, 0148) holds outpatient prescriptions (dose, frequency text, priority including `stat`, duration). Pharmacy acceptance and dispensing are ORD-4 (0144). There is no medicine administration, nursing task, fluid balance, shift or handover table, and no nursing access code (`INTERFACE_CONTRACT.md` SX-1; `role-matrix.json:154-164`).
+- No sample has a medicine round, fluid balance, observation trend chart, ICU chart, shift setup or handover screen. Those screens are new and follow the blue design's list, record and drawer patterns.
+
+### What staff get
+
+- **One observation chart per admission** (owner decision Q195 A, 25 Nov 2026). Today's vitals gain pain score, AVPU, blood glucose, oxygen device, oxygen flow and FiO2, and GCS. They are recorded through the same vitals routes, so Triage & Vitals and the ward share one history. The chart shows them over time, with VIT-1's soft flags.
+- **No early-warning score** (owner decision Q199 A, 25 Nov 2026). Health ID computes no NEWS2, no total and no severity score, and raises no alarm from one. The chart shows each value and its soft flag only. MAP and the GCS total are shown on screen as plain arithmetic of the values entered.
+- **The ICU chart** (owner decisions Q201 A and Q202 A, 25 Nov 2026). For a patient on an ICU ward, the same chart in an hourly grid: vitals, GCS, oxygen device and FiO2, glucose, and the hourly fluid balance with its running total. No ventilator settings and no infusion titration in this release. A daily ICU review is a clinical note of type "ICU daily review".
+- **Inpatient medicine orders** (owner decision Q197 A, 25 Nov 2026). A prescription on an admission can carry set times, "as needed" (with its reason, minimum gap and most doses in 24 hours), STAT, once only, or an infusion rate.
+- **The medicine round (MAR)** (owner decisions Q196 A and Q198 A, 25 Nov 2026). Each admission's active orders become a list of due doses. Each dose is recorded against its order as given, held, refused, omitted or not available, with the time, dose, route, reason and nurse. A dose may be given before the pharmacy dispenses; the pharmacy state shows beside it, and the nurse says where the medicine came from. A dose is never edited; a mistake is marked entered in error.
+- **Nursing tasks** per admission, with a due time, an assigned nurse, "overdue", start, complete and cancel, replacing the sample. A task can repeat (for example every 4 hours).
+- **Fluid balance**: intake and output per entry, totals per shift and per fluid day, and the balance.
+- **Clinical shifts** (owner decision Q193 A, 25 Nov 2026). The facility defines its clinical shifts once (for example Morning, Afternoon, Night). Nurses in charge assign nurses to wards and patients per shift (ICU 1:1 or 1:2), and name the on-call doctor. The Duty roster (Phase 4) reuses the same shifts. The cashier's day stays the "till day" (BILL-1).
+- **Shift handover.** A handover sheet per ward and shift lists the ward's patients with what is due, missed or overdue, and each patient's handover note. The outgoing nurse gives it; the incoming nurse accepts it.
+- **Their own access codes and department switch** (owner decision Q200 A, 25 Nov 2026).
+
+Not in this release: verbal or ward-stock doses with no order (owner decision Q196 A, 25 Nov 2026; they need their own signed rule later), a second-nurse witness for controlled drugs (no controlled drugs in this release's stock), barcode scanning at the bedside, device feeds, care plans, a scored risk assessment (pressure sores, falls), and offline use (owner decision Q161 A, 25 Nov 2026: a paper drug chart and observation chart as the back-up).
+
+### Decisions this section is built on
+
+The owner's answers (25 Nov 2026), each at the recommended option:
+
+| Question | Built as |
+|---|---|
+| Q195 Where the new observations go | **A:** extend today's vitals; one vitals history |
+| Q196 What the medicine round records | **A:** doses against an order only |
+| Q197 Inpatient medicine orders | **A:** set times, "as needed", STAT, once only and infusion rates, before the MAR |
+| Q198 A dose before the pharmacy dispenses | **A:** allowed, with the pharmacy state shown beside it. The clinical lead signs the reason |
+| Q199 Early-warning or severity scores | **A:** none computed; values and soft flags only |
+| Q200 Rights | **A:** their own access codes and a "nursing" department switch |
+| Q193 One meaning of "shift" | **A:** clinical shifts defined once here, reused by the Duty roster; the cashier's day is the "till day" |
+| Q194 Critical results on wards | **A:** the nurses assigned this shift and the on-call doctor are added to ADT-1's recipients |
+| Q201, Q202 ICU | **A:** a ward type; the first chart is hourly vitals, GCS, oxygen and FiO2, glucose and fluid balance |
+| Q158 Ola's medicine sign-offs | **A:** the MAR rules are Ola's, countersigned by the clinical lead |
+| Q157 Specialist reviewers | **A:** the clinical lead picks a nursing adviser before real patients |
+
+Smaller choices made while writing this section:
+
+| Question | Built with | The other option |
+|---|---|---|
+| Q-NUR-6 Codes for fluid balance | **A:** fluid balance is part of the observation chart (Q195), so it uses the vitals codes (`ehr.vital.read`, `ehr.vital.write`) **(recommended option, not yet answered by the owner)** | B: its own codes |
+| Q-NUR-7 Where the new vitals fields can be entered | **A:** anywhere vitals are entered (Triage & Vitals too), once `NURSING_ENABLED` is on **(recommended option, not yet answered by the owner)** | B: only on the ward chart |
+| Q-NUR-8 AVPU or ACVPU | **A:** AVPU as decided (alert, voice, pain, unresponsive). "New confusion" is a clinical lead item **(recommended option, not yet answered by the owner)** | B: ACVPU now |
+| Q-NUR-9 When a dose is due and late | **A:** a set-time dose is due from 60 minutes before to 60 minutes after its time, then "late". A dose can be recorded up to 12 hours after it was given, marked "recorded late" when more than 60 minutes after. The clinical lead may change the window **(recommended option, not yet answered by the owner)** | B: a 30-minute window |
+| Q-NUR-10 "As needed" limits | **A:** giving inside the minimum gap, or past the most doses in 24 hours, is allowed with a reason (8-300 characters) and shows a warning. It is not blocked **(recommended option, not yet answered by the owner)** | B: blocked until the prescriber changes the order |
+| Q-NUR-11 A dose before dispensing | **A:** when the pharmacy has not dispensed, the nurse says where the medicine came from: ward stock, the patient's own, or bought outside **(recommended option, not yet answered by the owner)** | B: no source recorded |
+| Q-NUR-12 A dose different from the order | **A:** allowed with a reason (8-300 characters), shown on the chart **(recommended option, not yet answered by the owner)** | B: refused; the order must change first |
+| Q-NUR-13 Task names on ward lists | **A:** the task name, due time and assignee show on the ward's task list to ward staff, with names under ADT-1's rule. The completion record is chart content **(recommended option, not yet answered by the owner)** | B: tasks only inside the chart |
+| Q-NUR-14 Old note categories | **A:** once NUR-1 is live at a facility, "Medication administration" and "Handover" are no longer offered as nursing note categories for an admission. Notes saved earlier stay readable, as the old "Vitals" category did. Outpatient visits keep them **(recommended option, not yet answered by the owner)** | B: keep both ways |
+| Q-NUR-15 Fluid day | **A:** a fluid day runs from 07:00 to 07:00 Lagos time; the facility can choose another start hour **(recommended option, not yet answered by the owner)** | B: midnight to midnight |
+| Q-NUR-16 Shift patterns | **A:** none seeded. The setup screen offers Morning 07:30-14:30, Afternoon 14:00-21:00 and Night 20:30-08:00 as a starting point; the overlaps are handover time **(recommended option, not yet answered by the owner)** | B: seed those three for every facility |
+
+### Routes
+
+All routes are under `/api/v1/ehr/`, which the gateway already sends to ehr-api. **The gateway nginx template does not change.** They need `X-Facility-Id` and `X-Purpose-Of-Use: direct-care` (shift setup takes `healthcare-operations`). Every write needs an `Idempotency-Key`, with replays as ADT-1. Writes on a record send `expectedRowVersion`; a stale one is 412.
+
+No Health ID or NIN appears in any path, query, body or answer. Patients, admissions, orders, doses and tasks are named by UUID.
+
+Until the owner's go-live, the service flag `NURSING_ENABLED` (ehr-api) is off in production and every route below answers 503 `NURSING_NOT_AVAILABLE`; the new vitals fields and inpatient order fields are refused with 400 `NURSING_FIELDS_NOT_AVAILABLE`. It is on in staging and at the sealed demo and QA facilities. When facility setup (Q149, gap map F2) ships, the facility's own `nursing` switch must also be on. NUR-1 also needs ADT-1's `INPATIENT_ENABLED`.
+
+Every route that shows chart content (values, doses, notes) checks chart read access (`ehr.context_allows(patient, facility, 'read_records')`), and every write of chart content checks write access, as today's vitals and notes do. Ward-level lists follow ADT-1's "Names on ward lists".
+
+#### Observation chart (Q195, Q199, Q202)
+
+**1. Vitals gain new fields.** The existing `POST /ehr/patients/:patientId/encounters/:encounterId/vitals` and `POST …/vitals/:vitalId/corrections` accept, and every vitals answer returns:
+
+| Field | Rule | On screen |
+|---|---|---|
+| `painScore` | whole number 0-10 | "Pain (0-10)" |
+| `avpu` | `alert`, `voice`, `pain` or `unresponsive` | "AVPU" |
+| `bloodGlucoseMmolL` | 0.5-50.0, one decimal place | "Blood glucose (mmol/L)" |
+| `oxygenDevice` | `room_air`, `nasal_cannula`, `simple_mask`, `venturi_mask`, `non_rebreather_mask`, `high_flow_nasal`, `cpap_or_niv`, `tracheostomy_mask`, `ventilator` or `other` | "Oxygen" |
+| `oxygenFlowLPerMin` | 0.5-70.0; only with a device other than `room_air` | "Flow (L/min)" |
+| `fio2Percent` | whole number 21-100; with `room_air` only 21 | "FiO2 (%)" |
+| `gcsEye`, `gcsVerbal`, `gcsMotor` | 1-4, 1-5, 1-6; all three or none, except `gcsVerbalNotTestable: true` in place of `gcsVerbal` (for example a tracheostomy) | "GCS: E, V, M"; the screen shows the total, or "E4 VT M6" |
+
+- A reading still needs at least one value, now from any of the old and new fields. Blood pressure is still a pair.
+- `oxygenDevice: "ventilator"` records only that the patient is ventilated. Ventilator settings are not in this release (Q202).
+- Corrections may replace any of the new fields, as the old ones.
+- Old readings have the new fields `null`. Nothing already stored changes.
+- `GET /ehr/vitals/usual-ranges` (VIT-1) adds the new measures to its table only when the clinical lead signs their ranges; until then they have no soft flag.
+
+**2. `GET /ehr/admissions/:admissionId/observation-chart?from=…&to=…&view=all|hourly`**: the stay's chart. Needs `ehr.vital.read`, `ehr.admission.read` and chart read access.
+
+```json
+{ "admissionId": "uuid", "encounterId": "uuid", "wardType": "icu", "from": "…", "to": "…",
+  "readings": [ { "vitalId": "uuid", "recordedAt": "…", "status": "recorded", "values": { "pulseBpm": 112,
+      "systolicMmhg": 96, "diastolicMmhg": 58, "respiratoryRate": 26, "oxygenSaturationPercent": 92,
+      "temperatureC": 38.4, "painScore": 4, "avpu": "alert", "bloodGlucoseMmolL": 7.2, "oxygenDevice": "nasal_cannula",
+      "oxygenFlowLPerMin": 2, "fio2Percent": null, "gcsEye": 4, "gcsVerbal": 5, "gcsMotor": 6 },
+      "flags": [ { "measure": "pulseBpm", "level": "outside_usual" } ], "recordedByMembershipId": "uuid" } ],
+  "hours": [ { "hourStart": "…", "readingIds": ["uuid"], "fluidInMl": 120, "fluidOutMl": 60, "runningBalanceMl": 420 } ],
+  "rangesVersion": "2026-11-adult-1", "score": null }
+```
+
+- `view=hourly` adds `hours` (the ICU grid, default for an ICU ward). Up to 7 days per call.
+- `flags` are VIT-1's soft flags, worked out on each read and never stored.
+- `score` is always `null`: no early-warning or severity score is computed (Q199). The field is there so a screen cannot mistake a missing score for a low one.
+- Readings marked entered in error show with their status, struck through, as EHR-C8b.
+
+#### Inpatient medicine orders (Q197)
+
+**3. Prescriptions gain `inpatientSchedule`.** The existing `POST /ehr/patients/:patientId/encounters/:encounterId/prescriptions` accepts, only when the encounter is an admission's inpatient encounter (400 `INPATIENT_SCHEDULE_NOT_ALLOWED` otherwise):
+
+```json
+{ "…": "today's prescription fields", "inpatientSchedule": { "kind": "regular", "times": ["06:00", "14:00", "22:00"],
+    "firstDueAt": "2026-12-03T13:00:00.000Z", "asNeeded": null, "infusion": null } }
+```
+
+| Field | Rule |
+|---|---|
+| `kind` | `regular`, `as_needed`, `stat` or `once` |
+| `times` | `regular` only: 1-12 distinct times "HH:MM" (Lagos), sorted |
+| `firstDueAt` | optional; left out, now. For `once`, the time it is due |
+| `asNeeded` | `as_needed` only: `{ "reason": "1-200 characters", "minIntervalMinutes": 15-1440, "maxDosesPer24h": 1-24 }` |
+| `infusion` | optional, for `regular`, `stat` or `once` with route IV: `{ "rateMlPerHour": 0.1-2000, "volumeMl": 1-5000, "fluid": "0-120 characters" }` |
+
+- `stat` also sets today's `priority: "stat"`. Today's `frequency` text is still required; the screen fills it from the schedule (for example "06:00, 14:00, 22:00").
+- The schedule is set at creation only, as 0125's fields. To change it, the prescriber stops the order and writes a new one.
+- The pharmacy sees these as ordinary prescriptions (ORD-4 work items), with the schedule shown on the card.
+
+#### The medicine round (Q196, Q198)
+
+**4. `GET /ehr/admissions/:admissionId/medicine-round?from=…&to=…`**: the stay's MAR. Needs `ehr.mar.read` and chart read access. Default window: the last 24 hours and the next 24.
+
+```json
+{ "orders": [ { "prescriptionId": "uuid", "medicationDisplay": "Ceftriaxone", "strength": "1 g", "doseForm": "injection",
+      "dose": { "quantity": 1, "unit": "g" }, "route": "IV", "status": "active", "schedule": { "kind": "regular",
+      "times": ["06:00", "18:00"] }, "pharmacyState": "dispensed",
+      "doses": [ { "scheduledFor": "…", "state": "due", "administrationId": null },
+                 { "scheduledFor": "…", "state": "given", "administrationId": "uuid" } ],
+      "asNeeded": null, "lastGivenAt": "…", "nextAllowedAt": null } ],
+  "administrations": [ { "administrationId": "uuid", "prescriptionId": "uuid", "scheduledFor": "…", "outcome": "given",
+      "givenAt": "…", "recordedAt": "…", "recordedLate": false, "late": false, "dose": { "quantity": 1, "unit": "g" },
+      "doseDiffersReason": null, "route": "IV", "reasonCode": null, "reasonText": null, "supplySource": null,
+      "pharmacyStateAtRecord": "dispensed", "overrideReason": null, "infusionAction": null,
+      "recordedByMembershipId": "uuid", "status": "recorded" } ] }
+```
+
+- Due doses are worked out on each read from the schedule; they are not stored. `state`: `upcoming`, `due`, `late`, `given`, `held`, `refused`, `omitted`, `not_available`.
+- An order `on_hold`, `completed`, `cancelled` or `entered_in_error` has no due doses; its recorded doses stay.
+- `pharmacyState`: `not_sent`, `sent`, `accepted`, `dispensed`, `part_dispensed`, `not_dispensable` or `reversed`, read from ORD-4 and Q132 A (0133, 0144, 0148).
+- An outpatient prescription on the stay (no schedule) is listed under "No schedule"; doses can be recorded against it as "once" doses.
+
+**5. `GET /ehr/medicine-round?wardId=…&window=now|next_4h`**: the ward's round. Needs `ehr.mar.read`. Every admitted patient of the ward with doses due, late or due in the window: patient (names under ADT-1's rule), bed, and per dose the medicine name, time and state. Doses and medicine names show only for patients whose chart the member can read; for others the row shows "Open the record to see the medicines" and counts only.
+
+**6. `POST /ehr/admissions/:admissionId/medicine-administrations`**: record a dose. Needs `ehr.mar.record` and chart write access.
+
+```json
+{ "prescriptionId": "uuid", "scheduledFor": "2026-12-03T05:00:00.000Z", "outcome": "given",
+  "givenAt": "2026-12-03T05:20:00.000Z", "dose": { "quantity": 1, "unit": "g" }, "route": "IV",
+  "doseDiffersReason": null, "reasonCode": null, "reasonText": null, "supplySource": null,
+  "overrideReason": null, "infusionAction": null }
+```
+
+| Field | Rule |
+|---|---|
+| `prescriptionId` | an `active` prescription on this stay's encounter (409 `MAR_ORDER_NOT_ACTIVE`) |
+| `scheduledFor` | a due time of a `regular`, `stat` or `once` order; `null` for `as_needed` and for orders with no schedule. One record per scheduled dose (409 `DOSE_ALREADY_RECORDED`, with its id) |
+| `outcome` | `given`, `held`, `refused`, `omitted` or `not_available` |
+| `givenAt` | the time of the event: not in the future, at most 12 hours ago (Q-NUR-9) |
+| `dose`, `route` | `given` only, both required. They default on screen to the order's. A different dose needs `doseDiffersReason` (8-300, Q-NUR-12) |
+| `reasonCode` | required for every outcome but `given`: `held`: `clinical_decision`, `awaiting_result`, `nil_by_mouth`; `omitted`: `patient_away`, `no_access`, `nil_by_mouth`, `other`; `not_available`: `not_in_stock`, `awaiting_pharmacy`, `patient_to_buy`; `refused`: `patient_refused` |
+| `reasonText` | 0-300; required (8 or more) for `clinical_decision` and `other` |
+| `supplySource` | `given` only, required when the pharmacy state is not `dispensed` or `part_dispensed` (Q198, Q-NUR-11): `ward_stock`, `patient_own` or `bought_outside` |
+| `overrideReason` | `as_needed` only: required (8-300) when inside the minimum gap or past the most doses in 24 hours (Q-NUR-10) |
+| `infusionAction` | for an order with `infusion`: `started` or `stopped`. A rate change needs a new order |
+
+- Answer `201 { "administration": …, "warnings": ["late", "dose_differs", "as_needed_inside_gap", "before_dispensing"] }`. Warnings never block; the screen shows them.
+- The pharmacy state at the time is kept with the dose (`pharmacyStateAtRecord`).
+- A dose is never edited or deleted.
+
+**7. `POST /ehr/medicine-administrations/:administrationId/entered-in-error`**: body `{ "expectedRowVersion", "reason": "8-500 characters" }`. Needs `ehr.mar.record` and chart write access. Status becomes `entered_in_error`; the record stays, struck through, and the scheduled dose is due again. It cannot be undone.
+
+#### Nursing tasks (replacing the sample)
+
+**8. `GET /ehr/nursing-tasks?wardId=…|admissionId=…&status=open|done&mine=true`**: the task list. Needs `ehr.nursing-task.read`. Each task: `{ taskId, admissionId, patient (names under ADT-1's rule), bedName, name, dueAt, overdue, status, assignedMembershipId, repeatEveryHours, startedAt, completedAt, completionRecorded, rowVersion }`. `status`: `assigned`, `in_progress`, `completed` or `cancelled`. Open tasks first, by due time.
+
+**9. `POST /ehr/admissions/:admissionId/nursing-tasks`**: body `{ "name": "1-120 characters", "dueAt", "assignedMembershipId"?, "repeatEveryHours"?: 1-168 }`. Needs `ehr.nursing-task.write`. The assignee is an active nurse, clinician or doctor here (400 `TASK_ASSIGNEE_INVALID`). Only for an open admission.
+
+**10. `POST /ehr/nursing-tasks/:taskId/start`**, **`/complete`** (body `{ "expectedRowVersion", "completionRecord"?: "1-2000 characters" }`), **`/cancel`** (body `{ "expectedRowVersion", "reason": "8-300 characters" }`), and **`PATCH /ehr/nursing-tasks/:taskId`** (body `{ "expectedRowVersion", "assignedMembershipId"?, "dueAt"? }`). Need `ehr.nursing-task.write`.
+- The design's flow: `assigned` -> start -> `in_progress` -> complete -> `completed`; cancel from `assigned` (and from `in_progress`).
+- A completion record is chart content: giving it needs chart write access; it shows only to members who can read the chart (Q-NUR-13).
+- Completing a repeating task makes the next one, due `repeatEveryHours` after this one was due, while the admission is open.
+- Discharge cancels every open task of the admission, with the reason "Discharged".
+
+#### Fluid balance (Q-NUR-6)
+
+**11. `GET /ehr/admissions/:admissionId/fluid-balance?day=YYYY-MM-DD`**: one fluid day (Q-NUR-15). Needs `ehr.vital.read` and chart read access. Entries, totals per shift and per hour, intake, output and balance; entries in error shown struck through.
+
+**12. `POST /ehr/admissions/:admissionId/fluid-balance`**: body `{ "direction": "in" | "out", "kind", "volumeMl"?: 1-10000, "notMeasured"?: true, "recordedAt", "note"?: "0-200 characters" }`. Needs `ehr.vital.write` and chart write access.
+- `kind` for intake: `oral`, `iv`, `enteral_tube`, `blood_product`, `other`. For output: `urine`, `vomit`, `drain`, `stool`, `tube_aspirate`, `blood_loss`, `other`.
+- Exactly one of `volumeMl` or `notMeasured: true` (for example "incontinent, not measured"). An unmeasured entry is shown and counted apart; it is never added to a total.
+- `recordedAt`: not in the future, at most 24 hours ago.
+
+**13. `POST /ehr/fluid-balance/:entryId/entered-in-error`**: body `{ "expectedRowVersion", "reason": "8-500 characters" }`. As route 7.
+
+#### Clinical shifts and assignments (Q193)
+
+**14. `GET /ehr/clinical-shifts`**, **`POST /ehr/clinical-shifts`** (body `{ "name": "1-40 characters, unique among active", "startsAt": "HH:MM", "endsAt": "HH:MM" }`; a shift may cross midnight), **`PATCH /ehr/clinical-shifts/:shiftId`** (`name`, `active`). Setup needs `ehr.clinical-shift.manage`; the list is open to `ehr.nursing-task.read` too. Times are Lagos. A shift is never deleted. Up to 8 active shifts.
+
+**15. `GET /ehr/shift-assignments?date=YYYY-MM-DD&shiftId=…&wardId=…`** (`ehr.nursing-task.read`) and **`PUT /ehr/shift-assignments`** (`ehr.shift-assignment.manage`): body `{ "date", "shiftId", "wardId", "expectedVersion", "assignments": [ { "membershipId", "duty": "nurse" | "nurse_in_charge" | "on_call_doctor", "admissionIds": ["uuid", …] } ] }`.
+- `nurse` and `nurse_in_charge` must be active nurses or clinicians here; `on_call_doctor` an active doctor or clinician (400 `SHIFT_ASSIGNEE_INVALID`).
+- At most one `nurse_in_charge` and one `on_call_doctor` per ward and shift. A patient is allocated to at most one nurse per shift. Admission ids must be open admissions on that ward.
+- ICU allocation (1:1 or 1:2) is the same list; the screen warns when an ICU nurse has more than two patients.
+- The whole ward's list for that shift is replaced; every change is kept.
+- An assignment grants no chart access. With ADT-1's ward-team access switched on, a nurse assigned to a patient counts as that patient's ward team for the shift.
+
+#### Shift handover (Q193)
+
+**16. `GET /ehr/handovers?wardId=…&date=…&shiftId=…`**: the handover sheet. Needs `ehr.nursing-task.read`.
+
+```json
+{ "handoverId": "uuid", "status": "draft", "wardId": "uuid", "date": "2026-12-03", "shiftId": "uuid",
+  "fromMembershipIds": ["uuid"], "toMembershipIds": [], "givenAt": null, "acceptedAt": null,
+  "patients": [ { "admissionId": "uuid", "patient": { "fullName": "…", "nameHidden": false }, "bedName": "Bed 4",
+      "lastObservationAt": "…", "flagsSinceLastShift": 2, "dosesMissedThisShift": 1, "dosesDueNextShift": 3,
+      "openTasks": 2, "overdueTasks": 0, "fluidBalanceMl": 350, "watch": true,
+      "handoverNoteId": "uuid", "handoverNote": "…", "noteHidden": false } ] }
+```
+
+- Counts come from the chart, the MAR, the tasks and fluid balance. The note text, flags and fluid balance show only for patients whose chart the member can read (`noteHidden`); counts of tasks show for all.
+- A sheet that does not exist yet is answered as a draft with no notes (`handoverId: null`).
+
+**17. `PUT /ehr/handovers/:handoverId/patients/:admissionId`** (or `PUT /ehr/handovers/new/patients/:admissionId` with `wardId`, `date`, `shiftId` in the body): body `{ "expectedRowVersion"?, "note": "1-2000 characters", "watch": false }`. Needs `ehr.handover.write` and chart write access. Writes the note as a clinical note of type "Nursing handover" on the stay's encounter, or a new revision of this sheet's note. Only while the sheet is a draft.
+
+**18. `POST /ehr/handovers/:handoverId/give`** (`ehr.handover.write`; the sheet becomes `given`, with who gave it) and **`POST /ehr/handovers/:handoverId/accept`** (`ehr.handover.write`; by a nurse assigned to the next shift on this ward, 409 `HANDOVER_NOT_YOURS` otherwise; the sheet becomes `accepted`). A given sheet's notes are signed with it.
+
+### Names and chart content on ward lists
+
+Ward-level lists (routes 5, 8, 16) name patients under ADT-1's "Names on ward lists" (Q190: all ward staff after the DPO check; until then only where the member can read the chart). Chart content on those lists (medicine names, doses, note text, values, completion records) shows only where the member can read the chart now. Counts (due, late, overdue, open) show for every patient on the ward.
+
+### Errors
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | "Check the highlighted fields." |
+| 400 | `NURSING_FIELDS_NOT_AVAILABLE` | "These fields are not switched on yet." |
+| 400 | `OXYGEN_FIELDS_INVALID` | "Enter the flow or FiO2 with an oxygen device, or 21% on room air." |
+| 400 | `GCS_INCOMPLETE` | "Enter all three GCS parts, or mark the verbal part as not testable." |
+| 400 | `INPATIENT_SCHEDULE_NOT_ALLOWED` | "Set times, as needed, STAT and infusions are for admitted patients only." |
+| 400 | `INPATIENT_SCHEDULE_INVALID` | "Check the schedule: times, gap and most doses in 24 hours." |
+| 400 | `DOSE_REASON_REQUIRED` | "Choose a reason for a dose that was not given." |
+| 400 | `DOSE_DIFFERS_REASON_REQUIRED` | "Say why the dose differs from the order." |
+| 400 | `SUPPLY_SOURCE_REQUIRED` | "The pharmacy has not dispensed this medicine. Say where it came from." |
+| 400 | `AS_NEEDED_OVERRIDE_REASON_REQUIRED` | "This is sooner or more often than ordered. Say why." |
+| 400 | `DOSE_TIME_INVALID` | "The time can be up to 12 hours ago, and not in the future." |
+| 400 | `TASK_ASSIGNEE_INVALID`, `SHIFT_ASSIGNEE_INVALID` | "Choose a nurse, clinician or doctor who works at this facility." |
+| 400 | `SHIFT_TIMES_INVALID` | "Enter a start and end time. A shift can run past midnight." |
+| 400 | `FLUID_ENTRY_INVALID` | "Enter the amount in mL, or mark it as not measured." |
+| 403 | `NURSING_NOT_ALLOWED` | "Only nurses, clinicians and doctors of this facility can use the medicine round and nursing tasks." |
+| 403 | `MAR_RECORD_NOT_ALLOWED` | "Only nurses, clinicians and doctors can record doses." |
+| 403 | `SHIFT_SETUP_NOT_ALLOWED` | "Only the facility's admins can set up clinical shifts." |
+| 403 | `SHIFT_ASSIGN_NOT_ALLOWED` | "Only nurses in charge and admins can assign shifts." |
+| 403 | `CHART_ACCESS_REQUIRED` | "Open this patient's record first, then try again." |
+| 404 | `ADMISSION_NOT_FOUND`, `ADMINISTRATION_NOT_FOUND`, `TASK_NOT_FOUND`, `FLUID_ENTRY_NOT_FOUND`, `HANDOVER_NOT_FOUND` | "This record is not at this facility." |
+| 409 | `ADMISSION_NOT_OPEN` | "This patient has been discharged. The record can still be read." |
+| 409 | `MAR_ORDER_NOT_ACTIVE` | "This order is not active. Ask the prescriber." |
+| 409 | `DOSE_ALREADY_RECORDED` | "This dose is already recorded. Mark it entered in error if it is wrong." |
+| 409 | `ALREADY_ENTERED_IN_ERROR` | "This entry is already marked entered in error." |
+| 409 | `TASK_STATE_INVALID` | "This task has moved on. Reload it." |
+| 409 | `HANDOVER_NOT_YOURS` | "Only a nurse on the next shift for this ward can accept the handover." |
+| 409 | `HANDOVER_NOT_DRAFT` | "This handover has been given. Write any change in the next one." |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | as ID-6 |
+| 412 | `NURSING_VERSION_CONFLICT` | "Someone else changed this. Reload it and try again." |
+| 503 | `NURSING_NOT_AVAILABLE` | "The medicine round and nursing tasks are not switched on yet." (flag off, or a database without 0174) |
+
+Staff screens show the message and never the word "permission".
+
+### Roles and access codes (Q200)
+
+Seven new codes. Observations and fluid balance keep today's `ehr.vital.read` and `ehr.vital.write`; inpatient orders keep `ehr.prescription.write`.
+
+| Backend role | `ehr.mar.read` | `ehr.mar.record` | `ehr.nursing-task.read` | `ehr.nursing-task.write` | `ehr.handover.write` | `ehr.shift-assignment.manage` | `ehr.clinical-shift.manage` |
+|---|---|---|---|---|---|---|---|
+| `nurse` | yes | yes | yes | yes | yes | yes | no |
+| `clinician` | yes | yes | yes | yes | yes | no | no |
+| `doctor` | yes | yes | yes | yes | no | no | no |
+| `admin`, `org_admin` | no | no | no | no | no | yes | yes |
+| `receptionist`, `lab`, `pharmacist`, `cashier`, `billing_officer`, others | no | no | no | no | no | no | no |
+
+- Nineteen role rows: six for nurses, five for clinicians, four for doctors, two each for admins and org admins.
+- The design gives every clinical role nursing tasks (`frame/sampleAccess.ts:26`) and nurses the ward pages (`:49`); doctors also record doses (STAT doses on rounds).
+- When the midwife role ships (Q155), its own file gives it the nurse's codes.
+- SX-1 gains two areas: `nursingCare`, "Medicine round and nursing tasks" (shown with `ehr.mar.read` and `ehr.nursing-task.read`, used in full with `ehr.mar.record` and `ehr.nursing-task.write`), and `clinicalShifts`, "Clinical shifts" (shown with `ehr.shift-assignment.manage`, used in full with `ehr.clinical-shift.manage`).
+
+### Database design
+
+Four migrations, **0174 to 0177, provisional**, stacked on ADT-1's 0170-0173 (numbers are given at merge). Each follows the rules ADT-1 lists (one `do` block; locks first, NOWAIT, with busy refusals beginning "0174: " to "0177: "; preconditions; "already applied"; post-checks; audit rows; `runtime-grants.sql` and the unsigned declaration). Each needs the owner's verbatim signature, Rahman's final database check and an independent agent review. Ola reviews 0175 (the medicine rules), countersigned by the clinical lead (owner decision Q158 A, 25 Nov 2026).
+
+New tables have row-level security enabled and no policy or privilege for any runtime role; only SECURITY DEFINER functions read or write them, with ADT-1's caller checks, and `ehr.context_allows` for chart content. 0174 is the exception: `ehr.vitals` keeps its row-level security policies (0005, 0142), and the new columns follow them.
+
+**0174 Observation chart fields on vitals.** Needs 0142 and ADT-1's 0171.
+- `ehr.vitals` gains `pain_score` (0-10), `avpu` (`alert`, `voice`, `pain`, `unresponsive`), `blood_glucose_mmol_l` numeric(3,1) (0.5-50.0), `oxygen_device` (the list above), `oxygen_flow_l_per_min` numeric(4,1) (0.5-70.0), `fio2_percent` (21-100), `gcs_eye` (1-4), `gcs_verbal` (1-5), `gcs_verbal_not_testable` boolean, `gcs_motor` (1-6). All nullable, no default, so the column adds touch no row.
+- New CHECKs: flow and FiO2 only with a device; on `room_air`, no flow and FiO2 null or 21; GCS all three parts or none, with `gcs_verbal` null exactly when `gcs_verbal_not_testable`.
+- 0004's "at least one value" CHECK is replaced by one that counts the old and the new fields. 0004's corrections CHECK on `ehr.vital_corrections.replacement_values` keys is replaced by one with the new keys added. Both are added `NOT VALID` and then validated in the file. The precondition pins both old definitions.
+- Nothing else in 0004, 0005 or 0142 changes: the policies, the status guard, `vitals_versioned` and `vitals_no_delete` stay (their bodies md5-pinned).
+- `ehr.observation_chart(admission, from, to)`: readings and hourly fluid totals for the stay, for the chart route. It returns no score.
+- Locks: ACCESS EXCLUSIVE on `ehr.vitals` and `ehr.vital_corrections` (column adds and CHECK swaps; one validating scan each); ACCESS SHARE on `ehr.admissions` and `ehr.encounters`; ROW EXCLUSIVE on `audit.events`.
+- Old images on this schema: today's ehr-api inserts the old columns only, which the new CHECKs allow, and its vitals routes select a fixed column list (`VITAL_COLUMNS`, `vitals.service.ts`). Two reads take the whole row with `to_jsonb(v)`: the latest-vitals read (`vitals.service.ts:148`), which then keeps only its named measures, and the **staff** records-evidence query (`patient-records/patient-evidence.query.ts:37-38`), which would show the new fields as extra keys once a reading has them. That is the same staff member's same patient, under the same access, so nothing leaks; the new image lists the fields by name there too. The **patient's** evidence query already uses an explicit list ("so a future column cannot leak", `patient-evidence.query.ts:123-124`), so patients see the new fields only when the new image adds them.
+
+**0175 Inpatient medicine orders and the medicine round.** Needs 0174, 0125, 0144 and 0148.
+- `ehr.prescriptions` gains `schedule_kind` (`regular`, `as_needed`, `stat`, `once`), `scheduled_times` (text array of "HH:MM", 1-12), `first_due_at`, `as_needed_reason` (1-200), `as_needed_min_interval_minutes` (15-1440), `as_needed_max_doses_per_24h` (1-24), `infusion_rate_ml_per_hour` numeric(6,1), `infusion_volume_ml` (1-5000), `infusion_fluid` (0-120). All nullable; a CHECK holds each kind's shape.
+- A trigger `prescriptions_inpatient_schedule_guard`, BEFORE INSERT OR UPDATE: a schedule only on an encounter that is an admission's inpatient encounter; the schedule columns never change after creation. Its name sorts before 0148's AFTER UPDATE trigger, which stays the last trigger on the table (0148's rule); the post-check confirms it.
+- `ehr.medication_administrations`: admission, encounter, patient, facility, prescription; `scheduled_for`; `outcome`; `given_at`; `recorded_at`; `dose_quantity`, `dose_unit`, `route`; `dose_differs_reason`; `reason_code`, `reason_text`; `supply_source`; `pharmacy_state_at_record`; `override_reason`; `infusion_action`; `status` (`recorded`, `entered_in_error`), `entered_in_error_reason`, `entered_in_error_at`, `entered_in_error_by_membership_id`; `recorded_by_membership_id`; the `Idempotency-Key` with the request's SHA-256; `row_version`.
+  - CHECKs: dose and route exactly for `given`; a reason code for every other outcome, from that outcome's list; `supply_source` only for `given`.
+  - Unique (prescription, scheduled_for) where `recorded` and `scheduled_for` is not null: one record per scheduled dose under any race.
+  - A trigger refuses any change but the one-way move to `entered_in_error`, and any delete.
+- Functions: `ehr.mar_read`, `ehr.mar_ward_round`, `ehr.mar_record`, `ehr.mar_entered_in_error`, and `ehr.mar_due_doses(admission, from, to)` (no role may execute it; it works out the due doses in Lagos time). `ehr.mar_record` reads the pharmacy state through ORD-4's tables as the owner and stores it with the dose. It locks the prescription `FOR SHARE` and the admission `FOR SHARE`, so an order stopped at the same moment either wins or sees the dose.
+- Locks: ACCESS EXCLUSIVE on `ehr.prescriptions` (column adds, CHECK and trigger; one validating scan); SHARE ROW EXCLUSIVE on `ehr.admissions`, `ehr.encounters`, `identity.staff_facility_memberships` (foreign keys of the new table); ACCESS SHARE on ORD-4's work-item, acceptance and dispensing tables (body checks); ROW EXCLUSIVE on `audit.events`.
+- Old images on this schema: today's ehr-api and pharmacy-api never set the schedule columns. Prescriptions they create are outpatient as today.
+
+**0176 Nursing tasks, fluid balance, clinical shifts and handover.** Needs 0175 and ADT-1's 0170-0171.
+- `ehr.nursing_tasks`: admission, facility, patient, `name` (1-120), `due_at`, `assigned_membership_id`, `repeat_every_hours` (1-168), `status`, `started_at`, `completed_at`, `completion_record` (1-2000), `cancel_reason` (8-300), `previous_task_id` (for repeats), versions and actors.
+- `ehr.fluid_balance_entries`: admission, encounter, patient, facility, `direction`, `kind`, `volume_ml` (1-10000) or `not_measured`, `recorded_at`, `note` (0-200), `status` (`recorded`, `entered_in_error`) with reason, actor and time; one-way status change only, no delete.
+- `ehr.facility_nursing_settings`: facility, `fluid_day_starts_at_hour` (0-23, default 7).
+- `ehr.clinical_shifts`: facility, `name` (1-40), `starts_at`, `ends_at` (Lagos `time`), `active`. Unique name per facility among active.
+- `ehr.shift_assignments`: facility, `shift_date` (Lagos), shift, ward, membership, `duty`; unique (shift_date, shift, ward, membership); partial uniques for one `nurse_in_charge` and one `on_call_doctor` per (shift_date, shift, ward).
+- `ehr.shift_patient_allocations`: assignment, admission; unique (shift_date, shift, admission) so a patient has one nurse per shift.
+- `ehr.shift_assignment_events`: every replacement of a ward's list, append-only.
+- `ehr.shift_handovers`: ward, `shift_date`, shift, `status` (`draft`, `given`, `accepted`), given by and at, accepted by and at; unique (ward, shift_date, shift). `ehr.shift_handover_items`: handover, admission, `clinical_note_id` (references `ehr.clinical_notes`), `watch`.
+- Functions for routes 8-18, plus a replacement of ADT-1's `ehr.admission_notice_recipients` (md5-pinned before and after) that adds the nurses allocated to the patient on the current shift, the ward's nurse in charge and its on-call doctor (Q194). `ehr.admission_discharge` cancels the admission's open tasks through `ehr.nursing_tasks_close_for_discharge`, which no role may execute; it is called from a trigger AFTER UPDATE OF `status` on `ehr.admissions`, so ADT-1's function body does not change.
+- Locks: SHARE ROW EXCLUSIVE on `ehr.admissions`, `ehr.wards`, `ehr.encounters`, `ehr.clinical_notes`, `identity.facilities` and `identity.staff_facility_memberships` (foreign keys and the trigger); ROW EXCLUSIVE on `audit.events`.
+
+**0177 Nursing access codes and sealed test shifts.** Needs 0174-0176 and ADT-1's 0173.
+- The access-code tables gain the seven codes and the nineteen role rows of the table above. One audit row per row added (reason "NUR-1 Nursing (Release D, owner decision Q200 A)"). The post-check prints how many real (not sealed) staff gain each code. `role-matrix.json` and the SX-1 areas change in the same pull request.
+- Sealed step (QA Hospital and the four sealed demo facilities only, as 0151): the three shifts of Q-NUR-16, fictional. Nothing else.
+- Without 0177 no role holds a nursing code, so every new function refuses. This is the database half of "built but switched off".
+- Locks: SHARE ROW EXCLUSIVE on the role-row table; ROW EXCLUSIVE on the code table, `ehr.clinical_shifts` and `audit.events`; ROW SHARE on `auth.roles`.
+
+### Audit
+
+Every route writes its rows in the request's transaction, refusals included.
+
+- **Chart:** today's vitals audit rows, unchanged; `ehr.observation-chart.read` (the admission, the window).
+- **Medicine round:** `ehr.mar.read`, `ehr.mar.ward-round` (one collection row with the patient ids shown, plus one `.shown` row per patient), `ehr.mar.record` (outcome, reason code, pharmacy state, supply source, and whether late, dose differs or an override was given), `ehr.mar.entered-in-error`.
+- **Tasks:** `ehr.nursing-task.list` (with `.shown` per patient), `.create`, `.start`, `.complete`, `.cancel`, `.update`.
+- **Fluid balance:** `ehr.fluid-balance.read`, `.record`, `.entered-in-error`.
+- **Shifts and handover:** `ehr.clinical-shift.create`, `.update`, `ehr.shift-assignment.set`, `ehr.handover.read` (with `.shown` per patient), `.note`, `.give`, `.accept`.
+- Rows hold ids, outcomes, codes and counts. **No row ever holds a name, Health ID, medicine name, dose, value, task name, note text, completion record or reason text.**
+
+### Notifications
+
+None in this release. The patient is on the ward. Staff see due, late and overdue items on the ward lists, which refresh every 60 seconds. When ORD-11's staff inbox ships (Q151), critical results reach the nurses on shift and the on-call doctor through `ehr.admission_notice_recipients` (Q194). Missed-dose and overdue-task notices are a later item.
+
+### Website screens (Lekan; mapped to Akos's existing sample screens)
+
+| Akos sample (health `apps/patient-web/src/ehr-blue/`) | Live screen | Calls |
+|---|---|---|
+| `clinical/nursing/` (live Nursing observations: `observations.ts:15-21,37-60`, `NewObservation.tsx:43-46` visit picker) and the design's `frame/sample/catalog.ts:527-556` (ref Admission, categories incl. Vitals, Units / dose) | Nursing observations stays for notes. For an admitted patient it opens on the admission (the design's ref), with tabs: Observation chart, Medicine round, Fluid balance, Tasks, Handover. The "Medication administration" and "Handover" categories go for admissions (Q-NUR-14); old notes stay readable | routes 2, 4, 8, 11, 16; today's notes |
+| `clinical/triage/vitals.ts:42-51` (`VITAL_FIELDS`), `triage/ranges.ts`, `triage/VitalsForm.tsx` | The new fields join the vitals form (pain, AVPU, glucose, oxygen device, flow, FiO2, GCS), shared by Triage & Vitals and the chart (Q-NUR-7). MAP and the GCS total shown as you type | route 1 |
+| No sample (the design has no trend chart) | Observation chart: a table and simple line chart per measure over time, soft flags beside values, no score anywhere | route 2 |
+| `clinical/sample/definitions.ts:211-220` (ICU) with `catalog.ts:692-700` | The ICU chart: the hourly grid (`view=hourly`) with GCS, oxygen and FiO2, glucose and hourly fluid with running balance; "ICU daily review" note | routes 2, 11, 12; today's notes |
+| Consultation's order drawer (`clinical/consult/orders/CreateOrder.tsx`, `orders.ts`) | For an admitted patient: Schedule (set times, as needed with reason, gap and most doses, STAT, once only) and Infusion (rate, volume, fluid) | route 3 |
+| `frame/sample/store.ts:61-64` (demo note "Fictional Med A given by mouth") | The Medicine round: per patient, the orders as a grid of due times with Give, Hold, Refused, Omit, Not available; the pharmacy state beside each order; ward view of doses due now and late | routes 4-7 |
+| `definitions.ts:278-290`, `catalog.ts:1289-1322` (Nursing tasks: Admission, Care task, Assigned nurse, Due time; Start, Complete with Completion record, Cancel with Reason) | Nursing tasks: ward and "my tasks" lists, overdue first; New task with repeat; the same three actions | routes 8-10 |
+| `clinical/sample/seed.ts:241-245` (fictional tasks) | Removed from the live page. Sealed demo and QA facilities use backend data | — |
+| No sample | Fluid balance (entries, hourly and shift totals, balance), Clinical shifts setup (Settings), Shift assignments (per ward and shift, ICU allocation), Handover sheet (give and accept) | routes 11-18 |
+| `clinical/pages.ts:31,40`, `frame/pages.ts:86,93`, `frame/BlueFrame.tsx:49` | Navigation: Nursing observations and Nursing tasks (live) under Care; Clinical shifts under Settings | — |
+| `frame/sampleAccess.ts:26,49`, `onboarding/roleTemplates.ts:24,44` | Live grants from the role table above | — |
+| `home/RoleDashboard.tsx:26` | Nurse home: doses due now and late, overdue tasks, handover to accept | routes 5, 8, 16 |
+
+Rules for the screens:
+- Lagos time, "18 Nov 2026" dates and the 24-hour clock everywhere (owner decisions Q181 A and Q182 A, 25 Nov 2026). Due times are shown in Lagos time whatever the device's zone.
+- Never put a Health ID in a URL. URLs carry admission, order, dose and task UUIDs only.
+- Names and chart content on ward lists follow "Names and chart content on ward lists". Every ward list says: "Do not show this list on a screen patients or visitors can see."
+- Never show a score, a total of flags or a colour worked out from several values (Q199). Each value keeps its own soft flag.
+- Giving a dose before dispensing shows the pharmacy state and asks where the medicine came from.
+- The `packages/contracts/src/registry.ts` entries go from `proposed` to `served` only when this ships.
+- **Before this ships:** keep the Nursing tasks sample at demo facilities only, with its banner, and send nothing. Nursing observations stays as it is.
+
+### Tests
+
+- **Database** (throwaway local PostgreSQL clusters, fictional patients only), in `services/ehr-api/test/database/nursing.integration.sql` and `services/ehr-api/src/ehr/nursing/nursing.pg.spec.ts`:
+  - vitals with each new field alone; the oxygen and GCS rules; corrections of new fields; old readings unchanged; entered in error (0142) still works; the patient's own read unchanged;
+  - inpatient schedules: refused on an outpatient visit; each kind's shape; never changed after creation; 0148's trigger still last;
+  - due doses across midnight and across a schedule's first day, in Lagos time with the test cluster's zone set elsewhere;
+  - each outcome and its reasons; one record per scheduled dose with two sessions at once; a dose before dispensing needs a source; dose differs and as-needed overrides need reasons; late and recorded-late marks; entered in error frees the dose; an order stopped while a dose is recorded;
+  - no score anywhere: the chart answer's `score` is always `null`, and no function returns a total;
+  - tasks: the flow, repeats, cancel at discharge; completion record hidden without chart access;
+  - fluid balance: totals per hour, shift and fluid day (with a 07:00 start), unmeasured entries never counted, entered in error removed from totals;
+  - shifts across midnight; one nurse in charge and one on-call doctor per ward and shift; one nurse per patient per shift; ICU allocation;
+  - handover: notes as clinical notes, give and accept, only the next shift's nurse accepts;
+  - names and chart content hidden as ADT-1's rule; every refusal and its audit row; no medicine name, dose, value or note text in any audit row; sealed demo and QA isolation.
+- **Migration:** each file's busy refusal ("0174: …" to "0177: …"), "already applied", half state, pinned bodies; 0174's CHECK swaps from 0004's definitions only; 0175 on a table with existing prescriptions.
+- **Release C's live verifiers:** the rehearsal with `HID_REHEARSAL_LIVE_TREE` set to a `git archive` of 95fa1e52 and `HID_REHEARSAL_LIVE_POINTS` set to the four files' final numbers (after ADT-1's). All twelve live runtime verifiers pass after each file; the vitals verifiers matter most for 0174.
+- **New runtime verifier:** `services/ehr-api/scripts/verify-nursing-runtime.mjs` (a reading with the new fields, a scheduled order, a dose of each outcome, a task, a fluid entry, a shift, a handover), added to the rehearsal.
+- **Services:** unit specs; the flag off; `role-matrix.json`; the SX-1 areas; the vitals DTO with the new fields.
+- **Website:** chart, ICU grid, medicine round, tasks, fluid balance, shifts and handover, with the device zone away from Lagos; no score shown; no Health ID in any URL; no "permission" in staff text.
+
+### Depends on
+
+- ADT-1 (0170-0173): admissions, wards, the names rule, `ehr.admission_notice_recipients`.
+- 0004, 0005, 0142 (vitals and their corrections and entered in error), VIT-1 (soft flags and the usual-ranges table), 0125 and 0148 (prescription details and changes after dispensing), ORD-4 / 0144 (pharmacy state), EHR-C5 (signed notes), SX-9 (names).
+- Facility setup and department switches (Q149, gap map F2): the facility's `nursing` switch.
+- ORD-11 and the staff inbox (Q151, Q194).
+- It unblocks: ICU, Maternity's postnatal ward, Theatre's recovery, Blood bank's transfusion observations, and the Duty roster (Phase 4, reusing the clinical shifts).
+
+### Go-live gate (owner decision Q160 A, 25 Nov 2026)
+
+As ADT-1's, for nursing: the clinical lead's checklist below; a hazard log (wrong patient, wrong dose, a missed dose, a dose given twice, a value entered on the wrong patient, a handover not accepted); a test with real nurses at Demo Hospital with fictional patients; a short staff guide; a written paper back-up (paper drug chart, observation chart and fluid chart, entered later; owner decision Q161 A, 25 Nov 2026); the owner's go-live and the production switch applied with the owner's AWS access.
+
+### Clinical lead checklist (before real patients)
+
+- The new observation fields, their units and their usual ranges for VIT-1, including AVPU or ACVPU (Q-NUR-8) and the oxygen device list.
+- That no early-warning score is computed (Q199), and what nurses do instead (each value's soft flag, and the facility's own escalation on paper).
+- The ICU chart items, units and ranges (Q202), with a nursing adviser picked by the clinical lead (Q157).
+- The inpatient order types: set times, as needed (reason, gap, most doses), STAT, once only, infusions (Q197). With Ola (Q158).
+- The medicine round's outcomes and reason lists, the due and late window (Q-NUR-9), dose-differs and as-needed override reasons (Q-NUR-10, Q-NUR-12). With Ola (Q158).
+- The reason for allowing a dose before dispensing, and the supply sources (Q198, Q-NUR-11). With Ola (Q158).
+- The fluid balance kinds and the fluid day start (Q-NUR-15).
+- The clinical shift patterns, ICU nurse-to-patient allocation, and the handover content (Q193, Q-NUR-16).
+- Who gets critical results on wards: the nurses on shift, the nurse in charge and the on-call doctor (Q194).
+
+### DPO items
+
+- **Ward lists (Q190, Q-NUR-13):** the medicine round, task list and handover sheet name patients to ward staff, under ADT-1's switch. Medicine names, doses, values and notes only with chart access.
+- **The medicine record:** a new kind of health record (who gave what, when), kept as part of the record, never deleted; entered-in-error entries kept.
+- **Staff data in shifts:** who worked which shift on which ward; kept for the record's audit, and reused by the Duty roster (Phase 4) under its own review.
+- **Retention:** charts, doses, tasks, fluid entries and handovers are part of the record.
+
+### Target
+
+Release D, Phase 2, after ADT-1. Size **L**: four migrations (0174-0177, provisional), two changed vitals and prescription routes and about 22 new routes in ehr-api, no gateway change, one new runtime verifier, and the screens' wiring (Lekan).
 
 # Not planned yet
 
