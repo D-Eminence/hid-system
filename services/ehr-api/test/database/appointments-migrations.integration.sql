@@ -12,7 +12,9 @@
 --      when this transaction already holds another file's strong lock, it
 --      refuses at once ("... so it does not wait; ..."). Both messages are
 --      the ones the runner's dry run retries (its own number first, its
---      wording last; hid-system#306), and nothing is applied;
+--      wording last; hid-system#306), and nothing is applied. The same when
+--      the other session holds identity.sealed_qa_members (ACCESS EXCLUSIVE:
+--      0160 now takes the sealed-member tables up front, NOWAIT);
 --   2. a second run of each answers "already applied" (55000) and changes
 --      nothing;
 --   3. 0161 taken away for this transaction: a half state ("not in the
@@ -129,6 +131,13 @@ select pg_temp.expect('1c the same while this transaction holds an earlier file'
   pg_temp.answer('0160', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || :'made0160_holding');
 select public.dblink_exec('m160_blocker', 'rollback') as ended \gset
 select public.dblink_exec('m160_blocker', 'begin') as began \gset
+select public.dblink_exec('m160_blocker', 'lock table identity.sealed_qa_members in access exclusive mode') as blocked \gset
+:run0160
+select pg_temp.expect('1c2 identity.sealed_qa_members held by another session: 0160 tries for 5 seconds, then refuses as the runner retries',
+  'busy refusal: stayed busy for 5 seconds | ' || :'made0160_before',
+  pg_temp.answer('0160', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0160());
+select public.dblink_exec('m160_blocker', 'rollback') as ended \gset
+select public.dblink_exec('m160_blocker', 'begin') as began \gset
 select public.dblink_exec('m160_blocker', 'lock table platform.control_settings in access share mode') as blocked \gset
 :run0161
 select pg_temp.expect('1d platform.control_settings read by another session: 0161 tries for 5 seconds, then refuses',
@@ -200,6 +209,7 @@ insert into declared_locks values
   ('0160', 'identity.organizations', 'RowShareLock'), ('0160', 'identity.consent_directives', 'AccessShareLock'),
   ('0160', 'identity.consent_directive_versions', 'AccessShareLock'),
   ('0160', 'identity.facility_profiles', 'AccessShareLock'), ('0160', 'auth.account_roles', 'AccessShareLock'),
+  ('0160', 'identity.sealed_demo_members', 'AccessShareLock'), ('0160', 'identity.sealed_qa_members', 'AccessShareLock'),
   ('0161', 'platform.control_settings', 'AccessExclusiveLock'),
   ('0161', 'ehr.appointment_events', 'ShareRowExclusiveLock'), ('0161', 'ehr.appointments', 'ShareRowExclusiveLock'),
   ('0161', 'identity.patients', 'ShareRowExclusiveLock'), ('0161', 'identity.facilities', 'ShareRowExclusiveLock'),
@@ -321,6 +331,36 @@ delete from audit.events where correlation_id = '0160-appointments-appt1';
 set local session_replication_role = origin;
 select pg_temp.expect('4a the state before 0160, for this transaction', '0 tables, 0 functions, 0 role rows, 0 audit rows',
   pg_temp.made0160());
+-- A fictional front-desk member at a real facility (triggers off, as the suites seed; nothing here reads the
+-- sealed-member tables), so the closing count reaches identity.sealed_demo_facility and identity.sealed_qa_facility
+-- even on a fresh build, as it does on production.
+set local session_replication_role = replica;
+insert into identity.organizations (id, name, slug) values
+  ('e1610000-0000-4000-8000-000000000001', 'Seal Count Group', 'seal-count-group');
+insert into identity.facilities (id, organization_id, name, code, timezone, active, lifecycle_status) values
+  ('e1610000-0000-4000-8000-000000000002', 'e1610000-0000-4000-8000-000000000001', 'Seal Count Clinic', 'SEAL-COUNT',
+   'Africa/Lagos', true, 'verified');
+insert into auth.accounts (id, subject, email, display_name, status) values
+  ('e1610000-0000-4000-8000-000000000003', 'synthetic:seal-count-desk', 'seal-count-desk@example.invalid',
+   'Seal Count Desk', 'active');
+insert into identity.staff (id, account_id, full_name, email, verification_status, default_role) values
+  ('e1610000-0000-4000-8000-000000000004', 'e1610000-0000-4000-8000-000000000003', 'Seal Count Desk',
+   'seal-count-desk@example.invalid', 'verified', 'receptionist');
+insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
+  membership_role, app_role, is_primary, active) values
+  ('e1610000-0000-4000-8000-000000000005', 'e1610000-0000-4000-8000-000000000004', 'e1610000-0000-4000-8000-000000000003',
+   'e1610000-0000-4000-8000-000000000001', 'e1610000-0000-4000-8000-000000000002', 'receptionist', 'receptionist',
+   true, true);
+insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason) values
+  ('e1610000-0000-4000-8000-000000000006', 'e1610000-0000-4000-8000-000000000003', 'receptionist', 'facility',
+   'e1610000-0000-4000-8000-000000000005', 'e1610000-0000-4000-8000-000000000002', 'Synthetic seal count role');
+set local session_replication_role = origin;
+select pg_temp.expect('4a2 an active membership at a facility holds one of the four roles, so 0160''s closing count reads the seals',
+  'true',
+  (select (count(*) > 0)::text from identity.staff_facility_memberships membership
+     join auth.account_roles assignment on assignment.membership_id = membership.id and assignment.revoked_at is null
+    where membership.active and membership.facility_id is not null
+      and assignment.role_code in ('receptionist', 'doctor', 'clinician', 'nurse')));
 
 savepoint s160;
 create table ehr.appointment_settings (id integer);

@@ -109,8 +109,13 @@
 -- identity.organizations (the new rows' and audit rows' foreign key checks);
 -- ACCESS SHARE on identity.consent_directives,
 -- identity.consent_directive_versions and identity.facility_profiles (read by
--- the functions; the preconditions read the catalog) and auth.account_roles
--- (read by the closing count of the staff who gain each code). A busy table fails the
+-- the functions; the preconditions read the catalog), auth.account_roles
+-- (read by the closing count of the staff who gain each code) and
+-- identity.sealed_demo_members and identity.sealed_qa_members (read by the
+-- closing count, through identity.sealed_demo_facility and
+-- identity.sealed_qa_facility, as soon as a membership reaches it, as on
+-- production; taken up front like 0136, 0147 and 0151 take them, so they are
+-- never locked late while the strong locks above are held). A busy table fails the
 -- attempt at once, and its subtransaction releases what it took. The attempt
 -- is made 50 times, 100 ms apart (about 5 seconds), so the file never waits for
 -- one of its locks while holding the others; then 55P03 (nothing applied).
@@ -184,14 +189,15 @@ begin
   lock table auth.permissions, audit.events in row exclusive mode nowait;
   lock table auth.roles, auth.accounts, identity.organizations in row share mode nowait;
   lock table identity.consent_directives, identity.consent_directive_versions, identity.facility_profiles,
-    auth.account_roles in access share mode nowait;
+    auth.account_roles, identity.sealed_demo_members, identity.sealed_qa_members in access share mode nowait;
   exit;
   exception when lock_not_available then
     if v_holding then
       raise exception using errcode = '55P03',
         message = '0160: identity.patients, identity.facilities, identity.staff_facility_memberships, '
           || 'auth.role_permissions, ehr.visit_queue or a table 0160 reads or writes (the permissions, roles, '
-          || 'accounts, organizations, consent directives, facility profiles, role assignments and audit.events) is busy, and this '
+          || 'accounts, organizations, consent directives, facility profiles, role assignments, sealed demo and QA '
+          || 'members and audit.events) is busy, and this '
           || 'transaction already holds an earlier migration''s locks, so it does not wait; nothing applied; run '
           || 'the release again at a quieter time';
     end if;
@@ -199,7 +205,8 @@ begin
       raise exception using errcode = '55P03',
         message = '0160: identity.patients, identity.facilities, identity.staff_facility_memberships, '
           || 'auth.role_permissions, ehr.visit_queue or a table 0160 reads or writes (the permissions, roles, '
-          || 'accounts, organizations, consent directives, facility profiles, role assignments and audit.events) stayed busy for 5 '
+          || 'accounts, organizations, consent directives, facility profiles, role assignments, sealed demo and QA '
+          || 'members and audit.events) stayed busy for 5 '
           || 'seconds; nothing applied; run the release again at a quieter time';
     end if;
     perform pg_sleep(0.1);

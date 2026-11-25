@@ -167,7 +167,7 @@ const acceptedMigrations = new Map([
   ['0152_catalog_diagnoses.sql', 'abfecc3571808e4ad29fdf8c1e202f65b3cdf890e9f3106b74bd6ef1bd19f9c9'],
   ['0153_clinician_recent_diagnoses.sql', '45faa6a739056cc07426fdb5363b58c7dda1dbcbc096fb6d1769ae746798500b'],
   // APPT-1 (Release D), numbers provisional (given at merge, after 0152-0154), unsigned.
-  ['0160_appointments.sql', '1d26117473baabf20b1fd482f558072fbe07d8dc941e59f7d5f25c9d42193d99'],
+  ['0160_appointments.sql', '08dfe7475fa412b0c1a794ba8aa8e4fe94bb2ea63d9e00f4cb2896f65e60b37f'],
   ['0161_appointment_notices_and_call_list.sql', 'bdd7934796d54ebdf5ddcd27fbb977d841d89b64f20f828dff9b9b72dc6e0c40'],
 ])
 
