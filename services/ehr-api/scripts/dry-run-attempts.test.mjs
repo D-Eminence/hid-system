@@ -55,6 +55,38 @@ test('0148\'s own busy refusals, read from the file, are each retried', async ()
   }
 });
 
+/** A migration file's own 55P03 refusals, as the server raises them: its quoted parts joined, '' read as '. */
+async function busyRefusalsOf(file) {
+  const sql = await readFile(path.join(scripts, '../database/migrations', file), 'utf8');
+  return [...sql.matchAll(/errcode = '55P03',\s*message = ((?:'(?:[^']|'')*'\s*(?:\|\|\s*)?)+);/g)]
+    .map(([, literals]) => [...literals.matchAll(/'((?:[^']|'')*)'/g)].map(([, part]) => part.replaceAll("''", "'")).join(''));
+}
+
+// Rahman, #320 finding 1; and his re-review's finding 2: the attempt also takes ACCESS SHARE on both of 0149's lists
+// (the status's body check reads them), so both refusals name the three tables and are still retried.
+test('0152\'s two busy refusals, read from the file, name the versions table and both lists, and are retried', async () => {
+  const file = '0152_catalog_diagnoses.sql';
+  const refusals = await busyRefusalsOf(file);
+  const tables = 'ehr.catalog_versions (a catalogue search or load), ehr.catalog_medicines or ehr.catalog_lab_tests';
+  assert.deepEqual(refusals, [
+    `0152: ${tables} is busy and this transaction already holds an earlier migration's locks, so it does not wait; `
+      + `nothing applied; ${tail}`,
+    `0152: ${tables} stayed busy for 5 seconds; nothing applied; ${tail}`,
+  ]);
+  for (const message of refusals) {
+    assert.match(message, /ehr\.catalog_medicines/);
+    assert.match(message, /ehr\.catalog_lab_tests/);
+    assert.equal(isBusyRefusal(new MigrationFileError(file, databaseError('55P03', message))), true, message);
+  }
+  // The lists are locked in the same NOWAIT attempt as the versions table, before the status is replaced.
+  const sql = await readFile(path.join(scripts, '../database/migrations', file), 'utf8');
+  const attempt = sql.indexOf('lock table ehr.catalog_versions in access exclusive mode nowait;');
+  const lists = sql.indexOf('lock table ehr.catalog_medicines, ehr.catalog_lab_tests in access share mode nowait;');
+  const handler = sql.indexOf('exception when lock_not_available then', attempt);
+  assert.ok(attempt > 0 && lists > attempt && lists < handler, 'the lists are locked inside the attempt');
+  assert.ok(lists < sql.indexOf('create or replace function ehr.catalog_status()'), 'before the status is replaced');
+});
+
 test('anything else is not retried', () => {
   const file = '0131_own_facility_patient_access.sql';
   for (const error of [

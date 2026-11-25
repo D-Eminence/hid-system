@@ -1,11 +1,11 @@
-import { Injectable, Optional } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import type { QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
-import type { WorkItemProgressDto } from './dto/work-item-progress.dto';
+import type { WorkItemProgressBatchDto, WorkItemProgressDto } from './dto/work-item-progress.dto';
 import { OWN_WORK_OFF, PharmacyOwnWork, type OwnWorkState } from './own-work-access';
 import { PharmacyRefills, REFILLS_OFF } from './prescription-refills';
 
@@ -117,6 +117,33 @@ export const WORK_ITEM_PROGRESS_QUERY = `select w.id::text as work_item_id,
   where w.patient_id=$1::uuid and w.facility_id=$2::uuid and w.order_route_id is null
     and w.source_ehr_prescription_id=any($3::uuid[])`;
 
+/** At most this many Identity checks of one batch read run at once (decision 4). */
+export const PROGRESS_BATCH_CHECK_CONCURRENCY = 4;
+
+/**
+ * Every Identity check of one batch read is done within this long of the
+ * handler's start (decision 4), or aborted: ehr-api waits 3.5 seconds for the
+ * whole call, and this leaves time for the guard, the transactions and the
+ * way back.
+ */
+export const PROGRESS_BATCH_CHECK_BUDGET_MS = 2_000;
+
+/**
+ * One patient's entry in the batch answer: answered with its items, exactly
+ * as the one-patient route; or denied (audited) or unavailable, with a code
+ * and never items.
+ */
+export type PharmacyProgressBatchEntry = { patientId: string; outcome: 'answered'; items: PharmacyProgressItem[] }
+  | { patientId: string; outcome: 'denied' | 'unavailable'; code: string };
+
+/** One patient's check in the batch. */
+type Verdict = { outcome: 'answered'; breakGlass: boolean }
+  | { outcome: 'denied'; code: string; reason: 'identity_refusal' | 'identity_authorization' }
+  | { outcome: 'unavailable'; code: string };
+
+/** Not checked before the budget ran out, or aborted by it. */
+const TIME_LIMIT: Verdict = { outcome: 'unavailable', code: 'PROGRESS_CHECK_TIME_LIMIT' };
+
 /**
  * ORD-3: a read-only progress answer for ehr-api, which shows the clinician
  * whether this facility's pharmacy received and dispensed each prescription.
@@ -127,6 +154,11 @@ export const WORK_ITEM_PROGRESS_QUERY = `select w.id::text as work_item_id,
  */
 @Injectable()
 export class PharmacyWorkItemProgressService {
+  /** How long readBatch's checks may take, from its start; a property so a test can shorten it. */
+  batchCheckBudgetMs = PROGRESS_BATCH_CHECK_BUDGET_MS;
+  /** For PROGRESS_CHECK_FAILED only. */
+  private readonly logger = new Logger(PharmacyWorkItemProgressService.name);
+
   constructor(private readonly database: DatabaseService, private readonly identity: IdentityService,
     private readonly audit: AuditService, private readonly ownWork: PharmacyOwnWork = OWN_WORK_OFF,
     // ORD-12: `lastFilledAt` while PRESCRIPTION_REFILLS_ENABLED is on; off by default, so every existing caller is
@@ -173,16 +205,193 @@ export class PharmacyWorkItemProgressService {
       // 0133: whether each item was withdrawn before it was dispensed, and why (no flag when it cannot be read);
       // ORD-4: in the same reader statement, its pharmacist's acceptance (none when it cannot be read).
       const states = await this.ownWork.states(client, rows.map((row) => row.work_item_id), context.correlationId, 'flag');
-      const found = new Map(rows.map((row) => [row.source_ehr_prescription_id.toLowerCase(), row]));
-      return { items: input.sourceEhrPrescriptionIds.map((id) => {
-        const row = found.get(id.toLowerCase());
-        const item = project(id, row, row ? states.get(row.work_item_id) : undefined, current, current && accepted);
-        // ORD-12 (refills on): the latest fill's time, null whenever dispensedAt is.
-        return this.refills.enabled
-          ? { ...item, lastFilledAt: item.dispensedAt === null ? null : iso(row?.last_filled_at ?? null) } : item;
-      }) };
+      return { items: progressItems(input.sourceEhrPrescriptionIds, rows, states, current, accepted,
+        this.refills.enabled) };
     });
   }
+
+  /**
+   * Decision 4: ORD-3 for several patients; each patient as by a call of its
+   * own. Each patient gets its own Identity check (at most
+   * PROGRESS_BATCH_CHECK_CONCURRENCY at once, all within batchCheckBudgetMs),
+   * its own denied or success row, and today's statement bound to that
+   * patient alone; a patient that is refused, or could not be checked, is
+   * answered without items and changes nothing in another patient's entry.
+   * Direct care only. One transaction writes every denial, before the read;
+   * one more reads every allowed patient.
+   */
+  async readBatch(context: DataAccessContext, input: WorkItemProgressBatchDto, current = false, accepted = false):
+  Promise<{ patients: PharmacyProgressBatchEntry[] }> {
+    // MY-1 reads under direct care only. An emergency read of many patients at
+    // once has no use, so it keeps the one-patient route; refused before
+    // Identity is asked anything.
+    if (context.purposeOfUse !== 'direct-care') {
+      throw new DomainProblem(400, 'PURPOSE_OF_USE_REQUIRED', 'X-Purpose-Of-Use must be direct-care for this route');
+    }
+    const patients = input.patients;
+    const verdicts = await this.checkAll(context, patients);
+    const resource = (patientId: string) => ({ patientId, resourceType: 'pharmacy-work-item-collection',
+      resourceId: context.facilityId });
+    const denied = patients.flatMap((entry, index) => {
+      const verdict = verdicts[index]!;
+      return verdict.outcome === 'denied' ? [{ entry, reason: verdict.reason }] : [];
+    });
+    // Every denial is written, and committed, before anything is read, as the
+    // one-patient route writes its denial before it answers 403.
+    if (denied.length > 0) {
+      await this.database.withTransaction(context, async (client) => {
+        for (const { entry, reason } of denied) {
+          await this.audit.recordWithClient(client, context, 'pharmacy.work-item.progress.read', resource(entry.patientId),
+            { requestedCount: entry.sourceEhrPrescriptionIds.length, reason, via: 'batch' }, 'denied');
+        }
+      });
+    }
+    const allowed = patients.flatMap((entry, index) => {
+      const verdict = verdicts[index]!;
+      return verdict.outcome === 'answered' ? [{ entry, index, breakGlass: verdict.breakGlass }] : [];
+    });
+    const answered = new Map<number, PharmacyProgressItem[]>();
+    if (allowed.length > 0) {
+      const items = await this.database.withTransaction(context, async (client) => {
+        const found: Array<{ entry: WorkItemProgressDto; rows: ProgressRow[] }> = [];
+        for (const { entry, breakGlass } of allowed) {
+          // Today's statement, bound to this patient and this patient's ids
+          // only: no id reaches a statement bound to another patient.
+          const rows = (await client.query<ProgressRow>(WORK_ITEM_PROGRESS_QUERY,
+            [entry.patientId, context.facilityId, entry.sourceEhrPrescriptionIds])).rows;
+          await this.audit.recordWithClient(client, context, 'pharmacy.work-item.progress.read', resource(entry.patientId),
+            { requestedCount: entry.sourceEhrPrescriptionIds.length, foundCount: rows.length,
+              workItemIds: rows.map((row) => row.work_item_id), breakGlass, via: 'batch' });
+          found.push({ entry, rows });
+        }
+        // 0133's and ORD-4's reader once for the whole call (at most 100 work
+        // items, within one statement of the reader); each item keeps its own
+        // state, so a patient's items are built from its own rows only.
+        const states = await this.ownWork.states(client, found.flatMap(({ rows }) => rows.map((row) => row.work_item_id)),
+          context.correlationId, 'flag');
+        return found.map(({ entry, rows }) =>
+          progressItems(entry.sourceEhrPrescriptionIds, rows, states, current, accepted, this.refills.enabled));
+      });
+      allowed.forEach(({ index }, position) => answered.set(index, items[position]!));
+    }
+    return { patients: patients.map((entry, index): PharmacyProgressBatchEntry => {
+      const verdict = verdicts[index]!;
+      return verdict.outcome === 'answered'
+        ? { patientId: entry.patientId, outcome: 'answered', items: answered.get(index)! }
+        : { patientId: entry.patientId, outcome: verdict.outcome, code: verdict.code };
+    }) };
+  }
+
+  /**
+   * Each patient's check, in the order asked, by at most
+   * PROGRESS_BATCH_CHECK_CONCURRENCY workers. When batchCheckBudgetMs is up,
+   * the checks still running are aborted and no longer waited for, and the
+   * ones not started are not started, so one hung check cannot hold the
+   * whole call past ehr-api's timeout; those patients are unavailable, not
+   * refused.
+   */
+  private async checkAll(context: DataAccessContext, patients: readonly WorkItemProgressDto[]): Promise<Verdict[]> {
+    // As read(): the clinician's browser request was a GET; see there.
+    const readContext: DataAccessContext = { ...context, requestMethod: 'GET' };
+    const budget = new AbortController();
+    // An explicit timer (not AbortSignal.timeout) so a test can shorten batchCheckBudgetMs.
+    const timer = setTimeout(() => budget.abort(), this.batchCheckBudgetMs);
+    timer.unref?.();
+    const verdicts: Verdict[] = [];
+    let next = 0;
+    const worker = async () => {
+      while (next < patients.length) {
+        const index = next;
+        next += 1;
+        verdicts[index] = budget.signal.aborted ? TIME_LIMIT
+          : await this.check(patients[index]!.patientId, readContext, budget.signal);
+      }
+    };
+    try {
+      await Promise.all(Array.from({ length: Math.min(PROGRESS_BATCH_CHECK_CONCURRENCY, patients.length) }, worker));
+    } finally {
+      clearTimeout(timer);
+    }
+    return verdicts;
+  }
+
+  /** One patient's verdict, by the table of the batch contract (in its order); never throws. */
+  private async check(patientId: string, readContext: DataAccessContext, signal: AbortSignal): Promise<Verdict> {
+    let decision: Awaited<ReturnType<IdentityService['authorize']>>;
+    try {
+      decision = await withinBudget(this.identity.authorize(patientId, 'read_records', readContext, { signal }),
+        signal);
+    } catch (error) {
+      // Identity's own refusal (403) is a denied read of this patient, audited as one, as read() does.
+      if (error instanceof DomainProblem && error.getStatus() === 403) {
+        return { outcome: 'denied', code: error.code, reason: 'identity_refusal' };
+      }
+      // The Identity client answers an aborted check as Identity being
+      // unavailable, and withinBudget stops waiting with the signal's reason;
+      // either way it was our time limit.
+      if (signal.aborted) return TIME_LIMIT;
+      if (error instanceof DomainProblem) return { outcome: 'unavailable', code: error.code };
+      // Neither ids nor the message: only what tells the failure apart.
+      this.logger.error({ message: 'Own progress check failed', correlationId: readContext.correlationId,
+        errorName: error instanceof Error ? error.name : 'UnknownError' });
+      return { outcome: 'unavailable', code: 'PROGRESS_CHECK_FAILED' };
+    }
+    // Not allowed is a denial, by the same test as read() (and lab-api's batch).
+    if (!decision.allowed) {
+      return { outcome: 'denied', code: 'PHARMACY_ACCESS_DENIED', reason: 'identity_authorization' };
+    }
+    // A break-glass decision is never read through the batch (decision 4: an
+    // emergency read keeps the one-patient route), so a decision carrying it
+    // is not an answer this route takes.
+    if (decision.breakGlass !== false) {
+      return { outcome: 'unavailable', code: 'INVALID_IDENTITY_RESPONSE' };
+    }
+    return { outcome: 'answered', breakGlass: decision.breakGlass };
+  }
+}
+
+/**
+ * The check, or the budget, whichever ends first: once the signal aborts,
+ * this rejects with its reason. The Identity client stops its own time limit
+ * and the abort once Identity's answer headers arrive, and reads the body
+ * after them with neither, so one stalled answer would otherwise hold its
+ * worker, and with it the whole call, past ehr-api's timeout. The check left
+ * behind ends on its own; nothing waits for it, and its answer is not read.
+ */
+async function withinBudget<T>(check: Promise<T>, signal: AbortSignal): Promise<T> {
+  let stop: () => void = () => undefined;
+  const spent = new Promise<never>((_resolve, reject) => {
+    stop = () => reject(signal.reason);
+    if (signal.aborted) stop();
+    else signal.addEventListener('abort', stop, { once: true });
+  });
+  try {
+    // Promise.race keeps a handler on the promise that loses, so a late
+    // failure of the check left behind is not an unhandled rejection.
+    return await Promise.race([check, spent]);
+  } finally {
+    // One listener per check in flight, so the budget's signal never holds more than four of ours.
+    signal.removeEventListener('abort', stop);
+  }
+}
+
+/**
+ * Each id asked, in the order asked, from this patient's own rows only (ids
+ * matched without regard to letter case and answered as sent); shared by
+ * read() and readBatch(), so a batch entry is exactly the one-patient answer.
+ * `refills` (ORD-12, PRESCRIPTION_REFILLS_ENABLED on): each item also carries
+ * `lastFilledAt`, the latest fill's time, null whenever `dispensedAt` is; off,
+ * no item carries it.
+ */
+function progressItems(ids: readonly string[], rows: readonly ProgressRow[], states: Map<string, OwnWorkState>,
+  current: boolean, accepted: boolean, refills: boolean): PharmacyProgressItem[] {
+  const found = new Map(rows.map((row) => [row.source_ehr_prescription_id.toLowerCase(), row]));
+  return ids.map((id) => {
+    const row = found.get(id.toLowerCase());
+    const item = project(id, row, row ? states.get(row.work_item_id) : undefined, current, current && accepted);
+    return refills
+      ? { ...item, lastFilledAt: item.dispensedAt === null ? null : iso(row?.last_filled_at ?? null) } : item;
+  });
 }
 
 /**

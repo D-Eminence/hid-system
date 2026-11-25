@@ -73,7 +73,8 @@
 // ehr-api with only
 // X-HID-Own-Progress: 0133 (a Release A ehr-api), answers received for the
 // accepted item with no acceptedAt, and the same with only ORD-4's header,
-// accepted only with both; an accepted item put on hold reads withdrawn,
+// accepted only with both, and its several-patient form (decision 4,
+// progress/batch) answers the same by header; an accepted item put on hold reads withdrawn,
 // keeps its acceptance (Accept answers it again, 200) and cannot be
 // dispensed (409); an item held before anyone accepted it cannot be accepted
 // (409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE, withdrawnReason changed); and
@@ -893,6 +894,21 @@ try {
   assert.deepEqual(headerMatrix, { releaseA: asReceived, ord4Only: asReceived,
     both: [{ ...asReceived[0], status: 'accepted', acceptedAt: acceptance4.acceptedAt }] },
   `the progress answers by header: ${JSON.stringify(headerMatrix)}`);
+  // The several-patient form (decision 4) reads the two headers through the same helper as the one-patient route, so
+  // the patient's entry is the one-patient answer for the same headers.
+  const batchAsEhr = async (label, versionHeaders) => expectStatus(await http(pharmacy, 'POST',
+    '/pharmacy/work-items/progress/batch', { cookie: doctor.cookie, facility: hospital.facilityId,
+      purpose: 'direct-care', body: { patients: [{ patientId: patient.id, sourceEhrPrescriptionIds: [rx4.id] }] },
+      headers: { 'x-hid-internal-caller': 'ehr-api', 'x-hid-service-token': tokens.pharmacy, ...versionHeaders } }), 200,
+  `pharmacy batch progress ${label}`).patients;
+  const batchMatrix = {
+    releaseA: await batchAsEhr('with only the 0133 header', { 'x-hid-own-progress': '0133' }),
+    ord4Only: await batchAsEhr('with only the ORD-4 header', { 'x-hid-own-progress-accepted': 'ord4' }),
+    both: await batchAsEhr('with both headers', { 'x-hid-own-progress': '0133', 'x-hid-own-progress-accepted': 'ord4' }),
+  };
+  const entryOf = items => [{ patientId: patient.id, outcome: 'answered', items }];
+  assert.deepEqual(batchMatrix, { releaseA: entryOf(headerMatrix.releaseA), ord4Only: entryOf(headerMatrix.ord4Only),
+    both: entryOf(headerMatrix.both) }, `the batch progress answers by header: ${JSON.stringify(batchMatrix)}`);
 
   // Dispensing the accepted item: dispensed, acceptedAt kept, and no second acceptance (its audit row says none).
   expectStatus(await pharmacyCall(ownPharmacist, 'POST', `/work-items/${item4.id}/dispensings`,
@@ -966,7 +982,7 @@ try {
     ownProgress: { accepted: 'accepted with acceptedAt', afterDispensing: 'dispensed, acceptedAt kept',
       heldAfterAcceptance: 'withdrawn, acceptedAt kept' },
     progressHeaders: { only0133: 'received, no acceptedAt', onlyOrd4: 'received, no acceptedAt',
-      both: 'accepted with acceptedAt' },
+      both: 'accepted with acceptedAt', batchForm: 'the same entry by header (decision 4)' },
     heldAfterAcceptance: { list: 'withdrawn (changed), acceptance kept', accept: '200 alreadyAccepted',
       dispense: 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE' },
     heldBeforeAcceptance: 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE (changed), nothing written',

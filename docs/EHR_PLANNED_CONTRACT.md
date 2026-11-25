@@ -856,8 +856,12 @@ Answer `200`, `Cache-Control: no-store`:
 
 Audit: one `ehr.my-orders.list` row (filters, count, `hiddenCount`, patient
 ids shown) plus one `ehr.my-orders.list.shown` row per patient shown, on
-every read, as the waiting list does (EHR-C7). The progress lookups are
-audited by ORD-3 as today.
+every read, as the waiting list does (EHR-C7). The progress lookups use
+ORD-3's several-patient form (one call per kind for the page) and are
+audited per patient as ORD-3's one-patient lookup is, except where that
+form's 2-second limit applies: a patient not checked within it, or whose
+refusal completes after it, is `unknown` with no `denied` row (Identity
+keeps its own row of a refusal).
 
 ### Errors
 
@@ -890,10 +894,13 @@ audited by ORD-3 as today.
 
 ### Depends on
 
-- ORD-3 (wave 1, on staging). Its internal progress call takes one `patientId`
-  per call (ORD-3 section). Needed from lane D: a form that takes several
-  patients in one call (at most 100 ids in all), or MY-1 makes one call per
-  patient on the page (hence the page limit of 50).
+- ORD-3 (wave 1, on staging). Its internal progress call takes one
+  `patientId` per call (ORD-3 section). Lane D adds ORD-3's several-patient
+  form (decision 4: `.../progress/batch`, at most 50 patients and 100 ids in
+  all, both progress headers); MY-1 makes one call per kind for its page,
+  and against an image without that form one call per patient and kind,
+  at most 6 at once for the page across both kinds with one
+  `OwnProgressSlots` for the page (hence still the page limit of 50).
 - EHR-C7 card shape and 0131 own-facility access (Release A).
 - Q123 A (decided) for the default reach.
 - ORD-11 (Release C) later adds "new result" and "Seen" marks; not in this
@@ -1312,7 +1319,9 @@ default 10. Optional `doseForm` is one of section 46's values (`tablet`,
 Optional `route` is a plain word up to 100 characters. Each word of `q` must
 start a word of the generic name, another name or a brand name. Other names
 and brands come from `ocr-worker/src/reading/drug-list.ts` and
-`brand-names.ts`, and an item is always shown under its generic name. Names
+`brand-names.ts` (its confirmed rows only: a brand still pending a
+pharmacist's review is left out; second slice), and an item is always shown
+under its generic name. Names
 that start with `q` come first, then the rest in A to Z order. Withdrawn
 items are never offered.
 
@@ -1516,6 +1525,9 @@ together, like section 46's setting.
   - WHOCC terms for using ATC codes in a commercial product. This is an open
     point with no decision yet, to be decided before this section is built.
     Until it is decided, `atcCode` stays `null`.
+  - The owner's confirmation that the Nigeria Essential Medicines List, 8th
+    edition ("All rights reserved"), may be used for its facts.
+  - Both answers are recorded in the sign-off (second slice, `licences`).
 - ORD-2 (0133) and order routes for the name-only send paths.
 - SX-1 fixture for the new permission.
 
@@ -1565,8 +1577,8 @@ signs a version (Q124 A) and the governed loader (a later slice) loads it.
     "COVID-19", "U/A" and "G&XM" find the tests named so. Only the first 6
     words count, each cut to 40 characters;
     `q` never reaches the query parser as typed, so brackets or operators
-    answer nothing, never an error. Brand names come with the loader (they
-    are other names).
+    answer nothing, never an error. Brand names come with the seed files
+    (they are other names, the confirmed brands only; second slice).
   - The order: names that start with `q` first, then by name in the "C"
     collation, then strength and the list id, so it is the same on every
     load.
@@ -1615,6 +1627,326 @@ signs a version (Q124 A) and the governed loader (a later slice) loads it.
   loaded by owner SQL (the doctor and the pharmacist search), and the
   refusals and the audit rows.
 
+### Second slice: the seed files and the governed loader (draft, not live)
+
+Built on 23 Nov 2026 (lane D), stacked on the first slice; Rahman's review
+of hid-system#319 built in (five rounds). No migration and no route: three
+scripts in `services/ehr-api/scripts`, the approvals file, and an opt-in
+phase of the deploy tool. Nothing is loaded until the clinical lead signs a
+file.
+
+- **Seed files:** `catalog:build-seeds` turns the combined list (#312) into
+  `hid-medicines.json` and `hid-lab-tests.json` (format
+  `hid-catalog-seed/1`). The bytes are stable, so the sha256 the lead signs
+  is reproducible, and `--check` fails on any drift. The builder prints what
+  the lead signs with each file, opening with the record of Ola's brand
+  decision (`brandDecision`, below): what was held back and why, how every
+  Wave 0 code stands (kept ones included), every brand added (brand ->
+  generic, on how many items) and every brand left out, with why. It reads
+  `brand-names.ts` with Node's own TypeScript type stripping, so it needs
+  Node 22.18 or later; on an older Node it stops first with a plain line
+  naming the version it needs (exit 2, nothing built).
+  - A row the database would refuse is **held back** with why (for example
+    a strength over 80 characters, or a test with no code), never cut or
+    guessed. The seed lists its held-back rows, so the lead signs with them
+    in view.
+  - Every gap in the ids must be a retired id with a reason, and no retired
+    id may still be a row. A retired id whose row the builder holds back
+    stops it with "MED-00002 is held back in this seed and also listed as
+    retired; fix the row, do not retire it; nothing built" (exit 2, one
+    line): retired, the row would be gone for good, though it only needs
+    fixing.
+  - Everything the builder reads is inside that one-line handling: a file
+    that cannot be read or is not JSON, a broken CSV (an unclosed quote: "the
+    combined list <file>: CSV: a quoted field is not closed; nothing built";
+    a row with the wrong number of fields), any other list it cannot make
+    into seeds, or a seed that would not load (an HID-LAB code that is not
+    Wave 0's) stops it with one plain line, exit 2, nothing built. Both
+    seeds are built and checked in memory first and written only when both
+    are good, each under a temporary name and then renamed into place, so a
+    bad lab-test list never leaves a new medicine file behind, and seeds
+    already there stay as they were. A seed file it cannot write is one line
+    too (exit 1).
+  - **ATC codes:** `atcCode` is `null` in the seed unless the builder is run
+    with `--with-atc`, which it refuses until a medicine sign-off of that
+    version records the WHOCC terms answer (`licences.whoccAtc`).
+  - **Brand names:** only the confirmed rows of `ocr-worker`'s
+    `brand-names.ts` go into `otherNames`, so they are signed with the file
+    (Ola's clinical decision, round 2 of #319). The file has two review
+    statuses: `coordinator-curated` (the brands curated before the table,
+    which the file keeps active) is the confirmed one; a row still
+    `pending-pharmacist`, or of any other status, is left out. A confirmed
+    brand is added only where its generic (compared without case, white
+    space collapsed) is the generic name of exactly one medicine in the
+    seed. A combination counts only when written as the seed writes it
+    ("amoxicillin + clavulanic acid"). The brand then goes on every item
+    (strength and form) of that medicine. Nothing is guessed: the builder's
+    report lists every brand added and every brand left out with why
+    (pending pharmacist review, or no medicine with exactly that generic
+    name). When a pharmacist confirms a pending brand, it comes in with the
+    next version the lead signs.
+  - **Ola's check of the confirmed brands (23 Nov 2026):** the 21
+    coordinator-curated brands now in the medicine seed (valium, phenergan,
+    flagyl, amoxil, augmentin, septrin, rocephin, zinnat, coartem, fansidar,
+    daraprim, panadol, norvasc, adalat, lasix, plasil, glucophage, ventolin,
+    postinor, buscopan, voltaren) were checked by Ola as clinical owner and
+    are confirmed. Brands pending a pharmacist's review stay out until a
+    pharmacist confirms them. The rule above is unchanged, and so is the
+    medicine seed built from #312's list (sha256
+    `d6a08fe25ed63ab05ad8dfb7bddf6de022d1504188c787f73c514e50e09d3419`);
+    the builder's report opens with this record (`brandDecision`), so the
+    lead signs with it in view.
+  - **Wave 0:** the lab-test seed reports each Wave 0 HID-LAB code as kept,
+    renamed, recoded, held back (a row of that name with no code) or
+    missing. An HID-LAB item whose code is not in
+    `docs/codes/hid-lab-codes.json`, or is there with another name, is
+    refused, so a Wave 0 code is never changed or reused.
+  - The notices: LOINC's when a test has a LOINC code; the WHO Model List's
+    citation (CC BY-NC-SA 3.0 IGO) when a medicine comes from it.
+- **Sign-off:** `docs/codes/catalog-approvals.json` (format
+  `hid-catalog-approvals/1`, empty until the lead signs). An entry names a
+  file's kind, version and sha256, an approval reference and the time. A
+  medicine entry also records the owner's licence answers under `licences`,
+  each a reference to where the answer is kept: `nigeriaEml8` always, and
+  `whoccAtc` for a file with ATC codes. It is added in a reviewed PR that
+  records the sign-off; no personal names.
+- **The loader,** `catalog:load --seed <file> [--dry-run]`, runs after the
+  migrations, never inside one, as the schema owner. It refuses (exit 2,
+  nothing written, one line ending "nothing loaded"):
+  - before it connects: `--approvals` under `NODE_ENV=production` (only the
+    deployed approvals file signs a load); a seed, approvals or Wave 0 file
+    that cannot be read or is not JSON; a seed that breaks 0149's rules or
+    Wave 0's; a seed that holds back an id and also lists it as retired
+    ("MED-00002 is held back in this seed and also listed as retired; fix
+    the row, do not retire it"; the load refuses it again before its first
+    statement, so nothing is retired); a file whose sha256
+    is not signed for its kind and version;
+    a medicine sign-off without `licences.nigeriaEml8`, or a file with ATC
+    codes whose sign-off lacks `licences.whoccAtc`;
+  - in its transaction: a schema without 0149; a version already loaded;
+    an id of the active version that the new seed drops without listing it
+    in its retired ids with a reason; an id of the active version that the
+    new seed holds back ("MED-00002 is in the live list but held back in
+    this seed; fix the row, do not retire it");
+  - a lock still busy after 5 seconds: "ehr.catalog_versions or another
+    catalogue load stayed busy for 5 seconds; nothing loaded; run the
+    release again at a quieter time";
+  - 0149's own refusals, with the database's message: its insert triggers
+    and the versions guard (SQLSTATE 55000: `CATALOG_ID_CHANGED`,
+    `CATALOG_ID_RETIRED`, `CATALOG_VERSION_SEALED`) and its table checks
+    (23514), for example "the database refused the load:
+    CATALOG_ID_CHANGED: MED-00001 (55000); nothing loaded".
+
+  Anything else is a failure: exit 1, also one line ending "nothing
+  loaded", never a stack trace. That covers an error before it connects (a
+  `DATABASE_HOST` that makes no address: "DATABASE_HOST does not make a
+  database address: Invalid URL (ERR_INVALID_URL)"; a bad TLS setting), no
+  database, and a connection dropped mid-load (a terminated backend, a
+  failover): the loader listens for the client's `error` event, so a drop
+  is never an unhandled one, and a load cut off before its commit leaves
+  nothing ("terminating connection due to administrator command (57P01);
+  nothing loaded").
+
+  A drop once the load's COMMIT is sent is different: the version may have
+  committed (a backend terminated while its commit waits for a synchronous
+  standby has already committed locally), so the loader never says "nothing
+  loaded" then. It tracks that COMMIT was sent; if the connection is lost,
+  or a fatal error comes, before COMMIT's reply, it ends with its own exit
+  code, 3, and one line: "load-catalog: the connection was lost during
+  commit, so the load may have committed; ask for the same load again to
+  settle it (it loads, or is refused as already loaded)". An ERROR reply to
+  COMMIT means the load rolled back and stays a refusal or a failure, and a
+  connection the client already knew was lost is never sent COMMIT, so both
+  still end "nothing loaded".
+
+  The loader's exit codes: 0 loaded (or a dry run rolled back), 1 a
+  failure with nothing loaded, 2 a refusal with nothing loaded, 3 the
+  connection lost during commit, outcome unknown.
+
+  The database refuses a retired, changed or reused id on its own, and the
+  whole load rolls back. In one transaction the loader takes its advisory
+  lock and SHARE ROW EXCLUSIVE on the versions, records the new retired
+  ids, inserts the version (with `approvals_sha256`, the approvals file's
+  own sha256) and its rows, then turns the old version off and the new one
+  on. `--dry-run`
+  rolls back. It prints one line: what loaded, the seed's and the approvals
+  file's sha256, and what it replaced.
+- **Where it runs in production:** only in the migration image, which
+  carries exactly the files the loader reads, by name, at `/app/docs/codes`
+  where the loader looks: the approvals file, the Wave 0 codes
+  (`hid-lab-codes.json`) and the two signed seed files. Nothing else under
+  `docs/codes` ships (drafts never do); until the seed files are committed,
+  their one-name pattern (`hid-medicines.jso[n]`) copies nothing.
+  `verify-container-platform.mjs` checks that the image carries exactly
+  those four and that no stage copies any other file from `docs/`, and a
+  change to one of the four runs the build and verify gate as well as the
+  staging preparation tests. A change under `docs/codes/` rebuilds the
+  migration image. The deploy tool (`scripts/production_deployment.py`)
+  has an opt-in catalogue phase:
+  - It runs only when the release asks for it: a dispatch of "Production
+    backend candidates" with `catalog_load` set to `medicine`, `lab_test`
+    or both (`CATALOG_LOAD`; a push always deploys with `none`), in a
+    release that carries the migration image. Any other value, a rollback,
+    or a release without the migration image is refused before it starts,
+    and so is a seed missing from the checkout (`CATALOG_SEED_MISSING`):
+    the deploy job checks out the commit the image was built from, and the
+    tool reads each asked seed's version and sha256 there.
+  - It runs after the migration phase has succeeded (after the apply and the
+    final plan, or after a plan that found nothing pending), before any
+    service is updated: one Fargate task per seed on the migration task
+    definition the release registered, its command
+    `scripts/load-catalog.mjs --seed /app/docs/codes/<file>`.
+  - A refusal (exit 2) stops the release (`CATALOG_LOAD_REFUSED`), and any
+    other non-zero exit stops it too (`CATALOG_LOAD_FAILED`); either way the
+    tool prints the loader's last line (its refusal or failure line, or
+    whatever it printed last). The receipt records each load
+    (`catalog_checks`: kind, `loaded`, version, the seed's and the approvals
+    file's sha256, items, the version replaced). Each seed is its own
+    transaction: if the lab tests are refused after the medicines loaded,
+    the medicines stay loaded and the failed receipt names them.
+  - A task that exits 0 has loaded its seed, so the tool names it as loaded
+    at once (kind, version, the file's sha256, "evidence pending"), before
+    it reads the task's log. The evidence line then replaces that entry; it
+    must carry every field the receipt records (`replaced` too, `null` when
+    nothing was replaced). If the line is missing or malformed, the entry
+    says "evidence line missing" and the release fails with
+    `CATALOG_LOAD_EVIDENCE_MISSING`. If the log cannot be read (CloudWatch
+    throttling, or the lease check before the read), the entry says
+    "evidence unreadable" and the release fails with that error (for
+    example `AWS_ThrottlingException`). Either way the tool prints a line
+    naming the seed as loaded, and the failed receipt, when the release can
+    write one, names it.
+  - A task that exits 3 may have loaded. The tool names the seed as
+    "outcome unknown" at once (kind, version and the file's sha256 from the
+    checkout), before it reads the task's log, and the release stops
+    (`CATALOG_LOAD_OUTCOME_UNKNOWN`); the failed receipt names the seed so.
+    The exit code is enough: a log that cannot be read (CloudWatch
+    throttling, or the lease check before the read) or a line that never
+    arrives changes neither the entry nor the error. The log only adds to
+    what the tool prints: the loader's line, or `"log_error"` saying why it
+    could not be read. The commit line under any other exit code (never
+    expected) is treated the same way, the safe side.
+  - **After a failure that follows a successful load** (a later seed
+    refused, the evidence line missing, or the services failing after the
+    catalogue phase), the operator dispatches the release again with
+    `catalog_load` set to `none`. The loaded version stays loaded, and
+    asking to load it again is refused ("medicine 2026.1 is already
+    loaded"), so a re-dispatch that asks again cannot finish. The deploy
+    tool prints this step with the failure
+    (`"next": "dispatch the release again with catalog_load none"`). When
+    the release ends unreconciled (the lease lost, or a rollback that could
+    not be confirmed: no failed receipt, and the lease stays held), the step
+    says to reconcile first: "reconcile this release first (it ended
+    unreconciled and keeps the deployment lease), then dispatch the release
+    again with catalog_load none". A seed that did not load is asked for on
+    its own once its cause is fixed.
+  - The catalogue phase stops at the first seed that does not end loaded
+    with its evidence, so a seed asked for after it is never tried. The
+    step names every such seed, in load order, so none asked for is
+    dropped (`"catalog_not_tried"` lists them). After the medicines loaded
+    without their evidence line, with the lab tests asked for too, the step
+    is "dispatch the release again with catalog_load lab_test to load what
+    this release did not try" rather than `none`.
+  - **After a load whose outcome is unknown,** the operator dispatches the
+    release again asking for that seed, which settles it: it loads, or it
+    is refused as already loaded. The tool prints this step too
+    (`"catalog_outcome_unknown"` names the seed, and `"next": "dispatch the
+    release again with catalog_load medicine to settle it (it loads, or is
+    refused as already loaded; once refused, dispatch again with
+    catalog_load none)"`), after the reconcile-first step when the release
+    ended unreconciled. A seed loaded before it is named under
+    `catalog_loaded_before_failure` and not asked for again. A seed asked
+    for after it was never tried, so the step asks for it too, after the
+    unknown one: with `medicine,lab_test` asked for and the medicines'
+    outcome unknown, "dispatch the release again with catalog_load
+    medicine,lab_test to settle medicine and load lab_test (medicine loads,
+    or is refused as already loaded; once refused, dispatch again with
+    catalog_load lab_test)". The second half is needed because a refusal
+    stops that release before the lab tests.
+  - Not asked, the release runs exactly as before.
+- **Before the first real load:**
+  - #312's open points: the Wave 0 codes, the 13 uncoded tests and the four
+    over-long fields. The builder shows each one until it is settled.
+  - The owner's WHO licence answer (CC BY-NC-SA 3.0 IGO), before the WHO
+    rows ship.
+  - The owner's confirmation that the Nigeria EML 8th edition may be used,
+    recorded in the sign-off as `licences.nigeriaEml8`; the loader refuses a
+    medicine file without it.
+  - The WHOCC terms answer, recorded as `licences.whoccAtc`, only if ATC
+    codes are wanted; until then the seed is built without `--with-atc` and
+    every `atcCode` is `null`.
+  - The clinical lead's sign-off in `catalog-approvals.json`, and the seeds
+    committed as `docs/codes/hid-medicines.json` and `hid-lab-tests.json`.
+- **Proven** on a throwaway copy (NOBYPASSRLS schema owner) with #312's
+  list as of 23 Nov and a synthetic approvals file recording both licence
+  answers:
+  - 1,616 medicines (4 held back, 4 retired) and 145 tests (13 held back)
+    load. Of the 86 brands, the 23 confirmed ones are considered: 21 are
+    added, onto 97 items, and ampiclox and piriton are left out (no
+    medicine with exactly their generic name); the 63 pending a
+    pharmacist's review are left out. Wave 0: WIDAL and EUCR kept (as
+    LAB-0145 and LAB-0113), 9 recoded to LOINC, MP-SMEAR and HIV-SCREEN
+    missing.
+  - As the EHR runtime, every medicine name and other name typed exactly
+    (1,713) finds its item, and so does every lab-test name and other name
+    of two or more characters (529; "K" and "E" are under the search's
+    2-character minimum). `panadol` finds the 8 paracetamol items and
+    `augmentin` the 7 amoxicillin + clavulanic acid items; `lonart`,
+    `ciprotab` and `clavulin` (pending) find nothing.
+  - A 2026.2 that gives MED-00001 a strength is refused by 0149 ("the
+    database refused the load: CATALOG_ID_CHANGED: MED-00001 (55000)"), and
+    one that holds back MED-00002, live in 2026.1, is refused with "fix the
+    row, do not retire it"; both exit 2, nothing written.
+  - An unsigned file, `--approvals` under production, a malformed approvals
+    file, a sign-off without the Nigeria EML confirmation, an ATC file
+    without the WHOCC answer, a second load of a version, a held lock
+    (refused after 5.07 s) and a version that drops the highest id
+    (MED-01624) without retiring it are each refused with exit 2, nothing
+    written. With MED-01624 retired with a reason, that version loads,
+    replaces 2026.1 (kept) and records MED-01624 as retired.
+  - Round 3 (same list, same seeds: medicine `d6a08fe2…`, lab tests
+    `847040fb…`): the loader's backend terminated with
+    `pg_terminate_backend` three times, while it waited on its advisory
+    lock, on the versions table's lock and at the insert of the retired ids
+    (another session holding each): each time exit 1 and the one line
+    "terminating connection due to administrator command (57P01); nothing
+    loaded", no 2026.2 row, nothing retired, no session left; the same
+    2026.2 then loads. Round 2's loader, terminated the same way, ended with
+    a 21-line "Unhandled 'error' event" trace.
+  - A 2026.2 that holds back MED-00002 and also lists it as retired is
+    refused (exit 2, before it connects), and MED-00002 is not retired.
+    Round 2's loader loaded that file and retired MED-00002 for good. The
+    builder, given MED-00002 in the retired ids while the list holds its row
+    back, stops with one line (exit 2) and writes nothing. A `DATABASE_HOST`
+    of "db host" ends with one line (exit 1).
+  - Round 4: on a throwaway copy whose sessions commit synchronously and
+    whose cluster names a synchronous standby that never connects, the
+    loader's COMMIT of the medicine seed waits (wait event `SyncRep`), and
+    `pg_terminate_backend` ends its backend there. PostgreSQL warns that
+    the transaction has already committed locally, and medicine 2026.1 is
+    loaded and active (1,616 items). The loader now ends with the commit
+    line ("the connection was lost during commit, so the load may have
+    committed; ...", exit 1); round 3's loader said "Connection terminated
+    unexpectedly; nothing loaded". Asked for again, the load is refused as
+    already loaded, which settles it. Terminated before its COMMIT (waiting
+    on the versions table's lock), it still says "nothing loaded" and leaves
+    nothing, and the same load then loads.
+  - Round 4: #312's list with one more row whose quote is never closed
+    stops the builder with one line (exit 2), and the signed seeds in the
+    folder stay as they were; round 3's builder ended with a stack trace.
+    The list with LAB-0001's code changed to an HID-LAB code that is not
+    Wave 0's stops it with one line (exit 2) and writes neither seed; round
+    3's builder wrote a new medicine file. The list itself still builds the
+    same seeds (`d6a08fe2…`, `847040fb…`), and `--check` passes.
+  - Round 5: the same commit proof (a backend terminated while its COMMIT
+    waits in `SyncRep`, committed locally, medicine 2026.1 active with
+    1,616 items) ends with the same line and exit 3; round 4's loader ended
+    with it and exit 1, the code of a failure with nothing loaded, so the
+    deploy tool needed the log to tell the two apart. Asked for again, the
+    load is refused as already loaded (exit 2). Terminated before its
+    COMMIT, the loader still ends with exit 1 and "nothing loaded" and
+    leaves nothing, and the same load then loads.
+
 ### Target
 
 Release B (number given at merge).
@@ -1644,8 +1976,10 @@ exist and will not be built (owner decision Q124 A, 19 Nov 2026).
 ### Routes
 
 ehr-api `ehr/terminology/`. `X-Facility-Id` is required, and there is no
-purpose header (no patient data). `q` follows the ORD-7 rules: no Health ID
-or NIN shapes, never logged.
+purpose header: neither route reads a patient's record or returns a patient
+id (the recent list's `display` is the clinician's own text, which may name
+a patient). `q` follows the ORD-7 rules: no Health ID or NIN shapes, never
+logged.
 
 | Method and path | Who may call | Permission |
 | --- | --- | --- |
@@ -1662,7 +1996,9 @@ Extension codes (X...) and blocks without a code are left out.
 Each word of `q` must start a word of the title or of one of our own other
 names. Those come from `DIAGNOSIS_SYNONYMS` in the same file (HTN, DM,
 "MP+", typhoid...), are kept apart from WHO's words, and contain no ICD-10
-content. Exact title starts come first, then shorter titles.
+content. A code typed exactly comes first, then an entry whose title or
+one of our other names is `q` itself, then those whose title or other name
+starts with `q`, then shorter titles.
 
 Example for `q=falciparum`:
 
@@ -1691,8 +2027,10 @@ Example for `q=falciparum`:
 - When `q` looks like an ICD-10 code (a letter, two digits or a digit and a
   letter, then optionally a dot and up to 4 more characters, such as
   `B50.9`), `typedIcd10` is `{ "codeSystem": "ICD-10", "code": "B50.9" }`
-  (upper-cased). No ICD-10 title is shipped or looked up: we hold no ICD-10
-  licence (owner decision Q124 A, 19 Nov 2026).
+  (upper-cased). As for an ICD-11 code, any run of characters that are
+  neither letters nor digits is taken off both ends first, so "B50.9." and
+  "(B50.9)" are B50.9. No ICD-10 title is shipped or looked up: we hold no
+  ICD-10 licence (owner decision Q124 A, 19 Nov 2026).
 
 **Recent diagnoses.** These are the caller's own last picks at this
 facility, newest first. `limit` is 1-50, default 20.
@@ -1704,11 +2042,20 @@ facility, newest first. `limit` is 1-50, default 20.
 ```
 
 - The list is kept in its own table (`ehr.clinician_recent_diagnoses`:
-  membership, code system, code, display, last used, count). It is written
-  in the same transaction as each diagnosis this member saves, at most 200
-  per membership, and the oldest drop off.
-- It holds **no patient id**, so it stays usable after a grant ends and
-  shows no patient.
+  membership, code system, code, display, last used, count), at most 200
+  per membership, and the oldest drop off. It is a best-effort record,
+  written in the same transaction as a diagnosis with a code this member
+  saves, and a save may skip it while the diagnosis still saves: when
+  another save of the same membership, or of a membership whose id has
+  the same `hashtext` value (even at another facility), has recorded a
+  pick in a transaction that is still open, or when the record fails (the
+  second slice, below).
+- It holds **no patient id**, so it stays usable after a grant ends. Its
+  display is the clinician's own text, which may name a patient.
+- Picks are kept as saved across an ICD-11 release switch: a code the new
+  release dropped, or an old title, is still offered, with nothing marking
+  it, until the `codeStatus` slice changes the read (the second slice,
+  below, "Across an ICD-11 release switch").
 - The read is audited as `ehr.terminology.recent-read` with the count only.
 - Favourites are ORD-8 (Release C).
 
@@ -1771,14 +2118,14 @@ facility, newest first. `limit` is 1-50, default 20.
 | HTTP | Code | Message |
 | --- | --- | --- |
 | 400 | `CATALOG_SEARCH_TEXT_TOO_SHORT` | "Type at least 2 letters to search." |
-| 400 | `CATALOG_SEARCH_TEXT_NOT_ALLOWED` | "Search by diagnosis name or code. Do not type a Health ID or NIN here." |
+| 400 | `CATALOG_SEARCH_TEXT_NOT_ALLOWED` | "Search by diagnosis name or code, and type a code with its dot (such as 2B6B.2Y). Do not type a Health ID or NIN here." (582 ICD-11 codes typed without their dot have a Health ID's shape, such as `2B6B2Y`) |
 | 400 | `DIAGNOSIS_CODE_INCOMPLETE` | "Diagnosis code and its code system must be supplied together." |
-| 400 | `VALIDATION_FAILED` | existing (a diagnosis with no code while the setting is off, unknown field, `null`, bad `limit`) |
+| 400 | `VALIDATION_FAILED` | existing (a diagnosis with no code while the setting is off, unknown field, `null`, bad `limit`); also a `q` over 100 characters, or with a control character other than tab (U+0000 included: "q must not contain control characters"), before the database |
 | 400 | `PURPOSE_OF_USE_REQUIRED`, `IDEMPOTENCY_KEY_REQUIRED` | existing, on the create route only |
 | 403 | existing permission refusal; `CONSENT_REQUIRED` on create as today | — |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | existing |
 | 429 | `CATALOG_SEARCH_LIMITED` | "Too many searches. Please wait a minute and try again." (shared with ORD-7's limit) |
-| 503 | `TERMINOLOGY_UNAVAILABLE` | "Diagnosis search is not available right now. You can type the diagnosis instead." |
+| 503 | `CATALOG_UNAVAILABLE` | sent as "The service could not complete the request." (ORD-7's code, for a schema without the diagnosis list and for any database failure; every 5xx detail is replaced by that text, so a screen reads the status and the code, never the words. The service's own words, "Diagnosis search is not available right now.", give no advice and stay inside it) |
 
 ### Screen notes
 
@@ -1791,7 +2138,10 @@ facility, newest first. `limit` is 1-50, default 20.
 - **After it ships:**
   - Search the route as the clinician types (about 250 ms after typing
     stops).
-  - Show the recent list when the field is empty.
+  - Show the recent list when the field is empty, each pick's `display` as
+    saved. After a release switch, until the `codeStatus` slice, that can
+    be a dropped code or an old title, shown as saved with nothing marking
+    it.
   - Show `display` exactly as given (WHO's licence does not allow changing
     the title). Show `matchedName` in grey, as "matched falciparum malaria".
   - When `typedIcd10` is present, offer "Use ICD-10 code B50.9". Then the
@@ -1815,6 +2165,266 @@ facility, newest first. `limit` is 1-50, default 20.
   nullable code.
 - The patient-evidence change (lane D edits `patient-records/` only for the
   ICD-11 split, agreed with lane C as FR-1 was).
+
+### First slice: the ICD-11 list and its search (0152, draft, not live)
+
+Built on 23 Nov 2026 (lane D), on ORD-7's tables and loader (#318, #319), as
+the design note on hid-system#258 (13:55 UTC) set out. The number 0152 is
+provisional. Nothing is loaded until the clinical lead signs the release
+file's seed in `docs/codes/catalog-approvals.json`.
+
+- **Database (0152):** `ehr.catalog_versions` takes the kind `diagnosis`
+  (ACCESS EXCLUSIVE on that small table, and in the same attempt ACCESS
+  SHARE on ORD-7's two lists, whose status 0152 replaces; NOWAIT for at
+  most 5 seconds, else 55P03 "0152: …", which a dry run retries).
+  `ehr.catalog_diagnoses` holds one row per coded entry per release: code,
+  WHO's title verbatim, our other names apart, chapter, and whether the
+  entry is residual. It is append-only, and, as ORD-7's lists, a release
+  that is or has been live takes no new entry (55000
+  `CATALOG_VERSION_SEALED`): only a release still loading takes entries. A
+  version of another kind (a medicine or lab-test list) takes none either
+  (55000). The post-checks pin each trigger's events, that it has no WHEN
+  condition, column list or arguments, and the sealed-release function's
+  body.
+  Instead of the planned `ehr.terminology_icd11`, the list shares ORD-7's
+  versions, loader and sign-off. The loader takes 0152's refusals as it
+  takes 0149's: a sealed release (55000) or a table check (23514) ends the
+  load as a refusal (exit 2) with the database's message, and nothing is
+  loaded.
+- **The seed** `docs/codes/drafts/icd11-mms-2026-01.json` is built by
+  `catalog:build-icd11-seed` from WHO's `SimpleTabulation-ICD-11-MMS-en.zip`
+  (2026-01, sha256 `f1356588…`). That is the file
+  `ocr-worker/src/reading/diagnosis-list.ts` checked its titles against,
+  and all 134 of that list's titles come out the same. The seed's sha256
+  is `3662b1d7…`.
+  - It holds 17,255 entries. Extension codes and blocks are left out, and
+    so are chapter 26 (traditional medicine conditions, 1,120) and section
+    V (functioning, 130). Neither is a diagnosis a clinician picks here
+    (Ola, clinical owner). The seed lists both with why.
+  - Our other names are `DIAGNOSIS_SYNONYMS`' names for coded titles, a
+    name in double quotes included ("parkinson's disease" for 8A00.0
+    Parkinson disease, which the builder used to drop). Names pointing to
+    a block (HTN, "MP+") are not loaded, as this section says.
+  - A title with accented letters also has its plain-letter spelling as
+    one of our other names, so a search typed without the accents finds
+    it (Ola, clinical owner: the same names, in plain letters). The
+    2026-01 release has 10: 2B02 Sezary syndrome; 4A43.2 Sjogren
+    syndrome, 4A43.20 Primary, 4A43.21 Secondary and 4A43.22 Paediatric
+    onset Sjogren syndrome, 4A43.2Y Other specified sjogren syndrome,
+    4A43.2Z Sjogren syndrome, unspecified; 4A62 Behcet disease; 5C52.03
+    Sjogren-Larsson syndrome; 8A45.42 Demyelination due to Sjogren
+    disease. WHO's titles are unchanged.
+  - 76 entries have an other name.
+- **Search:** `GET /api/v1/ehr/terminology/diagnoses?q=&limit=` as above,
+  with ORD-7's rules for `q` (6 words, never raw `to_tsquery`, no Health ID
+  or NIN shapes, never logged) and its 429 and cache. Only the active
+  release is read, through its own rows: a release kept after a newer one
+  went live costs nothing.
+  - The code matches too, whole or in parts ("1F40", "1f40.z").
+  - Titles and our other names are split into words as `q` is (lower case,
+    at anything that is not a letter or a digit), as ORD-7's lists are. So
+    a title typed as written is found: `COVID-19`, `T-cell/histiocyte`,
+    `glucose-6-phosphate`. Split by the default parser, 20 were not found
+    at all, among them RA01 "COVID-19" and the other COVID-19 entries.
+  - A word-final 's or ’s is dropped from `q` first, so a name typed with
+    it finds the entry named: "Parkinson's disease" is 8A00.0 Parkinson
+    disease, first; "Crohn's disease of large intestine" is DD70.3;
+    "alzheimer's disease", "bell's palsy", "huntington's disease" and
+    "wilson's disease" find theirs (before, the lone s had to start another
+    word, so these found nothing). When nothing matched, the search runs
+    once more with a final s dropped from each word of 4 or more letters
+    ("parkinsons", "alzheimers"), and keeps only the entries where each
+    word so shortened is a whole word of the title or of one of our other
+    names. So "parkinsons" puts 8A00.0 Parkinson disease first, and "fits"
+    finds nothing: fit only starts "Fitting or adjustment of ..." entries,
+    which it used to offer. "gallstones" finds what "gallstone" finds.
+  - The order: the entry whose code `q` is; then an entry whose title or
+    one of our other names is `q` itself, as words ("ra" is FA20
+    Rheumatoid arthritis, whose other name is ra, before shorter titles
+    starting with ra; "urti" is CA07.0, "prom" JA89); then entries whose
+    title or other name starts with `q`; then shorter titles. A title's
+    own apostrophe-s is compared as `q`'s is.
+  - With the 2026-01 release loaded, each of its 16,883 titles of 2 to 100
+    characters, typed as written or in upper case, comes first. The 372
+    longer ones, cut to 100 characters, are each in the first 25.
+  - The code `q` is: `q` upper-cased and trimmed, with or without its dot
+    ("9A03.0" or "9a030"), and found even without the dot. A code copied
+    with punctuation around it is still that code: any run of characters
+    that are neither letters nor digits is taken off both ends before its
+    shape is tested ("NB91.", "NB91,", "(NB91)", "(NB91).", "NB91 .",
+    ".NB91", "NB91,."); the code's own dot stays ("(9A03.0)." is 9A03.0).
+    A code typed with spaces at its dot ("5C50 5", "5C50. 5", "5C50 .5")
+    is that code too, when such a code exists; otherwise its words are
+    searched as before. So a parent code such as 9A03 comes before its
+    child codes, whose titles are shorter. With the 2026-01 release
+    loaded, each of its 17,255 codes searched by itself comes first, in
+    each of 16 forms: as written, without its dot, in lower case with and
+    without the dot, with a full stop, a comma, a semicolon or a colon
+    after it, in brackets, square brackets or double quotes, in brackets
+    with a full stop after them, with a space and a full stop after it,
+    with a full stop before it, and with spaces or no-break spaces around
+    it; and each of its 12,913 dotted codes typed with spaces at the dot,
+    in the three forms above. Typed without its dot, a code whose six
+    characters have a Health ID's shape (582 codes, such as `2B6B2Y`) is
+    refused as a Health ID would be, and the refusal says to type the dot;
+    with its dot (`2B6B.2Y`) it is found.
+  - `matchedName` is our other name when it is what matched, or when it
+    starts with `q` and the title does not. So `q=falciparum` gives 1F40
+    first, named "falciparum malaria", as the example above.
+  - `typedIcd10` is filled for a `q` shaped like an ICD-10 code, with any
+    punctuation around it taken off ("(B50.9)." is B50.9).
+  - A `q` with a control character other than tab (U+0000 included) is 400
+    `VALIDATION_FAILED` before the database, in all three catalogue
+    searches.
+  - A schema without 0152, or any database failure, answers 503
+    `CATALOG_UNAVAILABLE`, sent as "The service could not complete the
+    request." (as every 5xx; the service's own words, "Diagnosis search is
+    not available right now.", stay inside it). The catalogue status fills
+    `diagnoses: { available, release, fileSha256 }`.
+  - Activate an ICD-11 release only once this slice's ehr-api is live: the
+    0149-era ehr-api takes the status's diagnosis row for a lab-test row,
+    so it would show WHO's notice while it says diagnoses are not
+    available.
+- **Measured** with the full release loaded on throwaway PostgreSQL 16
+  (median of 25 calls inside the server, as the EHR runtime, from the
+  sixth call on a connection, when the generic plan is in use; the
+  host's 4 CPUs were shared, load average 2.3 to 2.8; this slice's
+  search and the one it replaced were called in turn in one session):
+  - The load takes under 1 s.
+  - A word or a code takes 1–2 ms (`malaria` 1.5 ms, `9A03` 1.3 ms, `NB91`
+    at limit 25 1.7 ms).
+  - Two-letter `q` take longest: `di` (2,974 entries match) about 49 ms,
+    `in` about 73 ms, and the broadest, `of` (6,715), about 115 ms at limit
+    10 and 121 ms at 25, with single calls up to about 185 ms.
+  - With a second release kept (2027-01 active and 2026-01 kept, as a new
+    WHO release leaves the old one), the times are the same, because only
+    the active release's rows are read: `of` 121 ms, `in` 74 ms, `di` 49
+    ms, `NB91` 1.7 ms. Before, the search read both releases' rows from the
+    sixth call on a connection: `of` 194 ms, `in` 119 ms, `di` 76 ms, `NB91`
+    2.7 ms.
+- **Not in this slice:** recent diagnoses (the next slice, below), and
+  diagnoses by name only and `codeStatus`, which alter `ehr.diagnoses` and
+  need a lock plan.
+
+### Second slice, first part: recent diagnoses (0153, draft, not live)
+
+Built on 23 Nov 2026 (lane D), on 0152 (#320), as the sizing note on
+hid-system#258 (14:18 UTC) set out. The number 0153 is provisional. No
+live table is altered.
+
+- **Database (0153):** `ehr.clinician_recent_diagnoses` (membership,
+  facility, code system, code, display, last used, count; key membership,
+  code system and code). It has no foreign key, so no live table is locked,
+  and no patient id. Row-level security is on with no policy and no grant:
+  only two SECURITY DEFINER functions use it.
+  - `ehr.record_recent_diagnosis(code system, code, display)` reads the
+    session's actor, membership and facility (as ehr-api sets them) and
+    records only for a membership holding `ehr.diagnosis.write` at that
+    facility (`auth.membership_has_permission`), and nothing with no code.
+    The same pick again updates its display, time and count. At most 200
+    per membership; the oldest drop off. It never waits for another save:
+    it first takes the membership's recording lock,
+    `pg_try_advisory_xact_lock(7409, hashtext(membership id))` (class key
+    7409 for this record only), held to the end of the save's transaction,
+    and records nothing while another transaction holds it. No other code
+    takes the two-key form: ehr-api's `allergy-reader.ts` takes the one-key
+    form on `hashtext` of a text key, and every other advisory lock in the
+    repository the one-key form on `hashtextextended` of a text key.
+    PostgreSQL keeps the one-key and two-key key spaces apart, so class key
+    7409 cannot collide with any of them. So two saves of one clinician
+    cannot deadlock on their picks or on the 200-cap trim; the later one
+    may skip its record. The lock is keyed on the hash of the membership
+    id, not the id, so a save also skips its record while a save of
+    another membership whose id has the same `hashtext` value holds it,
+    even at another facility (0153's header says so too, lines 63-64:
+    "two memberships whose ids share a hash only skip a record now and
+    then"). The runtime verifier
+    (`verify-prescription-details-runtime.mjs`) checks this with two
+    sessions as the EHR runtime: while one save of the doctor's has
+    recorded a pick and is still open (holding the recording lock and that
+    pick's row), another, with `lock_timeout` 1500 ms, records the same
+    pick and then a different one for the same membership; each must come
+    back in under 500 ms, record nothing and raise nothing, and once the
+    first commits both are kept. The database suite's case 1f only checks
+    the function as written (the try-lock call and the early return).
+  - `ehr.recent_diagnoses(limit)` gives the session's membership's picks at
+    its facility, newest first, and none without the permission. 22023
+    `RECENT_DIAGNOSES_INVALID` outside 1-50.
+  - EXECUTE on both to the EHR runtime and the schema test runtime only.
+- **Recording:** `DiagnosesService.createInTransaction` (the route's and
+  EHR-C5's consultation's) calls the record after the insert, in a
+  savepoint. It is a best-effort side record. What it guarantees is that
+  the record never waits for another save of the same membership (the
+  recording lock, above). It can still hold the save up: it reads the
+  auth role tables (through `auth.membership_has_permission`), so a DDL
+  lock on one of them can hold the save at the record up to ehr-api's
+  statement timeout (15 s, `database.service.ts:289`), after which the
+  error (57014) is rolled back to the savepoint like any other and the
+  save goes on. Any failure of the record, a schema without 0153
+  (42883), a deadlock (40P01) or a lock not available (55P03) included, is
+  rolled back to the savepoint and the diagnosis saves as before, with a
+  warning naming the SQLSTATE and the request's correlation id, as other
+  ehr-api warnings do, and nothing of the patient or the member (none for
+  42883). Only a serialization failure (40001) in a SERIALIZABLE
+  transaction is passed on, so the whole transaction is run again; the
+  diagnosis saves are READ COMMITTED. An idempotent replay records nothing.
+- **Route:** `GET /api/v1/ehr/terminology/diagnoses/recent?limit=` as
+  above. It takes `X-Facility-Id` and no purpose header, and needs
+  `ehr.diagnosis.write`. The answer is never kept (the global
+  `private, no-store`).
+  - The read and its audit row (`ehr.terminology.recent-read`, details
+    `{ resultCount }` only) commit in one transaction. A read whose audit
+    row cannot be written is refused.
+  - A schema without 0153, or any database failure, answers 503
+    `CATALOG_UNAVAILABLE`, sent as "The service could not complete the
+    request." (as every 5xx, as for the search; the service's own words,
+    "Diagnosis search is not available right now.", the search's, give no
+    advice and stay inside it: trying again does not help while 0153 is
+    not there, and a name alone is not accepted yet). The screen reads the
+    status and the code, and shows the empty field as before.
+  - A refusal is audited by the interceptor, as for the search.
+- **Across an ICD-11 release switch** (Rahman's re-review of #321, minor
+  1; Ola, clinical owner, 24 Nov 2026): picks are kept as saved. The read
+  (`0153:183-188`) does not look at the active release, and its answer
+  carries no release or in-list field. So after a new release goes live,
+  a code that release dropped, or a code under its old title, is still
+  offered from the recent list with nothing marking it, and picking it
+  again raises its count. A diagnosis saved from such a pick is stored as
+  typed: a code not in the list is allowed by design (`not_in_list` once
+  `codeStatus` is built). Meanwhile the screen shows each pick's
+  `display` as saved, the old title included. 0153 is not changed for
+  this.
+  - **Booked:** the `codeStatus` slice, which alters `ehr.diagnoses`
+    anyway, replaces the read, `ehr.recent_diagnoses`, so that it returns
+    the active release's current title, with an in-list flag, or leaves
+    dropped codes out, and the database suite gains a case for a release
+    switch. That slice ships before any second ICD-11 release is loaded.
+    - Returning the current title, or leaving dropped codes out, keeps the
+      read's columns, so `create or replace` keeps its owner and grants
+      and no grant is needed (one owner, the migration owner, owns the
+      recent table, `ehr.catalog_versions` and `ehr.catalog_diagnoses`).
+      The new definition restates SECURITY DEFINER and its `search_path`,
+      which `create or replace` would otherwise drop.
+    - An in-list flag is a new column, which `create or replace` refuses
+      ("cannot change return type of existing function"). So the read is
+      then dropped and made again, with EXECUTE granted again to the EHR
+      runtime and the schema test runtime (in that migration and in
+      `runtime-grants.sql`) and checked again by its post-checks, or the
+      flag goes in a new function.
+  - No second ICD-11 release can go live until the clinical lead signs a
+    WHO update: nothing is loaded until the lead signs the release file's
+    seed in `docs/codes/catalog-approvals.json` (the first slice, above;
+    owner decision Q124 A, 19 Nov 2026).
+- **0153's header** is left as it is: lines 16-17 still say the table
+  "shows no patient", and lines 34-35 that the record "never fails or
+  holds up a clinical save". This section says what holds: no patient
+  id, a display that may name a patient, and a record that never waits
+  for another save of the same membership. The header changes only if
+  0153 changes for another reason (0153 is cleared to sign at sha256
+  `45faa6a7…`).
+- **Not in this slice:** diagnoses by name only and `codeStatus` (with
+  the recent read's change for a release switch, above).
+
 
 ### Target
 
