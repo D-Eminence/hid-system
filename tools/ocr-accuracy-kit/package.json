@@ -1,0 +1,18 @@
+{
+  "name": "@hid/ocr-accuracy-kit",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Paper reading launch check: fictional documents, answer keys, runner and scorer",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "generate": "python3 generate.py --seed 20261103 --count 200 --out generated --check-against keys",
+    "estimate": "node run.mjs --estimate-only",
+    "run:fake": "node run.mjs --i-confirm-fictional-documents --fake --docs generated/documents --out results/fake",
+    "score:fake": "node score.mjs --results results/fake",
+    "test": "node --test 'test/*.test.mjs' && python3 -m unittest discover -s test -p 'test_*.py'"
+  }
+}
