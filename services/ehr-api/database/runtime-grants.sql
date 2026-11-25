@@ -2044,3 +2044,123 @@ revoke all on function ehr.search_catalog_medicines(text, integer, text, text),
   ehr.catalog_lab_test_id_fixed() from public;
 revoke all on ehr.catalog_versions, ehr.catalog_medicines, ehr.catalog_lab_tests, ehr.catalog_retired_codes
   from public;
+
+-- Inpatient admission, wards and beds (ADT-1 of Release D, 0170-0173; the
+-- owner's sprint approval of 25 November 2026), exactly as those files grant
+-- and revoke them. 0170: the ward list, setup, staff list, bed board, census
+-- and bed status to the EHR runtime only. 0171: the admission request, list,
+-- read, admit, transfer, handover read, prepare discharge, discharge, cancel,
+-- change, discharge summary print, the two band prints and the four death
+-- record functions (switched off) to the EHR runtime only. No privilege for any
+-- runtime on the new tables (only these functions read and write them, as
+-- their owner) or on the switches, and none on the helpers (the caller, audit,
+-- keys, cards, the name check, the encounter and bed moves, the stay's end, the
+-- notice recipients, the band answer and the immutability triggers). 0172 (on
+-- BILL-1): the ward charges, the interim statement, the hourly bed-day sweep
+-- and the admission bill lookup to the EHR runtime; none on the hooks or their
+-- helpers, or on the two new commercial tables. 0173: route 23's
+-- identity.open_ward_stay to the Identity runtime only (switched off); none on
+-- identity.end_ward_stay_grants. The codes themselves (0173) add no grant.
+grant execute on function
+  ehr.ward_list(boolean, boolean),
+  ehr.ward_create(text, text, text, text, text),
+  ehr.ward_update(uuid, bigint, text, text, text, boolean, text, text),
+  ehr.bed_create(uuid, text, text, text, text),
+  ehr.bed_update(uuid, bigint, text, boolean, text, text),
+  ehr.ward_staff_set(uuid, bigint, uuid[], text, text),
+  ehr.bed_board(uuid, text),
+  ehr.inpatient_census(date),
+  ehr.bed_set_status(uuid, bigint, text, text, text, text),
+  ehr.admission_request(uuid, text, uuid, uuid, uuid, text, text, uuid, uuid, uuid, text, text),
+  ehr.admission_list(text, uuid, text),
+  ehr.admission_read(uuid),
+  ehr.admission_admit(uuid, bigint, uuid, boolean, text, text),
+  ehr.admission_transfer(uuid, bigint, uuid, text, boolean, text, text),
+  ehr.admission_handover_read(uuid, uuid),
+  ehr.admission_prepare_discharge(uuid, bigint, text, date, uuid[], text, text),
+  ehr.admission_discharge(uuid, bigint, text, timestamptz, jsonb, text, timestamptz, text, text, text),
+  ehr.admission_cancel(uuid, bigint, text, text, text),
+  ehr.admission_update(uuid, bigint, text, uuid, date, text, text, text),
+  ehr.discharge_summary_print(uuid),
+  ehr.wristband_print(uuid, text, text, text),
+  ehr.newborn_band_print(uuid, text, text, text),
+  ehr.death_record_write(uuid, jsonb),
+  ehr.death_record_read(uuid),
+  ehr.death_record_amend(uuid, jsonb, text),
+  ehr.death_record_print(uuid, text) to hid_ehr_runtime;
+revoke all on function
+  ehr.ward_list(boolean, boolean),
+  ehr.ward_create(text, text, text, text, text),
+  ehr.ward_update(uuid, bigint, text, text, text, boolean, text, text),
+  ehr.bed_create(uuid, text, text, text, text),
+  ehr.bed_update(uuid, bigint, text, boolean, text, text),
+  ehr.ward_staff_set(uuid, bigint, uuid[], text, text),
+  ehr.bed_board(uuid, text),
+  ehr.inpatient_census(date),
+  ehr.bed_set_status(uuid, bigint, text, text, text, text),
+  ehr.inpatient_caller(text, text[]),
+  ehr.inpatient_audit(uuid, text, text, text, text, jsonb),
+  ehr.inpatient_member_has_role(uuid, uuid, text[]),
+  ehr.inpatient_chart_blocked(uuid, uuid, uuid, uuid),
+  ehr.inpatient_bed_occupants(uuid, uuid[]),
+  ehr.inpatient_waiting(uuid, uuid[]),
+  ehr.inpatient_day_counts(uuid, date),
+  ehr.ward_key(uuid, text, text),
+  ehr.ward_json(uuid, boolean),
+  ehr.ward_patient_name_visible(uuid, uuid),
+  ehr.bed_status_events_immutable(),
+  ehr.admission_request(uuid, text, uuid, uuid, uuid, text, text, uuid, uuid, uuid, text, text),
+  ehr.admission_list(text, uuid, text),
+  ehr.admission_read(uuid),
+  ehr.admission_admit(uuid, bigint, uuid, boolean, text, text),
+  ehr.admission_transfer(uuid, bigint, uuid, text, boolean, text, text),
+  ehr.admission_handover_read(uuid, uuid),
+  ehr.admission_prepare_discharge(uuid, bigint, text, date, uuid[], text, text),
+  ehr.admission_discharge(uuid, bigint, text, timestamptz, jsonb, text, timestamptz, text, text, text),
+  ehr.admission_cancel(uuid, bigint, text, text, text),
+  ehr.admission_update(uuid, bigint, text, uuid, date, text, text, text),
+  ehr.discharge_summary_print(uuid),
+  ehr.wristband_print(uuid, text, text, text),
+  ehr.newborn_band_print(uuid, text, text, text),
+  ehr.death_record_write(uuid, jsonb),
+  ehr.death_record_read(uuid),
+  ehr.death_record_amend(uuid, jsonb, text),
+  ehr.death_record_print(uuid, text),
+  ehr.admission_key(uuid, text, text),
+  ehr.admission_cards(uuid[], boolean),
+  ehr.admission_encounter_move(uuid, text, timestamptz, text),
+  ehr.admission_bed_move(uuid, text, text),
+  ehr.admission_stay_ended(uuid, text),
+  ehr.admission_sex_mismatch(uuid, uuid),
+  ehr.admission_notice_recipients(uuid),
+  ehr.admission_history_immutable(),
+  ehr.wristband_answer(uuid, text, integer, timestamptz),
+  ehr.wristband_print_for(uuid, text, text, text, text),
+  ehr.death_record_gate(text),
+  ehr.death_record_content_valid(jsonb),
+  ehr.death_record_json(uuid) from public;
+revoke all on ehr.wards, ehr.beds, ehr.bed_status_events, ehr.ward_staff, ehr.ward_events, ehr.inpatient_switches,
+  ehr.admission_counters, ehr.admissions, ehr.admission_movements, ehr.admission_discharge_medicines,
+  ehr.wristband_prints, ehr.death_records, ehr.death_record_versions from public;
+grant execute on function
+  commercial.ward_charges_set(uuid, bigint, uuid, uuid),
+  commercial.ward_charges_list(),
+  commercial.interim_statement(uuid),
+  commercial.accrue_bed_days_due(uuid),
+  commercial.admission_bill_ids(uuid[]) to hid_ehr_runtime;
+revoke all on function
+  commercial.ward_charges_set(uuid, bigint, uuid, uuid),
+  commercial.ward_charges_list(),
+  commercial.interim_statement(uuid),
+  commercial.accrue_bed_days_due(uuid),
+  commercial.admission_bill_ids(uuid[]),
+  commercial.admission_bill_open(uuid),
+  commercial.admission_line_put(uuid, uuid, text, text),
+  commercial.admission_fee_add(uuid),
+  commercial.accrue_bed_days(uuid),
+  commercial.payments_deposit_guard(),
+  commercial.hook_admission_open(),
+  commercial.hook_admission_status() from public;
+revoke all on commercial.ward_charge_items, commercial.bed_day_charges from public;
+grant execute on function identity.open_ward_stay(uuid) to hid_identity_runtime;
+revoke all on function identity.open_ward_stay(uuid), identity.end_ward_stay_grants(uuid, text) from public;

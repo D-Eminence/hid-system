@@ -12321,3 +12321,207 @@ when `dateOfBirthEstimated`, and "NIN Not Verified". On `sent_for_review`
 show the message and nobody else's details. After `identified`, offer
 "Verify NIN" (ID-6). Never show `firstName`/`lastName` of a record whose
 `recordKind` is `unknown`.
+
+## ADT-1. Inpatient admission, wards and beds, transfers and discharge (Release D, migrations 0170-0173, provisional; not live until signed)
+
+Built exactly as `docs/EHR_PLANNED_CONTRACT.md` ADT-1 says, on the owner's approval of the sprint decision sheet on 25
+November 2026 (verbatim: "I approve Q147–Q290 at the recommended options"; ADT-1 rests on Q149, Q151, Q155-Q161,
+Q163, Q173, Q176, Q181-Q202) and at the recommended option of the section's smaller choices (Q-ADT-9 A to Q-ADT-18 A,
+not yet answered by the owner). Numbers 0170-0173 are provisional (given at merge, after 0152-0154, APPT-1's
+0160-0161, BILL-1's 0162-0167 and ED-1's 0168-0169). 0171 needs ED-1's 0168 (it adopts ED-1's admission requests);
+0172 needs BILL-1's 0162-0167 (if BILL-1 is not in the same cut, 0172 waits and takes a later number; 0173 does not
+need it).
+
+One service flag, `INPATIENT_ENABLED` in ehr-api, off by default. While off, every route below answers 503
+`INPATIENT_NOT_AVAILABLE` ("Inpatient care is not switched on yet."). On in staging and at the sealed demo and QA
+facilities; in production only after the clinical lead's checklist and the owner's go-live (Q160 A). A database
+without 0170 also answers 503 `INPATIENT_NOT_AVAILABLE`.
+
+All routes are under `/api/v1/ehr/` (the gateway already sends them to ehr-api; **the gateway nginx template does not
+change**), except route 23 (`/api/v1/identity/ward-stay-access`, identity-api) and the charge routes
+(`/api/v1/commercial/...`, served by ehr-api beside BILL-1's own routes, behind BILL-1's gateway location). Staff
+routes need `X-Facility-Id` and `X-Purpose-Of-Use: direct-care`; ward setup (routes 2-6) needs `healthcare-operations`;
+route 1 and route 9 take either; the charge routes are `healthcare-operations`. Every write needs an `Idempotency-Key`
+(16-128 URL-safe characters): a replay with the same body answers the first answer with `"replayed": true`; the same
+key with another body is 409 `IDEMPOTENCY_KEY_REUSED`. Writes on a ward, bed or admission send `expectedRowVersion`;
+a stale one is 412 (`WARD_VERSION_CONFLICT` or `ADMISSION_VERSION_CONFLICT`, "Someone else changed this. Reload it
+and try again."). No Health ID or NIN in any path or query: patients, admissions, wards, beds and movements by UUID.
+The one Health ID in any answer is the band print's, in the body, for printing. Times are ISO UTC; screens show Lagos
+time, "18 Nov 2026" dates and the 24-hour clock.
+
+**Who** (seven new codes, 0173; sixteen role rows):
+
+| Backend role | `ehr.ward.read` | `ehr.admission.read` | `ehr.bed.allocate` | `ehr.wristband.print` | `ehr.admission.decide` | `ehr.ward.manage` | `ehr.death-record.write` |
+|---|---|---|---|---|---|---|---|
+| `nurse` | yes | yes | yes | yes | no | no | no |
+| `clinician`, `doctor` | yes | yes | yes | yes | yes | no | no |
+| `admin`, `org_admin` | no | no | no | no | no | yes | no |
+| `receptionist`, `lab`, `pharmacist`, `cashier`, `billing_officer`, others | no | no | no | no | no | no | no |
+
+`ehr.death-record.write` is held by no role (a later signed file gives it to doctors once the clinical lead and legal
+sign, Q188). Session areas (SX-1): `inpatient`, "Inpatient and wards" (shown with `ehr.ward.read`; full with
+`ehr.admission.read` and `ehr.bed.allocate`: nurses, clinicians and doctors full), and `wardSetup`, "Ward
+configuration" (`ehr.ward.manage`: admins and owners). Refusals in plain words, never "permission": 403
+`INPATIENT_NOT_ALLOWED` ("Only nurses, clinicians and doctors of this facility can use the wards."), 403
+`WARD_SETUP_NOT_ALLOWED` ("Only the facility's admins can set up wards and beds."), 403 `ADMISSION_DECIDE_NOT_ALLOWED`
+("Only doctors and clinicians can admit, change or discharge a patient."), 403 `BED_ALLOCATE_NOT_ALLOWED` ("Only
+nurses, clinicians and doctors can give or change a bed."), 403 `ADMISSION_CHART_ACCESS_REQUIRED` ("Open this
+patient's record first, then try again.").
+
+### Ward setup
+
+1. `GET /ehr/wards[?includeInactive=true][&includeBeds=true]` (`ehr.ward.read` or `ehr.ward.manage`):
+   `{ "items": [ { "wardId", "name", "wardType", "takes", "active", "bedCount", "overflowCount", "occupied",
+   "available", "cleaning", "maintenance", "overflowInUse", "staffCount", "rowVersion" } ] }`. Counts never name a
+   patient. With `includeBeds=true` each item also carries `beds` (`bedId`, `name`, `kind`, `status`, `active`,
+   `rowVersion`) and `staffMembershipIds`, for the ward configuration screen.
+2. `POST /ehr/wards` (`ehr.ward.manage`) `{ "name" (2-80, unique among active wards, any case), "wardType" (general,
+   paediatric, maternity, icu, private, other), "takes"? (any, male, female) }` → 201 `{ "ward": { … with beds and
+   staff }, "replayed" }`. 409 `WARD_NAME_TAKEN` ("This name is already used. Choose another.").
+3. `PATCH /ehr/wards/:wardId` `{ "expectedRowVersion", "name"?, "wardType"?, "takes"?, "active"? }` → `{ "ward",
+   "replayed" }`. Changing the type or closing a ward with an occupied bed: 409 `WARD_NOT_EMPTY`.
+4. `POST /ehr/wards/:wardId/beds` `{ "name" (1-40, unique among the ward's active beds), "kind"? (bed, overflow) }` →
+   201 `{ "bedId", "ward", "replayed" }`. At most 200 beds and 50 overflow spaces: 409 `BED_LIMIT_REACHED`. 409
+   `BED_NAME_TAKEN`.
+5. `PATCH /ehr/beds/:bedId` `{ "expectedRowVersion", "name"?, "active"? }` → `{ "bedId", "ward", "replayed" }`. A bed
+   is never deleted; taking an occupied bed out of use: 409 `BED_OCCUPIED`.
+6. `PUT /ehr/wards/:wardId/staff` `{ "expectedRowVersion", "membershipIds": [0-200] }` → `{ "ward", "replayed" }`.
+   Each an active nurse, clinician or doctor membership here (400 `WARD_STAFF_INVALID`). The list never opens a chart.
+
+### Bed board, census, bed status
+
+7. `GET /ehr/bed-board?wardId=…` or `?wardType=icu` (`ehr.ward.read`): `{ "wards": [ { "wardId", "name",
+   "wardType", "takes", "active", "beds": [ { "bedId", "name", "kind", "status", "statusSince", "rowVersion",
+   "patient": card | null } ] } ], "waitingForBed": [card, …] }`. Read again every 60 seconds while shown.
+8. `GET /ehr/census[?date=YYYY-MM-DD]` (today or a Lagos day up to 90 days back): `{ "date", "facility": { "beds",
+   "occupied", "available", "cleaning", "maintenance", "overflowInUse", "admitted", "transfersIn", "transfersOut",
+   "discharged", "died", "waitingForBed", "midnightCount" }, "wards": [ { "wardId", "name", "wardType", …same counts } ]
+   }`. Counts only.
+9. `POST /ehr/beds/:bedId/status` (`ehr.bed.allocate` or `ehr.ward.manage`) `{ "expectedRowVersion", "status"
+   (available, cleaning, maintenance), "note"? }` → `{ "bed": { "bedId", "name", "kind", "status", "statusSince",
+   "rowVersion" }, "replayed" }`. cleaning → available ("Complete bed turnover"), available → maintenance ("Place in
+   maintenance": `note` 8-300 required), maintenance → available ("Release from maintenance"), available → cleaning.
+   An occupied bed: 409 `BED_OCCUPIED`; any other move: 400 `VALIDATION_FAILED`.
+
+### Admissions
+
+**The admission card** (every answer; the bed board's `patient` and `waitingForBed` are the same card):
+
+```json
+{ "admissionId": "uuid", "admissionNumber": "A-2026-000123", "patientId": "uuid", "fullName": "Ada Wardone",
+  "nameHidden": false, "initials": "A W", "recordKind": "standard", "unknownLabel": null, "sex": "female",
+  "dateOfBirth": "1972-05-14", "dateOfBirthEstimated": false, "ageYears": 54, "ageEstimated": false,
+  "healthIdLast4": "WW12", "ninStatus": "verified", "chartBlocked": false, "encounterId": "uuid",
+  "status": "admitted", "source": "direct", "edAttendanceId": null, "fromEncounterId": null,
+  "visitQueueEntryId": null, "motherAdmissionId": null, "reason": "Community-acquired pneumonia",
+  "reasonHidden": false, "careTeam": "Medical team A", "responsibleMembershipId": "uuid", "requestedWardId": "uuid",
+  "requestedAt": "…", "requestedByMembershipId": "uuid", "admittedAt": "…", "admittedByMembershipId": "uuid",
+  "daysAdmitted": 2, "wardId": "uuid", "wardName": "Female Medical Ward", "bedId": "uuid", "bedName": "Bed 4",
+  "expectedDischargeOn": "2026-12-06", "preparedAt": null, "dischargeReady": false, "discharge": null,
+  "cancelledAt": null, "deathRecorded": false, "billId": null, "rowVersion": 5 }
+```
+
+- `status`: `requested` (waiting for a bed), `admitted`, `discharge_ready`, `discharged`, `cancelled`. `source`: `ed`,
+  `consultation`, `waiting_list`, `direct`.
+- `ninStatus`: `verified` or `not_verified`; show "NIN Verified" / "NIN Not Verified".
+- **Names on ward lists (Q190 A):** with the DPO's switch off (as shipped), `fullName`, `dateOfBirth` and
+  `healthIdLast4` are shown only for patients whose chart the member can read now; otherwise `nameHidden: true`,
+  `fullName: null`, and the card shows `initials`, `sex` and `ageYears`. A deny directive for this facility always
+  hides the name and sets `chartBlocked: true`. For an unknown record (0145) `fullName` is "Unknown patient U-0007"
+  and `initials` the label. Every ward list shows: "Do not show this list on a screen patients or visitors can see."
+- `reason` is `null` with `reasonHidden: true` for a member without `ehr.admission.read` (Q-ADT-10 A).
+- `discharge`: `null`, or `{ "outcome", "dischargedAt", "dischargedByMembershipId", "summaryNoteId",
+  "referredToFacilityName", "diedAt" }`; `outcome`: `routine`, `dama`, `referred_out`, `absconded`, `died`.
+- `billId`: the admission bill (Q189 A) when the facility uses billing and 0172 is applied; otherwise `null`.
+
+10. `POST /ehr/admissions` (`ehr.admission.decide` and chart write access) `{ "patientId", "source",
+    "fromEncounterId"? (consultation), "edAttendanceId"? (ed: an ED-1 record decided `admit_requested`),
+    "visitQueueEntryId"? (waiting_list: an open row), "reason" (1-300), "careTeam"? (1-80),
+    "responsibleMembershipId" (a doctor or clinician here; for `ed` it defaults to ED-1's admitting doctor),
+    "requestedWardId"?, "motherAdmissionId"? (a newborn) }` → 201 `{ "admission", "replayed" }`. The request makes
+    the inpatient visit at once (`encounter_type 'inpatient'`, `planned`). Refusals: 400 `ADMISSION_SOURCE_INVALID`,
+    400 `RESPONSIBLE_DOCTOR_INVALID` ("Choose a doctor or clinician who works at this facility."), 400
+    `MOTHER_ADMISSION_INVALID`, 404 `WARD_NOT_FOUND`, 403 `ADMISSION_CHART_ACCESS_REQUIRED`, 409
+    `ADMISSION_ALREADY_OPEN` ("This patient is already admitted or waiting for a bed here.", with `admissionId` of the
+    open one).
+11. `GET /ehr/admissions?status=open|requested|admitted|discharge_ready|discharged|cancelled&wardId=&wardType=icu`
+    (`ehr.ward.read`) → `{ "items": [card], "hasMore", "limit": 500 }`. Default: open admissions and those discharged
+    or cancelled today (Lagos). Waiting for a bed first, then ward, then bed.
+12. `GET /ehr/admissions/:admissionId` → `{ "admission", "movements": [ { "movementId", "kind", "at",
+    "byMembershipId", "fromWardId", "fromBedId", "toWardId", "toBedId", "handoverRecorded", "outcome",
+    "printNumber", "reprintReason" } ] }`. Kinds: requested, admitted, transferred, prepared, discharged, cancelled,
+    details_changed, wristband_printed. Never the handover text.
+13. `POST /ehr/admissions/:admissionId/admit` (`ehr.bed.allocate`; no chart access needed, Q-ADT-11 A)
+    `{ "expectedRowVersion", "bedId", "confirmSexMismatch"? }` → `{ "admission", "replayed" }`. Only from `requested`.
+    The bed occupied, the visit `in_progress`; an ED record closes by itself (`closed_via = 'admission'`, ED-1 shows it
+    closed) and its waiting-list row finishes; a waiting-list row finishes. 409 `BED_NOT_AVAILABLE` ("This bed is not
+    free. Choose another bed or overflow space."; also when two members give one bed at the same moment: exactly one
+    wins), 409 `WARD_SEX_MISMATCH` (confirm with `confirmSexMismatch: true`; audited), 409 `ADMISSION_STATE_INVALID`.
+14. `POST /ehr/admissions/:admissionId/transfer` (`ehr.bed.allocate`) `{ "expectedRowVersion", "bedId",
+    "handover"? (1-2000; needs chart write access), "confirmSexMismatch"? }` → `{ "admission", "replayed" }`. The
+    old bed to cleaning. `GET /ehr/admissions/:admissionId/movements/:movementId/handover` (`ehr.admission.read` and
+    chart read access) → `{ "movementId", "handover", "at", "byMembershipId" }`.
+15. `POST /ehr/admissions/:admissionId/prepare-discharge` (`ehr.admission.decide`, chart write) `{
+    "expectedRowVersion", "followUpPlan" (1-2000), "expectedDischargeOn"?, "dischargeMedicineIds"? (0-50 of the
+    stay's prescriptions) }` → `{ "admission", "replayed" }`. Can be sent again while `discharge_ready`.
+16. `POST /ehr/admissions/:admissionId/discharge` (`ehr.admission.decide`, chart write) `{ "expectedRowVersion",
+    "outcome", "dischargedAt"?, "summary"? { "presentingProblem", "courseInHospital", "proceduresDone"?,
+    "conditionAtDischarge"? (improved, unchanged, worse, not_applicable), "followUpPlan"?, "patientAdvice"? },
+    "referredToFacilityName"? (referred_out), "diedAt"? (died), "signature": "SIGN" }` → `{ "admission",
+    "summaryNoteId", "replayed" }`. `routine` and `referred_out` only from `discharge_ready` (409
+    `DISCHARGE_NOT_PREPARED`, "Prepare the discharge first."); the summary is required for routine, DAMA and referred
+    out (400 `DISCHARGE_SUMMARY_REQUIRED`); 400 `DIED_AT_REQUIRED`, `DISCHARGE_TIME_INVALID`, `SIGNATURE_REQUIRED`. The
+    summary is a signed clinical note "Discharge summary" of the stay's visit (with the stay's diagnoses and the
+    medicines on discharge), which the patient sees in their records. **The discharge never reads the bill.**
+17. `POST /ehr/admissions/:admissionId/cancel` (`ehr.admission.decide`) `{ "expectedRowVersion", "reason" (8-500) }`.
+    Only from `requested`; the visit is cancelled; an ED record stays "Waiting for admission".
+18. `PATCH /ehr/admissions/:admissionId` (`ehr.admission.decide`) `{ "expectedRowVersion", "careTeam"?,
+    "responsibleMembershipId"?, "expectedDischargeOn"?, "reason"? }`. Only while open.
+19. `GET /ehr/admissions/:admissionId/discharge-summary` (`ehr.admission.read`, chart read) → the print: `{ "facility":
+    { "name", "address", "phone" }, "patient": { "fullName", "sex", "dateOfBirth", "dateOfBirthEstimated", "healthId":
+    null, "healthIdLast4", "ninStatus" }, "admissionNumber", "admittedAt", "dischargedAt", "wards", "responsibleDoctor",
+    "outcome", "referredToFacilityName", "diedAt", "summary", "diagnoses", "medicinesOnDischarge", "signedBy",
+    "signedAt", "printedAt" }`. Each print is audited.
+20. `POST /ehr/admissions/:admissionId/wristband` (`ehr.wristband.print`) `{ "reprintReason"? (lost, damaged,
+    details_changed, moved_ward) }` → `{ "fullName", "unknownLabel", "sex", "dateOfBirth", "ageEstimated", "healthId",
+    "admissionNumber", "facilityName", "wardName", "allergyAlert", "barcode", "pairCode", "printNumber", "printedAt",
+    "replayed" }`. A reprint without a reason: 400 `REPRINT_REASON_REQUIRED`. `allergyAlert` prints "Allergy: check the
+    chart". The Health ID is in this answer only; never put it in a URL or keep it after printing.
+21. `POST /ehr/admissions/:admissionId/newborn-band` → as route 20 plus `motherName`, `motherAdmissionNumber`,
+    `pairCode` ("A-2026-000123 / B1") and `bornAt` (null until Maternity). Reprint the mother's band with reason
+    `details_changed` to carry the same pair code.
+22. Death record (switched off, Q188 A): `POST /ehr/admissions/:admissionId/death-record`, `GET …/death-record`,
+    `POST …/death-record/amend` (reason 8-500), `GET …/death-record/print?form=certificate|registration-notice`. While
+    off: 503 `DEATH_RECORD_NOT_AVAILABLE` ("The death certificate is not switched on yet. The outcome and time of death
+    are recorded."). The outcome `died` and its time are recorded by route 16.
+23. `POST /identity/ward-stay-access` (identity-api; `ehr.ward.read`; switched off, Q156 A) `{ "admissionId" }` → `{
+    "consentGrantId", "patientId", "status", "expiresAt", "existingGrant", "authorization": { "basis": "ward-stay",
+    "scope": "write_records", "purpose": "direct-care" } }`. While off: 503 `WARD_STAY_ACCESS_NOT_AVAILABLE`
+    ("Ward-team access is not switched on yet. Open the record the usual way."); offer "Open this facility's patient"
+    (0131) instead. Once on: 403 `WARD_STAY_ACCESS_REFUSED` ("You are not on the ward team for this patient. Open the
+    record the usual way."), 404 `ADMISSION_NOT_FOUND`. The patient's access history shows `basis: "ward-stay"`,
+    revocable by the patient; the notice says "Your records were opened" (`accessKind: "ward_stay"`).
+
+### Charges (Q189 A; 0172, on BILL-1)
+
+- `GET /commercial/ward-charges` (`billing.catalogue.read`) → `{ "items": [ { "wardId", "wardName", "wardType",
+  "bedDayItemId", "admissionFeeItemId", "version" } ] }`; `PUT /commercial/ward-charges/:wardId`
+  (`billing.catalogue.manage`) `{ "expectedVersion" (0 for a ward with none yet), "bedDayItemId", "admissionFeeItemId"
+  }` (active price-list items of kind `other`).
+- The admission request opens the admission bill (BILL-1's bill with `"source": "admission"` and `"admission": {
+  "admissionId", "admissionNumber", "status", "dischargedWithBalance" }`); the stay's lab and pharmacy lines join it.
+  The admission fee is added when the bed is given; one bed-day per Lagos midnight at the rate of the ward the patient
+  is in then ("Bed-day: ICU (3 Dec 2026)"), added every hour and at discharge, never twice; a stay with no midnight
+  counts one day.
+- BILL-1's `POST /commercial/bills/:billId/payments` takes `"kind": "deposit"` on an admission bill while the stay is
+  open (409 `DEPOSIT_NOT_ALLOWED` otherwise); a deposit may be more than what is due: the bill shows `creditKobo`.
+- `GET /commercial/bills/:billId/interim-statement` (`billing.bill.read`) → BILL-1's bill answer plus
+  `"statementNumber": "I-2026-000045"`, `"depositsKobo"` and `"printedAt"`; each print is audited.
+- **Discharge is never held for an unpaid bill**; the bill stays open after discharge. A facility without payment
+  settings gets no bill. A database without BILL-1 or 0172 answers the charge routes 503 `BILLING_NOT_AVAILABLE`.
+
+### Notifications
+
+None to the patient on admission, transfer or discharge; nothing for a death. Staff notices come with ORD-11's staff
+inbox (Q151 A, Q194 A), which will read `ehr.admission_notice_recipients` (the responsible doctor; NUR-1 adds the nurses
+on shift and the on-call doctor).

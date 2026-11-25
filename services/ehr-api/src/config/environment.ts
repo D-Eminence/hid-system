@@ -111,6 +111,10 @@ const environmentSchema = z
     OFFLINE_ESCROW_KEYS: optionalString,
     // Prescription strength, form, duration, quantity and priority (0125): off by default, off is exactly as before.
     PRESCRIPTION_DISPENSING_DETAILS_ENABLED: booleanString,
+    // ADT-1 (0170-0173): inpatient admission, wards and beds. Off by default; every inpatient route answers 503
+    // INPATIENT_NOT_AVAILABLE. On in staging and at the sealed demo and QA facilities; in production only after the
+    // clinical lead's checklist and the owner's go-live (owner decision Q160 A, 25 November 2026).
+    INPATIENT_ENABLED: booleanString,
   })
   .superRefine((environment, context) => {
     if (environment.AI_ENABLED) {

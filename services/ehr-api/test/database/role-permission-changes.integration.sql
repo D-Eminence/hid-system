@@ -69,10 +69,13 @@ create function pg_temp.expect(case_name text, expected text, actual text) retur
 $$;
 grant execute on function pg_temp.expect(text, text, text) to public;
 
--- A role's permissions as one sorted, space-separated line.
+-- A role's permissions as one sorted, space-separated line. The seven
+-- inpatient codes of a later file (0173, ADT-1) are left out here and checked
+-- on their own in 1n.
 create function pg_temp.role_line(role text) returns text language sql as $$
   select string_agg(permission_code, ' ' order by permission_code) from auth.role_permissions
-   where role_code = role and permission_code <> 'identity.patient.open-own-facility';
+   where role_code = role and permission_code <> 'identity.patient.open-own-facility'
+     and permission_code not in ('ehr.ward.read', 'ehr.admission.read', 'ehr.bed.allocate', 'ehr.wristband.print', 'ehr.admission.decide', 'ehr.ward.manage', 'ehr.death-record.write');
 $$;
 -- The twelve rows 0136 removes, the eight it adds and the three codes it creates.
 create function pg_temp.removed_present() returns integer language sql as $$
@@ -161,6 +164,17 @@ select pg_temp.expect('1j who holds the new codes', 'ehr.document.read-own: rece
      from (select permission_code as code, string_agg(role_code, ' ' order by role_code) as holders
              from auth.role_permissions
             where permission_code in ('ocr.job.start', 'ocr.job.read-own', 'ehr.document.read-own')
+            group by permission_code) held));
+select pg_temp.expect('1n the inpatient codes: none before 0173, its sixteen rows after',
+  case when not exists (select 1 from auth.permissions where code = 'ehr.ward.read') then ''
+       else 'ehr.admission.decide: clinician doctor | ehr.admission.read: clinician doctor nurse | '
+         || 'ehr.bed.allocate: clinician doctor nurse | ehr.ward.manage: admin org_admin | '
+         || 'ehr.ward.read: clinician doctor nurse | ehr.wristband.print: clinician doctor nurse' end,
+  (select coalesce(string_agg(code || ': ' || holders, ' | ' order by code), '')
+     from (select permission_code as code, string_agg(role_code, ' ' order by role_code) as holders
+             from auth.role_permissions
+            where permission_code in ('ehr.ward.read', 'ehr.admission.read', 'ehr.bed.allocate', 'ehr.wristband.print',
+                                      'ehr.admission.decide', 'ehr.ward.manage', 'ehr.death-record.write')
             group by permission_code) held));
 select pg_temp.expect('1k org_admin holds neither work list (untouched)', '0',
   (select count(*)::text from auth.role_permissions

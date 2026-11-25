@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0151",
-    "count": 152,
+    "last": "0173",
+    "count": 156,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -705,6 +705,22 @@
       {
         "name": "0151_sealed_qa_front_desk_and_nurse_logins.sql",
         "sha256": "abab517679255cec2d67aadae9d44f1b629e8e3e9ee30d77cfee33817b2c75f2"
+      },
+      {
+        "name": "0170_inpatient_wards_and_beds.sql",
+        "sha256": "b5fa2ffe1f63400c95db5906b6e4b8c31cfe31fec517f4f761dd02f725a4c520"
+      },
+      {
+        "name": "0171_inpatient_admissions_and_discharge.sql",
+        "sha256": "2ebfa6cfe8283764c6812d7ea6fa00001611d54bef8a8ed8c2fabd50235f4e9d"
+      },
+      {
+        "name": "0172_inpatient_admission_charges.sql",
+        "sha256": "cfcc828ad32296c42dbfdaa83eca07c23ce8911f74d3dd2fc24a33e2851758e1"
+      },
+      {
+        "name": "0173_inpatient_access_and_ward_team.sql",
+        "sha256": "b0c9c43a53de4218c33b2ae93206dec2692b9b6888dee28f4d131e276215b0c3"
       }
     ]
   },

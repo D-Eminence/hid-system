@@ -35,6 +35,8 @@ import { CatalogModule } from './catalog/catalog.module';
 
 import { ConsultationDraftsModule } from './consultation-drafts/consultation-drafts.module';
 import { MyOrdersModule } from './my-orders/my-orders.module';
+// ADT-1 (0170-0173): inpatient admission, wards and beds, behind INPATIENT_ENABLED.
+import { InpatientModule } from './inpatient/inpatient.module';
 @Module({
   imports: [
     ClinicalInfrastructureModule,
@@ -55,6 +57,8 @@ import { MyOrdersModule } from './my-orders/my-orders.module';
     VisitQueueModule,
     // ORD-7 (0149): the medicine and lab-test lists.
     CatalogModule,
+    // ADT-1 (0170-0173): inpatient admission, wards and beds, behind INPATIENT_ENABLED.
+    InpatientModule,
   ],
   controllers: [PatientRecordsController,StaffPatientChatController,HealthProfileController],
   providers: [StaffChatScopeService,StaffEvidenceService,StaffChatHistoryService,PatientRecordsService, ImportedAttachmentService, BedrockAiService, ClaudeAiService, PatientAttachmentTextService,PatientEvidenceService, PatientChatService, PatientChatHistoryService, PatientChatSourceService,
