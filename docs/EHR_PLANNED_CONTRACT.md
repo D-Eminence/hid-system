@@ -1,4 +1,4 @@
-# HID planned contract for the rest of Akos's EHR list (Release B and C, not live)
+# HID planned contract for the rest of Akos's EHR list (Release B, C and D, not live)
 
 This file lists the API that Akos's EHR frontend will need but that is not built yet. With it, he can build each screen once: the shape now, and the fallback he shows until the route ships.
 
@@ -44,6 +44,7 @@ Rules that hold in every section:
 | [ORD-6: Several tests in one lab request](#ord-6-several-tests-in-one-lab-request-planned-release-c-needs-a-migration-yes) | N-7 | C | yes | M |
 | [ORD-8: Order sets, favourites, and note and visit templates](#ord-8-order-sets-favourites-and-note-and-visit-templates-planned-release-c-needs-a-migration-yes) | P0-5, P1-13, P1-12 | C | yes | L |
 | [ORD-11: Result and dispensed notices to the ordering doctor](#ord-11-result-and-dispensed-notices-to-the-ordering-doctor-planned-release-c-needs-a-migration-yes) | P1-6 | C | yes | L |
+| [REP-1: Provider reports, operations figures first](#rep-1-provider-reports-operations-figures-first-planned-release-d-needs-a-migration-yes) | department Provider reports and trends (gap map row 76, hand-off F2), Home's "No comparison yet" figures | D | yes (0203-0204, provisional) | M |
 | [ORD-13: No drug-interaction checks](#ord-13-no-drug-interaction-checks-not-planned-no-release-needs-a-migration-no) | P0-5, N-9 (interactions) | not planned | no | — |
 | [P2-1: National ID type per country and a neutral company number](#p2-1-national-id-type-per-country-and-a-neutral-company-number-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-1 | after C | yes, when designed | M |
 | [P2-2: Interface translations and language](#p2-2-interface-translations-and-language-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-2, P1-8 (language) | after C | yes, when designed | L |
@@ -51,7 +52,7 @@ Rules that hold in every section:
 | [P2-4: Time zone, date and phone formats](#p2-4-time-zone-date-and-phone-formats-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-4 | after C | yes, when designed | M |
 | [QA-2: Migrate account test pass and one real save of every drawer form](#qa-2-migrate-account-test-pass-and-one-real-save-of-every-drawer-form-planned-before-the-release-a-go-live-needs-a-migration-no) | R-4, QA question | before A go-live | no | S |
 
-Owner answers of 19 Nov 2026, and the sections that rest on them: Q124 A (ORD-7, ORD-8, ORD-9, ORD-10 phase 2, ORD-6, VIT-1), Q125 B (ORD-4, now planned for Release B), Q126 A (EHR-C6, ORD-8), Q127 A (ID-8, ORD-11), Q128 A (ORD-11, SX-7), Q129 A (SX-4, CHW-1), Q130 A (CHW-1), Q131 A (ORD-12, ORD-13, ORD-10 phase 2, P2-1 to P2-4), Q132 A (Q132 A, now planned for Release B; ORD-4 refers to it). No owner question for these sections is waiting for an answer.
+Owner answers of 19 Nov 2026, and the sections that rest on them: Q124 A (ORD-7, ORD-8, ORD-9, ORD-10 phase 2, ORD-6, VIT-1), Q125 B (ORD-4, now planned for Release B), Q126 A (EHR-C6, ORD-8), Q127 A (ID-8, ORD-11), Q128 A (ORD-11, SX-7), Q129 A (SX-4, CHW-1), Q130 A (CHW-1), Q131 A (ORD-12, ORD-13, ORD-10 phase 2, P2-1 to P2-4), Q132 A (Q132 A, now planned for Release B; ORD-4 refers to it). No owner question for the Release B and C sections is waiting for an answer. Release D sections rest on the sprint decisions the owner approved on 25 Nov 2026 (Q147–Q290 at the recommended options; REP-1: Q237-Q241, Q149, Q155, Q181, Q182).
 
 Open points with no decision yet, each to be decided before that section is built:
 
@@ -3712,6 +3713,360 @@ Release C (lane D). Size **L**:
 - four routes;
 - audit;
 - a runtime check across Lab, Pharmacy and EHR.
+
+# Release D
+
+Release D holds the department first versions of the two-week sprint the owner approved on 25 Nov 2026: every department ships a first working version on Akos's blue design, anything that needs outside approval is built but switched off, every change gets an independent agent review and Rahman's final database check, and real patients use it only after the clinical lead's checklist and the owner's go-live.
+
+The owner approved every sprint decision at its recommended option on 25 Nov 2026 ("I approve Q147–Q290 at the recommended options"; the sheet is hid-system#332, comment 7148689407). **"(owner decision Qnnn A, 25 Nov 2026)"** marks a line that rests on one of them. The owner can still change any of them; the PR that rebuilds a section says which lines change.
+
+## REP-1: Provider reports, operations figures first (planned, Release D, needs a migration: yes)
+
+Department: Provider reports and trends (the roadmap's Phase 4 "Provider reports"; gap map row 76, hand-off F2). Survey: `docs/coordination/roadmap.json` on `claude/coordinator-state`, entry "Provider reports and trends". Size M.
+
+Status: planned, not live.
+
+Surveyed before writing:
+- health `apps/patient-web/src/ehr-blue/frame/admin/AdminSamples.tsx:384-415` (origin/main b44b0d56), `ReportsSample`, "Reports & Analytics": a "Created from" and "Created through" date range and fixed figures (Visits, Signed Encounters, Admissions, Occupied and Total Beds, Published Results, Fulfilled Prescriptions, Invoiced, Collected, Outstanding, Stock Movements, "Quality Rates: No data — no validated denominator", Mean Open Queue Minutes). Its note says the scope is the current hospital and branch and records are selected by creation date.
+- `frame/pages.ts:133`: the page is `demoOnly` (made-up figures that read as the facility's own; parity report 3.2), group Insight, beside the live Audit trail.
+- `home/dashboardCards.tsx`: `ReportingPeriod` ("Last 7 days", "Last 30 days", "Record creation dates · local time"), `Figure` ("No comparison yet") and `PatientBillingCard`. `home/BlueHome.tsx`: the Activity card and its Reporting period, demo facilities only. `home/RoleDashboard.tsx`: `ACTIVITY`, and `SHORTCUTS` pointing to `reports` for the Records Officer, Billing Officer and Cashier. No chart, sparkline or trend line anywhere in the design.
+- `frame/sampleAccess.ts` and `onboarding/roleTemplates.ts`: reports view and export for Hospital Owner, Hospital Admin, Medical Director, Records Officer and Billing Officer; view only for Cashier. `DESIGN_ROLE_OF` maps `org_admin` to Hospital Admin.
+- hid-system (`staging-novu-ci-20261005` at 0cfddcc9, 0001-0153): no facility reporting route and no report code (only `audit.read` and `platform.audit.read`). The models: `GET /audit/events` (`healthcare-operations` purpose), the export record of `INTERFACE_CONTRACT.md` 48.x, and the source tables below.
+
+### What staff get
+
+- **The Reports page** ("Reports & Analytics", Insight group), for the facility's administrators. They choose a date range of Lagos days, at most 92 days, ending today or earlier (default: the last 30 days, today included).
+- **Operations figures, from live data only**, for this facility alone: the waiting list, registrations, visits, the laboratory and the pharmacy (the table in "The figures").
+- **A comparison** for every figure: the same figure over the previous period of the same length, just before the range.
+- **A simple daily trend line** for every figure over the range.
+- **Downloads**: CSV and PDF, built in the browser from a server answer in which small counts are already hidden. Each download is recorded (the 48.x pattern). Switched off at real facilities until the DPO's review.
+- **Home**: the administrator's Activity card shows live figures for the reporting period (last 7 or 30 days) with the previous period, instead of the sample's "No comparison yet".
+
+Not in this release:
+- finance figures (invoiced, collected by payment method, refunds and voids, outstanding, deferred, HMO receivables, end-of-day differences): after patient billing (BILL-1, 0162-0167) is live, as REP-2;
+- stock figures (below reorder level, expiring in 90 days, value by location): after Stock and procurement;
+- admissions and bed occupancy: after Inpatient (ADT-1);
+- disease reports and the NHMIS/DHIS2 monthly summary: after ORD-9 coding and the clinical lead's approval of indicator definitions (Q238 A);
+- quality rates, rates of any kind, organisation-wide or multi-facility roll-ups (Q241 A), patient lists (Q239 A), nightly totals (Q237 A), scheduled or emailed reports.
+
+### Decisions this section is built on
+
+| Question | Built with | The other option |
+|---|---|---|
+| Q237 (REP-1) How figures are worked out | **A**: on demand from live data, indexed, at most 92 days, one facility (owner decision Q237 A, 25 Nov 2026) | B: nightly totals |
+| Q238 (REP-2) Contents | **A**: operations first; finance and stock when their departments ship; no NHMIS yet (owner decision Q238 A, 25 Nov 2026) | B: also NHMIS now |
+| Q239 (REP-3) Patient-level data | **A**: totals only. No answer, download or audit row names a patient. Patient lists stay in their own pages (owner decision Q239 A, 25 Nov 2026) | B: audited patient lists in downloads |
+| Q240 (REP-4) Who sees reports | **A**: new codes `reports.read` and `reports.export`, given to the facility's administrators (`admin`, `org_admin`). Finance figures also to billing staff come with REP-2. Clinical figures to doctor leads: see "Open points" (owner decision Q240 A, 25 Nov 2026) | B: every staff member sees every figure |
+| Q241 (REP-5) Across facilities | **A**: one facility at a time, the session's (owner decision Q241 A, 25 Nov 2026) | B: organisation-wide now |
+| Q149 One switch per department, seeded off | **A**: the service flags `REPORTS_ENABLED` and `REPORTS_EXPORT_ENABLED`, both off (owner decision Q149 A, 25 Nov 2026) | B: no switch |
+| Q155 New roles | **A**: no Medical Director or Consultant role, so the design's Medical Director grant has no backend role (owner decision Q155 A, 25 Nov 2026) | B: reuse today's roles with extra rights |
+| Q124 Clinical content | **A**: the figure definitions ship as a draft, marked so on screen and in every answer, until the clinical lead signs them (owner decision Q124 A, 19 Nov 2026) | — |
+| Q181, Q182 Time and dates | **A**: Lagos days and times on every screen and download; dates as "18 Nov 2026" (owner decisions Q181 A and Q182 A, 25 Nov 2026) | — |
+
+### The figures (draft definitions, awaiting the clinical lead's and Ola's sign-off)
+
+All figures are of the session's facility only, never another's. A figure counts each record once, on the Lagos day named in the "Day" column. Sealed demo and QA patients exist only at sealed facilities, so a real facility's figures never include them.
+
+| Section | Key | Words on screen | Source | Day | What is counted |
+|---|---|---|---|---|---|
+| `waitingList` | `checkedIn` | Patients checked in | `ehr.visit_queue` (0135) | `queue_day` | every check-in |
+| `waitingList` | `seen` | Seen by a clinician | `ehr.visit_queue` | `queue_day` | tracked check-ins (below) that reached "With clinician", or were closed `finished` |
+| `waitingList` | `leftWithoutBeingSeen` | Left without being seen | `ehr.visit_queue` | `queue_day` | tracked check-ins closed `left` that never reached "With clinician" |
+| `waitingList` | `cancelled` | Check-ins cancelled | `ehr.visit_queue` | `queue_day` | check-ins closed `cancelled` |
+| `waitingList` | `medianWaitMinutes` | Median wait to see a clinician | `ehr.visit_queue` | `queue_day` | median of the minutes from check-in to the first move to "With clinician", over tracked check-ins that have one |
+| `registrations` | `newHealthIds` | Registered with a new Health ID | `identity.registration_cases` (0011, 0130) | `created_at` | cases at this facility with status `approved_new_identity` |
+| `registrations` | `existingHealthIds` | Registered with an existing Health ID | `identity.registration_cases` | `created_at` | status `resolved_existing_identity` or `linked_existing` |
+| `visits` | `opened` | Visits opened | `ehr.encounters` | `started_at` | not imported from paper (0113), not `cancelled` or `entered_in_error` |
+| `visits` | `completed` | Visits completed | `ehr.encounters` | `ended_at` | status `completed`, not imported from paper (the design's "Signed Encounters") |
+| `lab` | `requested` | Lab tests requested | `ehr.lab_requests` | `created_at` | requests made here, status `active`, `on_hold` or `completed` |
+| `lab` | `specimensCollected` | Samples collected | `lab.specimens` | `collected_at` | this facility's laboratory, status `collected`, `received` or `rejected` |
+| `lab` | `resultsReleased` | Results released | `lab.result_releases` | first release | each result once, on the day of its first release (the design's "Published Results") |
+| `lab` | `medianTurnaroundMinutes` | Median time from sample to result | `lab.result_releases`, `lab.test_executions`, `lab.specimens` | first release | median of the minutes from the sample's collection to the result's first release |
+| `pharmacy` | `dispensed` | Prescriptions dispensed | `pharmacy.dispensings` | `dispensed_at` | this facility's pharmacy, dispensings not reversed (the design's "Fulfilled Prescriptions") |
+| `pharmacy` | `dispensingsReversed` | Dispensings reversed | `pharmacy.dispensing_reversals` | `reversed_at` | this facility's pharmacy |
+| `pharmacy` | `notCompleted` | Prescriptions this pharmacy could not complete | `ehr.order_route_unable_endings` (0091) | `recorded_at` | kind `prescription`, receiving facility this one, with a count per reason (`out_of_stock`, `medicine_unavailable`, `needs_prescriber_review`, `controlled_requirements`, `cannot_meet_priority`, `patient_declined`, `patient_did_not_return`, `other`) |
+
+Rules for every figure:
+- **Lagos days.** `from` and `to` are Lagos calendar days, both included. A record counts in the range when its day (as above, in `Africa/Lagos`) is in it.
+- **The previous period** is the same number of days just before `from`. When the range includes today, today counts so far (`includesToday: true`).
+- **Daily values.** Each figure carries one value per day of the range. A day with nothing is 0 for a count, and `null` with sample size 0 for a median.
+- **Medians** are in whole minutes (half up) and carry their sample size.
+- **Tracked check-ins.** Before 0203 the waiting list did not record when a clinician first saw the patient. From 0203 every new check-in records it (`wait_tracked`). `seen`, `leftWithoutBeingSeen` and `medianWaitMinutes` count tracked check-ins only, and each carries `coverage` (how many check-ins in the range and in the previous period are tracked), so the screen can say "Counted for 300 of 412 check-ins".
+- **Only operations figures.** The design's Admissions, Beds, Invoiced, Collected, Outstanding, Stock Movements and Quality Rates are not shown. The design's "Mean Open Queue Minutes" is replaced by the median wait.
+- **Draft.** Every answer carries `definitions: { "version": "rep1-draft-1", "signedOff": false }` until the clinical lead and Ola sign the definitions; a later image then answers `signedOff: true` with the signed version. While `signedOff` is false, the screen and every download say "Figure definitions are awaiting clinical sign-off".
+
+### Routes
+
+All routes are under `/api/v1`, in ehr-api (`services/ehr-api/src/reports/`). They need `X-Facility-Id` and `X-Purpose-Of-Use: healthcare-operations` (as `GET /audit/events`). No route takes a facility id other than the session's, a patient id, a Health ID or a NIN, and no answer holds one. Answers carry `Cache-Control: no-store`.
+
+**Switches (owner decision Q149 A, 25 Nov 2026).** Two ehr-api settings, both off by default:
+- `REPORTS_ENABLED`: while off, both routes answer 503 `REPORTS_NOT_AVAILABLE` at real facilities.
+- `REPORTS_EXPORT_ENABLED`: while off (or while `REPORTS_ENABLED` is off), route 2 answers 503 `REPORTS_EXPORT_NOT_AVAILABLE` at real facilities. It stays off until the DPO's review.
+- The four sealed demo facilities and the sealed QA facility have both routes whatever the settings, because their patients are fictional (BILL-1's rule). The database function decides this, from the setting ehr-api passes and the facility's seal.
+- A database without 0203 and 0204 also answers 503 `REPORTS_NOT_AVAILABLE`.
+
+**The report** (both routes answer it):
+
+```json
+{ "report": "operations", "facilityId": "uuid",
+  "from": "2026-11-01", "to": "2026-11-30", "days": 30,
+  "previousFrom": "2026-10-02", "previousTo": "2026-10-31",
+  "includesToday": false, "timeZone": "Africa/Lagos", "generatedAt": "2026-12-01T08:00:00.000Z",
+  "definitions": { "version": "rep1-draft-1", "signedOff": false },
+  "sections": [
+    { "key": "waitingList", "figures": [
+      { "key": "checkedIn", "kind": "count", "current": 412, "previous": 380,
+        "daily": [{ "day": "2026-11-01", "value": 12 }] },
+      { "key": "seen", "kind": "count", "current": 290, "previous": 0,
+        "coverage": { "tracked": 300, "previousTracked": 0 },
+        "daily": [{ "day": "2026-11-01", "value": 9 }] },
+      { "key": "medianWaitMinutes", "kind": "median_minutes", "current": 34, "previous": null,
+        "sampleSize": 290, "previousSampleSize": 0,
+        "coverage": { "tracked": 300, "previousTracked": 0 },
+        "daily": [{ "day": "2026-11-01", "value": 31, "sampleSize": 9 }] } ] },
+    { "key": "pharmacy", "figures": [
+      { "key": "notCompleted", "kind": "count", "current": 4, "previous": 2,
+        "byReason": [{ "reason": "out_of_stock", "current": 3, "previous": 2 }],
+        "daily": [{ "day": "2026-11-01", "value": 0 }] } ] } ] }
+```
+
+- `sections` are always the five above, in that order, each with every figure of the table in its order. `byReason` lists all eight reasons, in the table's order.
+- `kind`: `count` or `median_minutes`. A median with no sample is `null` with `sampleSize: 0`.
+- `daily` has one entry per day of the range, oldest first. The previous period has totals only.
+- `coverage` is only on the three tracked figures.
+
+**1. `GET /api/v1/ehr/reports/operations?from=YYYY-MM-DD&to=YYYY-MM-DD`**: the report, as the screen shows it.
+- Needs `reports.read`.
+- `from` and `to` are required Lagos days:
+  - `from` on or before `to`;
+  - `to` today (Lagos) or earlier;
+  - `from` no more than 2 years before today;
+  - at most 92 days from `from` to `to`, both included.
+- Any other query parameter answers 400 `VALIDATION_FAILED`.
+- Answer 200 with the report. Values are shown as they are: this is the facility's own administrators reading their own facility.
+- The screen and Home read it when opened and when the range changes. There is no polling.
+
+**2. `POST /api/v1/ehr/reports/operations/exports`**: a download, recorded (the 48.x pattern).
+- Needs `reports.read` and `reports.export`.
+- Body `{ "from": "YYYY-MM-DD", "to": "YYYY-MM-DD", "format": "csv" | "pdf" }`, with the range rules of route 1. Any other field answers 400 `VALIDATION_FAILED`.
+- Answer 200 with the report, small counts hidden, plus `"export": { "format": "csv", "minimumCount": 5, "suppressedValues": 37, "recordedAt": "…" }`.
+- **Small counts.** Every count from 1 to 4 (totals, daily values, `byReason`, `coverage` and sample sizes) is `null`, with `currentSuppressed`, `previousSuppressed` or (in `daily` and `byReason`) `suppressed: true` beside it. A median whose sample is under 5 is `null` and marked the same way. 0 and counts of 5 or more are shown. The database applies the rule, so a download never holds what the rule hides.
+- The website builds the CSV or PDF itself from this answer only, never from route 1's. It writes "fewer than 5" for a hidden count and "not shown (fewer than 5)" for a hidden median.
+- No `Idempotency-Key`: each call is one download and one audit row, as in 48.x.
+- The record is written in the same call, so a download cannot happen without it.
+
+ehr-api runs each call in one transaction with `SET LOCAL statement_timeout = '15s'`. A timeout answers 503 `REPORT_TOO_SLOW`.
+
+### Errors
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | "Check the highlighted fields." (a missing or unknown field, not a date, an unknown format) |
+| 400 | `REPORT_RANGE_INVALID` | "Choose a start date on or before the end date, ending today or earlier, within the last 2 years." |
+| 400 | `REPORT_RANGE_TOO_LONG` | "Choose a range of up to 92 days." |
+| 400 | `PURPOSE_OF_USE_REQUIRED` | as `GET /audit/events` (`healthcare-operations` only) |
+| 403 | `REPORTS_NOT_ALLOWED` | "Only this facility's administrators can see its reports." |
+| 403 | `REPORTS_EXPORT_NOT_ALLOWED` | "Only this facility's administrators can download its reports." |
+| 503 | `REPORTS_NOT_AVAILABLE` | "Reports are not available yet." (switch off at a real facility, or a database without 0203 and 0204) |
+| 503 | `REPORTS_EXPORT_NOT_AVAILABLE` | "Downloading reports is not available yet." |
+| 503 | `REPORT_TOO_SLOW` | "This report took too long. Try a shorter range, or try again later." |
+
+Staff screens show the message and never the word "permission".
+
+### Roles and access codes
+
+Two new codes, in 0204 (owner decision Q240 A, 25 Nov 2026):
+
+| Backend role | `reports.read` | `reports.export` | Design role it stands for |
+|---|---|---|---|
+| `org_admin` | yes | yes | Hospital Owner, Hospital Admin (`DESIGN_ROLE_OF`) |
+| `admin` | yes | yes | Hospital Admin |
+| `org_admin_awaiting_review` | no | no | a self-signed-up facility before support's review (no clinical access yet) |
+| `doctor`, `clinician`, `nurse`, `receptionist`, `lab`, `pharmacist` | no | no | — (doctor leads: "Open points") |
+| `cashier`, `billing_officer` (BILL-1, 0162, not live) | no | no | Cashier, Billing Officer: with REP-2's finance figures |
+| none | — | — | Medical Director (no such role, Q155 A); Records Officer (no backend role) |
+
+SX-1 (`services/identity-api/src/auth/facility-modules.ts`) gains the area `reports`, "Reports": shown with `reports.read`, used in full with `reports.export`. `services/identity-api/test/role-matrix.json` gains a derived row "Reports" (facility admin full, every other column hidden) and the two codes in `todayRolePermissions` for `admin` and `org_admin`, in the same pull request as 0204.
+
+### Database design
+
+Two migrations, **0203 and 0204, provisional** (numbers are final at integration, in release order). Each needs the owner's verbatim signature, Rahman's final database check and an independent agent review. Neither reads anything 0154-0202 create. Both tolerate what other lanes add (other codes, roles, CHECK values and triggers on the same tables): they pin only what they read and check their own objects exactly.
+
+Both files follow 0147, 0150, 0151 and wave 1 (0168, 0169):
+- the whole file is one `do` block, so nothing applies if any part raises;
+- every lock is taken first, NOWAIT, including the tables read by the functions the file calls, tried 50 times 100 ms apart. If this transaction already holds an earlier file's blocking locks, there is one try and no sleep. A busy refusal raises 55P03 beginning "0203: " (or "0204: ") and ending "run the release again at a quieter time";
+- preconditions are catalog reads that raise 55000 and apply nothing: the marker objects of only the earlier files whose objects the file uses, and the md5 of each function body it calls;
+- running the file again where it is applied raises "0203: already applied" (exact detection of all its own objects) and changes nothing; any half state raises "0203: the schema is not in the reviewed state";
+- post-checks in the 0148/0152 form: each new object's owner; each function's `prosecdef`, `proconfig` (`search_path=pg_catalog, pg_temp`) and ACL; each trigger's `tgtype`, `tgqual`, `tgattr`, `tgnargs`, `tgfoid` and `tgenabled`; each policy's command, roles and expression; each index's definition;
+- no temporary table and no name that `pg_temp` could resolve inside any SECURITY DEFINER function: every name is schema-qualified, and `search_path` is fixed to `pg_catalog, pg_temp`;
+- the file adds its block to `services/ehr-api/database/runtime-grants.sql` (the staging file followed by REP-1's block) and an unsigned declaration to `config/production-schema-compatibility.json`, which stays unsigned until the owner signs.
+
+**0203_facility_reports_operations.sql: the figures.**
+- **The waiting list records when a clinician first sees the patient** (`ehr.visit_queue`, 0135):
+  - two new columns: `first_with_clinician_at timestamptz` and `wait_tracked boolean`. Rows that exist when 0203 applies keep `null` in both (not tracked). No row is rewritten.
+  - a CHECK, `visit_queue_report_stamp_ck`: `first_with_clinician_at` is null, or `wait_tracked` is true and it is not before `checked_in_at`.
+  - a trigger, `visit_queue_report_stamp` (BEFORE INSERT OR UPDATE, FOR EACH ROW), calling `ehr.visit_queue_report_stamp()` (plpgsql, SECURITY INVOKER, fixed `search_path`, EXECUTE for no role). On insert it sets `wait_tracked` true, and `first_with_clinician_at` to `stage_changed_at` when the row starts at `with_clinician`. On update it keeps both columns as they were, except that a tracked row moving to `with_clinician` for the first time gets `stage_changed_at`. So nobody, the owner included, can change them afterwards, and 0135's and ED-1's functions need no change.
+  - The trigger only writes the row's own two columns. So ED-1's `visit_queue_ed_guard` (BEFORE UPDATE OF its four columns) and `visit_queue_ed_close_mirror`, and APPT-1's CHECK, are unaffected whichever applies first.
+- **Indexes for the day ranges:**
+  - `ehr.visit_queue (facility_id, queue_day)`;
+  - `ehr.encounters (facility_id, ended_at) where status = 'completed'`;
+  - `ehr.lab_requests (facility_id, created_at)`;
+  - `lab.specimens (facility_id, collected_at) where collected_at is not null`;
+  - `lab.result_releases (facility_id, released_at)`;
+  - `pharmacy.dispensings (facility_id, dispensed_at)`;
+  - `pharmacy.dispensing_reversals (facility_id, reversed_at)`.
+  - Existing indexes serve the rest: `encounters_facility_status_idx`, `registration_cases_facility_status_idx` and `order_route_unable_endings_facility_idx`.
+- **The owner's count, only while a report runs (0143's marker pattern).** Every source table except `ehr.visit_queue` has row-level security forced, so the function's owner sees nothing in them by default.
+  - `ehr.report_scans (backend_pid, transaction_started_at)`, primary key on both: one row while a report counts, for this backend's transaction only. Row-level security enabled and forced, with four owner policies (as 0091's T10), and no grant to any role. It is not append-only history: each row is deleted before the function returns.
+  - `ehr.report_scan_open()` (SQL, STABLE, SECURITY DEFINER, fixed `search_path`): whether this backend's own transaction holds a marker. EXECUTE to PUBLIC, because every role that reads a table evaluates its policies.
+  - One read policy per source table, named `<table>_scan_reports`, FOR SELECT. It is true only when the current role is the table's owner (or a member of it) **and** `ehr.report_scan_open()` is true. It is asked once per statement (a scalar subquery), so a runtime role's own reads are never widened. The eight tables: `ehr.encounters`, `ehr.lab_requests`, `identity.registration_cases`, `lab.specimens`, `lab.test_executions`, `lab.result_releases`, `pharmacy.dispensings` and `pharmacy.dispensing_reversals`.
+  - `ehr.order_route_unable_endings` already lets its owner read it (0091), and `ehr.visit_queue` has row-level security not forced, so neither needs a policy.
+- **Functions**, owned by the owner of `ehr.visit_queue` (0135's), with `search_path = pg_catalog, pg_temp`:
+  - `ehr.facility_report_operations_figures(facility uuid, from date, to date, suppress boolean) returns jsonb`. SECURITY INVOKER, EXECUTE for no role; it runs only inside the two below, as their owner. It writes the marker, counts, deletes the marker and returns the report. It calls no other function while the marker exists, so no other owner-run function or trigger ever sees what the policies open. A raise anywhere rolls the marker back with the transaction.
+  - `ehr.facility_report_operations(from date, to date, switched_on boolean) returns jsonb`. SECURITY DEFINER, EXECUTE for `hid_ehr_runtime` only.
+  - `ehr.facility_report_operations_export(from date, to date, format text, switched_on boolean) returns jsonb`. SECURITY DEFINER, EXECUTE for `hid_ehr_runtime` only.
+  - Each checks the caller: an account, an active membership at the session facility that is not on hold, `reports.read` (and `reports.export` for the download) through `auth.membership_has_permission`, and the purpose `healthcare-operations`. Else 42501 `REPORTS_NOT_PERMITTED` / `REPORTS_EXPORT_NOT_PERMITTED`, or 22023 `REPORTS_OPERATIONS_PURPOSE_ONLY`.
+  - Each checks the switch: `switched_on` (ehr-api's setting), or the session facility is sealed demo or sealed QA (`identity.sealed_demo_facility`, `identity.sealed_qa_facility`). Else 55000 `REPORTS_SWITCHED_OFF`.
+  - Each checks the range (22023 `REPORT_RANGE_INVALID` or `REPORT_RANGE_TOO_LONG`) and the format (`csv` or `pdf`, 22023).
+  - The facility is always `platform.current_facility_id()`, never an argument the runtime chooses.
+  - Without 0204, no role holds a report code, so both functions refuse. This is the database half of "built but switched off".
+- **Owners.** Section 0 refuses (55000, nothing applied) unless the functions' owner owns, or is a member of the owner of, each source table and `ehr.order_route_unable_endings`, and no `hid_` runtime role is a member of that owner (0133's form). A NOTICE names every owner checked; Rahman confirms them for production before signing.
+- **Locks** (expected; measured with `pg_locks` before commit, and pinned when the file is written):
+  - ACCESS EXCLUSIVE on `ehr.visit_queue` (the columns, CHECK and trigger), and on `ehr.encounters`, `ehr.lab_requests`, `identity.registration_cases`, `lab.specimens`, `lab.test_executions`, `lab.result_releases`, `pharmacy.dispensings` and `pharmacy.dispensing_reversals` (each policy; the index builds need less). All are taken by one LOCK attempt, so the file never waits while holding some of them.
+  - ACCESS SHARE on any table a LANGUAGE sql body names when it is created (measured).
+  - The CHECK and the seven index builds read each table once. These tables are small on the live system, so this takes well under a second; run it at a quiet time.
+- **Old images on this schema:** nothing calls the new functions. The policies change nothing for any runtime role. The trigger only fills the two new columns, inside 0135's and ED-1's own functions.
+
+**0204_facility_reports_access.sql: who reads reports.** It follows 0169's shape:
+- `auth.permissions` gains `reports.read` ("See this facility's operations reports: totals only, no patient (REP-1, 0204)") and `reports.export` ("Download this facility's operations reports with small counts hidden; each download is recorded (REP-1, 0204)").
+- `auth.role_permissions` gains four rows: `admin` and `org_admin`, each with both codes.
+- One audit row per role row, as the system actor: `auth.role-permission.add`, resource `role-permission` "<role>/<code>", reason "REP-1 Provider reports, operations figures (Release D, owner decision Q240 A)".
+- Preconditions:
+  - 0203's objects are there;
+  - "0204: already applied" when exactly the two codes and four rows are there. The test names the two codes, never `reports.%`, so a later REP-2 code does not confuse it;
+  - "0204: the role table is not in the reviewed state" for any other state of those two codes;
+  - `admin` and `org_admin` exist and are active;
+  - `auth.membership_has_permission` is md5-pinned as 0001-0153 leave it.
+- Post-checks: the report rows are exactly the four, every other row of the role table is unchanged (compared row by row with the table before), and there are exactly four audit rows.
+- The closing NOTICE prints how many active memberships at real (not sealed) facilities gain each code. It calls `identity.sealed_demo_facility` and `identity.sealed_qa_facility`, so the file also locks `identity.sealed_demo_members` and `identity.sealed_qa_members`.
+- Locks, as 0169's: SHARE ROW EXCLUSIVE on `auth.role_permissions`; ROW EXCLUSIVE on `auth.permissions` and `audit.events`; ROW SHARE on `auth.roles` and the tables the audit rows' keys reference (`auth.accounts`, `identity.staff_facility_memberships`, `identity.organizations`, `identity.facilities`, `identity.patients`); ACCESS SHARE on `auth.account_roles`, `identity.sealed_demo_members` and `identity.sealed_qa_members`.
+- No function, policy, grant or table changes, so `runtime-grants.sql` is unchanged by this file.
+- It is its own file so Rahman can review who reads reports apart from the tables, and so it can be signed after 0203 if the role table changes (for example for the doctor leads, below).
+
+### Audit
+
+Written by the two functions, in the request's transaction:
+- `ehr.reports.operations.read`, success: resource type `facility-report`, resource id `operations`, details `{ from, to, days, includesToday, figures }`.
+- `ehr.reports.operations.exported`, success: the same resource, details `{ from, to, days, format, figures, values, suppressedValues, minimumCount }`.
+- A refusal the functions raise (code, purpose, range, switch) rolls back. ehr-api's request audit records it (`@AuditAction`), as for 0135.
+- No row ever names a patient (`patient_id` is null) or holds a figure's value. Figures are not personal data on their own, but a row holding them would be a second copy of the report outside its rules.
+
+### Notifications
+
+None. Patients are not told about reports, which name nobody. There are no staff notices (gap F2).
+
+### What patients see
+
+Nothing. No patient page changes, and no answer to a patient includes a report or a figure. A patient's access history is unchanged: a report opens no record.
+
+### Website screens (mapped to Akos's existing sample screens)
+
+| Akos sample (health `apps/patient-web/src/ehr-blue/`) | Live screen | Calls |
+|---|---|---|
+| `frame/pages.ts:133` (`demoOnly(page('reports', …ReportsSample))`) | `live('reports', 'Insight', 'Reports & Analytics', 'chart', 'reports.read', …)`. Listed only where the session holds `reports.read` and route 1 does not answer 503 `REPORTS_NOT_AVAILABLE`; elsewhere today's demo-only sample stays | route 1 |
+| `frame/admin/AdminSamples.tsx:384-415` (`ReportsSample`: "Created from", "Created through", fixed figures, scope note) | "From" and "Through" (Lagos days, default the last 30 days; "Choose a range of up to 92 days"). Five sections with their figures, each with the previous period and the change, a daily line, `coverage` on the three waiting-list figures, and the reasons under "could not complete". A banner while `signedOff` is false. The scope note in plain words ("This facility only. Days are Lagos days.") | route 1 |
+| (none; new) | "Download CSV" and "Download PDF" for `reports.export`, built from route 2's answer only. The file states the facility, the range, the Lagos time it was made, "Counts from 1 to 4 are shown as fewer than 5" and the draft banner | route 2 |
+| `home/dashboardCards.tsx` (`ReportingPeriod`, `Figure` "No comparison yet") and `home/BlueHome.tsx` (the Activity card) | For a session holding `reports.read`, the Activity card reads route 1 for the last 7 or 30 days (today included). It shows Patients checked in, Visits opened, Results released and Prescriptions dispensed, each "vs previous 7 days" (or 30). The note "Record creation dates · local time" becomes "Lagos days". Other roles keep today's demo-only sample | route 1 |
+| `home/dashboardCards.tsx` (`PatientBillingCard`) | Unchanged sample (finance figures come with REP-2) | — |
+| `home/RoleDashboard.tsx` (`SHORTCUTS` 'reports' for Records Officer, Billing Officer, Cashier) | Shown only where the session may open the page, as today's rule does. No backend role of those three holds `reports.read` in this release | — |
+| `frame/sampleAccess.ts`, `onboarding/roleTemplates.ts` (reports grants) | Live grants from the role table above | — |
+
+Rules for the screens:
+- Every date and time goes through `@hid/ui/display`, in Lagos, whatever the device's zone. Dates read "18 Nov 2026", with 24-hour times.
+- No chart library is needed. One simple line per figure, with the values readable as text for screen readers.
+- Never show a figure as a rate or a quality measure. Medians say "minutes" and show their sample size.
+- The page shows no patient name, list or link, and its URL carries only the dates.
+- Before this ships, keep the sample at the demo facilities only, with its banner. `packages/contracts/src/registry.ts` entries go from `proposed` to `served` only when this ships.
+
+### Tests
+
+- **Database** (throwaway local PostgreSQL, fictional patients only, migrations run as a NOSUPERUSER NOBYPASSRLS migrator), in `services/ehr-api/test/database/facility-reports.integration.sql`:
+  - every figure on a seeded facility, including Lagos day edges (23:30 UTC is the next Lagos day) and today counting so far;
+  - tracked and untracked check-ins and their coverage; the stamp on insert at `with_clinician` and on the first move there, unchanged by later moves, by ED-1's moves and by a direct update as the owner;
+  - a result released twice counted once; a reversed dispensing not counted as dispensed; visits imported from paper, cancelled and entered in error left out;
+  - the previous period; 92 days accepted; 93 days, `from` after `to`, a future `to` and more than 2 years back refused;
+  - downloads: counts 1-4 `null` and marked, 0 and 5 shown, medians of fewer than 5 hidden, sample sizes and coverage hidden the same way;
+  - another facility's rows never counted; a sealed facility counting only its own; the switch off refusing at a real facility and not at a sealed one;
+  - the caller's checks (no code, a download without `reports.export`, the wrong purpose, a held or inactive membership);
+  - exactly one audit row per call, with no patient and no value;
+  - no marker left after a call, a refusal or a raise; a runtime role's own reads of each source table unchanged; an owner-run function called after the report in the same transaction sees nothing more.
+- **Migration**, in `services/ehr-api/test/database/facility-reports-migrations.integration.sql`:
+  - each file with each locked table held by another session gives the "0203: … busy" (or "0204: …") refusal and nothing applied;
+  - a second run gives "already applied"; a half state is refused;
+  - post-checks pass; a changed pinned body is refused;
+  - 0203 applies with and without ED-1's 0168 and APPT-1's 0160 before it, and they apply after it;
+  - 0204 applies with BILL-1's 0162 roles and codes before it.
+- **Release C's live verifiers:** `scripts/tuf-staging-migration-rehearsal.mjs` with `HID_REHEARSAL_LIVE_TREE` and `HID_REHEARSAL_LIVE_POINTS` set to the two files' final numbers; all live runtime verifiers pass after each file. A new verifier, `services/ehr-api/scripts/verify-facility-reports-runtime.mjs` (read, download, refusals, the stamp), is added to the rehearsal.
+- **Services:** controller and service specs (both switches, the sealed rule, the purpose, the range, the timeout as `REPORT_TOO_SLOW`, the error mapping); `role-matrix.json`; the SX-1 area spec.
+- **Query cost:** the suite seeds one facility with 92 days of fictional work (about 50,000 check-ins and visits) and records each figure's plan. Route 1 stays under 2 seconds there.
+- **Known on the sprint branch:** release tests 45, 53 and 99 fail with "missing migration prefix" because of the numbering gap before 0203. That is expected and is not worked around.
+- **Website:** the page, Home's card and both downloads with the device zone away from Lagos; hidden counts in the files; no "permission" in staff text; no Health ID in any URL.
+
+### Depends on
+
+- Live today: EHR-C7 / 0135 (waiting list), 0004 and 0113 (visits, and visits imported from paper), 0011 and 0130 (registration cases), 0018-0021 (laboratory work, samples, results and their release), 0023 (pharmacy dispensing and reversals), 0091 (could not complete), 0098 and 0123 (sealed demo and QA), the audit trail.
+- ED-1 (0168): only the shared waiting-list table. Either may apply first.
+- BILL-1 (0162-0167), Stock, ADT-1 and ORD-9: none for this release. They are needed for REP-2 (finance), stock figures, beds and admissions, and disease reports.
+- It unblocks: replacing `ReportsSample` and Home's sample Activity figures for administrators.
+
+### Clinical lead checklist (before go-live), with Ola for the laboratory and pharmacy
+
+- "Seen": reached "With clinician", or closed as finished.
+- "Left without being seen": closed "Left" before reaching "With clinician" (ED-1's "left before being seen" lands here; "left against medical advice" after being seen does not).
+- The wait: from check-in to the first move to "With clinician", as a median (the design's mean is dropped).
+- "Visits completed" standing for the design's "Signed Encounters"; visits imported from paper left out.
+- Which lab request states count as requested (active, on hold, completed).
+- Turnaround from sample collection to the first release (Ola). The other choice, from the request, needs two more tables in 0203.
+- "Dispensed" net of reversals, and the eight reasons for could not complete (Ola).
+- No figure shown as a rate or a quality measure until a denominator is validated.
+
+### DPO items
+
+- **Totals only** (Q239 A): no answer, download or audit row names a patient.
+- **Small counts.** Downloads hide counts from 1 to 4 and medians of fewer than 5; the screen, inside the facility, shows them. To confirm:
+  - the threshold of 5;
+  - showing zero;
+  - daily values in downloads;
+  - whether secondary suppression is needed (a hidden count worked out from a total and the others).
+- **Downloads** are switched off at real facilities (`REPORTS_EXPORT_ENABLED`) until this review, which is needed before any report leaves the facility or is shared across facilities. Each download is recorded with its format, range and counts only.
+- **Registration cases** hold the NIN in encrypted form. 0203's read policy opens them to the report's owner only while it counts statuses, never their contents.
+
+### Rahman (database review)
+
+- Eight owner read policies with a marker (0143's pattern), on tables with forced row-level security, `identity.registration_cases` included; the marker table; the owners in production.
+- ACCESS EXCLUSIVE on nine clinical tables at once for the length of the file.
+- Two columns, a CHECK and a trigger on 0135's `ehr.visit_queue`, beside ED-1's triggers and APPT-1's CHECK.
+- Query cost over 92 days, and the 15-second limit.
+
+### Open points
+
+- **Doctor leads (Q240 A).** There is no lead role (Q155 A), so this release gives reports to administrators only. Two ways for the owner to choose from:
+  - a later small file adds an access role "Reports" that the facility administrator gives to named doctors through SX-4. SX-4's role list is also replaced by BILL-1's 0162, so that file comes after BILL-1;
+  - or wait for the roster's head-of-department right (Q245 A).
+- **Records Officer** (design) has no backend role; nothing is granted for it.
+- **Finance figures and billing staff** (REP-2), after BILL-1 is live: their own route, codes for `billing_officer` (view and download) and `cashier` (view), and the PatientBillingCard made live.
+- **Stock figures**, after Stock and procurement; **beds and admissions**, after ADT-1.
+- **History before 0203**: the waiting list's seen, left-without-being-seen and wait figures cover check-ins from 0203 on (`coverage` says how many).
+
+### Target
+
+Release D, sprint wave 3 (from 25 Nov 2026). Size **M**.
+- Backend: 0203 and 0204 (provisional), ehr-api `src/reports/`, the SX-1 area and the role matrix, `runtime-grants.sql`, the unsigned declaration.
+- Website: the Reports page, the downloads and Home's Activity card for administrators.
+- Review: an independent agent review per change; Rahman (database, query cost, row-level security, release cut); the owner's verbatim signature on each migration.
+- Go-live:
+  - `REPORTS_ENABLED` on only after the clinical lead's (and Ola's) sign-off of the definitions and the owner's go-live;
+  - `REPORTS_EXPORT_ENABLED` on only after the DPO's review.
 
 # Not planned yet
 

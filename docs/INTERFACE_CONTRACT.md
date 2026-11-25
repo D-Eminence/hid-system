@@ -12423,3 +12423,167 @@ when `dateOfBirthEstimated`, and "NIN Not Verified". On `sent_for_review`
 show the message and nobody else's details. After `identified`, offer
 "Verify NIN" (ID-6). Never show `firstName`/`lastName` of a record whose
 `recordKind` is `unknown`.
+
+## REP-1. Provider reports: operations figures first (Release D, migrations 0203 and 0204, provisional; not live until signed)
+
+Built exactly as `docs/EHR_PLANNED_CONTRACT.md` REP-1 says, on the sprint decisions the owner approved on 25 Nov 2026
+at their recommended options: Q237 A (figures worked out on demand from live data, at most 92 days, one facility),
+Q238 A (operations figures first; finance and stock when their departments ship; no NHMIS yet), Q239 A (totals only;
+no answer, download or audit row names a patient), Q240 A (new codes `reports.read` and `reports.export`; this release
+gives them to the facility's administrators; finance figures to billing staff come with REP-2; doctor leads are an
+open point, as no lead role exists, Q155 A), Q241 A (the session's facility only), and Q149 A (switches seeded off).
+Numbers 0203 and 0204 are provisional (final at integration, in release order); neither file reads anything
+0154-0202 create.
+
+**The figures are a draft.** Every answer carries `definitions: { "version": "rep1-draft-1", "signedOff": false }`
+until the clinical lead (and Ola, for the laboratory and pharmacy) sign the definitions; screens and downloads say
+"Figure definitions are awaiting clinical sign-off" while it is false.
+
+Two service settings in ehr-api, both off by default:
+- `REPORTS_ENABLED`: while off, both routes answer 503 `REPORTS_NOT_AVAILABLE` at real facilities.
+- `REPORTS_EXPORT_ENABLED`: while off (or while `REPORTS_ENABLED` is off), route 2 answers 503
+  `REPORTS_EXPORT_NOT_AVAILABLE` at real facilities. It stays off until the DPO's review of downloads and small
+  counts.
+- The sealed demo facilities and the sealed QA facility have both routes whatever the settings (their patients are
+  fictional); the database decides this from the setting ehr-api passes and the facility's seal.
+- A database without 0203 and 0204 also answers 503 `REPORTS_NOT_AVAILABLE`.
+
+Both routes need `X-Facility-Id` and `X-Purpose-Of-Use: healthcare-operations` (as `GET /audit/events`), and answer
+`Cache-Control: no-store`. No route takes a patient id, a Health ID, a NIN or another facility's id, and no answer
+holds one. ehr-api runs each call in one transaction with `SET LOCAL statement_timeout = '15s'`.
+
+**Who** (two new codes, 0204):
+
+| Backend role | `reports.read` | `reports.export` |
+|---|---|---|
+| `org_admin`, `admin` | yes | yes |
+| every other role, `org_admin_awaiting_review` included | no | no |
+
+Session areas (SX-1): `reports`, "Reports", shown with `reports.read`, used in full with `reports.export`.
+
+**The report** (both routes):
+
+```json
+{ "report": "operations", "facilityId": "uuid",
+  "from": "2026-11-01", "to": "2026-11-30", "days": 30,
+  "previousFrom": "2026-10-02", "previousTo": "2026-10-31",
+  "includesToday": false, "timeZone": "Africa/Lagos", "generatedAt": "2026-12-01T08:00:00.000Z",
+  "definitions": { "version": "rep1-draft-1", "signedOff": false },
+  "sections": [
+    { "key": "waitingList", "figures": [
+      { "key": "checkedIn", "kind": "count", "current": 412, "previous": 380,
+        "daily": [{ "day": "2026-11-01", "value": 12 }] },
+      { "key": "medianWaitMinutes", "kind": "median_minutes", "current": 34, "previous": null,
+        "sampleSize": 290, "previousSampleSize": 0,
+        "coverage": { "tracked": 300, "previousTracked": 0 },
+        "daily": [{ "day": "2026-11-01", "value": 31, "sampleSize": 9 }] } ] },
+    { "key": "pharmacy", "figures": [
+      { "key": "notCompleted", "kind": "count", "current": 4, "previous": 2,
+        "byReason": [{ "reason": "out_of_stock", "current": 3, "previous": 2 }],
+        "daily": [{ "day": "2026-11-01", "value": 0 }] } ] } ] }
+```
+
+- `sections`, always in this order, each with all its figures:
+  - `waitingList`: `checkedIn`, `seen`, `leftWithoutBeingSeen`, `cancelled`, `medianWaitMinutes`;
+  - `registrations`: `newHealthIds`, `existingHealthIds`;
+  - `visits`: `opened`, `completed`;
+  - `lab`: `requested`, `specimensCollected`, `resultsReleased`, `medianTurnaroundMinutes`;
+  - `pharmacy`: `dispensed`, `dispensingsReversed`, `notCompleted`.
+  What each counts, and on which Lagos day, is the planned contract's table.
+- `from` and `to` are Lagos days, both included. The previous period is the same number of days just before `from`.
+  `includesToday`: the range ends today, which counts so far.
+- `kind`: `count` or `median_minutes` (whole minutes; `null` with `sampleSize: 0` when there is no sample).
+- `daily`: one entry per day of the range, oldest first (0 for a count on a day with nothing). The previous period
+  has totals only.
+- `coverage` (on `seen`, `leftWithoutBeingSeen` and `medianWaitMinutes`): how many check-ins in the range and in
+  the previous period record when a clinician first saw the patient. Check-ins from before 0203 do not, and those
+  three figures count only those that do.
+- `byReason` (on `notCompleted`): all eight reasons of 0091 for a prescription, in this order: `out_of_stock`,
+  `medicine_unavailable`, `needs_prescriber_review`, `controlled_requirements`, `cannot_meet_priority`,
+  `patient_declined`, `patient_did_not_return`, `other`.
+
+**1. `GET /api/v1/ehr/reports/operations?from=YYYY-MM-DD&to=YYYY-MM-DD`**: the report, as the screen shows it.
+`reports.read`. Both dates are required: `from` on or before `to`, `to` today (Lagos) or earlier, `from` no more than
+2 years before today, and at most 92 days from `from` to `to`, both included. Any other query parameter answers 400
+`VALIDATION_FAILED`. Answer 200 with the report, values as they are (the facility's own administrators reading their
+own facility).
+
+**2. `POST /api/v1/ehr/reports/operations/exports`**: a download, recorded (the 48.x pattern). `reports.read` and
+`reports.export`. Body `{ "from", "to", "format": "csv" | "pdf" }`, with route 1's range rules; any other field
+answers 400 `VALIDATION_FAILED`. No `Idempotency-Key`: each call is one download and one audit row. Answer 200 with
+the report, small counts hidden, plus `"export": { "format", "minimumCount": 5, "suppressedValues", "recordedAt" }`.
+- **Small counts.** Every count from 1 to 4 (totals, daily values, `byReason`, `coverage`, sample sizes) is `null`,
+  with `currentSuppressed`, `previousSuppressed` or (in `daily` and `byReason`) `suppressed: true` beside it.
+- A median whose sample is under 5 is `null` and marked the same way. 0, and counts of 5 or more, are shown.
+- The database applies the rule.
+- The website builds the CSV or PDF from this answer only, never from route 1's, writing "fewer than 5" for a hidden
+  count and "not shown (fewer than 5)" for a hidden median.
+
+Errors (plain words; screens show the message and never the word "permission"):
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | the request validation's own wording |
+| 400 | `REPORT_RANGE_INVALID` | "Choose a start date on or before the end date, ending today or earlier, within the last 2 years." |
+| 400 | `REPORT_RANGE_TOO_LONG` | "Choose a range of up to 92 days." |
+| 400 | `PURPOSE_OF_USE_REQUIRED` | as `GET /audit/events` |
+| 403 | `REPORTS_NOT_ALLOWED` | "Only this facility's administrators can see its reports." |
+| 403 | `REPORTS_EXPORT_NOT_ALLOWED` | "Only this facility's administrators can download its reports." |
+| 503 | `REPORTS_NOT_AVAILABLE` | "Reports are not available yet." |
+| 503 | `REPORTS_EXPORT_NOT_AVAILABLE` | "Downloading reports is not available yet." |
+| 503 | `REPORT_TOO_SLOW` | "This report took too long. Try a shorter range, or try again later." |
+
+### Audit
+
+Written by the database functions in the request's transaction:
+- `ehr.reports.operations.read`: resource type `facility-report`, resource id `operations`, details
+  `{ from, to, days, includesToday, figures }`.
+- `ehr.reports.operations.exported`: the same resource, details
+  `{ from, to, days, format, figures, values, suppressedValues, minimumCount }`.
+- A refusal the database raises (code, purpose, range, switch) is in ehr-api's request audit.
+- No row names a patient or holds a figure's value.
+
+### Database (0203, 0204)
+
+0203 changes the following:
+- `ehr.visit_queue` (0135):
+  - gains `first_with_clinician_at` and `wait_tracked` (null on rows from before 0203; no row rewritten), a CHECK
+    tying them together, and a BEFORE INSERT OR UPDATE trigger, `visit_queue_report_stamp`;
+  - the trigger records the first move to `with_clinician` on tracked rows, and keeps both columns unchanged
+    afterwards for every writer, the owner included;
+  - 0135's and ED-1's functions are not changed.
+- Seven indexes for the day ranges (visit queue, completed visits, lab requests, samples collected, result releases,
+  dispensings, reversals).
+- The owner's count, only while a report runs (0143's marker pattern):
+  - `ehr.report_scans`: row-level security enabled and forced, owner policies, no grant;
+  - `ehr.report_scan_open()`: EXECUTE to PUBLIC; it answers only whether this transaction holds a marker;
+  - one `<table>_scan_reports` read policy on each of `ehr.encounters`, `ehr.lab_requests`,
+    `identity.registration_cases`, `lab.specimens`, `lab.test_executions`, `lab.result_releases`,
+    `pharmacy.dispensings` and `pharmacy.dispensing_reversals`. Each is true only for the table's owner while the
+    marker is held, so no runtime role's reads change.
+- SECURITY DEFINER functions with `search_path = pg_catalog, pg_temp`, owned by `ehr.visit_queue`'s owner:
+  - `ehr.facility_report_operations` and `ehr.facility_report_operations_export`, EXECUTE for `hid_ehr_runtime`
+    only (as `runtime-grants.sql`);
+  - the counting helper, which no role may execute;
+  - no temporary table, and every name schema-qualified.
+
+Without 0204 no role holds a report code, so both functions refuse.
+
+0204 adds the following:
+- the two codes;
+- four role rows (`admin`, `org_admin`, each with both codes);
+- four `auth.role-permission.add` audit rows as the system actor (reason "REP-1 Provider reports, operations
+  figures (Release D, owner decision Q240 A)");
+- no grant.
+
+Both files take every lock first, NOWAIT, with busy refusals that begin with their own number (the runner's dry-run
+retry).
+
+### Screen notes
+
+- Every date and time in Lagos through `@hid/ui/display`, whatever the device's zone; dates as "18 Nov 2026".
+- One simple daily line per figure. Never a rate or a quality measure.
+- No patient name, list or link anywhere on the page. URLs carry only the dates.
+- Show the draft banner while `definitions.signedOff` is false, and the `coverage` line under the three waiting-list
+  figures.
+- Before go-live keep `ReportsSample` at the demo facilities only, with its banner.
