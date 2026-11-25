@@ -36,11 +36,12 @@ export const LEFT_OUT_CHAPTERS = {
 
 /**
  * Our other names for the diagnosis search that ocr-worker's DIAGNOSIS_SYNONYMS does not hold, each with its code,
- * WHO's title for that code (the build stops if the release lacks the code or names it otherwise), the names, and
- * who approved them. Promised on #320: no "Down" query reached LD40.0 Complete trisomy 21, and "gallstones" reached
- * DA91.30 Gallstone ileus of small intestine but not DC11 Cholelithiasis. As in DIAGNOSIS_SYNONYMS, a name that does
- * not say which narrower entry is meant names the broader title true of all of them: "gallstones" says neither
- * where the stones are nor whether there is cholecystitis or cholangitis, so it is DC11, not one of DC11.0-DC11.7.
+ * WHO's title for that code (the build stops if the release lacks the code or names it otherwise, or if another entry
+ * already has one of the names as its title or other name), the names, and who approved them. Promised on #320: no
+ * "Down" query reached LD40.0 Complete trisomy 21, and "gallstones" reached DA91.30 Gallstone ileus of small
+ * intestine but not DC11 Cholelithiasis. As in DIAGNOSIS_SYNONYMS, a name that does not say which narrower entry is
+ * meant names the broader title true of all of them: "gallstones" says neither where the stones are nor whether
+ * there is cholecystitis or cholangitis, so it is DC11, not one of DC11.0-DC11.7.
  * "Down's syndrome" needs no name of its own: the search drops a word-final 's from what is typed and from our
  * names alike (0152).
  */
@@ -176,13 +177,21 @@ export function plainLetters(title) {
 }
 
 /**
+ * A title or name as 0152's search compares it with q, as words: a word-final 's or ’s dropped (any case), lower
+ * case, split at anything that is not a letter or a digit. "Down's-Syndrome" is "down syndrome".
+ */
+const searchedWords = (name) => name.replace(/([\p{L}\p{N}])['’][sS](?![\p{L}\p{N}])/gu, '$1').toLowerCase()
+  .replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+/**
  * The diagnosis seed: every coded, non-extension entry of the tabulation,
  * in code order, with its verbatim title, chapter, whether it is residual,
  * and our other names. `release` is the version label (2026-01);
  * `releaseFile` names the WHO file and its sha256, recorded in the seed.
  * `approvedNames` is a list shaped as APPROVED_OTHER_NAMES (the build
  * passes that list): each entry's names are added to its code's other names,
- * once its code is in the seed with exactly the title it gives.
+ * once its code is in the seed with exactly the title it gives and no other
+ * entry has one of the names as its title or other name.
  */
 export function buildIcd11Seed(rows, { release, releaseFile, otherNames = new Map(), approvedNames = [] }) {
   const items = [];
@@ -219,6 +228,26 @@ export function buildIcd11Seed(rows, { release, releaseFile, otherNames = new Ma
       throw new Error(`approved other names: ${code} is "${item.title}" in this release, not "${title}"`);
     }
     item.otherNames = [...new Set([...item.otherNames, ...names])].sort();
+  }
+  // An approved name is no other entry's title or other name, compared as the search compares them: a search for it
+  // would otherwise offer two entries that each are q.
+  const holders = new Map();
+  if (approvedNames.length > 0) {
+    for (const item of items) {
+      for (const name of [item.title, ...item.otherNames]) {
+        const words = searchedWords(name);
+        holders.set(words, [...(holders.get(words) ?? []), item.code]);
+      }
+    }
+  }
+  for (const { code, names } of approvedNames) {
+    for (const name of names) {
+      const others = [...new Set(holders.get(searchedWords(name)))].filter((holder) => holder !== code);
+      if (others.length > 0) {
+        throw new Error(`approved other names: "${name}" for ${code} is already a title or other name of `
+          + others.join(', '));
+      }
+    }
   }
   return {
     format: SEED_FORMAT,

@@ -213,6 +213,16 @@ test('the approved other names join their entry\'s other names; a code or title 
   assert.throws(() => build(entry({ names: ['gallstones; calculi'] })), /DC11's names must be trimmed/)
   assert.throws(() => build(entry({ approval: ' ' })), /approved other names: DC11 has no approval/)
   assert.throws(() => build([...entry(), ...entry()]), /approved other names: DC11 is listed twice/)
+  // A name another entry already has, as a title or other name, compared as the search compares them, stops it too.
+  assert.throws(() => build(entry({ names: ['Cholelithiasis-unspecified'] })),
+    /approved other names: "Cholelithiasis-unspecified" for DC11 is already a title or other name of DC11\.Z/)
+  assert.throws(() => build(entry({ names: ['gallstones'] }), new Map([['DC11.Z', ["Gallstones's"]]])),
+    /"gallstones" for DC11 is already a title or other name of DC11\.Z/)
+  assert.throws(() => build([...entry(), { code: 'LD40.0', title: 'Complete trisomy 21', names: ['GALLSTONES'], approval: 'ok' }]),
+    /"gallstones" for DC11 is already a title or other name of LD40\.0/)
+  // Its own entry's title or other name is no clash.
+  assert.deepEqual(build(entry({ names: ['cholelithiasis', 'gallstones'] }), new Map([['DC11', ['gallstones']]])).items[0].otherNames,
+    ['cholelithiasis', 'gallstones'])
 })
 
 test('the seed: coded entries only, verbatim titles, code order; no extension code, block, chapter 26 or section V', () => {

@@ -2192,7 +2192,9 @@ file's seed in `docs/codes/catalog-approvals.json`.
     syndrome" for LD40.0 Complete trisomy 21, and "gallstone" and
     "gallstones" for DC11 Cholelithiasis (Ola, clinical owner, 25 Nov
     2026). The build stops if the release lacks the code or titles it
-    otherwise. "Down's syndrome" finds LD40.0 through the apostrophe-s rule.
+    otherwise, or if another entry already has one of the names as its
+    title or other name, compared as the search compares them. "Down's
+    syndrome" finds LD40.0 through the apostrophe-s rule.
   - 78 entries have an other name.
 - **Search:** `GET /api/v1/ehr/terminology/diagnoses?q=&limit=` as above,
   with ORD-7's rules for `q` (6 words, never raw `to_tsquery`, no Health ID
