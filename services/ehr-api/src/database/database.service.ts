@@ -10,7 +10,8 @@ import type { DataAccessContext } from '../common/request-context';
  * this hospital's own pharmacy has dispensed a prescription it holds, the
  * prescription can still be sent to an outside pharmacy, and the send
  * withdraws the own item ("sent elsewhere"). This image always sets it, in
- * staff transactions only (never a patient, system or workload one). An
+ * withTransaction's staff transactions only (never withStaffTransaction's,
+ * which reads no order route, nor a patient, system or workload one). An
  * older image never sets it, so it keeps ORDER_ROUTE_ORDER_IN_WORK for any
  * prescription with a work item here, whichever schema it meets. On a
  * schema without 0133 the setting is unused.
@@ -22,13 +23,22 @@ export const OWN_FACILITY_WORK = '0133';
  * value reads vitals readings marked entered in error (with their status,
  * which this image filters as the contract says); every other session, an
  * older image's above all, never sees them. Set beside OWN_FACILITY_WORK, in
- * staff transactions only. On a schema without 0142 the setting is unused.
+ * withTransaction's staff transactions only (never withStaffTransaction's,
+ * which reads no vitals). On a schema without 0142 the setting is unused.
  */
 export const VITALS_STATUS_AWARE = '0142';
 
 export interface TransactionOptions {
   readOnly?: boolean;
   isolationLevel?: 'READ COMMITTED' | 'REPEATABLE READ' | 'SERIALIZABLE';
+}
+
+/** Who a staff transaction runs as (withStaffTransaction): no patient, no purpose of use. */
+export interface StaffTransactionContext {
+  subject: string;
+  facilityId: string;
+  membershipId: string;
+  correlationId: string;
 }
 
 /** How many times a SERIALIZABLE transaction PostgreSQL cancels is run in all (as pharmacy-api). */
@@ -140,6 +150,39 @@ export class DatabaseService implements OnApplicationShutdown {
           OWN_FACILITY_WORK,
           VITALS_STATUS_AWARE,
         ],
+      );
+      const result = await operation(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * A staff member's own work that reads no patient (ORD-9's recent
+   * diagnoses, 0153): the actor, facility and membership the guards
+   * established, and no purpose of use, as there is no patient. It sets
+   * neither app.own_facility_work nor app.vitals_status: the recent list
+   * reads no order route and no vitals.
+   */
+  async withStaffTransaction<Result>(
+    staff: StaffTransactionContext,
+    operation: (client: PoolClient) => Promise<Result>,
+  ): Promise<Result> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `select
+           set_config('app.actor_subject', $1, true),
+           set_config('app.facility_id', $2, true),
+           set_config('app.correlation_id', $3, true),
+           set_config('app.membership_id', $4, true)`,
+        [staff.subject, staff.facilityId, staff.correlationId, staff.membershipId],
       );
       const result = await operation(client);
       await client.query('COMMIT');

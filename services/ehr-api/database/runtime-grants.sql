@@ -2045,6 +2045,27 @@ revoke all on function ehr.search_catalog_medicines(text, integer, text, text),
 revoke all on ehr.catalog_versions, ehr.catalog_medicines, ehr.catalog_lab_tests, ehr.catalog_retired_codes
   from public;
 
+-- The ICD-11 diagnosis search (0152, ORD-9 of the Akos EHR plan, first
+-- slice; design note on hid-system#258, 23 November 2026), exactly as 0152
+-- grants and revokes it: the search to the EHR runtime and the schema test
+-- runtime; no privilege for any runtime on the diagnosis list or on its
+-- insert trigger function (sealed releases), which its trigger runs as the
+-- inserting role, the table's owner. The catalogue status keeps 0149's
+-- grants.
+grant execute on function ehr.search_catalog_diagnoses(text, integer) to hid_ehr_runtime, hid_schema_test_runtime;
+revoke all on function ehr.search_catalog_diagnoses(text, integer), ehr.catalog_diagnosis_not_sealed() from public;
+revoke all on ehr.catalog_diagnoses from public;
+
+-- Recent diagnoses (0153, ORD-9 of the Akos EHR plan, second slice, first
+-- part; sizing note on hid-system#258, 23 November 2026), exactly as 0153
+-- grants them: the record and the read to the EHR runtime and the schema
+-- test runtime; no privilege on the table for any runtime (row-level
+-- security on, no policy: only the two functions, as its owner, use it).
+grant execute on function ehr.record_recent_diagnosis(text, text, text), ehr.recent_diagnoses(integer)
+  to hid_ehr_runtime, hid_schema_test_runtime;
+revoke all on function ehr.record_recent_diagnosis(text, text, text), ehr.recent_diagnoses(integer) from public;
+revoke all on ehr.clinician_recent_diagnoses from public;
+
 -- Patient billing release 1 with pharmacy point-of-care stock (BILL-1,
 -- 0162-0167), exactly as those files grant and revoke them: the commercial
 -- schema's command and read functions (SECURITY DEFINER; each checks the
