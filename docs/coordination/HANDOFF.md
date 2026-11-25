@@ -1,4 +1,4 @@
-# Coordinator handoff: state at 25 Nov 2026, about 15:30 UTC
+# Coordinator handoff: state at 25 Nov 2026, about 17:20 UTC (local VS Code coordinator handing back)
 
 This file is for a coordinator session that takes over: a new cloud session, or the owner's local Claude Code in VS Code. It is not product documentation. The clinical lead's and DPO's names stay out of the repository and GitHub. The owner knows them.
 
@@ -24,19 +24,24 @@ This file is for a coordinator session that takes over: a new cloud session, or 
 - **Website-only fixes** ship once reviewed and green (Q94 4).
 
 ## Live in production
-- **Backend:** `backend-45502696619-1-956b7cb17fc4bf33`, hid-system `95fa1e52`, migrations 0001–0151. The other services stay on `d519e5d1` (Release C).
-- **Website:** health main `8168ec3d`, Release D (classic parity 257 of 257: 195 rows done and 62 done by decision). Live 25 Nov 01:25 UTC as `frontend-45524832398-1-3524ef584f6736bc`.
-- **Pins:** identity, ehr, ocr and outreach on `95fa1e52`; the rest on `d519e5d1`.
+- **Backend:** Release E, `backend-45657497614-1-9ad293c7963d6f06`, hid-system `0cfddcc9` (staging `staging-novu-ci-20261005`), migrations 0001–0153. It went live 25 Nov 17:04 UTC; 0152 and 0153 applied with no stop, and the fallback declaration was not used. All 13 components were rebuilt from `0cfddcc9`.
+  - Before it: #339 gateway pins, `backend-45649090315-1-03d2b78867300345` (`557cddb5`), live 16:06 UTC, no migration.
+- **Website:** re-pin health#333 merged as `42c548d0`, with all nine pins on `0cfddcc9`. **Its release, run 45661915015 (push), was still deploying at handback. The incoming coordinator must confirm it succeeded** (if it failed, read the error before re-running; `workflow_dispatch` on main is allowed).
+  - Last confirmed live: `frontend-45654205866-1-68900f164538dd64` (`59cc1b04`, pins on `557cddb5`) at about 16:50 UTC.
+- **GitHub flakiness on 25 Nov afternoon:** merge and comment calls returned 500/502/504 or empty bodies, but often succeeded anyway. Always re-read state before retrying, and guard merges with `sha=`. Once, a push to health main started no release run; the coordinator dispatched `production-frontends.yml` on main.
 
 ## Next releases, in order (one at a time)
-1. **Release E, hid-system#338** (branch `claude/backend-release-e`). It contains 0152 diagnosis search and 0153 recent diagnoses (Ola's ORD-9), plus #307's ORD-3 batch.
-   - Signed by the owner about 13:50 UTC on 25 Nov: 0152 `abfecc35…`, 0153 `45faa6a7…`, runtime-grants `49b378f5…`. The fallback declaration (0153 only) was signed in advance.
-   - Validation: release tests 126 of 126; the rehearsal against the live tree passed; a stop after 0152 was reproduced.
-   - **Waits on Rahman's final check.** Then merge it, watch "Production backend candidates", and re-pin the website (ehr-api and database-migration at least).
-   - If the release stops after 0152, the runbook is in the PR body: finish the migrations before re-running the grants.
-2. **Gateway fix, hid-system#339** (branch `claude/gateway-apk-pins-20261125`, head `933e1954`, CI green). It pins libexpat 2.11.0-r0 and OpenSSL 3.5.9-r1, and moves the VEX to 3.5.9-r1 (Q291 A, Q292 A). This must ship before any backend build: the old libexpat pin breaks every build.
-   - Follow-up: `security/production-runtime-assessment.json` still says 3.5.9-r0 for the gateway. Update it with the next backend-image change.
-3. **Lekan's website batch:** health #313 (role labels, `9ea9c69a`), #314 (routed details warning, `a45112d7`) and #234 (own-work Health ID, `dc1ca553`). All passed independent review with no defects (25 Nov). Add #331 (P2-4, Lagos time) after its review, then merge as one website release.
+1. **Confirm website run 45661915015** (above).
+2. **Lekan's website batch:** health #313 (role labels, `9ea9c69a`), #314 (routed details warning, `a45112d7`), #234 (own-work Health ID, `dc1ca553`) and #331 (P2-4 Lagos time, `a3ea3039`). Merge them as one website release.
+   - All four passed independent review. #331's review (25 Nov ~16:00) said ship. Two low-severity follow-ups for Lekan:
+     - Nigerian landlines (`+2341…`) show in international form, not `01 234 5678`.
+     - Some foreign numbers group oddly, and a stored `(0)` trunk stays in.
+     - Also unconfirmed: zoneless timestamps still use the device zone; `ageInYears` would be off by one if a date of birth ever arrives as an instant; `paperRecordsWording.ts:110` `isAdult` uses UTC.
+   - Check each PR is still at the reviewed head and green; refresh against main with a merge commit if needed.
+3. **0154 refills (#331 in hid-system, Ola):** Rahman reviewed it (#331 7168468937). Before signing, 0154 must lock `pharmacy.dispensing_reversals`, then be re-hashed. The progress statement grows with fills (about 1.8 s at 12 fills); a better shape was suggested. `check:db` on Release E plus #331 passed. Then: owner signature, Rahman's final check, release, re-pin. The clinical lead countersigns the refill calls (Q158) before `PRESCRIPTION_REFILLS_ENABLED` goes on.
+4. **Sprint wave 1** (#335–#337): each needs its agent review, then Rahman's final check, then the signature. #336 still needs the VEX re-bind for its nginx routes (Q291 A), now on top of #339's VEX.
+- Follow-up: `security/production-runtime-assessment.json` still says 3.5.9-r0 for the gateway. Update it with the next backend-image change.
+- Rahman's #340 (`createdByMembershipId`, no migration) and #341 (SX-8 Terraform flag, into #323) are green and await coordinator review. #340 asks for a yes from the coordinator or the owner before adding `createdByName` (it shows a colleague's name on each case). Not yet answered.
 
 ## Two-week sprint (approved 25 Nov; ends about 9 Dec)
 - 100% means classic parity, plus Akos's EHR list, plus every new department (Q146 B), each as a first working version. Items that need outside approval (video provider, SMS sender ID, live HMO portals, offline legal) are built but switched off.
@@ -47,7 +52,7 @@ This file is for a coordinator session that takes over: a new cloud session, or 
 | Department | Backend | Migrations | Website | State |
 |---|---|---|---|---|
 | Appointments | hid-system#335 (`63312e5f`) | 0160–0161 | health#328 | Review fixes done; next is Rahman's check, then the signature |
-| Billing release 1 and pharmacy stock | hid-system#336 (`9b36fa6e`) | 0162–0167 | health#329 | Adds 7 `/api/v1/commercial/*` nginx routes. Needs the VEX re-bind after #339 merges |
+| Billing release 1 and pharmacy stock | hid-system#336 (`9b36fa6e`) | 0162–0167 | health#329 | Adds 7 `/api/v1/commercial/*` nginx routes. #339 is live, so the VEX re-bind (Q291 A) can be done now |
 | Emergency board and triage | hid-system#337 | 0168–0169 | health#330 | CI green; next is Rahman's check, then the signature |
 
 - On sprint branches, release tests 45, 53 and 99 fail with `missing migration prefix`. This is expected from the numbering gap and closes at integration.
@@ -58,20 +63,22 @@ This file is for a coordinator session that takes over: a new cloud session, or 
 ### Later waves
 Maternity, theatre, blood bank, radiology, claims, stock and procurement, roster and HR, quality, dental, reports, referrals, telemedicine, ambulance, i18n, P2-1, facility setup, subscription and the staff inbox. Surveys are in `roadmap.json`.
 
-## Migration numbering
+## Migration numbering (settled 25 Nov ~17:00 UTC, #258 7168672285)
+Numbers are bookings, given finally at integration in release order. A later release closes up to the next free numbers if an earlier booked file isn't ready, and the owner signs after renumbering. A file requires markers only for the earlier files whose objects it uses.
+
 | Range | Owner |
 |---|---|
 | 0152–0153 | Ola (Release E) |
-| 0154 | Ola, refills (#331, `44d96bec`; the clinical lead countersigns, Q158) |
-| 0155–0159 | Ola (confirmed) |
+| 0154 | Ola, refills (#331; the clinical lead countersigns, Q158) |
+| 0155–0159 | Ola (ORD-7 facility items, names-only, ORD-9 ranking, ORD-6, ORD-11) |
 | 0160–0169 | Sprint wave 1 |
 | 0170–0177 | Sprint wave 2 (ADT, nursing) |
-| 0180–0183 | Ola's moved items (ORD-10 phase 2, lab one-person check, discussed, ORD-8) |
-| 0190+ | Later departments |
+| 0178–0180 | Ola: lab self-check (0178), "Discussed with the patient" (0179), ORD-8 (0180) |
+| 0181+ | Free. ORD-10 phase 2 takes the next number when WHOCC answers; later departments are booked per department on #258 |
 
 ## Team (sessions don't wake from GitHub; the owner relays, and the team reads hid-system#258)
-- **Rahman** (database, identity, release): final checks on #338, #339 and wave 1; review of Ola's 0155–0159 and 0180–0183 notes; then refills #331, `createdByMembershipId` and the SX-8 flag for #323; then SX-6, SX-7, ID-8 and CHW-1; then his tooling fixes #325 and #326.
-- **Ola** (orders, pharmacy, lab; clinical owner for medicines): waits on Rahman for 0154; brings ORD-8 and ORD-11 forward. ORD-10 phase 2 is blocked on the WHOCC terms (Q165 A); the owner has the drafted email. Also #312 (code list) and #315 (OCR drug list).
+- **Rahman** (database, identity, release): #338 and #339 done. He has reviewed all six of Ola's design notes (0155/0156, 0158, 0159, 0181/0182 now 0178/0179, 0183 now 0180); 0159 has one blocking point (each notice stores its recipient). Next: 0154's lock fix, then final checks on wave 1; then refills #331, `createdByMembershipId` and the SX-8 flag for #323; then SX-6, SX-7, ID-8 and CHW-1; then his tooling fixes #325 and #326.
+- **Ola** (orders, pharmacy, lab; clinical owner for medicines): renumber the notes to 0178/0179/0180 (#258 7168672285) and apply Rahman's review points; 0154 lock fix; brings ORD-8 and ORD-11 forward. ORD-10 phase 2 is blocked on the WHOCC terms (Q165 A); the owner has the drafted email. Also #312 (code list) and #315 (OCR drug list).
 - **Lekan** (website): five screens (ID-6, SX-10, MY-1, EHR-C8a/b, Q132 A), plus front desk marking a visit entered in error.
 
 ## Owner queue: hid-system#332
