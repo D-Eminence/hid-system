@@ -136,6 +136,10 @@ try {
         $8, $3, $4, 'Checked at the desk', clock_timestamp() - interval '3 days', clock_timestamp() - interval '3 days')`,
       [ids.p2Case, ids.facility, ids.deskAccount, ids.desk, `Synthtwo${run}`, `Bayo Synthtwo${run}`, key('case'),
        '0'.repeat(64), ids.p2, key('review')]);
+    await seed.query(`insert into identity.registration_case_contacts (registration_case_id, facility_id, phone_ciphertext,
+      address_ciphertext, key_version, created_by_account_id, created_by_membership_id)
+      values ($1, $2, $3, $4, 'synthetic-appointments-v1', $5, $6)`,
+      [ids.p2Case, ids.facility, phone, address, ids.deskAccount, ids.desk]);
     await seed.query(`insert into identity.patient_facility_contacts (id, patient_id, facility_id, registration_case_id,
       phone_ciphertext, address_ciphertext, key_version, created_by_account_id, created_by_membership_id)
       values ($1, $2, $3, $4, $5, $6, 'synthetic-appointments-v1', $7, $8)`,

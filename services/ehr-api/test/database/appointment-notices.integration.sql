@@ -122,6 +122,19 @@ values ('e1610500-0000-4000-8000-000000000011', 'e1610000-0000-4000-8000-0000000
   'e1610100-0000-4000-8000-000000000001', 'e1610300-0000-4000-8000-000000000001', 'Checked at the desk',
   clock_timestamp() - interval '40 days', clock_timestamp() - interval '40 days');
 -- p1's phone as facility A recorded it (an older one erased, a newer one current); p4's at B.
+-- The cases' own contact rows (0130), which the facility contacts reference.
+insert into identity.registration_case_contacts (registration_case_id, facility_id, phone_ciphertext, address_ciphertext,
+  key_version, created_by_account_id, created_by_membership_id, erased_at, erasure_reason)
+values
+  ('e1610500-0000-4000-8000-000000000011', 'e1610000-0000-4000-8000-000000000002', null, null, null,
+   'e1610100-0000-4000-8000-000000000001', 'e1610300-0000-4000-8000-000000000001', clock_timestamp() - interval '5 days',
+   'erasure_request'),
+  ('e1610500-0000-4000-8000-000000000001', 'e1610000-0000-4000-8000-000000000002', decode(repeat('02', 32), 'hex'),
+   decode(repeat('a2', 40), 'hex'), 'v1', 'e1610100-0000-4000-8000-000000000001', 'e1610300-0000-4000-8000-000000000001',
+   null, null),
+  ('e1610500-0000-4000-8000-000000000004', 'e1610000-0000-4000-8000-000000000012', decode(repeat('04', 32), 'hex'),
+   decode(repeat('a4', 40), 'hex'), 'v1', 'e1610100-0000-4000-8000-000000000003', 'e1610300-0000-4000-8000-000000000003',
+   null, null);
 insert into identity.patient_facility_contacts (id, patient_id, facility_id, registration_case_id, phone_ciphertext,
   address_ciphertext, key_version, created_by_account_id, created_by_membership_id, created_at, erased_at, erasure_reason)
 values
