@@ -1,4 +1,4 @@
-# HID planned contract for the rest of Akos's EHR list (Release B and C, not live)
+# HID planned contract for the rest of Akos's EHR list (Release B, C and D, not live)
 
 This file lists the API that Akos's EHR frontend will need but that is not built yet. With it, he can build each screen once: the shape now, and the fallback he shows until the route ships.
 
@@ -44,6 +44,7 @@ Rules that hold in every section:
 | [ORD-6: Several tests in one lab request](#ord-6-several-tests-in-one-lab-request-planned-release-c-needs-a-migration-yes) | N-7 | C | yes | M |
 | [ORD-8: Order sets, favourites, and note and visit templates](#ord-8-order-sets-favourites-and-note-and-visit-templates-planned-release-c-needs-a-migration-yes) | P0-5, P1-13, P1-12 | C | yes | L |
 | [ORD-11: Result and dispensed notices to the ordering doctor](#ord-11-result-and-dispensed-notices-to-the-ordering-doctor-planned-release-c-needs-a-migration-yes) | P1-6 | C | yes | L |
+| [ED-1: Emergency department board and triage](#ed-1-emergency-department-board-and-triage-planned-release-d-needs-a-migration-yes) | department Emergency department board (gap F1), Triage & Vitals priority | D | yes (0168-0169, provisional) | M |
 | [ORD-13: No drug-interaction checks](#ord-13-no-drug-interaction-checks-not-planned-no-release-needs-a-migration-no) | P0-5, N-9 (interactions) | not planned | no | — |
 | [P2-1: National ID type per country and a neutral company number](#p2-1-national-id-type-per-country-and-a-neutral-company-number-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-1 | after C | yes, when designed | M |
 | [P2-2: Interface translations and language](#p2-2-interface-translations-and-language-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-2, P1-8 (language) | after C | yes, when designed | L |
@@ -51,7 +52,7 @@ Rules that hold in every section:
 | [P2-4: Time zone, date and phone formats](#p2-4-time-zone-date-and-phone-formats-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-4 | after C | yes, when designed | M |
 | [QA-2: Migrate account test pass and one real save of every drawer form](#qa-2-migrate-account-test-pass-and-one-real-save-of-every-drawer-form-planned-before-the-release-a-go-live-needs-a-migration-no) | R-4, QA question | before A go-live | no | S |
 
-Owner answers of 19 Nov 2026, and the sections that rest on them: Q124 A (ORD-7, ORD-8, ORD-9, ORD-10 phase 2, ORD-6, VIT-1), Q125 B (ORD-4, now planned for Release B), Q126 A (EHR-C6, ORD-8), Q127 A (ID-8, ORD-11), Q128 A (ORD-11, SX-7), Q129 A (SX-4, CHW-1), Q130 A (CHW-1), Q131 A (ORD-12, ORD-13, ORD-10 phase 2, P2-1 to P2-4), Q132 A (Q132 A, now planned for Release B; ORD-4 refers to it). No owner question for these sections is waiting for an answer.
+Owner answers of 19 Nov 2026, and the sections that rest on them: Q124 A (ORD-7, ORD-8, ORD-9, ORD-10 phase 2, ORD-6, VIT-1), Q125 B (ORD-4, now planned for Release B), Q126 A (EHR-C6, ORD-8), Q127 A (ID-8, ORD-11), Q128 A (ORD-11, SX-7), Q129 A (SX-4, CHW-1), Q130 A (CHW-1), Q131 A (ORD-12, ORD-13, ORD-10 phase 2, P2-1 to P2-4), Q132 A (Q132 A, now planned for Release B; ORD-4 refers to it). No owner question for the Release B and C sections is waiting for an answer. Release D sections are built at the recommended option of each open question, marked as such, and the owner can still change them (ED-1: Q-ED-1 to Q-ED-7).
 
 Open points with no decision yet, each to be decided before that section is built:
 
@@ -3102,6 +3103,382 @@ Release C (lane D). Size **L**:
 - four routes;
 - audit;
 - a runtime check across Lab, Pharmacy and EHR.
+
+# Release D
+
+Release D holds the department first versions of the two-week sprint the owner approved on 25 Nov 2026: every department ships a first working version on Akos's blue design, anything that needs outside approval is built but switched off, every change gets an independent agent review and Rahman's final database check, and real patients use it only after the clinical lead's checklist and the owner's go-live.
+
+This Release D is the roadmap's Phase 1 department release. It is not the separate release the ID-8 section mentions for ID-8b, which would take another name if it is needed.
+
+Decisions in Release D sections are marked **(recommended option, not yet answered by the owner)**. The section is built with that option. The owner can still choose the other option; the PR that builds it says which lines change.
+
+## ED-1: Emergency department board and triage (planned, Release D, needs a migration: yes)
+
+Department: Emergency department board (the roadmap's 20th department, added although it was not surveyed; surveyed for this section on 25 Nov 2026). Gap map item F1. It is where ambulance handovers and emergency admissions enter.
+
+Status: planned, not live.
+
+Surveyed before writing:
+- health `apps/patient-web/src/ehr-blue/clinical/emergency/EmergencyWorkspace.tsx` (origin/main 4cd9639c). The page is `partial`: emergency access (break-glass) and the read-only emergency summary are live; the board ("New board entry", list, record) is the sample engine's and shows only at the four demo facilities.
+- The sample board: `clinical/sample/definitions.ts:174-184` and `frame/sample/catalog.ts:557-585`. Fields Presenting complaint, Triage priority (free text) and Assigned clinician. Statuses `arrived` -> "Record assessment" -> `assessed` -> "Record disposition" (Disposition, Follow-up) -> `completed`. One fictional seed row (`clinical/sample/seed.ts:248-250`). The design gives it to doctors only (`frame/sampleAccess.ts:14-16,38`).
+- The Triage & Vitals page: `clinical/triage/NewTriage.tsx:37,116-130`. Vitals are live; its Priority (Routine, Urgent, Emergency) is a marked sample that is never sent.
+- The live waiting list: 0135 (EHR-C7) and `departments/waiting/waitingRules.ts:83-96`, which already shows the five live levels ("Level 1: most urgent" to "Level 5: not urgent").
+
+### What staff get
+
+- **The board.** One screen per facility with three columns:
+  - **Waiting**: arrived, in triage, or triaged and ready to be seen;
+  - **Being seen**: with a nurse, clinician or doctor;
+  - **Disposition**: a decision is recorded (home, admission requested, referred out) and the patient has not yet left the department.
+  Within each column, patients are listed most urgent first (triage level 1 to 5, then no level), then by arrival time. Each card shows the time in the department.
+- **Arrival.** The front desk, a nurse, a clinician or a doctor puts a patient on the board: from a staff search, as this facility's own patient, or as a new unknown patient (ID-7, live since 0145). The arrival records how the patient came (walk-in, ambulance, brought by the public, police, referred, other).
+- **Triage on arrival.** A nurse, clinician or doctor sets the triage level, on the live five-level scale of the waiting list (0135). There is no second scale. A short presenting complaint can be recorded with it. Vital signs are recorded on the patient's visit as today (Triage & Vitals).
+- **Being seen.** "Start care" moves the patient to Being seen and puts the member down as the one seeing them. The visit itself is the usual emergency visit (EHR-C1, `encounterType: "emergency"`), opened under the usual chart access, and is then linked to the board.
+- **Disposition.** A clinician or doctor records the outcome: discharged home, admission requested, referred out, sent to outpatients, left before being seen, left against medical advice, or died. "Left the department" then takes the patient off the board.
+- **Admission request.** Recorded on the board with the receiving department and the admitting doctor. Wards (ADT) are not built yet, so the patient stays in the Disposition column, marked "Waiting for admission", until staff select "Left the department". ADT adopts these requests when it ships.
+- **Unknown patients.** "New arrival" offers "Unknown patient". It makes an ID-7 record and puts it on the board in one screen. The card shows "Unknown patient U-0007" and "Estimated age" until the record is identified; then the real name shows by itself.
+
+Not in this release: a public display mode, timers or alerts on waiting time, ambulance pre-alerts and the dispatch link (Ambulance dispatch adds it), ED billing (point-of-care billing B3), structured assessment forms, a death certificate, staff notifications (gap F2), and offline use.
+
+### Decisions taken at the recommended option (not yet answered by the owner)
+
+| Question | Built with | The other option |
+|---|---|---|
+| Q-ED-1 One list or two | **A**: an ED patient is a row of the live waiting list (0135) plus an ED record. Stage, triage level and assignee stay on the waiting-list row, so there is one place for each fact and no patient is lost between two lists | B: a separate ED queue table with its own stages |
+| Q-ED-2 Who uses the board | **A**: the front desk puts patients on the board and sees it (without the complaint); nurses also triage and move patients; clinicians and doctors also record the disposition (role table below) | B: the design's mapping: doctors only |
+| Q-ED-3 Patients found by emergency search | **A**: a member who found the patient by emergency search (0132) and holds an active break-glass grant for them at this facility may put them on the board (basis `emergency`). The board gives no chart access | B: only a staff search or this facility's own patient; anyone else is registered as an unknown patient (ID-7) |
+| Q-ED-4 Presenting complaint on the board | **A**: a short complaint (0-120 characters), shown only to nurses, clinicians and doctors on the board. The front desk never sees it | B: no complaint on the board; it lives only in the visit's chief complaint |
+| Q-ED-5 Disposition in one or two steps | **A**: two steps. The decision moves the patient to Disposition, and "Left the department" closes it. Left before being seen, left against medical advice, died, and sent to outpatients close at once | B: one step: every decision closes at once |
+| Q-ED-6 Admission request before wards exist | **A**: the request is stored on the ED record (receiving department, admitting doctor). The patient waits in Disposition until handed over. ADT adopts the open requests when it ships | B: no admission request until ADT ships; the outcome is recorded as "referred out" or on paper |
+| Q-ED-7 Writing care for a patient who cannot consent and is not this facility's own | **A**: unchanged in this release. Break-glass stays read only. If the patient cannot be identified, staff make an unknown record (ID-7), which is this facility's own, and merge it later (ID-8) | B: a new emergency write basis. That is an identity and consent change for its own section, with Rahman and the DPO |
+
+**Not a choice: the triage scale.** The board reuses the waiting list's live `triage_level` (1 most urgent to 5) and its words. 0135 shipped this scale as an owner default without clinical sign-off. **The clinical lead must sign off the five-level scale** (retroactively for the waiting list) before real patients use the board. The Triage & Vitals page's sample priority (Routine, Urgent, Emergency) is replaced by the same five levels, not mapped onto them.
+
+### How a patient gets onto the board
+
+0135's `ehr.visit_queue_check_in` accepts only a direct-care search `matchRef` (0132, 10 minutes) or this facility's own patient (0131). An emergency search's `matchRef` never checks in. Route 1 below keeps both of those ways and adds one more (Q-ED-3):
+
+1. **A staff search.** A `matchRef` from this member's own direct-care staff search in the last 10 minutes at this facility. Basis `search`.
+2. **This facility's own patient.** A `patientId` with 0131's basis. This includes every unknown record made at this facility (0145's `created_here`). Basis `own_facility`.
+3. **An emergency search (Q-ED-3).** A `matchRef` from this member's own emergency search (0132, purpose `emergency`), sent with `X-Purpose-Of-Use: emergency`, while this member holds an active, unexpired break-glass grant for that patient at this facility (`identity.consent_grants`, scope `break_glass`). Basis `emergency`.
+   - The board card shows what the emergency search card already showed this member (name, sex, date of birth, last 4 characters of the Health ID).
+   - The board stays on after the grant ends, because the patient is still in the department. The chart still needs a grant.
+   - Rahman (identity) and the DPO review this basis before 0168 is signed. With option B, the one change is that route 1 refuses an emergency `matchRef`.
+
+Anything else answers 403 `ED_ARRIVAL_NEEDS_SEARCH`, the same answer for every reason (as `CHECK_IN_NEEDS_SEARCH`).
+
+The arrival takes 0135's advisory lock (`visit-queue:<facility>:<patient>`) and respects its one-open-row index:
+- If the patient is not on the waiting list, a waiting-list row and an ED record are made together. Outcome `arrived`.
+- If the patient is already on the outpatient waiting list, that row is moved to the board (an ED record is added to it). Outcome `moved_from_waiting_list`.
+- If the patient is already on the board, that record is answered. Outcome `already_on_board`.
+
+A board patient still appears on the waiting list (0135 is unchanged), marked "Emergency department" (see "The waiting list" below).
+
+### Routes
+
+All routes are under `/api/v1`. Staff routes need `X-Facility-Id` and `X-Purpose-Of-Use: direct-care`. The one exception is route 1 with an emergency `matchRef`, which sends `emergency`. Every write needs an `Idempotency-Key`; a replay with the same body answers the first answer with `"replayed": true`.
+
+No Health ID or NIN appears in any path, query, body or answer. Patients are named by UUID, ED records by UUID, and new arrivals by a search card's `matchRef`.
+
+Until the owner's go-live, the service flag `ED_BOARD_ENABLED` (ehr-api) is off in production. With the flag off, every route below answers 503 `ED_BOARD_NOT_AVAILABLE`. It is on in staging and at the sealed demo and QA facilities.
+
+**The board card** (every answer):
+
+```json
+{ "attendanceId": "uuid", "entryId": "uuid", "patientId": "uuid", "fullName": "Tunde Boardone",
+  "recordKind": "standard", "unknownLabel": null, "sex": "male", "dateOfBirth": "1984-03-09",
+  "dateOfBirthEstimated": false, "healthIdLast4": "BB33", "chartBlocked": false,
+  "arrivalBasis": "search", "arrivalMode": "ambulance", "arrivedAt": "2026-12-03T08:10:00.000Z",
+  "minutesInDepartment": 42, "column": "waiting", "stage": "ready", "triageLevel": 2,
+  "triagedAt": "2026-12-03T08:16:00.000Z", "triagedByMembershipId": "uuid",
+  "presentingComplaint": "Fall from motorcycle, left leg pain", "complaintHidden": false,
+  "assignedMembershipId": null, "encounterId": null, "status": "open", "disposition": null,
+  "leftAt": null, "rowVersion": 3 }
+```
+
+- `recordKind`: `standard` or `unknown` (0145). For `unknown`, `fullName` is `"Unknown patient U-0007"` and `unknownLabel` is `"U-0007"`. The placeholder name is never shown as a name.
+- `arrivalBasis`: `search`, `own-facility` or `emergency` (EHR-C7's spelling).
+- `arrivalMode`: `walk_in`, `ambulance`, `brought_by_public`, `police`, `referred` or `other`.
+- `column`: `waiting` (stage `waiting`, `triage` or `ready`), `being_seen` (stage `with_clinician`), `disposition` (status `decided`) or `closed`.
+- `stage`, `triageLevel`, `assignedMembershipId`: the waiting-list row's own fields (0135).
+- `presentingComplaint`: `null` with `complaintHidden: true` for a member without `ehr.ed.triage` (the front desk). Otherwise the text, or `null` with `complaintHidden: false` when none was recorded.
+- `status`: `open`, `decided` (disposition recorded, still in the department) or `closed`.
+- `disposition`: `null`, or `{ "outcome", "decidedAt", "decidedByMembershipId", "admitToDepartmentCode", "admittingMembershipId", "referredToFacilityName" }`.
+- `outcome`: `discharged`, `admit_requested`, `referred_out`, `sent_to_outpatients`, `left_before_seen`, `left_against_advice` or `died`.
+- `chartBlocked`: as EHR-C7.
+- Staff names come from the staff names list (SX-9, `GET /identity/facility-staff-names`), as on the waiting list.
+
+**1. `POST /ehr/ed-attendances`**: put a patient on the board.
+
+```json
+{ "matchRef": "psr_…", "arrivalMode": "ambulance", "arrivedAt": "2026-12-03T08:10:00.000Z",
+  "triageLevel": 2, "presentingComplaint": "Fall from motorcycle, left leg pain" }
+```
+
+| Field | Rule |
+|---|---|
+| `matchRef` or `patientId` | exactly one (see "How a patient gets onto the board"). Both or neither: 400 `ED_ARRIVAL_NEEDS_ONE_PATIENT` |
+| `arrivalMode` | required, from the list above |
+| `arrivedAt` | optional, ISO UTC. Left out: now. No more than 6 hours in the past and never in the future |
+| `triageLevel` | optional, 1-5. Only with `ehr.ed.triage` |
+| `presentingComplaint` | optional, 1-120 characters, trimmed, with no control characters. Only with `ehr.ed.triage` |
+
+Answer `201 { "outcome": "arrived" | "moved_from_waiting_list" | "already_on_board", "attendance": card, "replayed": false }`. With `already_on_board`, the triage fields of the body are not applied (the screen shows the existing card).
+
+**2. `GET /ehr/ed-board[?includeClosedToday=true]`**: the board.
+- This facility's open and decided ED records, and with the flag also those closed today (Lagos day).
+- Answer `{ "items": [card], "counts": { "waiting": 4, "beingSeen": 2, "disposition": 1 }, "hasMore": false, "limit": 200 }`. Sorted by column, then triage level (1 first, no level last), then arrival time.
+- The screen reads it again every 30 seconds while shown, as the waiting list does.
+
+**3. `GET /ehr/ed-attendances/:attendanceId`**: one card plus `history`. Each history entry is `{ kind, at, byMembershipId, fromStage, toStage, triageLevel, outcome, reason }`.
+- `kind` is `arrived`, `moved_from_waiting_list`, `triaged`, `moved`, `visit_linked`, `disposition`, `disposition_changed`, `left`, `cancelled` or `closed_on_waiting_list`.
+- The complaint text is never in the history. A triage entry says only that a complaint was recorded or changed.
+
+**4. `POST /ehr/ed-attendances/:attendanceId/triage`**: body `{ "expectedRowVersion", "triageLevel": 1-5, "presentingComplaint"? (null clears) }`.
+- Needs `ehr.ed.triage`. Only while `open`.
+- Sets the waiting-list row's `triage_level`. From stage `waiting` or `triage`, it moves the stage to `ready`. Records who triaged and when.
+- Triage again is allowed; every change is kept in the history.
+
+**5. `POST /ehr/ed-attendances/:attendanceId/move`**: body `{ "expectedRowVersion", "stage"?: "waiting" | "triage" | "ready" | "with_clinician", "assignedMembershipId"? (null clears) }`, at least one change.
+- Needs `ehr.ed.triage`. Only while `open`.
+- The assignee follows 0135's rule (an active nurse, clinician or doctor here: `ehr.encounter.write` and `ehr.note.write`).
+- "Start care" on the screen sends `stage: "with_clinician"` and the member's own membership id.
+
+**6. `POST /ehr/ed-attendances/:attendanceId/visit`**: body `{ "expectedRowVersion", "encounterId" }`. Links the visit.
+- Needs `ehr.ed.triage`. While `open` or `decided`; a linked visit can be replaced by another, and the change is kept in the history.
+- The visit must be this patient's, at this facility, not `cancelled` or `entered_in_error`, and started no earlier than one hour before `arrivedAt`. Anything else answers 400 `ED_VISIT_INVALID`, the same for every reason.
+- The screen gets the visit from EHR-C1 (`POST /ehr/patients/:patientId/encounters`, `encounterType: "emergency"`, `reuseOpenVisit: true`), after the chart opens under the usual access. The link reads no clinical content and answers none.
+
+**7. `POST /ehr/ed-attendances/:attendanceId/disposition`**: body `{ "expectedRowVersion", "outcome", "admitToDepartmentCode"?, "admittingMembershipId"?, "referredToFacilityName"?, "reason"? }`.
+- Needs `ehr.ed.disposition`. From `open`. Also from `decided`, to change the decision; then `reason` (8-500 characters) is required.
+- `admit_requested` needs `admitToDepartmentCode`: one of this facility's profile departments (section 43.6 codes) other than `emergency`. `admittingMembershipId` is optional (an active doctor or clinician here).
+- `referred_out` takes an optional `referredToFacilityName` (2-120 characters). Referrals between facilities come later.
+- `discharged`, `admit_requested` and `referred_out` make the status `decided`. The patient stays in the Disposition column.
+- `left_before_seen` and `left_against_advice` close at once: waiting-list stage `left`.
+- `died` closes at once: waiting-list stage `finished`. No death certificate and no notice of any kind.
+- `sent_to_outpatients` closes the ED record only. The waiting-list row stays open at stage `waiting`, with its triage level, so the patient is back on the outpatient waiting list.
+- Recording a disposition never completes or changes the visit. The clinician completes it as today (EHR-C5), with the follow-up plan in the visit's note.
+
+**8. `POST /ehr/ed-attendances/:attendanceId/leave`**: body `{ "expectedRowVersion" }`. "Left the department".
+- Needs `ehr.ed.triage`. Only while `decided`.
+- Closes the ED record and the waiting-list row (stage `finished`).
+- For `admit_requested`, the screen says "Handed over to the ward". When ADT ships, its admission closes the record instead.
+
+**9. `POST /ehr/ed-attendances/:attendanceId/cancel`**: body `{ "expectedRowVersion", "reason": "8-500 characters" }`. For an arrival made in error.
+- Needs `ehr.ed.arrive`. Only while `open`, with no visit linked and no disposition.
+- If the arrival made the waiting-list row, the row closes as `cancelled`. If the patient was moved from the outpatient waiting list, the row stays open there, as it was.
+- The record is kept, never deleted.
+
+**The waiting list.** EHR-C7's routes are unchanged. Its card gains `edAttendanceId` (`null`, or the open or decided ED record's id), read through a new helper beside 0145's `ehr.visit_queue_record_kinds`. The waiting-list page marks those rows "Emergency department" and links to the board.
+
+If a board patient's row is closed on the waiting list (finished, left or cancelled), the ED record closes too, with history kind `closed_on_waiting_list`. Stage and triage changes made on the waiting list are the board's own, because they are the same fields.
+
+### Errors
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | "Check the highlighted fields." (unknown field, length or time outside the rules, unknown arrival mode or outcome) |
+| 400 | `ED_ARRIVAL_NEEDS_ONE_PATIENT` | "Choose one patient: from a search result or from this facility's patients." |
+| 400 | `ED_ARRIVAL_TIME_INVALID` | "The arrival time can be up to 6 hours ago, and not in the future." |
+| 400 | `ED_TRIAGE_INVALID` | "Choose a triage level from 1 to 5." |
+| 400 | `ED_NOTHING_TO_CHANGE` | "Choose a stage or who will see the patient." |
+| 400 | `ED_ASSIGNEE_INVALID` | "Choose a nurse, clinician or doctor who works at this facility." |
+| 400 | `ED_VISIT_INVALID` | "Choose a visit of this patient at this facility, started for this arrival." |
+| 400 | `ED_ADMIT_DEPARTMENT_INVALID` | "Choose a department of this facility to admit the patient to." |
+| 400 | `ED_REASON_REQUIRED` | "Say why in at least 8 characters." (change of disposition, cancel) |
+| 400 | `PURPOSE_OF_USE_REQUIRED`, `IDEMPOTENCY_KEY_REQUIRED` | as EHR-C7 and ID-6 |
+| 403 | `ED_BOARD_NOT_ALLOWED` | "Only the front desk, nurses, clinicians and doctors of this facility can use the emergency board." |
+| 403 | `ED_TRIAGE_NOT_ALLOWED` | "Only nurses, clinicians and doctors can triage, record a complaint or move patients on the board." |
+| 403 | `ED_DISPOSITION_NOT_ALLOWED` | "Only clinicians and doctors can record where the patient goes next." |
+| 403 | `ED_ARRIVAL_NEEDS_SEARCH` | "Search for the patient first, then add them to the board. A search result can be used for 10 minutes." |
+| 404 | `ED_ATTENDANCE_NOT_FOUND` | "This patient is not on this facility's emergency board." (also another facility's record) |
+| 409 | `ED_ATTENDANCE_CLOSED` | "This patient has left the emergency department. Add them again if they are back." |
+| 409 | `ED_ATTENDANCE_DECIDED` | "A decision is already recorded for this patient. Change the decision, or select Left the department." |
+| 409 | `ED_ATTENDANCE_NOT_DECIDED` | "Record where the patient goes next first." |
+| 409 | `ED_CANCEL_NOT_ALLOWED` | "This arrival already has a visit or a decision, so it cannot be cancelled. Record where the patient goes next instead." |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | as ID-6 |
+| 412 | `ED_VERSION_CONFLICT` | "Someone else changed this patient's place on the board. Reload it and try again." |
+| 503 | `ED_BOARD_NOT_AVAILABLE` | "The emergency board is not available yet." (flag off, or a database without 0168) |
+
+Staff screens show the message and never the word "permission".
+
+### Roles and access codes
+
+Four new codes. Every ED function also needs 0135's pair, `ehr.encounter.read` and `ehr.encounter.write`, which all four roles below already hold.
+
+| Backend role | `ehr.ed.read` | `ehr.ed.arrive` | `ehr.ed.triage` | `ehr.ed.disposition` | Design role it stands for |
+|---|---|---|---|---|---|
+| `receptionist` | yes | yes | no | no | Receptionist (the design gives none; the front desk registers arrivals) |
+| `nurse` | yes | yes | yes | no | Nurse (the design gives none; nurses triage) |
+| `clinician` | yes | yes | yes | yes | Doctor's clinical grant |
+| `doctor` | yes | yes | yes | yes | Doctor, Consultant, Medical Director (view, create, edit, assign, sign) |
+| `admin`, `org_admin` | no | no | no | no | Hospital Admin and Owner: no clinical board |
+| `lab`, `pharmacist`, others | no | no | no | no | — |
+
+SX-1 (`services/identity-api/src/auth/facility-modules.ts`) gains the area `emergencyBoard`, "Emergency department board": shown with `ehr.ed.read`, used in full with `ehr.ed.arrive`, `ehr.ed.triage` and `ehr.ed.disposition`.
+
+### Database design
+
+Two migrations, **0168 and 0169, provisional** (numbers are given at merge, after the files booked before them: 0152-0153 ORD-9, 0154 ORD-12 refills, APPT-1's 0160-0161, and any department file cut earlier). Each needs the owner's verbatim signature, Rahman's final database check and an independent agent review.
+
+Both files follow 0147, 0150 and 0151:
+- the whole file is one `do` block, so nothing applies if any part raises;
+- locks are taken first, NOWAIT, tried 50 times 100 ms apart. If this transaction already holds an earlier file's blocking locks, there is one try and no sleep. A busy refusal raises 55P03 beginning "0168: " (or "0169: ") and ending "run the release again at a quieter time";
+- preconditions are catalog reads that raise 55000 and apply nothing: markers of every earlier file, and the md5 of each function body the file calls or replaces;
+- running the file again on a database where it is applied raises "0168: already applied" and changes nothing; any half state raises "0168: the schema is not in the reviewed state";
+- post-checks compare the tables, the role table and the pinned bodies afterwards;
+- audit rows are written as the system actor;
+- the file updates `runtime-grants.sql` and the declaration in `config/production-schema-compatibility.json` (which stays unsigned until the owner signs).
+
+**0168 Emergency department board: records, arrival, triage and disposition.**
+- `ehr.ed_attendances`, one row per arrival:
+  - who and where: facility, organization, patient, `visit_queue_entry_id` (the waiting-list row; unique while open or decided);
+  - arrival: `arrival_basis` (`search`, `own_facility` or `emergency`), `arrival_mode`, `arrived_at`, `arrival_day` with a CHECK that it equals the Lagos day of `arrived_at` (as 0135's `queue_day`), `moved_from_waiting_list`;
+  - triage: `presenting_complaint` (1-120), `triaged_at`, `triaged_by_membership_id`. The level itself stays on `ehr.visit_queue.triage_level`;
+  - care: `encounter_id` (references `ehr.encounters`, optional);
+  - outcome: `status` (`open`, `decided`, `closed`), `disposition_outcome`, `admit_to_department_code` (checked by `identity.facility_department_codes`, never `emergency`), `admitting_membership_id`, `referred_to_facility_name` (2-120), `decided_at`, `decided_by_membership_id`, `left_at`, `closed_via` (`board`, `disposition`, `cancel` or `waiting_list`);
+  - CHECKs: a disposition exactly when `decided` or closed by disposition; an admission department exactly for `admit_requested`; `left_at` exactly when `closed`;
+  - `arrived_by_membership_id`, `updated_by_membership_id`, `updated_at`, `row_version`.
+  - Indexes: (facility, status, arrived_at) where not closed; (facility, arrival_day) where closed; (patient); (visit_queue_entry_id) unique where not closed; (facility, status) where `disposition_outcome = 'admit_requested'` (for ADT later).
+- `ehr.ed_attendance_events`: one row per arrival, move, triage, link, disposition, leave, cancel or mirrored close.
+  - It holds the kind, the from and to stage, the triage level, whether the complaint changed (never its text), the outcome, the reason (8-500 for a change of disposition and cancel), the actor, and when.
+  - It also holds the `Idempotency-Key` with the request's SHA-256 (unique per membership and key).
+  - A trigger refuses any update or delete.
+- Both tables have row-level security enabled and no policy or privilege for any runtime role. Only the functions read or write them, as their owner (0135's rule).
+- `ehr.visit_queue`:
+  - The `check_in_basis` CHECK gains `'emergency'`. The precondition accepts exactly one of two reviewed definitions, 0135's `('search', 'own_facility')` or APPT-1's `('search', 'own_facility', 'appointment')`, and keeps every value it finds. So 0168 applies whether or not APPT-1's 0160 is in the same cut.
+  - A trigger, `visit_queue_ed_close_mirror` (AFTER UPDATE OF `closed_at`, only when a row closes), closes the open or decided ED record of that row. It writes the `closed_on_waiting_list` event and one audit row. It does nothing when the change came from an ED function, which sets a transaction-local marker first.
+  - Nothing else in 0135 changes: its three functions and its card are not replaced.
+- SECURITY DEFINER functions with `search_path = pg_catalog, pg_temp`, owned like 0135's, EXECUTE for `hid_ehr_runtime` only:
+  - `ehr.ed_arrive`, `ehr.ed_board`, `ehr.ed_read`;
+  - `ehr.ed_triage`, `ehr.ed_move`, `ehr.ed_link_visit`, `ehr.ed_record_disposition`, `ehr.ed_leave`, `ehr.ed_cancel`;
+  - `ehr.visit_queue_ed_attendances(entry ids)`, the waiting-list helper (as 0145's `ehr.visit_queue_record_kinds`);
+  - `ehr.ed_cards`, which no role may execute. It returns 0135's card fields, 0145's record kind and label, and the ED fields. It returns the complaint only when the caller holds `ehr.ed.triage`.
+- Each function checks the caller: an active, unheld membership; the ED code; 0135's pair; the purpose (direct care, or emergency for `ehr.ed_arrive` with an emergency `matchRef`); and the facility's seal. A sealed demo or QA facility sees only its own sealed patients, as 0135 does.
+- `ehr.ed_arrive`:
+  - resolves the patient with 0132's `identity.resolve_patient_search_ref` (purpose `direct-care` or `emergency`), or 0131's `identity.own_facility_basis`;
+  - for `emergency`, it also requires the member's active break-glass grant for that patient at this facility;
+  - then takes 0135's advisory lock and either inserts the waiting-list row itself (basis as above, writing 0135's audit action `ehr.visit-queue.check-in` with `by: "emergency_department"`) or attaches the ED record to the open row.
+- Every write locks the ED record, then the waiting-list row, `FOR UPDATE`, always in that order. It checks the ED record's `row_version` and raises both rows' versions.
+- Without 0169, no role holds an ED code, so every function refuses. This is the database half of "built but switched off".
+- Locks (expected; measured with `pg_locks` before commit and pinned when the file is written):
+  - SHARE ROW EXCLUSIVE on `identity.patients`, `identity.facilities`, `identity.staff_facility_memberships` and `ehr.encounters` (foreign keys of new, empty tables);
+  - ACCESS EXCLUSIVE on `ehr.visit_queue` (the CHECK swap and the new trigger; the table is small, so this takes milliseconds);
+  - ACCESS SHARE on `identity.unknown_patients`, `identity.consent_grants`, the consent directive tables and `auth.permissions` (the card's body checks);
+  - ROW EXCLUSIVE on `audit.events`.
+- Old images on this schema:
+  - Nothing calls the new functions.
+  - Today's ehr-api maps any basis other than `own_facility` to `search` (`visit-queue.service.ts:196`), so an emergency arrival shows as "search" on the waiting list until the new image ships. That is harmless; no access depends on it.
+  - The mirror trigger runs inside 0135's own update function for old and new images alike, and only writes ED rows.
+
+**0169 Emergency department board: access codes.**
+- `auth.permissions` gains `ehr.ed.read`, `ehr.ed.arrive`, `ehr.ed.triage` and `ehr.ed.disposition`.
+- `auth.role_permissions` gains thirteen rows (the role table above: two for the front desk, three for nurses, four each for clinicians and doctors).
+- One audit row is written per row added (`auth.role-permission.add`, reason "ED-1 Emergency department board (Release D, recommended Q-ED-2 A)").
+- The post-check prints how many real (not sealed) staff gain each code.
+- `services/identity-api/test/role-matrix.json` and the SX-1 area change in the same pull request.
+- Locks: SHARE ROW EXCLUSIVE on `auth.role_permissions`, ROW EXCLUSIVE on `auth.permissions` and `audit.events`, ROW SHARE on `auth.roles`.
+- Kept as its own file so Rahman can review who gets the board apart from the tables. It can be signed after 0168 if the role table changes.
+
+### Audit
+
+Every route writes its rows in the request's transaction, refusals included, as 0135 does.
+
+- **Staff actions:** `ehr.ed.arrive` (with the basis and the outcome; plus 0135's `ehr.visit-queue.check-in` when a waiting-list row is made), `ehr.ed.record-read`, `ehr.ed.triage`, `ehr.ed.move`, `ehr.ed.link-visit`, `ehr.ed.disposition` (with the outcome), `ehr.ed.leave` and `ehr.ed.cancel`.
+- **The board:** `ehr.ed.board`, one collection row (the count, `hasMore`, the patient ids shown), plus one `ehr.ed.board.shown` row per patient on every read.
+- **The waiting-list helper:** no rows of its own. The waiting list's own `ehr.visit-queue.list.shown` already covers each patient.
+- **System:** `ehr.ed.closed-on-waiting-list` (the mirror trigger), with the waiting-list action's actor.
+- Rows hold ids, the outcome or refusal kind, the basis, the triage level and the disposition outcome. **No row ever holds a name, date of birth, Health ID, presenting complaint, referral facility name or reason text.**
+
+### Notifications
+
+None in this release:
+- The patient is in the department, so no inbox notice, push or email is sent on arrival, triage or disposition. A patient with no account (for example an unknown record, ID-7) would get nothing anyway (0037).
+- A disposition of `died` sends nothing to anyone.
+- Break-glass keeps its own emergency-contact alert as today (0084); the board adds none.
+- No staff notices: there is no staff inbox yet (gap F2). The board's 30-second refresh shows new arrivals.
+
+### Website screens (Lekan; mapped to Akos's existing sample screens)
+
+| Akos sample (health `apps/patient-web/src/ehr-blue/`) | Live screen | Calls |
+|---|---|---|
+| `clinical/emergency/EmergencyWorkspace.tsx:31-46` (EmergencyHome: emergency access form, then `SampleList id="emergency"` at demo facilities, "New board entry") | Emergency access stays as it is. The board moves to its own live page, "Emergency department", with the three columns, counts, triage-level badges (the waiting list's words and tones) and time in the department | route 2, SX-9 |
+| `clinical/sample/SampleCreate.tsx` with `definitions.ts:174-180` (Presenting complaint, Triage priority, Assigned clinician) | New arrival drawer: patient from a search card (`matchRef`), this facility's patient, or "Unknown patient" (ID-7's form, then route 1 with the new `patientId`); Arrival mode; Arrival time; for nurses, clinicians and doctors also Triage level (1-5) and Presenting complaint | 0132 search, ID-7 route 1, route 1 |
+| `definitions.ts:181` ("Record assessment", `edit`) | "Triage" drawer (level and complaint) and "Start care". The assessment itself is written in Consultation (EHR-C5) after "Open chart" | routes 4, 5, 6; EHR-C1 |
+| `definitions.ts:182` ("Record disposition": Disposition, Follow-up; `sign`) | Disposition drawer: the seven outcomes; the department and admitting doctor for an admission; the facility name for a referral. Follow-up goes in the visit's note. Then "Left the department" (for an admission, "Handed over to the ward") | routes 7, 8 |
+| `clinical/sample/SampleDetail.tsx` (record page and its history) | ED record page with the card, the history and Cancel arrival | routes 3, 9 |
+| `clinical/sample/seed.ts:248-250` (the fictional board row) | Removed from the live page. Demo facilities show their sealed demo patients from the backend | — |
+| `clinical/triage/NewTriage.tsx:37,116-130` (sample Priority: Routine, Urgent, Emergency) | The sample block goes. Triage level 1-5, with the waiting list's words, is set on the patient's open board or waiting-list row | route 4, or EHR-C7 `PATCH` |
+| `departments/waiting/waitingRules.ts:83-96`, `WaitingList.tsx:243,342-345` | The same level list and words are shared with the board (one module). Board rows on the waiting list show "Emergency department" and link to the board | EHR-C7, `edAttendanceId` |
+| `frame/pages.ts:87`, `clinical/pages.ts:38-39`, `frame/BlueFrame.tsx:49`, `home/BlueHome.tsx:58` | Navigation: "Emergency department" (live, `ehr.ed.read`, Care group) beside "Emergency access" (unchanged, `identity.break-glass.write`) | — |
+| `frame/sampleAccess.ts:14-16,38`, `onboarding/roleTemplates.ts:14,33` | Live grants from the role table above | — |
+| `frame/pageGuides.ts:102-108`, `frame/HelpPage.tsx:90-93` | A guide for the board ("Add the patient, set the triage level, start care, record where they go next"). The emergency access guide is unchanged | — |
+
+Rules for the screens:
+- Show times in Lagos whatever the device's zone (P2-4 helper). Show "NIN Verified" / "NIN Not Verified" where a patient card shows NIN status.
+- Never put a Health ID in a URL. Board and record URLs carry the ED record's UUID only.
+- An unknown patient shows "Unknown patient U-0007" and "Estimated age"; offer to print the wristband once, as ID-7 does.
+- Show a level 1 or 2 card in the critical tone, as the waiting list does. No timer colours until the clinical lead names a target.
+- Say on the board: "Do not show this board on a screen patients or visitors can see."
+- The `packages/contracts/src/registry.ts` entries go from `proposed` to `served` only when this ships.
+- **Before this ships:** keep the sample board at demo facilities only, with its banner, and send nothing.
+
+### Tests
+
+- **Database** (throwaway local PostgreSQL, fictional patients only), in `services/ehr-api/test/database/ed-board.integration.sql` and `services/ehr-api/src/ehr/ed-board/ed-board.pg.spec.ts`:
+  - arrival by each basis; an emergency `matchRef` without an active break-glass grant, another member's grant, or an expired one, all answering `ED_ARRIVAL_NEEDS_SEARCH`;
+  - an ED arrival racing 0135's check-in for the same patient (one open row); a patient moved from the outpatient waiting list; `already_on_board`;
+  - an unknown record (0145) arriving by `patientId`, then identified (the name shows), with `recordKind` and label on the card;
+  - the complaint hidden from the front desk on every answer; its text never in an event or audit row;
+  - every stage move, triage, visit link (another patient's visit, another facility's visit, a cancelled visit, all `ED_VISIT_INVALID`), and each disposition outcome with its waiting-list stage;
+  - `sent_to_outpatients` leaving the waiting-list row open; cancel after a move from the waiting list leaving it open;
+  - the mirror trigger: a row closed on the waiting list closes the ED record; an ED close does not run it twice;
+  - version conflicts; idempotent replays; every refusal and its audit row; no name, Health ID, complaint or reason in any audit row;
+  - sealed demo and QA isolation; a member of another facility.
+- **Migration:**
+  - each file with a lock held by another session gives the "0168: … busy" (or "0169: …") refusal and nothing applied;
+  - a second run gives "already applied" and nothing changes; a half state is refused;
+  - the CHECK swap from 0135's definition and from APPT-1's; an unknown third definition refused;
+  - post-checks pass; a changed pinned body is refused.
+- **Release C's live verifiers:** `scripts/tuf-staging-migration-rehearsal.mjs` with `HID_REHEARSAL_LIVE_TREE` set to the live commit and `HID_REHEARSAL_LIVE_POINTS` set to the two files' final numbers. All twelve live runtime verifiers must pass after each file (the five ehr-api and seven identity-api `verify-*-runtime.mjs` the live rehearsal runs).
+- **New runtime verifier:** `services/ehr-api/scripts/verify-ed-board-runtime.mjs` (arrive by each basis, triage, move, link, each disposition, leave, cancel, the waiting-list helper and the mirror), added to the rehearsal.
+- **Services:** controller and service unit specs; the flag off answering `ED_BOARD_NOT_AVAILABLE`; `role-matrix.json`; the SX-1 area spec.
+- **Website:** board, new arrival (search, own patient, unknown patient), triage, disposition and record tests with the device zone set away from Lagos; the complaint never shown to the front desk; no Health ID in any URL; no "permission" in staff text.
+
+### Depends on
+
+- EHR-C7 / 0135 (waiting list, triage level, stages, assignee), 0131 (own facility), 0132 (search and emergency search `matchRef`), ID-5 (break-glass by `matchRef`), ID-7 / 0145 (unknown records, live), EHR-C1 and EHR-C5 (the emergency visit and its notes), SX-9 (names), 0114 (department codes).
+- APPT-1 (0160): only the shared `check_in_basis` CHECK. Either file may apply first.
+- ID-8 (merge), when built: a merge must move an open ED record with its waiting-list row to the target record. Until then, an unknown record stays on the board under its label.
+- It unblocks: Inpatient ADT (adopts open `admit_requested` records), Ambulance dispatch (its handover links to the ED record), and point-of-care billing B3 ("serve now, bill later" can read an open ED record).
+
+### Clinical lead checklist (before real patients)
+
+- **The five-level triage scale** (1 most urgent to 5), live since 0135 as an owner default with no clinical sign-off. Sign it off retroactively for the waiting list and the board, with what each level means (for example a published five-level scale such as ESI mapped onto levels 1-5) and the words on screen.
+- That the Triage & Vitals page and the outpatient waiting list use the same scale, and the sample's three priorities (Routine, Urgent, Emergency) are dropped.
+- The arrival modes and the seven disposition outcomes, including `died` as an outcome only (no death certificate) and `sent_to_outpatients`.
+- Who records a disposition: clinicians and doctors, not nurses.
+- Whether a free-text complaint of up to 120 characters on the board is acceptable for nurses, clinicians and doctors (Q-ED-4).
+- That the board shows time in the department with no target or alarm until the lead names one.
+- The unknown patient flow on arrival (ID-7), and the merge afterwards.
+- That emergency and unknown patients are served now and billed later (B3), which the board itself does not enforce.
+
+### DPO items
+
+- **Q-ED-3:** putting a patient found by emergency search on the board, while the member's break-glass grant is active. The board gives no chart access. The patient already sees the emergency search and the break-glass in their access history. Reviewed with Rahman before 0168 is signed.
+- **Q-ED-4:** a short presenting complaint shown on the board to the facility's nurses, clinicians and doctors without a chart grant. It is never shown to the front desk, and never in an audit row, log or notice.
+- **Q-ED-7:** writing care for a patient who cannot consent and is not this facility's own stays as today (break-glass read only, or an unknown record merged later). A new emergency write basis needs its own section.
+- **Public screens:** the board names patients. It must not be shown where patients or visitors can see it; the screen says so.
+- **`died` outcome:** recorded as an outcome only. It sends no notice and changes no account. A death register is a separate, later item.
+- **Retention:** ED records and their history are part of the record. Cancelled ones are kept, never deleted.
+
+### Target
+
+Release D, Phase 1 sprint (from 25 Nov 2026). Size **M**.
+- Backend: 0168 and 0169, ehr-api routes (`src/ehr/ed-board/`) and the waiting-list card field, the SX-1 area and the role matrix.
+- Website: Lekan.
+- Review: Rahman (database, identity and security, release cut), an independent agent review per change, and the owner's verbatim signature on each migration.
+- Go-live: production flag `ED_BOARD_ENABLED` on only after the clinical lead's checklist (the triage scale first) and the owner's go-live.
 
 # Not planned yet
 
