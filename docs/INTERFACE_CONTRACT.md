@@ -12423,3 +12423,239 @@ when `dateOfBirthEstimated`, and "NIN Not Verified". On `sent_for_review`
 show the message and nobody else's details. After `identified`, offer
 "Verify NIN" (ID-6). Never show `firstName`/`lastName` of a record whose
 `recordKind` is `unknown`.
+
+## RAD-1. Radiology: imaging requests, work list and reports (Release D, migrations 0181-0185, provisional; not live until signed)
+
+Built exactly as `docs/EHR_PLANNED_CONTRACT.md` RAD-1 says: owner decisions Q220 A (own order kind and work list), Q221 A (JPEG, PNG or PDF files, no DICOM), Q222 A (one radiologist signs and releases; an optional second review), Q223 A (patients see reports under the lab results rule, built and switched off), Q224 A (in-house only, a printed slip), Q225 A (the Health ID imaging list with LOINC codes, by name only as the fallback) and Q155 A (new roles `radiographer` and `radiologist`), all of 25 Nov 2026; and Q-RAD-8 to Q-RAD-16 at the recommended option, not yet answered by the owner. Numbers 0181-0185 are provisional.
+
+All routes are in ehr-api under `/api/v1`; the gateway is unchanged. Staff routes need `X-Facility-Id`. Routes with patient data need `X-Purpose-Of-Use: direct-care`; routes 4, 5 and 7 also take `emergency` under an active break-glass grant, as lab requests do. Every write is a POST with an `Idempotency-Key` (16-128 URL-safe characters): a replay with the same body answers the first answer with `"replayed": true`; another body is 409 `IDEMPOTENCY_KEY_REUSED`. Writes on an existing row take its `expectedRowVersion` (412 on a mismatch). Times are ISO 8601 UTC ending in `Z`; a "day" is the Lagos day. No Health ID or NIN in any path, query or body: patients, visits, requests, work items and files are named by UUID. Answers carry `Cache-Control: no-store`, except the list search (`private, max-age=60`).
+
+**The switch.** `RADIOLOGY_ENABLED` (ehr-api), `false` by default and in production until the owner's go-live. While it is off, routes 1, 3-25 and route 8's `kind=imaging` answer 503 `RADIOLOGY_NOT_AVAILABLE` at real facilities; the sealed QA facility and the four sealed demo facilities are served. A database without 0181-0185 answers the same. Route 26 answers 404 `IMAGING_REPORTS_NOT_AVAILABLE` until the database switch `patient_reports` is on (seeded off; a signed migration turns it on after the clinical lead's decision).
+
+**Who** (seven new codes, 0185):
+
+| Backend role | `ehr.imaging-request.read` | `ehr.imaging-request.write` | `radiology.work-item.read` | `radiology.work-item.manage` | `radiology.attachment.write` | `radiology.report.write` | `radiology.report.sign` |
+|---|---|---|---|---|---|---|---|
+| `doctor`, `clinician` | yes | yes | no | no | no | no | no |
+| `nurse` | yes | no | no | no | no | no | no |
+| `radiographer` (new, licence RRBN) | no | no | yes | yes | yes | no | no |
+| `radiologist` (new, licence MDCN) | no | no | yes | yes | yes | yes | yes |
+| every other role | no | no | no | no | no | no | no |
+
+Routes 3-8 also need the usual access to the patient (write for 3 and 6, read for 4, 5 and 7): a consent grant, 0131's own-facility opening included. Radiology staff need no grant: routes 9-25 serve only this facility's own imaging work, and never open the chart. Session areas (SX-1): `imagingOrders` "Imaging requests", `radiology` "Radiology work list", `radiologyReports` "Radiology reports".
+
+### Shapes
+
+**The patient card** on radiology answers (0124's fields with 0145's record kind):
+
+```json
+{ "patientId": "uuid", "fullName": "Ngozi Imageone", "sex": "female", "dateOfBirth": "1991-04-12",
+  "dateOfBirthEstimated": false, "healthIdLast4": "CC44", "recordKind": "standard", "unknownLabel": null }
+```
+
+For `recordKind: "unknown"`, `fullName` is "Unknown patient U-0007" and `unknownLabel` "U-0007".
+
+**The procedure:**
+
+```json
+{ "codeSystem": "HID-IMG", "code": "IMG-0012", "display": "X-ray chest PA", "modality": "xray",
+  "bodyRegion": "chest", "ionising": true, "preparation": null, "listVersion": "2026.1" }
+```
+
+- `codeSystem` is `HID-IMG` or `LOINC` (when the list row carries a LOINC Radiology Playbook code), or `null` with `code: null`, `bodyRegion: null`, `ionising: null`, `listVersion: null` for a request by name only.
+- `modality`: `xray`, `ultrasound`, `ct`, `mri`, `fluoroscopy`, `mammography`, `other`. `bodyRegion`: `head`, `neck`, `chest`, `abdomen`, `pelvis`, `spine`, `upper_limb`, `lower_limb`, `breast`, `whole_body`, `other`.
+
+**The request card** (routes 3-6, 8):
+
+```json
+{ "requestId": "uuid", "patientId": "uuid", "encounterId": "uuid", "procedure": { "…": "as above" },
+  "indication": "Cough for three weeks, weight loss", "urgency": "routine", "pregnancy": null,
+  "status": "active", "requestedAt": "2026-12-03T09:14:00.000Z", "requestedByMembershipId": "uuid",
+  "cancel": null, "rowVersion": 1,
+  "progress": { "stage": "scheduled", "examNumber": "RAD-2026-000123", "scheduledFor": "2026-12-03T13:00:00.000Z",
+    "checkedInAt": null, "examinedAt": null, "reportedAt": null, "notCompleted": null,
+    "urgentFinding": false, "correctionPending": false } }
+```
+
+- `urgency`: `routine` or `urgent`. `pregnancy`: `null`, `not_pregnant`, `possibly_pregnant` or `pregnant`.
+- `status`: `active`, `completed` (a report is signed), `not_done` (radiology could not complete it) or `cancelled`. `cancel`: `null` or `{ "reason", "at", "byMembershipId" }`.
+- `progress.stage`: `waiting_for_radiology`, `accepted`, `scheduled`, `checked_in`, `examined` (also while the report is being written; a draft is never shown), `reported`, `not_completed` or `cancelled`. `notCompleted`: `null` or `{ "reason", "note", "at" }`. `urgentFinding` and `correctionPending` are those of the signed version (`false` before one).
+- Staff names come from `GET /identity/facility-staff-names` (SX-9).
+
+**The released report** (route 5, once `progress.stage` is `reported`; otherwise `null`):
+
+```json
+{ "version": 2, "kind": "correction", "findings": "…", "impression": "…", "urgentFinding": false,
+  "correctionReason": "The side was wrong in the impression", "signedAt": "2026-12-03T16:02:00.000Z",
+  "signedByMembershipId": "uuid", "correctionPending": false,
+  "files": [ { "attachmentId": "uuid", "kind": "image", "fileName": "chest-pa.jpg", "mediaType": "image/jpeg",
+               "sizeBytes": 812345, "scanStatus": "clean", "removed": false, "removedAt": null } ],
+  "earlierVersions": [ { "version": 1, "kind": "original", "findings": "…", "impression": "…",
+                         "urgentFinding": false, "signedAt": "…", "signedByMembershipId": "uuid" } ] }
+```
+
+- `files`: those released with the current version. A file later marked entered in error stays in the list as `{ "attachmentId", "removed": true, "removedAt" }` with no name, type or size; show "A file was removed (entered in error)".
+- `scanStatus`: `pending`, `clean`, `rejected` or `failed`; only `clean` files download.
+- `correctionPending`: a correction is being written; the version shown stays the record until it is signed.
+
+### Routes
+
+**1. `GET /ehr/catalog/imaging-procedures?q=&limit=&modality=`** (`ehr.imaging-request.write` or `radiology.work-item.read`). ORD-7's search rules: `q` 2-100 characters after trimming (`CATALOG_SEARCH_TEXT_TOO_SHORT` below 2); a `q` shaped like a Health ID or an 11-digit NIN is refused before any search (400 `CATALOG_SEARCH_TEXT_NOT_ALLOWED`) and `q` is never logged; `limit` 1-25 (default 10); optional `modality` from the list. Each word of `q` must start a word of the name or another name. Answer `{ "listVersion": "2026.1", "more": false, "items": [ { procedure, "otherNames": ["CXR"], "matchedName": "CXR", "contrast": false } ] }`. While no signed list is loaded, `{ "listVersion": null, "more": false, "items": [] }`: the screen offers "Use '<typed text>' as written". No audit row (no patient).
+
+**2. `GET /ehr/catalog/status`** gains `"imagingProcedures": { "available": false, "version": null, "approvedAt": null }` and `"imagingNameOnly": true`. Everything else is unchanged.
+
+**3. `POST /ehr/patients/:patientId/encounters/:encounterId/imaging-requests`**:
+
+```json
+{ "procedureCodeSystem": "HID-IMG", "procedureCode": "IMG-0012", "procedureDisplay": "X-ray chest PA",
+  "modality": "xray", "indication": "Cough for three weeks, weight loss", "urgency": "routine",
+  "pregnancy": "not_pregnant" }
+```
+
+| Field | Rule |
+|---|---|
+| `procedureCodeSystem`, `procedureCode` | both or neither. With both: a code of the active list version, not withdrawn (400 `IMAGING_PROCEDURE_INVALID` otherwise); `procedureDisplay` and `modality` must then be the list's (sent for a check; the stored values are the list's) |
+| `procedureDisplay` | required, 1-200 characters after trimming, no control characters |
+| `modality` | required, from the list |
+| `indication` | required, 1-1000 characters after trimming |
+| `urgency` | required, `routine` or `urgent` |
+| `pregnancy` | optional, one of the three answers |
+
+The visit must be this patient's at this facility, `in_progress`, `on_hold` or `completed`, and not imported from paper records (400 `IMAGING_VISIT_INVALID` otherwise, the same answer for every reason). Answer 201 `{ "request": card, "replayed": false }`; the request is at once on this facility's radiology work list ("To accept").
+
+**4. `GET /ehr/patients/:patientId/encounters/:encounterId/imaging-requests[?cursor=&limit=]`**: the visit's requests, newest first. Answer `{ "items": [card], "nextCursor": null }` (`limit` 1-50, default 50).
+
+**5. `GET /ehr/patients/:patientId/encounters/:encounterId/imaging-requests/:requestId`**: `{ "request": card, "report": released report or null, "history": [ { "kind", "at", "byMembershipId", "reason" } ] }`. `history` kinds: `created`, `cancelled`, `accepted`, `scheduled`, `checked_in`, `examined`, `not_completed`, `reported`, `corrected`. Used for the request slip and the report print.
+
+**6. `POST .../imaging-requests/:requestId/cancel`**: `{ "expectedRowVersion", "reason": "8-500 characters" }`. Only while `active` and before the examination is recorded (409 `IMAGING_CANCEL_NOT_ALLOWED` after it; 409 `IMAGING_REQUEST_CLOSED` when no longer active). Cancels the work item too. Answer 200 `{ "request": card, "replayed": false }`.
+
+**7. `GET .../imaging-requests/:requestId/attachments/:attachmentId/download`**: a file released with the current version, not removed, scanned clean. Answer 200 as the documents download (`url`, `expiresInSeconds` 300, served inline as the type the scan detected). 404 `IMAGING_FILE_NOT_FOUND` for any other file; 409 `IMAGING_FILE_NOT_READY` while the scan is pending; 409 `IMAGING_FILE_REJECTED` when it failed the scan.
+
+**8. `GET /ehr/my-orders?kind=imaging`** (MY-1): the same parameters, reach, `hiddenCount`, bounded pages and cursor rules as MY-1, over imaging requests this member made here. `state=open` means `active`. Items: `{ "kind": "imaging_request", "orderId", "encounterId", "patient", "display", "status", "priority" (the urgency), "createdAt", "updatedAt", "progress", "orderRoute": null }`. `kind=all` still lists lab requests and prescriptions only; the screen shows Imaging as its own filter.
+
+**9. `GET /ehr/radiology/work-list?view=&modality=&urgency=&day=&cursor=&limit=`**:
+
+| Parameter | Values | Default |
+|---|---|---|
+| `view` | `to_accept` (active requests here not yet accepted), `in_progress` (`accepted`, `scheduled`, `checked_in`, `examined`), `done` (`reported`, `not_completed` or `cancelled` on `day`) | `to_accept` |
+| `modality`, `urgency` | from the lists | all |
+| `day` | `YYYY-MM-DD`, Lagos, today or up to 90 days back; `done` only | today |
+| `limit` | 1-100 | 50 |
+
+Urgent first, then oldest first (`done`: newest first). Each item:
+
+```json
+{ "requestId": "uuid", "workItemId": null, "examNumber": null, "patient": { "…": "patient card" },
+  "procedure": { "…": "as above" }, "indication": "…", "urgency": "urgent", "pregnancy": "possibly_pregnant",
+  "status": "waiting_for_radiology", "reportStatus": "none", "requestedAt": "…", "requestedByMembershipId": "uuid",
+  "scheduledFor": null, "checkedInAt": null, "examinedAt": null, "reportedAt": null,
+  "secondReviewDisagrees": false, "rowVersion": 1 }
+```
+
+`status` is the work item's, or `waiting_for_radiology`; `rowVersion` is the work item's, or the request's while waiting. `reportStatus`: `none`, `drafting`, `signed` or `correcting`. Answer `{ "items": [...], "counts": { "toAccept", "inProgress", "awaitingReport" }, "nextCursor": null }`.
+
+**10. `GET /ehr/radiology/requests/:requestId`**: one request waiting here (or accepted: then it names its `workItemId`), with the patient card and the requester's facility name for the slip.
+
+**11. `POST /ehr/radiology/requests/:requestId/accept`**: `{ "expectedRowVersion" }` (the request's). Only an `active` request of this facility not yet accepted (409 `IMAGING_REQUEST_ALREADY_ACCEPTED`, with its `workItemId`; 409 `IMAGING_REQUEST_CLOSED`). Gives the exam number (`RAD-2026-000123`, per facility and year, without gaps). Answer 201 `{ "workItem": work item, "replayed": false }`.
+
+**12. `GET /ehr/radiology/work-items/:workItemId`**:
+
+```json
+{ "workItem": { "workItemId": "uuid", "examNumber": "RAD-2026-000123", "status": "examined", "requestId": "uuid",
+    "patient": { "…": "patient card" }, "procedure": { "…": "as above" }, "indication": "…", "urgency": "routine",
+    "pregnancy": null, "requestedAt": "…", "requestedByMembershipId": "uuid", "acceptedAt": "…",
+    "acceptedByMembershipId": "uuid", "scheduledFor": null, "checkedInAt": "…",
+    "examination": { "examinedAt": "…", "examinedByMembershipId": "uuid", "details": "PA view, good inspiration" },
+    "notCompleted": null, "rowVersion": 5 },
+  "files": [ { "attachmentId": "uuid", "kind": "image", "fileName": "chest-pa.jpg", "mediaType": "image/jpeg",
+    "sizeBytes": 812345, "status": "uploaded", "scanStatus": "clean", "addedAt": "…", "addedByMembershipId": "uuid",
+    "releasedInVersion": null, "enteredInError": null, "rowVersion": 2 } ],
+  "report": { "status": "drafting", "currentVersion": 0, "rowVersion": 3, "draftHidden": false,
+    "draft": { "kind": "original", "findings": "…", "impression": "…", "urgentFinding": false,
+               "correctionReason": null, "draftVersion": 4, "savedAt": "…", "authorMembershipId": "uuid" },
+    "versions": [], "reviews": [] },
+  "history": [ { "kind": "examined", "at": "…", "byMembershipId": "uuid", "reason": null } ] }
+```
+
+- File `status`: `uploading`, `uploaded` or `entered_in_error` (`enteredInError`: `{ "reason", "at", "byMembershipId" }`). `releasedInVersion`: the first signed version that released it, or `null`.
+- `report.draft` only for a member who holds `radiology.report.write`; for anyone else `draft: null` and `draftHidden: true` while a draft exists.
+- `versions`: every signed version (`version`, `kind`, `findings`, `impression`, `urgentFinding`, `correctionReason`, `signedAt`, `signedByMembershipId`, `fileIds`). `reviews`: `{ "version", "outcome", "note", "at", "byMembershipId" }`.
+- `history` kinds: `accepted`, `scheduled`, `checked_in`, `examined`, `not_completed`, `cancelled`, `attachment_added`, `attachment_entered_in_error`, `draft_started`, `draft_discarded`, `signed`, `correction_started`, `reviewed`. No report or note text in the history.
+
+Every write below answers 200 `{ "workItem": work item, "replayed": false }` (routes 17-25 the whole route 12 answer) and takes `expectedRowVersion`, the work item's (412 `RADIOLOGY_VERSION_CONFLICT`).
+
+**13. `POST .../schedule`**: `{ "expectedRowVersion", "scheduledFor" }`, from 1 hour ago to 90 days ahead (400 `RADIOLOGY_SCHEDULE_TIME_INVALID`). From `accepted` or `scheduled` (a new time replaces the old; both are in the history).
+
+**14. `POST .../check-in`**: `{ "expectedRowVersion" }`. From `accepted` or `scheduled`.
+
+**15. `POST .../examination`**: `{ "expectedRowVersion", "examinedAt"?, "details"? }`. `examinedAt` up to 24 hours ago and not in the future (left out: now); `details` 0-2000 characters. From `accepted`, `scheduled` or `checked_in`. Sets `examined`; the ordering doctor's card shows `examined`.
+
+**16. `POST .../not-completed`**: `{ "expectedRowVersion", "reason", "note"? }`. `reason`: `did_not_attend`, `patient_declined`, `patient_unable`, `equipment_unavailable`, `pregnancy`, `not_justified`, `other`; `note` 8-500 characters, required for `other` (400 `RADIOLOGY_REASON_REQUIRED`). From `accepted`, `scheduled` or `checked_in`. The request becomes `not_done`.
+
+**17. `POST .../attachments/upload-intents`**: `{ "kind": "image" | "report_scan" | "other", "fileName": "1-255", "mediaType": "image/jpeg" | "image/png" | "application/pdf", "sizeBytes": 1-20971520, "sha256Hex": "64 lower-case hex" }`. From `examined` or `reported`. Another type: 400 `RADIOLOGY_FILE_TYPE_INVALID`; larger: 400 `RADIOLOGY_FILE_TOO_LARGE`; a 31st file (not counting those entered in error): 409 `RADIOLOGY_FILES_FULL`. Answer 201 `{ "file": file (status uploading), "upload": the documents upload shape (a PUT URL with its headers, expiresInSeconds 300), "replayed": false }`. The file is stored in the documents store with no visit, so it is in no Documents list and no record chat.
+
+**18. `POST .../attachments/:attachmentId/complete`**: after the browser's PUT. ehr-api reads the stored object's version, size and SHA-256; any difference from the intent is 409 `RADIOLOGY_FILE_UPLOAD_MISMATCH`. Idempotent as the documents' complete: a second call answers the file as it is now. The scan then runs as for any document; `scanStatus` shows `pending` until it is done.
+
+**19. `POST .../attachments/:attachmentId/entered-in-error`**: `{ "expectedRowVersion" (the file's), "reason": "8-500 characters" }`. The file leaves every view at once (released or not) and is kept, never deleted.
+
+**20. `GET .../attachments/:attachmentId/download`**: any file of this work item not entered in error, scanned clean; as route 7, with `RADIOLOGY_FILE_NOT_FOUND`, `RADIOLOGY_FILE_NOT_READY`, `RADIOLOGY_FILE_REJECTED`.
+
+**21. `POST .../report/draft`**: `{ "expectedDraftVersion": null | n, "findings": "0-8000", "impression": "0-2000", "urgentFinding": false }`. `null` starts the first draft (the work item `examined`, no draft open, no version signed); otherwise it saves the open draft (409 `RADIOLOGY_DRAFT_CHANGED` when `n` is not the draft's version: "This report was saved from another tab or by someone else. Reload it before you carry on."). Text is trimmed; no control characters but line breaks.
+
+**22. `POST .../report/sign`**: `{ "expectedDraftVersion": n }`. Needs findings and impression of at least 1 character after trimming (400 `RADIOLOGY_REPORT_INCOMPLETE`). Makes the draft version `currentVersion + 1`, signs and releases it with the files present and not entered in error, sets the work item `reported` and the request `completed`. One step.
+
+**23. `POST .../report/correction`**: `{ "expectedRowVersion" (the report's), "reason": "8-500 characters" }`. Only when a version is signed and no draft is open (409 `RADIOLOGY_CORRECTION_OPEN`). Opens a correction draft with the signed text; the ordering doctor sees `correctionPending: true`. Saved with route 21 and signed with route 22 (kind `correction`, the reason kept).
+
+**24. `POST .../report/draft/discard`**: `{ "expectedDraftVersion": n }`. Closes the open draft (a correction, or a first draft not yet signed) without a version. The draft's text is not kept.
+
+**25. `POST .../report/reviews`**: `{ "version": n, "outcome": "agree" | "disagree", "note": "0-1000" }`; `note` 8 or more characters for `disagree` (400 `RADIOLOGY_REASON_REQUIRED`). Only a signed version, by a radiologist who did not sign it (409 `RADIOLOGY_REVIEW_OWN_REPORT`), once per reviewer and version (409 `RADIOLOGY_ALREADY_REVIEWED`). Never changes the report or holds it back. A disagreement shows "Second review disagrees" on the work list until a later version is signed.
+
+**26. `GET /ehr/me/imaging-reports[?cursor=]`** (the patient's own session; switched off): signed current versions of the patient's own requests at any facility, newest first, text only: `{ "items": [ { "requestId", "facilityName", "procedureDisplay", "modality", "signedAt", "version", "corrected", "correctionReason", "findings", "impression" } ], "nextCursor": null }`. Never a draft, a file or a staff id. 404 `IMAGING_REPORTS_NOT_AVAILABLE` while `patient_reports` is off.
+
+### Errors
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | "Check the highlighted fields." (unknown field, length, list value or time outside the rules) |
+| 400 | `CATALOG_SEARCH_TEXT_TOO_SHORT`, `CATALOG_SEARCH_TEXT_NOT_ALLOWED` | as ORD-7 |
+| 400 | `IMAGING_PROCEDURE_INVALID` | "Choose a procedure from the list, or type its name." |
+| 400 | `IMAGING_VISIT_INVALID` | "Imaging can be requested from a visit at this facility that is in progress or finished." |
+| 400 | `RADIOLOGY_SCHEDULE_TIME_INVALID` | "Choose a time up to 90 days ahead." |
+| 400 | `RADIOLOGY_REASON_REQUIRED` | "Say why in at least 8 characters." |
+| 400 | `RADIOLOGY_FILE_TYPE_INVALID` | "Add a JPEG, PNG or PDF file." |
+| 400 | `RADIOLOGY_FILE_TOO_LARGE` | "Each file can be up to 20 MB." |
+| 400 | `RADIOLOGY_REPORT_INCOMPLETE` | "Write the findings and the impression before you sign." |
+| 400 | `PURPOSE_OF_USE_REQUIRED`, `IDEMPOTENCY_KEY_REQUIRED` | as today |
+| 403 | `CONSENT_REQUIRED` | as today (the ordering side only) |
+| 403 | `IMAGING_REQUEST_NOT_ALLOWED` | "Only doctors and clinicians can request imaging." (and reads without `ehr.imaging-request.read`: "Your role here does not include imaging requests.") |
+| 403 | `RADIOLOGY_NOT_ALLOWED` | "Only radiographers and radiologists of this facility can use the radiology work list." |
+| 403 | `RADIOLOGY_REPORT_NOT_ALLOWED` | "Only radiologists can write and sign reports." |
+| 404 | `IMAGING_REQUEST_NOT_FOUND` | "This imaging request was not found." (also another facility's, or another visit's) |
+| 404 | `RADIOLOGY_WORK_ITEM_NOT_FOUND` | "This examination is not on this facility's radiology work list." |
+| 404 | `IMAGING_FILE_NOT_FOUND`, `RADIOLOGY_FILE_NOT_FOUND` | "This file was not found." |
+| 404 | `IMAGING_REPORTS_NOT_AVAILABLE` | "Imaging reports are not shown here yet." (route 26 while switched off) |
+| 409 | `IMAGING_REQUEST_CLOSED` | "This request was cancelled or is finished." |
+| 409 | `IMAGING_REQUEST_ALREADY_ACCEPTED` | "Radiology has already accepted this request." (with `workItemId`) |
+| 409 | `IMAGING_CANCEL_NOT_ALLOWED` | "The examination is done, so this request cannot be cancelled. Ask radiology to note it on the report." |
+| 409 | `RADIOLOGY_STEP_NOT_ALLOWED` | "This examination has moved on. Reload it to see what can be done next." |
+| 409 | `RADIOLOGY_FILES_FULL` | "This examination already has 30 files. Mark a wrong one entered in error first." |
+| 409 | `RADIOLOGY_FILE_UPLOAD_MISMATCH` | "The file that arrived is not the one chosen. Add it again." |
+| 409 | `IMAGING_FILE_NOT_READY`, `RADIOLOGY_FILE_NOT_READY` | "This file is still being checked for viruses. Try again in a minute." |
+| 409 | `IMAGING_FILE_REJECTED`, `RADIOLOGY_FILE_REJECTED` | "This file failed the virus check and cannot be opened." |
+| 409 | `RADIOLOGY_DRAFT_CHANGED` | "This report was saved from another tab or by someone else. Reload it before you carry on." |
+| 409 | `RADIOLOGY_CORRECTION_OPEN` | "A correction of this report is already being written." |
+| 409 | `RADIOLOGY_REVIEW_OWN_REPORT` | "You signed this version, so another radiologist must do the second review." |
+| 409 | `RADIOLOGY_ALREADY_REVIEWED` | "You have already reviewed this version." |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | as ID-6 |
+| 412 | `IMAGING_VERSION_CONFLICT`, `RADIOLOGY_VERSION_CONFLICT` | "Someone else changed this. Reload it and try again." |
+| 503 | `RADIOLOGY_NOT_AVAILABLE` | "Radiology is not available yet." (flag off at a real facility, or a database without 0181-0185) |
+
+Staff screens show the message and never the word "permission".
+
+### Audit
+
+Written in the request's transaction, refusals included: `ehr.imaging-request.create`, `.list`, `.read`, `.cancel`, `.attachment-download`; `ehr.my-orders.list` (with `kind: imaging`) and `ehr.my-orders.list.shown`; `radiology.work-list.read` and one `radiology.work-list.shown` per patient shown; `radiology.request.read`; `radiology.work-item.accept`, `.read`, `.schedule`, `.check-in`, `.examine`, `.not-completed`; `radiology.attachment.upload-intent`, `.complete`, `.entered-in-error`, `.download`; `radiology.report.draft-save`, `.sign`, `.correction-start`, `.draft-discard`, `.review`; `ehr.me.imaging-reports.read`. Rows hold ids, statuses, kinds, urgency, modality and counts; never a name, date of birth, Health ID, indication, pregnancy answer, examination details, findings, impression, reason, note, file name or search text.
+
+### Database
+
+0181 (the imaging list, ORD-7's pattern; `ehr.catalog_versions` takes the kind `imaging_procedure`), 0182 (`ehr.imaging_requests` and its history), 0183 (schema `radiology`: work items, history, exam numbers, files, and the marker-gated owner policies on `ehr.documents`, `ehr.record_versions` and `ehr.document_scan_events`), 0184 (reports, drafts, versions, sign-offs, second reviews, the `patient_reports` switch), 0185 (the seven codes, the two roles, their licences, invitations and SX-4, and two sealed QA logins). SECURITY DEFINER functions with `search_path = pg_catalog, pg_temp`, EXECUTE for `hid_ehr_runtime` only; no runtime privilege on any new table; row-level security forced on every new table with patient or facility data. The full design, the locks and the tests are in the planned contract's RAD-1.

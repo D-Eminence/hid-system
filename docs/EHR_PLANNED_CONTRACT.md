@@ -1,4 +1,4 @@
-# HID planned contract for the rest of Akos's EHR list (Release B and C, not live)
+# HID planned contract for the rest of Akos's EHR list (Release B, C and D, not live)
 
 This file lists the API that Akos's EHR frontend will need but that is not built yet. With it, he can build each screen once: the shape now, and the fallback he shows until the route ships.
 
@@ -44,6 +44,7 @@ Rules that hold in every section:
 | [ORD-6: Several tests in one lab request](#ord-6-several-tests-in-one-lab-request-planned-release-c-needs-a-migration-yes) | N-7 | C | yes | M |
 | [ORD-8: Order sets, favourites, and note and visit templates](#ord-8-order-sets-favourites-and-note-and-visit-templates-planned-release-c-needs-a-migration-yes) | P0-5, P1-13, P1-12 | C | yes | L |
 | [ORD-11: Result and dispensed notices to the ordering doctor](#ord-11-result-and-dispensed-notices-to-the-ordering-doctor-planned-release-c-needs-a-migration-yes) | P1-6 | C | yes | L |
+| [RAD-1: Radiology: imaging requests, work list and reports](#rad-1-radiology-imaging-requests-work-list-and-reports-planned-release-d-needs-a-migration-yes) | department Radiology (gap map row 72, F1), the blue Radiology sample | D | yes (0181-0185, provisional) | L |
 | [ORD-13: No drug-interaction checks](#ord-13-no-drug-interaction-checks-not-planned-no-release-needs-a-migration-no) | P0-5, N-9 (interactions) | not planned | no | — |
 | [P2-1: National ID type per country and a neutral company number](#p2-1-national-id-type-per-country-and-a-neutral-company-number-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-1 | after C | yes, when designed | M |
 | [P2-2: Interface translations and language](#p2-2-interface-translations-and-language-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-2, P1-8 (language) | after C | yes, when designed | L |
@@ -51,7 +52,7 @@ Rules that hold in every section:
 | [P2-4: Time zone, date and phone formats](#p2-4-time-zone-date-and-phone-formats-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-4 | after C | yes, when designed | M |
 | [QA-2: Migrate account test pass and one real save of every drawer form](#qa-2-migrate-account-test-pass-and-one-real-save-of-every-drawer-form-planned-before-the-release-a-go-live-needs-a-migration-no) | R-4, QA question | before A go-live | no | S |
 
-Owner answers of 19 Nov 2026, and the sections that rest on them: Q124 A (ORD-7, ORD-8, ORD-9, ORD-10 phase 2, ORD-6, VIT-1), Q125 B (ORD-4, now planned for Release B), Q126 A (EHR-C6, ORD-8), Q127 A (ID-8, ORD-11), Q128 A (ORD-11, SX-7), Q129 A (SX-4, CHW-1), Q130 A (CHW-1), Q131 A (ORD-12, ORD-13, ORD-10 phase 2, P2-1 to P2-4), Q132 A (Q132 A, now planned for Release B; ORD-4 refers to it). No owner question for these sections is waiting for an answer.
+Owner answers of 19 Nov 2026, and the sections that rest on them: Q124 A (ORD-7, ORD-8, ORD-9, ORD-10 phase 2, ORD-6, VIT-1), Q125 B (ORD-4, now planned for Release B), Q126 A (EHR-C6, ORD-8), Q127 A (ID-8, ORD-11), Q128 A (ORD-11, SX-7), Q129 A (SX-4, CHW-1), Q130 A (CHW-1), Q131 A (ORD-12, ORD-13, ORD-10 phase 2, P2-1 to P2-4), Q132 A (Q132 A, now planned for Release B; ORD-4 refers to it). No owner question for the Release B and C sections is waiting for an answer. Release D's open questions are listed in its own sections.
 
 Open points with no decision yet, each to be decided before that section is built:
 
@@ -59,6 +60,7 @@ Open points with no decision yet, each to be decided before that section is buil
 - ORD-8: who keeps a facility's order sets and templates (and so who holds `ehr.order-set.manage`).
 - ORD-7 and ORD-10 phase 2: the WHOCC terms for using ATC codes in a commercial product (until then `atcCode` stays `null`).
 - CHW-1: whether to record a community health worker's registration number.
+- RAD-1 (Release D): Q-RAD-8 to Q-RAD-16 are built at the recommended option and are not yet answered by the owner (see the section's tables). The imaging list, the report template, the pregnancy question, the urgent-finding rule and when patients see reports need the clinical lead; imaging retention needs the DPO.
 
 # Release B
 
@@ -3712,6 +3714,313 @@ Release C (lane D). Size **L**:
 - four routes;
 - audit;
 - a runtime check across Lab, Pharmacy and EHR.
+
+# Release D
+
+Release D holds the department first versions of the two-week sprint the owner approved on 25 Nov 2026: every department ships a first working version on Akos's blue design, anything that needs outside approval is built but switched off, every change gets an independent agent review and Rahman's final database check, and real patients use it only after the clinical lead's checklist and the owner's go-live.
+
+Migration numbers in Release D are provisional. Each department section names the block it was given; the real numbers are given in merge order at the cut.
+
+## RAD-1: Radiology: imaging requests, work list and reports (planned, Release D, needs a migration: yes)
+
+Department: Radiology (imaging orders, studies, reports), roadmap Phase 3. Gap map row 72 ("No radiology controller, BACKEND GAP (hand-off F1)"). Booked in sprint wave 3 on 25 Nov 2026 (#258) with migrations **0181-0185, provisional**.
+
+Status: planned, not live.
+
+Owner decisions: Q220, Q221, Q222, Q223, Q224 and Q225 (the survey's R1-R3 and R5-R7) and Q155 (the survey's R4), all approved at option A on 25 Nov 2026 ("I approve Q147–Q290 at the recommended options"). Lines resting on them say **(owner decision Qnnn A, 25 Nov 2026)**. This section's own design questions, Q-RAD-8 to Q-RAD-16, are built at the recommended option and are **not yet answered**; the owner can still change them before 0181-0185 are signed.
+
+Surveyed before writing (health at b44b0d56, the live website; hid-system at staging 0cfddcc9, 0001-0153 live):
+- The blue design's sample workspace: `apps/patient-web/src/ehr-blue/clinical/sample/definitions.ts:136-151` and `frame/sample/catalog.ts:320-385` (kind `radiologyOrder`, group Diagnostics). Fields Encounter, Modality, Indication and Urgency (Routine, Urgent). Statuses ordered > scheduled > examined > study-attached ("Attach local study", image or PDF of at most 2 MB) > draft-report > reviewed > published, and "Correct report" back to draft.
+- The sample's rule "Sign the encounter before issuing clinical orders" (`clinical/sample/store.ts:296-299`).
+- "New radiology request" on the visit's orders, demo facilities only (`clinical/consult/orders/index.tsx:157-161`).
+- Navigation `frame/pages.ts:96` and `clinical/pages.ts:41` (status `sample`); the design's grants (`frame/sampleAccess.ts:39,45,66`: doctors view and create; Medical Director approve and publish; Radiology Reporter view, edit, approve and publish); the role "Radiology Reporter" (`frame/roleView.tsx:6`, `frame/admin/AdminSamples.tsx:231,238`); home tiles (`home/RoleDashboard.tsx:22,35,48,69`); modality suggestions X-ray, Ultrasound and CT (`frame/sample/store.ts:40`); the price-list row "Chest X-ray" (`departments/sample/admin.ts:20`); fictional seed rows (`clinical/sample/seed.ts:179-184,208-223`).
+- Backend: no imaging table, route or role exists. Reused: encounters (0004), the documents store and virus scan (0004, 0105), the ORD-7 list pattern (0149, 0152), the lab work-item, verify and release pattern (0018-0021), MY-1 (0143), work-item patient cards (0124), own-facility work without a personal grant (0133), the role rules (0136, 0139, 0147, 0150) and the sealed QA tenant (0123, 0151). The department code `radiology` exists (section 43.6).
+
+### What staff get
+
+- **Doctors and clinicians: "New imaging request"** on a visit's Orders (the Connected orders list). They pick a procedure from the Health ID imaging list (modality and body part, for example "X-ray chest PA" or "Ultrasound abdomen"), or type its name when it is not on the list ("by name only", as ORD-7 does for lab tests), and give the clinical indication and the urgency (routine or urgent). For women of child-bearing age the screen asks about pregnancy before an X-ray or CT. The visit must be this facility's, in progress, on hold or completed (signed); a cancelled visit, one entered in error, or one imported from paper records is refused. The request goes to this facility's radiology work list at once: there is no choice of destination (owner decision Q224 A, 25 Nov 2026).
+- **Radiographers: the radiology work list.** Three tabs: "To accept", "In progress" and "Done". A radiographer accepts a request (which gives it an exam number such as `RAD-2026-000123`), may schedule it or check the patient in, then records the examination done, or "Could not complete" with a reason. They attach the images or the report as JPEG, PNG or PDF files (a photo of a film, key images exported from the machine, or a scanned outside report) through the existing documents store and its virus scan. An attachment put on the wrong examination is marked "entered in error" with a reason; it is never deleted.
+- **Radiologists: the report.** The radiologist writes the findings and the impression and signs the report. Signing releases it: there is one step, and a second person is not needed (owner decision Q222 A, 25 Nov 2026). Another radiologist may add an optional second review ("agree" or "disagree", with a note); it never holds the report back. A signed report is corrected as a new version with a reason; every signed version is kept and shown, as lab results are. Radiologists can also do everything a radiographer does, because many perform ultrasound themselves.
+- **The ordering doctor** sees the request's progress (waiting for radiology, accepted, scheduled, checked in, examined, reported, could not complete) on the visit's Connected orders and in "Ordered by me" (MY-1, new filter "Imaging"). Once signed, the report and the files released with it show there, with "Corrected" and the reason when a later version replaced it.
+- **Prints.** A request slip (for the patient to carry to the radiology desk, or to an outside centre: owner decision Q224 A, 25 Nov 2026) and the signed report, both with the facility header from the facility profile (section 43.4).
+- **Built but switched off:** the whole department at real facilities (until the clinical lead's checklist and the owner's go-live), and the patient's view of signed reports (until the clinical lead decides when patients see imaging reports, owner decision Q223 A, 25 Nov 2026). The sealed QA facility and the four sealed demo facilities have the department on, with fictional patients only.
+
+Not in this release (survey's MVP limits, owner decisions Q221 A and Q224 A, 25 Nov 2026): DICOM storage and a viewer (PACS), modality worklist interfaces, sending requests to outside diagnostic centres through order routes (0086's kinds stay `lab_request` and `prescription`), teleradiology or outside reporters, payment before the scan and automatic bill lines (the cashier adds an imaging charge by hand, BILL-1), an urgent-finding alert to anyone (the report carries an "urgent finding" mark only), imaging in the patient's record chat, and offline use.
+
+### Decisions this section is built on
+
+| Decision | Built as |
+|---|---|
+| Q220 Where imaging orders live (survey R1) | **A:** their own order kind, `ehr.imaging_requests`, and their own work items, `radiology.work_items`, on the lab pattern (accept the exact request version, then work, then a report with versions, sign-off and release). Not lab tests: no accession, specimen or numeric result. (owner decision Q220 A, 25 Nov 2026) |
+| Q221 Images in the first release (R2) | **A:** report text plus JPEG, PNG or PDF files through the existing documents store and virus scan (0105). No DICOM. (owner decision Q221 A, 25 Nov 2026) |
+| Q222 Who signs (R3) | **A:** one radiologist drafts and signs, which releases the report; an optional second review by another radiologist never blocks it. (owner decision Q222 A, 25 Nov 2026) |
+| Q155 Roles (R4) | **A:** two new roles, `radiographer` (licence RRBN, the Radiographers Registration Board of Nigeria) and `radiologist` (licence MDCN), each given through SX-4 like any role, with the role-matrix fixture, a sealed QA test login and the department's areas. The design's "Radiology Reporter" is `radiologist`; no Medical Director or Consultant role is added. (owner decision Q155 A, 25 Nov 2026) |
+| Q223 When the patient sees a report (R5) | **A:** the same rule as lab results (E15). Built and switched off: the patient's read of signed reports (route 26) answers nothing until a signed migration turns the switch `patient_reports` on, after the clinical lead confirms A or chooses B (held until the ordering doctor marks it seen) for imaging. (owner decision Q223 A, 25 Nov 2026) |
+| Q224 Outside diagnostic centres (R6) | **A:** in-house only, plus the printed request slip. Order routes are unchanged. (owner decision Q224 A, 25 Nov 2026) |
+| Q225 Procedure codes (R7) | **A:** a Health ID imaging list (fixed ids `IMG-nnnn`, code system `HID-IMG`) keyed to LOINC Radiology Playbook codes where the reviewer has matched one from the LOINC table, signed by the clinical lead before it is loaded (Q124 A), with "by name only" as the fallback. (owner decision Q225 A, 25 Nov 2026) |
+| Q156 What new roles may open | **A, switched off for these roles:** radiographers and radiologists work from the radiology work list only, as lab staff do (0131's rule), and need no chart. 0185 does not give them `identity.patient.open-own-facility`; a two-row signed file adds it once Rahman and the DPO agree. (owner decision Q156 A, 25 Nov 2026) |
+| Q149 Department switch | **A:** the service flag below now; the facility's own `radiology` switch in facility setup (gap map F2) must also be on once that ships. (owner decision Q149 A, 25 Nov 2026) |
+| Q124 A, Q157 A | Every clinical list and template here is draft until the clinical lead (with a radiology adviser) signs it. (owner decisions of 19 and 25 Nov 2026) |
+| Q194 Critical results on wards | **A, later:** urgent imaging findings reach the ward team or on-call doctor when the urgent-finding notice is built with the staff notices (ORD-11 and Q151). Not in this release. (owner decision Q194 A, 25 Nov 2026) |
+| Q160 Go-live gate | **A:** hazard log, a test with real clinicians at Demo Hospital, a short staff guide, a written paper back-up procedure, and the production switch applied with the owner's AWS access. (owner decision Q160 A, 25 Nov 2026) |
+
+Built at the recommended option, **not yet answered by the owner**:
+
+| Question | Built with | The other option |
+|---|---|---|
+| Q-RAD-8 Which service serves radiology | **A:** ehr-api (new module `src/ehr/radiology/`), with the department's tables in a new database schema `radiology` built on lab's work-item, verify and release pattern. ehr-api already holds the documents store, its S3 bucket and the scan, the encounters and MY-1, and the gateway already sends `/api/v1/ehr/` there, so nothing changes in the gateway (no nginx change and no OpenVEX re-bind). Ola reviews the work-item and report design as the lab pattern's owner | B: lab-api, which would need its own S3 access or an internal call to ehr-api for every file, and a gateway route |
+| Q-RAD-9 Where attached files live | **A:** in `ehr.documents`, written only by the radiology functions, with **no visit (`encounter_id` null)**. So they are never in the visit's Documents list, the record chat (staff or patient: both read only documents of completed visits) or the patient's view before release; they are reached only through the radiology routes and the released report | B: tie them to the request's visit, which would show unreported images and scanned outside reports to the patient and in the record chat as soon as the visit is completed |
+| Q-RAD-10 File limits | **A:** JPEG, PNG or PDF; up to 20 MB each; up to 30 files per examination; retention class `clinical-10y` until the DPO sets imaging retention | B: the documents store's 50 MB and TIFF; or the design's 2 MB, too small for an exported image or a scanned report |
+| Q-RAD-11 The pregnancy question | **A:** asked, not required. The screen asks female patients aged 12 to 55 (Lagos date) before a procedure the list marks as using ionising radiation (X-ray, CT, fluoroscopy, mammography; every by-name X-ray, CT, fluoroscopy and mammography too); answers `not_pregnant`, `possibly_pregnant`, `pregnant`, or none. The radiographer sees it on the work list. Whether it is required, and the age band, are the clinical lead's | B: required by the server for that group now |
+| Q-RAD-12 Who examines and attaches | **A:** radiographers and radiologists | B: radiographers only |
+| Q-RAD-13 Urgent findings | **A:** the radiologist can mark a report "Urgent finding". It shows in red on the report, the Connected orders and "Ordered by me", and the screen tells the radiologist to phone the requesting doctor. Nothing is sent (no push, inbox, email or SMS) | B: no mark until the alert is built |
+| Q-RAD-14 Imaging in "Ordered by me" (MY-1) | **A:** a new `kind=imaging`, served by its own function with MY-1's rules; `kind=all` keeps lab requests and prescriptions as today, so 0143 is not changed. The screen shows Imaging as its own filter | B: replace 0143's list function so `all` includes imaging |
+| Q-RAD-15 QA logins | **A:** one fictional radiographer and one fictional radiologist at QA Hospital, sealed QA only (0151 pattern), at `radiographer@healthidentitydirectory.com` and `radiologist@healthidentitydirectory.com`. The owner confirms both mailboxes receive mail before signing; if not, that step is left out of the signed file | B: no QA logins; test with SX-4 role changes on existing QA staff |
+| Q-RAD-16 Files added after signing | **A:** a file can be added any time after the examination. A signed version releases exactly the files present when it was signed; a later file reaches the ordering doctor with the next signed version (a correction). A file marked entered in error disappears from every view at once, released or not, and the ordering doctor sees "A file was removed (entered in error)" | B: no files after the first signature |
+
+### How a request moves
+
+| Step | Who | Request `status` | Work item `status` | What the ordering doctor sees (`progress.stage`) |
+|---|---|---|---|---|
+| Request made | doctor, clinician | `active` | none | `waiting_for_radiology` |
+| Accepted (exam number given) | radiographer, radiologist | `active` | `accepted` | `accepted` |
+| Scheduled (optional, can change) | radiographer, radiologist | `active` | `scheduled` | `scheduled`, with the time |
+| Checked in (optional) | radiographer, radiologist | `active` | `checked_in` | `checked_in` |
+| Examination recorded | radiographer, radiologist | `active` | `examined` | `examined` (also while the report is written; a draft is never shown) |
+| Could not complete | radiographer, radiologist | `not_done` | `not_completed` | `not_completed`, with the reason |
+| Report signed (released) | radiologist | `completed` | `reported` | `reported`, with the report |
+| Correction started, then signed | radiologist | `completed` | `reported` | the signed version, with `correctionPending: true` until the new one is signed |
+| Cancelled by the requester | doctor, clinician | `cancelled` | `cancelled` (if accepted) | `cancelled`, with the reason |
+
+- Cancel is allowed until the examination is recorded. After that the request cannot be cancelled (`IMAGING_CANCEL_NOT_ALLOWED`); radiology finishes it or records "Could not complete".
+- "Could not complete" reasons (draft list for the clinical lead): `did_not_attend`, `patient_declined`, `patient_unable`, `equipment_unavailable`, `pregnancy`, `not_justified` (the radiographer or radiologist judged the exposure not justified; the screen says "Discuss with the requesting doctor"), `other` (a note of 8-500 characters is then required; otherwise the note is optional).
+- A request is accepted at its exact version (the lab pattern, 0018): a request changed or cancelled meanwhile is refused with a version conflict.
+
+### Routes
+
+All in ehr-api under `/api/v1`. The shapes, rules and errors are in `docs/INTERFACE_CONTRACT.md`, section "RAD-1". Staff routes need `X-Facility-Id` and act on that facility only; patient-data routes need `X-Purpose-Of-Use: direct-care` (reads of the chart's requests also take `emergency` under an active break-glass grant, as lab requests do). Every write needs an `Idempotency-Key`; a replay with the same body answers the first answer with `"replayed": true`, another body 409 `IDEMPOTENCY_KEY_REUSED`. Writes on an existing row take its `expectedRowVersion` (412 on a mismatch). No Health ID or NIN in any path, query or body: patients, requests, work items and files by UUID.
+
+| No. | Method and path | Codes needed |
+|---|---|---|
+| 1 | `GET /ehr/catalog/imaging-procedures?q=&limit=&modality=` | `ehr.imaging-request.write` or `radiology.work-item.read` |
+| 2 | `GET /ehr/catalog/status` (gains `imagingProcedures`) | facility membership (unchanged) |
+| 3 | `POST /ehr/patients/:patientId/encounters/:encounterId/imaging-requests` | `ehr.imaging-request.write`, and write access to the patient |
+| 4 | `GET /ehr/patients/:patientId/encounters/:encounterId/imaging-requests` | `ehr.imaging-request.read`, and read access |
+| 5 | `GET /ehr/patients/:patientId/encounters/:encounterId/imaging-requests/:requestId` | `ehr.imaging-request.read`, and read access |
+| 6 | `POST /ehr/patients/:patientId/encounters/:encounterId/imaging-requests/:requestId/cancel` | `ehr.imaging-request.write`, and write access |
+| 7 | `GET /ehr/patients/:patientId/encounters/:encounterId/imaging-requests/:requestId/attachments/:attachmentId/download` | `ehr.imaging-request.read`, and read access |
+| 8 | `GET /ehr/my-orders?kind=imaging` (MY-1) | `ehr.imaging-request.read` |
+| 9 | `GET /ehr/radiology/work-list?view=&modality=&urgency=&day=&cursor=&limit=` | `radiology.work-item.read` |
+| 10 | `GET /ehr/radiology/requests/:requestId` | `radiology.work-item.read` |
+| 11 | `POST /ehr/radiology/requests/:requestId/accept` | `radiology.work-item.manage` |
+| 12 | `GET /ehr/radiology/work-items/:workItemId` | `radiology.work-item.read` |
+| 13 | `POST /ehr/radiology/work-items/:workItemId/schedule` | `radiology.work-item.manage` |
+| 14 | `POST /ehr/radiology/work-items/:workItemId/check-in` | `radiology.work-item.manage` |
+| 15 | `POST /ehr/radiology/work-items/:workItemId/examination` | `radiology.work-item.manage` |
+| 16 | `POST /ehr/radiology/work-items/:workItemId/not-completed` | `radiology.work-item.manage` |
+| 17 | `POST /ehr/radiology/work-items/:workItemId/attachments/upload-intents` | `radiology.attachment.write` |
+| 18 | `POST /ehr/radiology/work-items/:workItemId/attachments/:attachmentId/complete` | `radiology.attachment.write` |
+| 19 | `POST /ehr/radiology/work-items/:workItemId/attachments/:attachmentId/entered-in-error` | `radiology.attachment.write` |
+| 20 | `GET /ehr/radiology/work-items/:workItemId/attachments/:attachmentId/download` | `radiology.work-item.read` |
+| 21 | `POST /ehr/radiology/work-items/:workItemId/report/draft` | `radiology.report.write` |
+| 22 | `POST /ehr/radiology/work-items/:workItemId/report/sign` | `radiology.report.sign` |
+| 23 | `POST /ehr/radiology/work-items/:workItemId/report/correction` | `radiology.report.write` |
+| 24 | `POST /ehr/radiology/work-items/:workItemId/report/draft/discard` | `radiology.report.write` |
+| 25 | `POST /ehr/radiology/work-items/:workItemId/report/reviews` | `radiology.report.sign` |
+| 26 | `GET /ehr/me/imaging-reports?cursor=` (patient session; switched off) | the patient's own session |
+
+Every write is a POST (ehr-api's browser API allows GET, POST and PATCH; no PUT or DELETE), as ED-1's writes are. Radiology staff need no consent grant for the patient: the radiology functions allow a member who holds the radiology codes at the work's facility, for this facility's own imaging work only (0133's rule for lab and pharmacy staff), and never open the chart.
+
+**The switch.** One service flag, `RADIOLOGY_ENABLED` in ehr-api, `false` by default and in production until the owner's go-live. While it is off, routes 1, 3-25 and the `imaging` kind of route 8 answer 503 `RADIOLOGY_NOT_AVAILABLE` at real facilities, and the catalog status says `imagingProcedures.available: false`. The sealed QA facility and the four sealed demo facilities are served while it is off, so the department can be tested end to end with fictional patients (sealed QA unknown patients included, owner decision Q163 A, 25 Nov 2026). A database without 0181-0185 also answers 503 `RADIOLOGY_NOT_AVAILABLE`. Route 26 has its own database switch (below) and answers 404 `IMAGING_REPORTS_NOT_AVAILABLE` until it is on, whatever the flag. Without 0185 no role holds a radiology code, so every function refuses: the database half of "built but switched off".
+
+### Roles and access codes
+
+Seven new codes (0185):
+
+| Code | What it allows |
+|---|---|
+| `ehr.imaging-request.read` | read a patient's imaging requests, their progress and released reports (with read access to the patient); "Ordered by me" imaging |
+| `ehr.imaging-request.write` | request and cancel imaging (with write access to the patient) |
+| `radiology.work-item.read` | the radiology work list, requests waiting there, work items and their files, and the imaging list search |
+| `radiology.work-item.manage` | accept, schedule, check in, record the examination or "could not complete" |
+| `radiology.attachment.write` | add files and mark them entered in error |
+| `radiology.report.write` | write and save the report draft, start or discard a correction |
+| `radiology.report.sign` | sign (release) a report version; record a second review of another radiologist's version |
+
+| Backend role | `ehr.imaging-request.read` | `ehr.imaging-request.write` | `radiology.work-item.read` | `radiology.work-item.manage` | `radiology.attachment.write` | `radiology.report.write` | `radiology.report.sign` | Design role it stands for |
+|---|---|---|---|---|---|---|---|---|
+| `doctor` | yes | yes | no | no | no | no | no | Doctor, Consultant, Medical Director (view, create) |
+| `clinician` | yes | yes | no | no | no | no | no | Doctor's clinical grant |
+| `nurse` | yes | no | no | no | no | no | no | Nurse (the design gives none; nurses read lab results today) |
+| `radiographer` (new) | no | no | yes | yes | yes | no | no | none in the design (the classic design's `radiographer`) |
+| `radiologist` (new) | no | no | yes | yes | yes | yes | yes | Radiology Reporter (view, edit, approve, publish) |
+| `receptionist`, `lab`, `pharmacist`, `admin`, `org_admin`, `cashier`, `billing_officer`, others | no | no | no | no | no | no | no | — |
+
+- The new roles get only these codes: no `ehr.*` chart code, no `identity.patient.read`, no consent codes, and not `identity.patient.open-own-facility` (Q156, above). They see a patient only on their own facility's radiology work.
+- Licences: `radiographer` needs an RRBN number, `radiologist` an MDCN number, checked as other licences are (format only, not against the board). `identity.staff_invitable_roles` offers both to hospitals and clinics (and `other` organisations with the EHR product), not to stand-alone laboratories or pharmacies.
+- SX-1 areas (`services/identity-api/src/auth/facility-modules.ts`): `imagingOrders` "Imaging requests" (show `ehr.imaging-request.read`, act `ehr.imaging-request.write`), `radiology` "Radiology work list" (show `radiology.work-item.read`, act `radiology.work-item.manage` and `radiology.attachment.write`), `radiologyReports` "Radiology reports" (show `radiology.work-item.read`, act `radiology.report.write` and `radiology.report.sign`). Radiographers: radiology full, reports view. Radiologists: both full. Doctors and clinicians: imaging requests full; nurses view.
+- `services/identity-api/test/role-matrix.json` gains both roles and every changed row, and `staff-licence.ts` gains the roles, their labels ("Radiographer", "Radiologist") and the licence body RRBN, in the same pull request as 0185.
+
+### Database design
+
+Five migrations, **0181-0185, provisional** (given at merge, after the files booked before them). Each needs the owner's verbatim signature, Rahman's final database check and an independent agent review. Each is written on staging-novu-ci-20261005 at 0cfddcc9 (0001-0153 live) and follows the wave 1 files after their reviews:
+
+- the whole file is one `do` block, so nothing applies if any part raises;
+- **locks first, NOWAIT**, every table the file changes or whose rows its checks or the functions it calls read (the sealed member tables `identity.sealed_demo_members` and `identity.sealed_qa_members` included), tried 50 times 100 ms apart; with one try and no sleep when this transaction already holds an earlier file's blocking locks. A busy refusal raises 55P03 beginning "0181: " (and so on) and ending "run the release again at a quieter time"; nothing is applied;
+- **preconditions** are catalog reads that raise 55000 and apply nothing. Markers are checked only for the earlier files whose objects the file uses. Other lanes' additions are accepted: a role holding extra codes, a CHECK carrying extra values, a table carrying another lane's extra trigger (the subset rule of #258, 25 Nov 2026), never an exact md5 of a whole list. A function this file rewrites is checked exactly, or against the bodies other sprint lanes are known to leave (named in each file);
+- **already applied**: a second run on a database where every object is exactly as the file leaves it raises "0181: already applied" and changes nothing; any half state raises "0181: the schema is not in the reviewed state";
+- **post-checks** in 0148's and 0152's form: every new table, column, constraint and index; owners (one owner for everything the file makes); every new function's md5, `SECURITY DEFINER`, its fixed `search_path = pg_catalog, pg_temp` and its ACL; every new trigger's `tgtype`, `tgqual`, `tgattr`, `tgnargs`, `tgfoid` and `tgenabled`; RLS enabled and forced, and the exact policies; grants exactly as stated;
+- **security definer rules** from the wave 1 review: every function names every object with its schema; no temporary table and no name `pg_temp` could resolve; a fixed `search_path`; no EXECUTE for `PUBLIC` unless stated;
+- **no sequences** (uuid keys; exam numbers from a counter row taken `FOR UPDATE`), so no runtime grant on any sequence;
+- **append-only history**: every history table refuses UPDATE and DELETE (row trigger) and TRUNCATE (statement trigger), with `platform.reject_mutation()`;
+- `services/ehr-api/database/runtime-grants.sql` is staging's file followed by this section's block; the declaration in `config/production-schema-compatibility.json` is an unsigned draft until the owner signs; a rollback note per file goes in `docs/rollback/` (not in the ledger).
+
+Every new table with patient or facility data: `facility_id` on every row; row-level security enabled **and forced**, with one owner policy, `facility_owner_rows` (`current_user` is the table's owner and the row's facility is the session's; BILL-1's form), plus, on the tables route 26 reads, one owner read policy for the patient's own session (`ehr.patient_self_context`); no privilege for any runtime role; only the functions read or write them, as their owner. The imaging list has no patient or facility data: like 0149's and 0152's lists it has no row-level security (stated in 0181's header) and no runtime privilege.
+
+**0181 `catalog_imaging_procedures`: the Health ID imaging list (ORD-7's pattern).** Needs 0149 and 0152.
+- `ehr.catalog_versions`: the kind CHECK gains `'imaging_procedure'`. The precondition requires `medicine`, `lab_test` and `diagnosis` and keeps every value it finds (another lane's list kind too).
+- `ehr.catalog_imaging_procedures`, one row per list row per version: the fixed id (`IMG-nnnn`, the code under `HID-IMG`), the name (1-200, for example "X-ray chest PA"), other names (0-500, "; " between names), `modality` (`xray`, `ultrasound`, `ct`, `mri`, `fluoroscopy`, `mammography`, `other`), `body_region` (`head`, `neck`, `chest`, `abdomen`, `pelvis`, `spine`, `upper_limb`, `lower_limb`, `breast`, `whole_body`, `other`), `loinc_code` (null until the reviewer matches it from the LOINC table; never typed from memory), `ionising`, `contrast`, `preparation` for the slip (0-300, for example "Come with a full bladder"), the source, `withdrawn`, and a generated tsvector over the name and other names, split as 0149's are, with a GIN index.
+- Append-only, as 0149's lists: a correction or withdrawal is a new version; an id is never dropped (a removed procedure stays with `withdrawn: true`). A BEFORE INSERT trigger refuses a row for a sealed version (`CATALOG_VERSION_SEALED`) or a version of another kind, an id whose name, modality or body region differs from an earlier version's, and a LOINC code another id held (`CATALOG_ID_CHANGED`).
+- `ehr.search_catalog_imaging_procedures(q, limit, modality)` (SECURITY DEFINER, STABLE): 0149's query rules over the active version's rows that are not withdrawn; `q` 2-100, limit 1-25, an optional modality from the list.
+- `ehr.catalog_imaging_status()`: whether an active version exists, its label, approval date, row count, attribution (LOINC's notice when a row carries a LOINC code) and the seed's sha256. It is a new function so 0152's `ehr.catalog_status()` is not replaced.
+- EXECUTE on both for `hid_ehr_runtime` and `hid_schema_test_runtime` only.
+- The draft list: `docs/codes/drafts/imaging-procedures-<version>.json` (format `hid-catalog-seed/1`, kind `imaging_procedure`), about 60 common procedures across the seven modalities, marked draft. ORD-7's governed loader (`services/ehr-api/scripts/load-catalog.mjs`) learns the kind; it loads a seed only when `docs/codes/catalog-approvals.json` names its sha256, which happens only after the clinical lead signs. Until then the list is empty everywhere and requests are made by name only. No migration ever loads data.
+- Locks: ACCESS EXCLUSIVE on `ehr.catalog_versions` (the CHECK swap; a handful of rows, milliseconds; every catalogue search waits that long). Nothing else existing is locked beyond the catalogs.
+
+**0182 `imaging_requests`: the request on the visit.** Needs 0004, 0098 and 0123 (the demo and QA seals), 0131 and 0145, and reads 0181's list.
+- `ehr.imaging_requests`: facility, organisation, patient, visit (foreign key `(encounter_id, patient_id, facility_id)` to `ehr.encounters`); the procedure (`procedure_code_system` `HID-IMG` or `LOINC` and `procedure_code`, both or neither; `procedure_display` 1-200; `modality`; `body_region`, null by name only; `catalog_version_id`, the list version it was picked from); `indication` (1-1000); `urgency` (`routine`, `urgent`); `pregnancy` (null, `not_pregnant`, `possibly_pregnant`, `pregnant`); `status` (`active`, `completed`, `not_done`, `cancelled`); the cancel (reason 8-500, when, by whom; present exactly when cancelled); `created_by`, `created_by_membership_id`, `created_at`, `updated_at`, `row_version`. Indexes for the visit's list, this facility's active requests (urgency, age), MY-1 (facility, member, created_at desc, id desc) and the patient.
+- `ehr.imaging_request_events` (append-only): `created`, `cancelled`, `accepted`, `scheduled`, `checked_in`, `examined`, `not_completed`, `reported`, `corrected` (all but the first two written by 0183's and 0184's functions), the actor, the reason for a cancel, and the `Idempotency-Key` with the request's SHA-256 (unique per membership and key).
+- SECURITY DEFINER functions, EXECUTE for `hid_ehr_runtime` only: `ehr.imaging_request_create`, `ehr.imaging_requests_for_encounter`, `ehr.imaging_request_read`, `ehr.imaging_request_cancel`, `ehr.list_my_imaging_requests` (MY-1's reach, `hiddenCount`, bounded pages and cursor rules). Helpers no role may execute: the card, the caller check and the audit writer.
+- Each checks: an active, unheld membership at the session facility; the code; the purpose; the patient through `ehr.context_allows(patient, facility, 'write_records' | 'read_records')` under the session's context (a consent grant, 0131's own-facility opening included; break-glass reads only); the visit rule above; the facility's seal (a sealed demo or QA facility orders only for its own sealed patients, as 0135). A picked code must be in the active list version and not withdrawn (`IMAGING_PROCEDURE_INVALID` otherwise); by name only needs a modality.
+- Locks: SHARE ROW EXCLUSIVE on `identity.patients`, `identity.facilities`, `identity.organizations`, `identity.staff_facility_memberships`, `ehr.encounters` and `ehr.catalog_versions` (foreign keys of the new tables); ACCESS SHARE on `ehr.catalog_imaging_procedures`, `identity.unknown_patients`, `identity.consent_grants`, the consent directive tables, `identity.sealed_demo_members`, `identity.sealed_qa_members`, `auth.permissions`, `auth.role_permissions` and `auth.account_roles` (read by the functions); ROW EXCLUSIVE on `audit.events`. Measured with `pg_locks` before commit and pinned by the suite.
+
+**0183 `radiology_work_items_and_attachments`: the work list, the examination and the files.** Needs 0105, 0123 (seal) and 0182.
+- Schema `radiology`, owned by the applier; USAGE for `hid_ehr_runtime` only, for its functions.
+- `radiology.number_counters` (facility, year, next value; taken `FOR UPDATE`, so exam numbers have no gaps).
+- `radiology.work_items`: facility, patient, the request (unique; foreign key to `ehr.imaging_requests (id, patient_id, facility_id)`) and the request version accepted; `exam_number` (`RAD-YYYY-nnnnnn`, unique per facility); `status` (`accepted`, `scheduled`, `checked_in`, `examined`, `reported`, `not_completed`, `cancelled`); `scheduled_for`; `checked_in_at`; the examination (`examined_at`, `examined_by_membership_id`, `examination_details` 0-2000); "could not complete" (`not_completed_reason` from the list above, `not_completed_note`); who accepted and when; `row_version`. CHECKs tie each status to its fields.
+- `radiology.work_item_events` (append-only): every kind of both files from the start (`accepted`, `scheduled`, `checked_in`, `examined`, `not_completed`, `cancelled`, `attachment_added`, `attachment_completed`, `attachment_entered_in_error`, `draft_started`, `draft_discarded`, `signed`, `correction_started`, `reviewed`), the actor, the reason where one is required, never report or note text, and the `Idempotency-Key` with the request's SHA-256 (unique per membership and key).
+- `radiology.attachments`: the work item, facility, patient, the document (unique; foreign key to `ehr.documents (id, patient_id, facility_id)`), `kind` (`image`, `report_scan`, `other`), who added it and when, `status` (`uploading`, `uploaded`, `entered_in_error`), and the entered-in-error reason, time and member. At most 30 per work item (not counting those entered in error).
+- **The files in the documents store (Q-RAD-9).** The radiographer holds no consent grant, and `ehr.documents`, `ehr.record_versions` (written by `ehr.documents`' versioning trigger) and `ehr.document_scan_events` (read through `ehr.documents_effective`) force row-level security on consent. So the radiology functions write and read those rows as their owner under a transaction-local marker (0130's and 0143's marker pattern):
+  - `radiology.attachment_marks` (owner only, forced row-level security, one owner policy): a row names this transaction, the document, its patient and facility. A radiology function writes it just before it touches the document and deletes it before it returns; a row of another transaction never counts.
+  - `radiology.attachment_mark_open(document, patient, facility)` (STABLE; EXECUTE for `PUBLIC`, because PostgreSQL checks EXECUTE on every function a policy calls; it answers only whether this transaction holds that marker).
+  - New permissive policies, each testing first that `current_user` is the owner (a CASE, so a runtime role never reaches the marker) and then the marker for that row: on `ehr.documents` for INSERT, SELECT and UPDATE; on `ehr.record_versions` for INSERT (with 0005's actor, membership and correlation tests too); on `ehr.document_scan_events` for SELECT. Named after every existing policy of those tables (0143's naming rule), so the consent policies are asked first and are unchanged. No other policy, grant or FORCE setting changes.
+  - The document row: `encounter_id` null, `classification` `phi`, `retention_class` `clinical-10y`, the declared type, size and SHA-256, `created_by` the radiographer. ehr-api makes the upload URL and reads the stored object's version, size and SHA-256 with the documents service's own storage code; the scan (0105) then works on it as on any document, unchanged.
+- **Cancel and the work item.** A BEFORE UPDATE OF `status` trigger on `ehr.imaging_requests` (`imaging_requests_radiology_guard`) refuses a cancel once the examination is recorded (55000 `IMAGING_CANCEL_NOT_ALLOWED`) and otherwise cancels the work item in the same transaction, with its event. It does nothing for the other status changes, which only the radiology functions make.
+- SECURITY DEFINER functions, EXECUTE for `hid_ehr_runtime` only: `radiology.work_list`, `radiology.request_read`, `radiology.accept`, `radiology.work_item_read`, `radiology.schedule`, `radiology.check_in`, `radiology.record_examination`, `radiology.record_not_completed`, `radiology.attachment_intent`, `radiology.attachment_complete`, `radiology.attachment_entered_in_error`, `radiology.attachment_download_target`, and `radiology.progress_for_requests(request ids)` (the `progress` of the request cards, which ehr-api adds to routes 4, 5 and 8 in the same transaction). Each checks an active, unheld membership at the session facility, the code, the purpose (direct care), that the work is this facility's own, the patient is active and no deny directive covers this member (0133's own-work test), and the seal. Every write locks the work item `FOR UPDATE`, then the request, in that order, and checks the work item's `row_version`.
+- Locks: SHARE ROW EXCLUSIVE on `identity.patients`, `identity.facilities`, `identity.staff_facility_memberships`, `ehr.imaging_requests` (foreign key and the new trigger: SHARE ROW EXCLUSIVE is what CREATE TRIGGER takes); ACCESS EXCLUSIVE on `ehr.documents`, `ehr.record_versions` and `ehr.document_scan_events` (CREATE POLICY; no scan, held for milliseconds, but every clinical write in that moment waits, so the file is run at a quiet time); ACCESS SHARE on the consent and directive tables, `identity.sealed_demo_members`, `identity.sealed_qa_members`, `identity.unknown_patients`, `auth.permissions`, `auth.role_permissions` and `auth.account_roles`; ROW EXCLUSIVE on `audit.events` and `ehr.imaging_request_events`.
+
+**0184 `radiology_reports_and_signoff`: the report, its versions, sign-off and release.** Needs 0183.
+- `radiology.reports`, one per work item: facility, patient, `current_version` (0 until the first signature), `status` (`drafting`, `signed`, `correcting`), `row_version`.
+- `radiology.report_drafts`: the open draft (at most one per report, a unique partial index): `kind` (`original`, `correction`), `base_version`, `findings` (0-8000), `impression` (0-2000), `urgent_finding`, `correction_reason` (8-500, exactly for a correction), the author, `draft_version`, saved and closed times, and how it closed (`signed`, `discarded`). A draft is working text, not the record: it is never shown to the ordering doctor or to radiographers, and its text is never in an event or audit row.
+- `radiology.report_revisions` (append-only): `version` (1, 2, …), `kind` (`original`, `correction`), `supersedes_version` (the version before, exactly for a correction), `findings` (1-8000), `impression` (1-2000), `urgent_finding`, `correction_reason`, the author and when.
+- `radiology.report_signoffs` (append-only), one per version: who signed and when, and the files released with it (the attachment ids present and not entered in error at signing). Signing is the release (owner decision Q222 A, 25 Nov 2026); there is no separate verify step, unlike lab's 0021.
+- `radiology.report_reviews` (append-only): the version, the reviewer (a different member from that version's signer: a trigger refuses the signer), `outcome` (`agree`, `disagree`), `note` (0-1000; 8 or more for `disagree`); one per reviewer and version. A disagreement marks the work item "Second review disagrees" on the work list until a later version is signed.
+- `radiology.switches`: one row per switch, `key` `patient_reports`, `enabled` false, `changed_by_migration`. Forced row-level security with an owner policy; no runtime privilege. A later signed migration turns it on after the clinical lead's decision.
+- SECURITY DEFINER functions, EXECUTE for `hid_ehr_runtime` only: `radiology.report_read` (radiology staff; the draft only to a member who holds `radiology.report.write`), `radiology.report_save_draft`, `radiology.report_sign` (the work item `examined` or `reported`; findings and impression not blank; writes the revision and the sign-off, sets the work item `reported`, the request `completed`, both events), `radiology.report_start_correction`, `radiology.report_discard_draft`, `radiology.report_review`; `ehr.imaging_released_reports(request ids)` (the ordering side: current signed version, earlier versions, `correctionPending`, released files with their scan status, removed files; the caller holds `ehr.imaging-request.read` and read access to each patient); `ehr.imaging_attachment_download_target(request, attachment)` (released, not entered in error, scanned clean); `ehr.my_imaging_reports(cursor)` (the patient's own session, signed current versions only, text only; refuses unless `patient_reports` is on).
+- Locks: SHARE ROW EXCLUSIVE on `radiology.work_items`, `identity.patients`, `identity.facilities`, `identity.staff_facility_memberships`; ACCESS SHARE on `radiology.attachments`, `radiology.attachment_marks`, `ehr.imaging_requests`, `ehr.documents`, `ehr.document_scan_events`, the consent and directive tables, the sealed member tables and the code tables; ROW EXCLUSIVE on `audit.events`, `radiology.work_item_events` and `ehr.imaging_request_events`.
+
+**0185 `radiology_roles_and_access_codes`: who uses radiology.** Kept apart so Rahman reviews who gets what apart from the tables. Needs 0123, 0136, 0139 and 0151.
+- `auth.permissions` gains the seven codes; `auth.roles` gains `radiographer` and `radiologist`; `auth.role_permissions` gains the 13 rows of the role table (doctor 2, clinician 2, nurse 1, radiographer 3, radiologist 5). Each role must still hold every code 0001-0153 gave it; codes other lanes add are accepted. One audit row per code, role and row added (`auth.permission.add`, `auth.role.add`, `auth.role-permission.add`, reason "RAD-1 Radiology (Release D, owner decisions Q155 A and Q220 A)").
+- The staff role machinery, so SX-4 and invitations accept the two roles: `identity.staff_invitable_roles` and the role-list functions BILL-1's 0162 names (`identity.staff_invitation_fields_valid`, `identity.attach_invited_member`, `identity.change_facility_staff_role`, `identity.add_facility_staff_role`, `identity.remove_facility_staff_role`, `identity.admin_add_facility_staff_role`, `identity.admin_remove_facility_staff_role`) get the two roles added to their role lists, `identity.staff_role_licence_body` maps `radiographer` to `RRBN` and `radiologist` to `MDCN`, and `identity.staff_invitations`' role check gains both. Each is checked before against staging's text, or that text with the roles other sprint lanes add (`cashier`, `billing_officer`, `midwife`, `dentist`) by the same rule, and refused otherwise; their roles are kept. Both new roles need a licence, so the "no licence" lists (the receptionist's) do not change.
+- A 0136-style count (numbers only, no stop): how many active memberships at real facilities gain each code. Every route stays switched off at real facilities until go-live.
+- Sealed QA step (Q-RAD-15, only where 0123 installed QA Hospital, exactly as 0151 and BILL-1's 0162 do): two fictional logins, `pending_reset`, no password, with fixed ids chosen not to collide with other lanes' (checked at integration). On every other database nothing is written for this step.
+- Not here: `identity.patient.open-own-facility` for the new roles (Q156, switched off).
+- Locks: SHARE ROW EXCLUSIVE on `auth.roles`, `auth.permissions`, `auth.role_permissions`; ACCESS EXCLUSIVE on `identity.staff_invitations` (its role check; a small table); the QA step's set as 0151's (ROW EXCLUSIVE on `identity.sealed_qa_members`, `auth.accounts`, `identity.staff`, `identity.staff_facility_memberships`, `auth.account_roles`; SHARE on `identity.organization_applications`; ROW SHARE on `identity.organizations`, `identity.facilities`, `identity.patients`, `identity.outreach_organisations`; ACCESS SHARE on `identity.sealed_demo_members`; 0123's install lock, tried and not waited for); ROW EXCLUSIVE on `audit.events`.
+
+Old images on this schema: nothing calls the new functions; the new policies on the documents tables never admit a runtime role; the guard trigger on `ehr.imaging_requests` runs only on that new table; the identity functions answer exactly as before for every existing role. New images on a database without these files answer 503 `RADIOLOGY_NOT_AVAILABLE`.
+
+### Audit
+
+Every route writes its rows in the request's transaction, refusals included (a refusal a function raises is recorded by ehr-api's request audit; a refusal a function answers is recorded by the function).
+
+- Requests: `ehr.imaging-request.create`, `.list` (the visit's), `.read`, `.cancel`, `.attachment-download`; `ehr.my-orders.list` with `kind: imaging` plus one `ehr.my-orders.list.shown` per patient shown (MY-1's names).
+- Radiology: `radiology.work-list.read` plus one `radiology.work-list.shown` per patient shown, `radiology.request.read`, `radiology.work-item.accept`, `.read`, `.schedule`, `.check-in`, `.examine`, `.not-completed`; `radiology.attachment.upload-intent`, `.complete`, `.entered-in-error`, `.download`; `radiology.report.draft-save`, `.sign`, `.correction-start`, `.draft-discard`, `.review`.
+- Patient (when switched on): `ehr.me.imaging-reports.read`.
+- Rows hold ids (patient, request, work item, report, version, attachment, document), status, outcome, kind, urgency, modality and counts. **No row ever holds a name, date of birth, Health ID, indication, pregnancy answer, examination details, findings, impression, reason or note text, file name, or search text.** The catalog search holds no patient and writes no audit row (ORD-7's rule).
+
+### Notifications
+
+None in this release. No inbox notice, push, email or SMS to the patient on a request or a report (the patient's view is switched off). No staff notice: there is no staff inbox yet (Q151 grows ORD-11's notices into one), and the urgent-finding alert, including Q194's ward team, comes with it. "Urgent finding" is a mark on the report only (Q-RAD-13); the radiologist phones the requesting doctor, as the paper back-up procedure says.
+
+### What patients see
+
+Nothing in this release, by default. Built and switched off: route 26, the patient's own signed reports (procedure, date, facility, findings, impression, "Corrected" with the reason, never a draft and never a file), behind the database switch `patient_reports` (seeded off) and the service flag. When the clinical lead confirms Q223 A (the lab results rule, E15) a signed migration turns the switch on, and imaging joins the patient's records where released lab results show. If the lead chooses B (held until the ordering doctor marks it seen), that is a later change: "mark seen" is not built here. Files are never shown to the patient until a patient download route exists (E15's documents rule). The patient's access history already shows every chart opening; radiology work opens no chart.
+
+### Website screens (Lekan; mapped to Akos's existing sample screens)
+
+| Akos sample (health `apps/patient-web/src/ehr-blue/`) | Live screen | Calls |
+|---|---|---|
+| `clinical/consult/orders/index.tsx:157-161` ("New radiology request", demo facilities only) | "New imaging request" beside New prescription and New lab request, for members with `ehr.imaging-request.write` where radiology is served. Connected orders lists the visit's imaging requests with their progress, and opens the released report | routes 1, 3, 4, 5, 6, 7 |
+| `clinical/sample/definitions.ts:136-151`, `frame/sample/catalog.ts:320-385` (Encounter, Modality, Indication, Urgency) | Request drawer: procedure (list search, or "Use '<typed text>' as written" with a modality), indication, urgency (Routine, Urgent), the pregnancy question when it applies (Q-RAD-11). The visit is the one open in the chart | routes 1, 2, 3 |
+| actions `schedule`, `examine`, `attach` | Radiology work list (To accept, In progress, Done), work item page: Accept, Schedule, Check in, Record examination, Could not complete, Add files (upload with progress, "Being checked for viruses" until clean), Mark entered in error | routes 9-20 |
+| actions `report`, `review`, `publish` | Report panel for radiologists: Findings, Impression, Urgent finding, Save draft, Sign and release (one step); Second review (agree or disagree) for another radiologist | routes 21, 22, 25 |
+| action `correct` | "Correct report" with a reason, then Sign; earlier versions listed as "Replaced" | routes 23, 24, 22 |
+| `frame/pages.ts:96`, `clinical/pages.ts:41` (sample) | "Radiology" in Diagnostics goes live with `radiology.work-item.read`; doctors keep their way in through the chart and "Ordered by me" | — |
+| `frame/sampleAccess.ts:39,45,66`, `frame/roleView.tsx:6`, `frame/admin/AdminSamples.tsx:231,238`, `onboarding/roleTemplates.ts` | Live grants from the role table. "Radiology Reporter" becomes Radiologist; Radiographer is added; both offered on the SX-4 staff page with their licence fields (RRBN, MDCN) | SX-4 |
+| `home/RoleDashboard.tsx:22,35,48,69` | Home tiles for radiographers and radiologists: counts to accept, in progress and awaiting a report | route 9 |
+| `frame/sample/store.ts:40` (X-ray, Ultrasound, CT) | The seven modalities, with their words: X-ray, Ultrasound, CT, MRI, Fluoroscopy, Mammography, Other | — |
+| `clinical/sample/seed.ts:179-184,208-223` | Removed from the live page; demo facilities show their sealed demo patients from the backend | — |
+| "Ordered by me" (MY-1) | An Imaging filter (`kind=imaging`) | route 8 |
+| No sample | Request slip print and report print, with the facility header (43.4), the exam number, and the Health ID's last 4 characters only | routes 5, 10, 12 |
+
+Rules for the screens: every date and time through `@hid/ui/display` in Lagos time whatever the device's zone; "NIN Verified" or "NIN Not Verified" wherever a patient card shows NIN status; never a Health ID in a URL (requests, work items and files by UUID); no "permission" wording on staff screens; an unknown patient shows "Unknown patient U-0007" and "Estimated age" (0145). "Urgent finding" in the critical tone, with "Phone the requesting doctor. Health ID does not send an alert yet." The `packages/contracts/src/registry.ts` entries go from `proposed` to `served` only when this ships. **Before this ships:** the sample stays at the demo facilities only, with its banner, and sends nothing.
+
+### Tests
+
+- **Database** (throwaway PostgreSQL 16 in Docker, image `hid-pg16-vector:local`, fictional patients only, migrations run by a NOSUPERUSER NOBYPASSRLS migrator), in `services/ehr-api/test/database/radiology.integration.sql` and `radiology-migrations.integration.sql`:
+  - each file's NOWAIT busy refusal (a lock held by another session) with nothing applied; "already applied" on a second run; a half state refused; the kind CHECK swap with another lane's extra kind kept; the role functions accepted with BILL-1's roles already added, and with a foreign change refused;
+  - post-checks pass; owners, `search_path`, ACLs and trigger fields as stated; no `PUBLIC` EXECUTE except the marker test; no runtime privilege on any new table;
+  - a request from each visit state (cancelled, entered in error and imported visits refused); a code not on the active list or withdrawn refused; by name only; another facility's visit refused; no write access refused;
+  - accept at the exact version (a cancelled or changed request refused); exam numbers without gaps under two sessions and across a year change; each status move and every refused move; "could not complete" with each reason; cancel before and after the examination (the guard);
+  - files: intent, complete, scan clean, download; another facility's work item; the 31st file refused; a type or size outside the rules; entered in error hidden from every view at once; the document row has no visit and is invisible to the visit's Documents list, the staff record chat query and the patient's own read; the marker never admits a runtime role, never outlives its transaction, and never admits another document;
+  - report: draft hidden from radiographers and the ordering doctor; sign releases exactly the files present; correction with reason, `correctionPending`, version history; discard; second review by the signer refused, by another radiologist accepted, disagreement shown on the work list;
+  - the ordering side (routes 4, 5, 7, 8) with consent, without consent, after the access ended (MY-1's `hiddenCount`); the patient route refused while the switch is off and answering signed versions only when a test turns it on;
+  - sealed demo and QA isolation; a member of another facility; a member on hold; every refusal with its audit row; no name, Health ID, indication, findings, impression, reason, note or file name in any audit row; history tables refuse UPDATE, DELETE and TRUNCATE.
+- **Release C's live verifiers:** `scripts/tuf-staging-migration-rehearsal.mjs` with `HID_REHEARSAL_LIVE_POINTS` set to the five files' final numbers; every live runtime verifier passes after each file. New verifier `services/ehr-api/scripts/verify-radiology-runtime.mjs` (QA doctor requests, QA radiographer accepts, examines and attaches, QA radiologist signs and corrects, the doctor reads the report), added to the rehearsal after the last file.
+- **Services:** ehr-api controller and service specs for every route (validation, idempotency, purpose, version conflicts, `q` refusals, the flag off answering `RADIOLOGY_NOT_AVAILABLE`, audit rows); identity-api `role-matrix.spec.ts`, `facility-modules.spec.ts`, `staff-licence` and staff invitation specs with the two roles.
+- **Expected on the sprint branch:** release tests 45, 53 and 99 (and similar ledger tests) fail with "missing migration prefix" because of the numbering gap before 0181. That is expected and is fixed at integration, not worked around.
+- **Website (Lekan):** request, work list, files, report, correction and print tests with the device zone set away from Lagos; no Health ID in any URL; no "permission" in staff text; the draft never shown to the ordering doctor.
+
+### Depends on
+
+- 0004 (encounters, documents), 0105 (scan), 0131 (own-facility opening, for the ordering doctor), 0132 and 0123 (seals), 0133 (own-work test), 0124 (patient card), 0145 (unknown records), 0143 (MY-1's rules), 0149 and 0152 (the list pattern and loader), 0136, 0139, 0147, 0150 and 0151 (roles, SX-4, the QA logins), SX-1 and SX-9 (areas, staff names), 43.4 (facility header).
+- BILL-1 (0162): only the shared role functions; 0185 applies with or without it.
+- ID-8 (merge), when built: a merge must move imaging requests, work items, reports and radiology files to the kept record.
+- Later: order route kind `imaging_request` and DICOM study references (phase 2, about two migrations); the urgent-finding notice with the staff notices (Q151, Q194); imaging prices linked from BILL-1's price list by `HID-IMG` code (Q174).
+
+### Clinical lead checklist (before real patients; signed by the clinical lead with a radiology adviser, Q157 A)
+
+- The imaging procedure list (`docs/codes/drafts/imaging-procedures-<version>.json`): names, modalities, body regions, which use ionising radiation or contrast, the preparation text, and each LOINC Radiology Playbook match.
+- The report template: findings and impression, and whether more headings are needed (technique, comparison).
+- The pregnancy question: whether it is required, the age band (built: asked, female 12-55, ionising procedures), and the answers.
+- The urgent-finding rule: what counts as urgent, who phones whom and how fast, until the alert exists (Q-RAD-13).
+- When patients see reports: A (the lab results rule, E15) or B (after the ordering doctor marks it seen) for imaging (Q223).
+- The "could not complete" reasons, including `not_justified` and what follows it.
+- Whether a report may be signed with no attached file (built: allowed, because films are often read on a light box).
+- That one radiologist signs and releases (Q222 A), and whether any examination needs a second review.
+
+### DPO items
+
+- Retention of images and reports (Q159): built as `clinical-10y` and never deleted; to be set before go-live.
+- File sizes: up to 20 MB per file and 30 per examination, larger than clinical notes (Q-RAD-10).
+- Radiology staff see the patient's name, sex, date of birth and last 4 Health ID characters on their own facility's work only, with no consent grant, as lab staff do (0133); every read is audited per patient.
+- The pregnancy answer is sensitive: shown only to the requester's side and radiology staff, never in an audit row.
+- Q156 for these roles (chart opening): not switched on; reviewed with Rahman before a later file adds it.
+- Later: teleradiology and outside reporters (NDPA processor terms), DICOM storage, and sending to outside centres.
+
+### Open points
+
+- Q-RAD-8 to Q-RAD-16 above are built at the recommended option and wait for the owner.
+- Q-RAD-15: the two QA mailboxes must be confirmed before 0185 is signed.
+- The fixed ids of the QA logins and the order of the shared role-function rewrites across BILL-1, Maternity (midwife), Dental (dentist) and this section are settled at integration.
+
+### Target
+
+Release D, Phase 3 (sprint wave 3, from 25 Nov 2026). Size **L**.
+- Backend: 0181-0185 (provisional), ehr-api `src/ehr/radiology/` (26 routes, including the changed catalog status and MY-1), identity-api areas, roles and licences, the role matrix, the runtime verifier.
+- Website: Lekan (the blue Radiology page from sample to live, the request drawer and Connected orders, the prints).
+- Review: Ola (the work-item and report design, as the lab pattern's owner), Rahman (database, roles, RLS and the documents policies, release cut), an independent agent review per change, and the owner's verbatim signature on each migration.
+- Go-live: `RADIOLOGY_ENABLED` on in production only after the clinical lead's checklist, the Q160 gate and the owner's go-live; `patient_reports` only after the clinical lead's decision on Q223.
 
 # Not planned yet
 
