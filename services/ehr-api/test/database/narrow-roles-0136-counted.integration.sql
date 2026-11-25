@@ -7,7 +7,8 @@
 -- only. On a migrated database it first takes 0147's roles, rows, grants
 -- and audit rows away for its transaction, and puts SX-4's change function
 -- back as Release B leaves it (0147's marked lines taken out, which 0147's
--- post-check proves gives that body) (0). The migration file is then run
+-- post-check proves gives that body), and takes 0150's doctor row
+-- (ocr.job.start, Q141 B) and its audit row away (0). The migration file is then run
 -- here as written (psql \ir), inside a savepoint after each fixture, as the
 -- runner runs it inside its transaction:
 --   1. 0, 0 and 0 before any fixture: 0147 applies, creates the two roles
@@ -106,10 +107,13 @@ $$;
 -- 0. Back to the state before 0147, for this transaction. On a migrated
 -- database 0147 has run already (at 0, 0 and 0 on a fresh one): its grants,
 -- its two roles with their three rows, and its audit rows (append-only, so
--- with triggers off) are taken away.
+-- with triggers off) are taken away. So is what 0150 (Q141 B) added after
+-- it, the doctor's ocr.job.start and its audit row: 0147 was written for the
+-- role table as 0136 left it, where doctors do not start readings.
 set local session_replication_role = replica;
-delete from audit.events where correlation_id = '0147-narrow-roles-q137b';
+delete from audit.events where correlation_id in ('0147-narrow-roles-q137b', '0150-doctors-start-readings-q141b');
 set local session_replication_role = origin;
+delete from auth.role_permissions where role_code = 'doctor' and permission_code = 'ocr.job.start';
 delete from auth.account_roles where role_code in ('work_list_reader', 'reading_starter');
 delete from auth.role_permissions where role_code in ('work_list_reader', 'reading_starter');
 delete from auth.roles where code in ('work_list_reader', 'reading_starter');

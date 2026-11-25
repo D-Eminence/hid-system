@@ -96,7 +96,7 @@
   "migration": {
     "first": "0001",
     "last": "0154",
-    "count": 151,
+    "count": 153,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -697,6 +697,14 @@
       {
         "name": "0149_catalog_medicines_and_lab_tests.sql",
         "sha256": "a92d10f221ab1cfadc1eca18c55fc6e7ef56d79e0280fc5f0bbc29633976eac9"
+      },
+      {
+        "name": "0150_doctors_start_readings_again.sql",
+        "sha256": "b8e11941ec490653cc999fb6a32a184520388b9aae65b765efead1e903ee2fd6"
+      },
+      {
+        "name": "0151_sealed_qa_front_desk_and_nurse_logins.sql",
+        "sha256": "abab517679255cec2d67aadae9d44f1b629e8e3e9ee30d77cfee33817b2c75f2"
       },
       {
         "name": "0154_prescription_refills.sql",
