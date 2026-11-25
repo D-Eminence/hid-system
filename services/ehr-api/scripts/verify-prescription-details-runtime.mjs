@@ -575,7 +575,7 @@ try {
   const notLoaded = { available: false, version: null, approvedAt: null, fileSha256: null };
   const statusBefore = await catalogGet(doctor, '/status');
   assert.deepEqual(expectStatus(statusBefore, 200, 'catalogue status before a list is loaded'), {
-    medicines: notLoaded, labTests: notLoaded, diagnoses: { available: false, release: null },
+    medicines: notLoaded, labTests: notLoaded, diagnoses: { available: false, release: null, fileSha256: null },
     labTestNameOnly: false, diagnosisNameOnly: false, classDuplicateCheck: false, attribution: [] },
   'before a signed list is loaded nothing is available');
   assert.equal(statusBefore.headers.get('cache-control'), 'private, max-age=60',
@@ -611,7 +611,7 @@ try {
     [[medicineVersion, labVersion]]);
   const loaded = seed => ({ available: true, version: '2026.1', approvedAt: '2026-12-01', fileSha256: seed.repeat(64) });
   assert.deepEqual(expectStatus(await catalogGet(ownPharmacist, '/status'), 200, 'catalogue status after a list'),
-    { medicines: loaded('a'), labTests: loaded('b'), diagnoses: { available: false, release: null }, labTestNameOnly: false,
+    { medicines: loaded('a'), labTests: loaded('b'), diagnoses: { available: false, release: null, fileSha256: null }, labTestNameOnly: false,
       diagnosisNameOnly: false, classDuplicateCheck: false, attribution: [loincNotice] },
   'a loaded list is available with its version, its sign-off day (Lagos), its seed file and its sources\' notices');
   const firstAmox = expectStatus(await catalogGet(doctor, '/medicines?q=Amox&limit=1'), 200, 'doctor searches medicines');
@@ -673,6 +673,45 @@ try {
       'dose form', 'no permission', 'patient'], auditRows: { success: 0, refusals: catalogAudit.length, searchText: 0 } };
   step('ORD-7: short text, a Health ID, a NIN, an unknown form, a missing permission and a patient are refused and '
     + 'never kept; only refusals are audited, never with the search text');
+
+  // ── ORD-9 (0152), first slice: the ICD-11 diagnosis search ──
+  // Loaded as the governed loader loads it: the release (still loading, with the approvals file's sha256), its
+  // entries, then the switch, which seals it (0149, 0152).
+  const icdNotice = 'Synthetic notice: ICD-11, World Health Organization, CC BY-ND 3.0 IGO.';
+  const diagnosisVersion = randomUUID();
+  await owner.query(`insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference,
+      approvals_sha256, approved_at, attribution) values ($1, 'diagnosis', '2026-01', repeat('d', 64),
+      'synthetic sign-off reference', repeat('1', 64), '2026-12-01T09:00:00+01:00', $2)`, [diagnosisVersion, [icdNotice]]);
+  await owner.query(`insert into ehr.catalog_diagnoses (version_id, code, title, other_names, chapter, residual) values
+    ($1, '1F40', 'Malaria due to Plasmodium falciparum', 'falciparum malaria', '01', false),
+    ($1, 'KA64.20', 'Congenital falciparum malaria', '', '19', false),
+    ($1, '1A07', 'Typhoid fever', 'enteric fever; typhoid', '01', false)`, [diagnosisVersion]);
+  await owner.query('update ehr.catalog_versions set active = true where id = $1', [diagnosisVersion]);
+  const terminologyGet = (who, path) => http(ehr, 'GET', `/ehr/terminology${path}`, { cookie: who.cookie,
+    facility: who.facilityId });
+  const falciparum = await terminologyGet(doctor, '/diagnoses?q=falciparum&limit=5');
+  assert.deepEqual(expectStatus(falciparum, 200, 'doctor searches diagnoses'), { release: 'ICD-11 MMS 2026-01',
+    more: false, typedIcd10: null, results: [
+      { codeSystem: 'ICD-11', code: '1F40', display: 'Malaria due to Plasmodium falciparum', matchedName: 'falciparum malaria' },
+      { codeSystem: 'ICD-11', code: 'KA64.20', display: 'Congenital falciparum malaria', matchedName: null }] },
+  'the doctor finds 1F40 first, named by our other name, then the shorter title');
+  assert.equal(falciparum.headers.get('cache-control'), 'private, max-age=60', 'a diagnosis answer is kept a minute');
+  assert.deepEqual(expectStatus(await terminologyGet(doctor, '/diagnoses?q=B50.9'), 200, 'an ICD-10 code typed'),
+    { release: null, more: false, results: [], typedIcd10: { codeSystem: 'ICD-10', code: 'B50.9' } },
+  'an ICD-10 code typed is named back as ICD-10, with no title');
+  const healthIdAsDiagnosis = await terminologyGet(doctor, `/diagnoses?q=${encodeURIComponent(patient.hid)}`);
+  assert.deepEqual([healthIdAsDiagnosis.status, healthIdAsDiagnosis.body?.code, healthIdAsDiagnosis.headers.get('cache-control')],
+    [400, 'CATALOG_SEARCH_TEXT_NOT_ALLOWED', 'private, no-store'], 'a Health ID as a diagnosis search is refused, never kept');
+  const noDiagnosisPermission = await terminologyGet(ownPharmacist, '/diagnoses?q=malaria');
+  assert.equal(noDiagnosisPermission.status, 403, `a pharmacist who records no diagnosis is refused: ${noDiagnosisPermission.status}`);
+  const statusWithDiagnoses = expectStatus(await catalogGet(doctor, '/status'), 200, 'status with a diagnosis release');
+  assert.deepEqual(statusWithDiagnoses.diagnoses, { available: true, release: 'ICD-11 MMS 2026-01', fileSha256: 'd'.repeat(64) },
+    'the status names the loaded ICD-11 release');
+  assert.ok(statusWithDiagnoses.attribution.includes(icdNotice), 'the ICD-11 notice is shown with the others');
+  evidence.diagnoses = { searched: ['falciparum: 1F40 first, by our other name', 'B50.9: typed ICD-10'],
+    refused: ['Health ID', 'no ehr.diagnosis.write'], status: 'ICD-11 MMS 2026-01' };
+  step('ORD-9: the doctor finds a diagnosis by a word or our other name, an ICD-10 code typed is named back, a Health ID '
+    + 'and a member without the permission are refused; the status names the release');
 
   evidence.elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
   evidence.status = 'passed';
