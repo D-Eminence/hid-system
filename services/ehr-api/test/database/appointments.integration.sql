@@ -171,6 +171,22 @@ $f$;
 create function pg_temp.slot(minutes integer) returns timestamptz language sql as $f$
   select to_timestamp(floor(extract(epoch from clock_timestamp()) / 300) * 300) + make_interval(mins => minutes)
 $f$;
+-- Today's (Lagos) bookings: the step before the current one, or midnight in the first minutes of the day. Always
+-- today and already begun (at most 10 minutes back), whatever the hour the suite runs.
+create function pg_temp.today_slot() returns timestamptz language sql as $f$
+  select greatest(pg_temp.slot(-5),
+    ((clock_timestamp() at time zone 'Africa/Lagos')::date + time '00:00') at time zone 'Africa/Lagos')
+$f$;
+-- Tomorrow's (Lagos) bookings: 10:00 tomorrow, moved by the given minutes (a 5-minute step, as Lagos is UTC+1).
+-- Always tomorrow and in the future, whatever the hour the suite runs (now plus 24 hours is the day after
+-- tomorrow late in the evening).
+create function pg_temp.tomorrow(minutes integer) returns timestamptz language sql as $f$
+  select ((((clock_timestamp() at time zone 'Africa/Lagos')::date + 1) + time '10:00') at time zone 'Africa/Lagos')
+         + make_interval(mins => minutes)
+$f$;
+create function pg_temp.tomorrow_day() returns date language sql as $f$
+  select (clock_timestamp() at time zone 'Africa/Lagos')::date + 1
+$f$;
 create function pg_temp.key(label text) returns text language sql immutable as $f$
   select 'booking-suite-key-' || label
 $f$;
@@ -428,12 +444,12 @@ set local role hid_ehr_api_runtime;
 select pg_temp.check_case('2 p1 tomorrow by matchRef, with doctor 3, in a clinic: the facility''s 20 minutes',
   'booked/false/search/booked/Amaka Bookone/AA22/20/Medical outpatients',
   pg_temp.book(1, 'p1-tomorrow', pg_temp.ref('p1'), null, 'general_outpatient', pg_temp.id('clinic:Medical outpatients'),
-    3, pg_temp.slot(24 * 60), null, 'follow_up', 'Blood pressure review', 'book-1'));
+    3, pg_temp.tomorrow(0), null, 'follow_up', 'Blood pressure review', 'book-1'));
 select pg_temp.check_case('2 the same key and body: the first answer', 'booked/true/search/booked/Amaka Bookone/AA22/20/Medical outpatients',
   pg_temp.book(1, null, pg_temp.ref('p1'), null, 'general_outpatient', pg_temp.id('clinic:Medical outpatients'),
-    3, pg_temp.slot(24 * 60), null, 'follow_up', 'Blood pressure review', 'book-1'));
+    3, pg_temp.tomorrow(0), null, 'follow_up', 'Blood pressure review', 'book-1'));
 select pg_temp.check_case('2 the same key, another body', 'key_reused',
-  pg_temp.book(1, null, pg_temp.ref('p1'), null, 'general_outpatient', null, null, pg_temp.slot(25 * 60), 30,
+  pg_temp.book(1, null, pg_temp.ref('p1'), null, 'general_outpatient', null, null, pg_temp.tomorrow(60), 30,
     'follow_up', null, 'book-1', 'book-1-other'));
 select pg_temp.check_case('2 the antenatal clinic''s own 45 minutes', 'booked/false/own_facility/booked/Bayo Booktwo/AB22/45/Antenatal clinic',
   pg_temp.book(1, 'p2-antenatal', null, pg_temp.patient(2), 'maternity', pg_temp.id('clinic:Antenatal clinic'), null,
@@ -513,20 +529,20 @@ select pg_temp.check_case('2 the administrator cannot book', '42501 APPOINTMENT_
 
 -- 3. Clashes.
 select pg_temp.check_case('3 doctor 3 again at the same time', 'clinician_clash',
-  pg_temp.book(1, null, pg_temp.ref('p3'), null, 'general_outpatient', null, 3, pg_temp.slot(24 * 60 + 10), 30,
+  pg_temp.book(1, null, pg_temp.ref('p3'), null, 'general_outpatient', null, 3, pg_temp.tomorrow(10), 30,
     'new_visit', null, 'clash-1'));
 select pg_temp.check_case('3 doctor 3 right after (back to back)', 'booked/false/search/booked/Chiamaka Bookthree/AC22/30/-',
-  pg_temp.book(1, 'p3-tomorrow', pg_temp.ref('p3'), null, 'general_outpatient', null, 3, pg_temp.slot(24 * 60 + 20), 30,
+  pg_temp.book(1, 'p3-tomorrow', pg_temp.ref('p3'), null, 'general_outpatient', null, 3, pg_temp.tomorrow(20), 30,
     'new_visit', null, 'clash-2'));
 select pg_temp.check_case('3 p1 again at the same time with another clinician', 'patient_clash',
-  pg_temp.book(1, null, pg_temp.ref('p1'), null, 'general_outpatient', null, 10, pg_temp.slot(24 * 60 + 5), 30,
+  pg_temp.book(1, null, pg_temp.ref('p1'), null, 'general_outpatient', null, 10, pg_temp.tomorrow(5), 30,
     'new_visit', null, 'clash-3'));
 select pg_temp.check_case('3 p1 at the same time at another facility is no clash here', 'needs_search',
-  pg_temp.book(7, null, null, pg_temp.patient(1), 'general_outpatient', null, null, pg_temp.slot(24 * 60), 30,
+  pg_temp.book(7, null, null, pg_temp.patient(1), 'general_outpatient', null, null, pg_temp.tomorrow(0), 30,
     'new_visit', null, 'clash-4'));
 select pg_temp.check_case('3 a clinic booking with no clinician: no clinician clash', 'booked/false/search/booked/Gozie Bookseven/AG22/20/Medical outpatients',
   pg_temp.book(1, 'p7-tomorrow', pg_temp.ref('p7'), null, 'general_outpatient', pg_temp.id('clinic:Medical outpatients'),
-    null, pg_temp.slot(24 * 60), null, 'new_visit', null, 'clash-5'));
+    null, pg_temp.tomorrow(0), null, 'new_visit', null, 'clash-5'));
 \if :a160_dblink_available
 reset role;
 -- Two bookings in parallel: a second session holds doctor 11's advisory lock (as another booking does until it
@@ -562,24 +578,24 @@ set local role hid_ehr_api_runtime;
 
 -- 4. Reschedule, cancel, no-show.
 select pg_temp.check_case('4 p1 moved by 2 hours to doctor 10', 'updated/false/booked/2/10',
-  pg_temp.reschedule(1, 'p1-tomorrow', 1, pg_temp.slot(24 * 60 + 120), null, 10, false, 'Clinic moved to afternoon',
+  pg_temp.reschedule(1, 'p1-tomorrow', 1, pg_temp.tomorrow(120), null, 10, false, 'Clinic moved to afternoon',
     'move-1'));
 select pg_temp.check_case('4 replayed', 'updated/true/booked/2/10',
-  pg_temp.reschedule(1, 'p1-tomorrow', 1, pg_temp.slot(24 * 60 + 120), null, 10, false, 'Clinic moved to afternoon',
+  pg_temp.reschedule(1, 'p1-tomorrow', 1, pg_temp.tomorrow(120), null, 10, false, 'Clinic moved to afternoon',
     'move-1'));
 select pg_temp.check_case('4 a stale version', 'changed/false/booked/2/10',
-  pg_temp.reschedule(1, 'p1-tomorrow', 1, pg_temp.slot(24 * 60 + 180), null, null, false, 'Another move again', 'move-2'));
+  pg_temp.reschedule(1, 'p1-tomorrow', 1, pg_temp.tomorrow(180), null, null, false, 'Another move again', 'move-2'));
 select pg_temp.check_case('4 a reason under 8 characters', '22023 APPOINTMENT_INVALID',
-  pg_temp.reschedule(1, 'p1-tomorrow', 2, pg_temp.slot(24 * 60 + 180), null, null, false, 'short', 'move-3'));
+  pg_temp.reschedule(1, 'p1-tomorrow', 2, pg_temp.tomorrow(180), null, null, false, 'short', 'move-3'));
 select pg_temp.check_case('4 onto doctor 3''s other patient', 'clinician_clash/false/booked/2/10',
-  pg_temp.reschedule(1, 'p1-tomorrow', 2, pg_temp.slot(24 * 60 + 20), null, 3, false, 'Back to doctor three', 'move-4'));
+  pg_temp.reschedule(1, 'p1-tomorrow', 2, pg_temp.tomorrow(20), null, 3, false, 'Back to doctor three', 'move-4'));
 select pg_temp.check_case('4 the clinician taken away', 'updated/false/booked/3/-',
-  pg_temp.reschedule(1, 'p1-tomorrow', 2, pg_temp.slot(24 * 60 + 120), null, null, true, 'Any clinician will do', 'move-5'));
+  pg_temp.reschedule(1, 'p1-tomorrow', 2, pg_temp.tomorrow(120), null, null, true, 'Any clinician will do', 'move-5'));
 reset role;
 update ehr.appointments set reminder_sent_at = clock_timestamp() where id = pg_temp.id('p1-tomorrow');
 set local role hid_ehr_api_runtime;
 select pg_temp.check_case('4 a move after the reminder', 'updated/false/booked/4/-',
-  pg_temp.reschedule(1, 'p1-tomorrow', 3, pg_temp.slot(24 * 60 + 125), null, null, false, 'Five minutes later please', 'move-7'));
+  pg_temp.reschedule(1, 'p1-tomorrow', 3, pg_temp.tomorrow(125), null, null, false, 'Five minutes later please', 'move-7'));
 reset role;
 select pg_temp.check_case('4 the reminder is reset', 'true',
   (select (reminder_sent_at is null)::text from ehr.appointments where id = pg_temp.id('p1-tomorrow')));
@@ -598,19 +614,19 @@ select pg_temp.check_case('4 B''s desk cannot touch A''s appointment', 'not_foun
   pg_temp.cancel(7, 'p2-antenatal', 1, 'Wrong facility cancel', 'cancel-3'));
 
 -- 5. Check-in.
--- p6: booked for 5 minutes before the current 5-minute step today, then made inactive; p2: booked today and on
--- nobody's list; p7: today, and already on A's waiting list (checked in by search through 0135); p3: today.
+-- All four at today's step before the current one (or at midnight just after it). p6: then made inactive; p2: on
+-- nobody's list; p7: already on A's waiting list (checked in by search through 0135); p3: no-show first.
 select pg_temp.check_case('5 p2 today', 'booked/false/own_facility/booked/Bayo Booktwo/AB22/20/-',
-  pg_temp.book(1, 'p2-today', null, pg_temp.patient(2), 'general_outpatient', null, null, pg_temp.slot(-5), null,
+  pg_temp.book(1, 'p2-today', null, pg_temp.patient(2), 'general_outpatient', null, null, pg_temp.today_slot(), null,
     'follow_up', null, 'today-2'));
 select pg_temp.check_case('5 p6 today', 'booked/false/search/booked/Funmi Booksix/AF22/20/-',
-  pg_temp.book(1, 'p6-today', pg_temp.ref('p6'), null, 'general_outpatient', null, null, pg_temp.slot(-5), null,
+  pg_temp.book(1, 'p6-today', pg_temp.ref('p6'), null, 'general_outpatient', null, null, pg_temp.today_slot(), null,
     'follow_up', null, 'today-6'));
 select pg_temp.check_case('5 p7 today', 'booked/false/search/booked/Gozie Bookseven/AG22/20/-',
-  pg_temp.book(1, 'p7-today', pg_temp.ref('p7'), null, 'general_outpatient', null, null, pg_temp.slot(-5), null,
+  pg_temp.book(1, 'p7-today', pg_temp.ref('p7'), null, 'general_outpatient', null, null, pg_temp.today_slot(), null,
     'follow_up', null, 'today-7'));
 select pg_temp.check_case('5 p3 today (no-show first)', 'booked/false/search/booked/Chiamaka Bookthree/AC22/20/-',
-  pg_temp.book(1, 'p3-today', pg_temp.ref('p3'), null, 'general_outpatient', null, null, pg_temp.slot(-5), null,
+  pg_temp.book(1, 'p3-today', pg_temp.ref('p3'), null, 'general_outpatient', null, null, pg_temp.today_slot(), null,
     'follow_up', null, 'today-3'));
 select pg_temp.check_case('5 p7 checked in by 0135 already', 'checked_in',
   (select outcome from (select pg_temp.as_member(1)) setting, ehr.visit_queue_check_in(pg_temp.ref('p7'), null)));
@@ -678,16 +694,16 @@ set local role hid_ehr_api_runtime;
 select pg_temp.check_case('6 today''s list at A', 'Booktwo:checked_in,Booksix:booked,Bookseven:checked_in,Bookthree!:checked_in/false',
   pg_temp.day_list(1, (clock_timestamp() at time zone 'Africa/Lagos')::date, null, null, null));
 select pg_temp.check_case('6 tomorrow''s list at A, booked only', 'Bookseven:booked,Bookthree!:booked,Bookone:booked/false',
-  pg_temp.day_list(2, ((clock_timestamp() + interval '1 day') at time zone 'Africa/Lagos')::date, null, null, array['booked']));
+  pg_temp.day_list(2, pg_temp.tomorrow_day(), null, null, array['booked']));
 select pg_temp.check_case('6 tomorrow, doctor 3''s', 'Bookthree!:booked/false',
-  pg_temp.day_list(1, ((clock_timestamp() + interval '1 day') at time zone 'Africa/Lagos')::date, null, 3, null));
+  pg_temp.day_list(1, pg_temp.tomorrow_day(), null, 3, null));
 select pg_temp.check_case('6 tomorrow, the clinic''s', 'Bookseven:booked,Bookone:booked/false',
-  pg_temp.day_list(1, ((clock_timestamp() + interval '1 day') at time zone 'Africa/Lagos')::date,
+  pg_temp.day_list(1, pg_temp.tomorrow_day(),
     pg_temp.id('clinic:Medical outpatients'), null, null));
 select pg_temp.check_case('6 one a page, has_more', 'Bookseven:booked/true',
-  pg_temp.day_list(1, ((clock_timestamp() + interval '1 day') at time zone 'Africa/Lagos')::date, null, null, null, 1));
+  pg_temp.day_list(1, pg_temp.tomorrow_day(), null, null, null, 1));
 select pg_temp.check_case('6 B''s desk sees nothing of A''s', '(empty)/false',
-  pg_temp.day_list(7, ((clock_timestamp() + interval '1 day') at time zone 'Africa/Lagos')::date, null, null, null));
+  pg_temp.day_list(7, pg_temp.tomorrow_day(), null, null, null));
 select pg_temp.check_case('6 the lab member cannot list', '42501 APPOINTMENT_NOT_ALLOWED',
   pg_temp.day_list(4, (clock_timestamp() at time zone 'Africa/Lagos')::date, null, null, null));
 select pg_temp.check_case('6 an unknown status', '22023 APPOINTMENT_INVALID',

@@ -215,6 +215,12 @@ $f$;
 create function pg_temp.slot(minutes integer) returns timestamptz language sql as $f$
   select to_timestamp(floor(extract(epoch from clock_timestamp()) / 300) * 300) + make_interval(mins => minutes)
 $f$;
+-- A booking for today (Lagos): the step before the current one, or midnight in the first minutes of the day. Always
+-- today and already begun (at most 10 minutes back), whatever the hour the suite runs.
+create function pg_temp.today_slot() returns timestamptz language sql as $f$
+  select greatest(pg_temp.slot(-5),
+    ((clock_timestamp() at time zone 'Africa/Lagos')::date + time '00:00') at time zone 'Africa/Lagos')
+$f$;
 create function pg_temp.key(label text) returns text language sql immutable as $f$
   select 'reminder-suite-key-' || label
 $f$;
@@ -354,7 +360,7 @@ select pg_temp.check_case('1 the cancel notice names the start that was cancelle
 select pg_temp.check_case('1 three email rows', 'APPOINTMENT_BOOKED:pending,APPOINTMENT_RESCHEDULED:pending,APPOINTMENT_CANCELLED:pending',
   pg_temp.emails(1));
 set local role hid_ehr_api_runtime;
-select pg_temp.check_case('1 p1 booked for today, a little later', 'booked', pg_temp.book(1, 'p1-today', 1, pg_temp.slot(30)));
+select pg_temp.check_case('1 p1 booked for today', 'booked', pg_temp.book(1, 'p1-today', 1, pg_temp.today_slot()));
 select pg_temp.check_case('1 checked in', 'checked_in', pg_temp.check_in(1, 'p1-today'));
 reset role;
 select pg_temp.check_case('1 a check-in writes no notice', '4 inbox, 4 email',
