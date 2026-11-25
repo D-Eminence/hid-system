@@ -166,9 +166,9 @@ const acceptedMigrations = new Map([
   ['0151_sealed_qa_front_desk_and_nurse_logins.sql', 'abab517679255cec2d67aadae9d44f1b629e8e3e9ee30d77cfee33817b2c75f2'],
   ['0152_catalog_diagnoses.sql', 'abfecc3571808e4ad29fdf8c1e202f65b3cdf890e9f3106b74bd6ef1bd19f9c9'],
   ['0153_clinician_recent_diagnoses.sql', '45faa6a739056cc07426fdb5363b58c7dda1dbcbc096fb6d1769ae746798500b'],
-  // APPT-1 (Release D), numbers provisional (given at merge, after 0152-0154), unsigned.
-  ['0160_appointments.sql', '08dfe7475fa412b0c1a794ba8aa8e4fe94bb2ea63d9e00f4cb2896f65e60b37f'],
-  ['0161_appointment_notices_and_call_list.sql', 'bdd7934796d54ebdf5ddcd27fbb977d841d89b64f20f828dff9b9b72dc6e0c40'],
+  // APPT-1 (Release D), numbers provisional (given at integration, in release order: #258), unsigned.
+  ['0160_appointments.sql', '7479df4fc318aecf2ad006fe2037174fd8a8cd8dfd1d1ae3b3a3617ced16fabe'],
+  ['0161_appointment_notices_and_call_list.sql', '5cbeab53ad7d0c5d117fe6aac95e8243de26a98a7c7637ef85d43da73d5cde8c'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

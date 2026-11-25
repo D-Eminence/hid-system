@@ -1,12 +1,15 @@
 -- 0160 APPT-1 Appointments: bookings, clinics and check-in to the waiting list
 -- (Release D, the department sprint the owner approved on 25 November 2026).
--- Written on staging-novu-ci-20261005 at 95fa1e52 (0001-0151 applied:
--- Release A, B and C, 0150 and 0151). The number is provisional: numbers are
--- given at merge, after the files booked before it (0152-0153 ORD-9, 0154
--- ORD-12). This file reads nothing those files create or change, so it applies
--- on 0001-0151 and on 0001-0154 alike. The declaration in
--- config/production-schema-compatibility.json stays unsigned until the owner
--- signs this file.
+-- Written on staging-novu-ci-20261005 at 95fa1e52 (0001-0151) and merged
+-- with Release E (0cfddcc9, 0001-0153, live). The number is provisional:
+-- numbers are given at integration, in release order (#258). This file reads
+-- nothing 0152-0154 create or change, so it applies on 0001-0151 and on
+-- 0001-0154 alike. Release D's lanes go in order of readiness (coordinator,
+-- #258, 25 November): this file accepts what Billing (0162-0167) and
+-- Emergency (0168-0169) add to the shared role table and to the waiting-list
+-- basis CHECK, so it applies before or after either of them (step 1 below).
+-- The declaration in config/production-schema-compatibility.json stays
+-- unsigned until the owner signs this file.
 --
 -- Decisions taken at the recommended option, not yet answered by the owner
 -- (docs/EHR_PLANNED_CONTRACT.md, APPT-1): Q-APPT-1 A (check-in from an
@@ -78,7 +81,10 @@
 --    audit.events              one row per role row added, as the system actor
 --                              (auth.role-permission.add).
 -- A6 ehr.visit_queue           the check_in_basis CHECK becomes ('search',
---                              'own_facility', 'appointment'). Nothing else in
+--                              'own_facility', 'appointment'), followed by any
+--                              value another lane added before this file (after
+--                              0168: 'emergency', the same CHECK 0168 leaves
+--                              when it runs after this file). Nothing else in
 --                              0135 changes; its functions read the basis as text.
 -- A7 SECURITY DEFINER functions (search_path pg_catalog, pg_temp), owned like
 --    0135's (the owner of identity.has_active_consent_grant), EXECUTE for
@@ -132,8 +138,8 @@
 --
 -- Undo (not in the ledger; a migration only if the owner signs it): drop the
 -- functions and the four tables, take the seven role rows and the two codes
--- out, and put the 0135 CHECK back once no waiting-list row has basis
--- 'appointment'.
+-- out, and take 'appointment' out of the CHECK (keeping every other value)
+-- once no waiting-list row has basis 'appointment'.
 --
 -- The whole file is one statement (do $appt0160$), so whatever raises in it,
 -- however the file is run, applies nothing:
@@ -141,9 +147,12 @@
 -- 1. Preconditions (55000, nothing applied): markers of 0145, 0149 and 0150;
 --    "0160: already applied" when every object of this file is there with the
 --    role rows it adds, "0160: the schema is not in the reviewed state" for
---    any half state; the bodies this file calls or reads md5-pinned; the codes
---    of receptionist, doctor, clinician and nurse as 0001-0151 leave them; the
---    waiting-list basis CHECK as 0135 left it.
+--    any half state; the bodies this file calls or reads md5-pinned; every
+--    code 0001-0151 give receptionist, doctor, clinician and nurse still held
+--    (the four lists are written out; each one's md5 is the one this file
+--    pinned before; codes another lane added are accepted) and no appointment
+--    code yet; the waiting-list basis CHECK as 0135 left it, or with plain
+--    values another lane added after 'search' and 'own_facility'.
 -- 2. A1-A8.
 -- 3. Post-checks: the four roles hold exactly their pinned codes plus this
 --    file's; every other role row is unchanged; the CHECK is the new one; the
@@ -166,12 +175,10 @@ declare
   v_mismatch text;
   v_reason constant text := 'APPT-1 Appointments (Release D, recommended Q-APPT-5 A)';
   v_correlation constant text := '0160-appointments-appt1';
-  -- md5 of each role's codes in byte order, joined by ',' (0150's form), as
-  -- 0001-0151 leave them and with this file's rows.
-  v_receptionist_before constant text := 'a06d876a6f2e1bbd524ed89e59acd110';
-  v_doctor_before constant text := '9da3f7c9be69ae834e9f7a7555eb3e07';
-  v_clinician_before constant text := 'b42ca0335673e504cb40113a8e33ca55';
-  v_nurse_before constant text := '1cf6eca65a5ea51b817db099e32a0ef2';
+  -- The waiting-list basis CHECK as found, its values in order, and the definition this file leaves.
+  v_check_found text;
+  v_basis_found text[];
+  v_check_after text;
   v_rows_before text;
   v_owner name;
   v_audited integer;
@@ -286,22 +293,79 @@ begin
   if v_mismatch is not null then
     raise exception using errcode = '55000', message = '0160: permission missing or inactive: ' || v_mismatch;
   end if;
-  if (select md5(string_agg(grant_row.permission_code, ',' order by grant_row.permission_code collate "C"))
-        from auth.role_permissions grant_row where grant_row.role_code = 'receptionist') is distinct from v_receptionist_before
-     or (select md5(string_agg(grant_row.permission_code, ',' order by grant_row.permission_code collate "C"))
-           from auth.role_permissions grant_row where grant_row.role_code = 'doctor') is distinct from v_doctor_before
-     or (select md5(string_agg(grant_row.permission_code, ',' order by grant_row.permission_code collate "C"))
-           from auth.role_permissions grant_row where grant_row.role_code = 'clinician') is distinct from v_clinician_before
-     or (select md5(string_agg(grant_row.permission_code, ',' order by grant_row.permission_code collate "C"))
-           from auth.role_permissions grant_row where grant_row.role_code = 'nurse') is distinct from v_nurse_before then
+  -- The codes 0001-0151 give each of the four roles, in byte order. Each list's md5 joined by ',' (0150's form) is
+  -- the md5 this file pinned before the coordinator's decision of 25 November (#258): every code must still be
+  -- held, and codes another Release D lane adds (Billing's 0162) are accepted. No appointment code may be there yet
+  -- (the half-state test above).
+  select string_agg(wanted.role_code, ', ' order by wanted.role_code) into v_mismatch
+    from (values
+      ('receptionist', 'a06d876a6f2e1bbd524ed89e59acd110',
+        array['ehr.document.read-own', 'ehr.document.write', 'ehr.encounter.read', 'ehr.encounter.write',
+          'ehr.vital.read', 'identity.authorization.check', 'identity.consent.read', 'identity.consent.write',
+          'identity.patient.read', 'identity.registration.write', 'ocr.job.read-own', 'ocr.job.start', 'ocr.job.write',
+          'outreach.campaign.read', 'outreach.campaign.write', 'outreach.registration.read',
+          'outreach.registration.write']),
+      ('doctor', '9da3f7c9be69ae834e9f7a7555eb3e07',
+        array['ehr.diagnosis.read', 'ehr.diagnosis.write', 'ehr.document.read', 'ehr.document.write',
+          'ehr.encounter.read', 'ehr.encounter.write', 'ehr.lab-request.read', 'ehr.lab-request.write', 'ehr.note.read',
+          'ehr.note.write', 'ehr.order-route.send', 'ehr.prescription.read', 'ehr.prescription.write', 'ehr.vital.read',
+          'ehr.vital.write', 'identity.authorization.check', 'identity.break-glass.write', 'identity.consent.read',
+          'identity.consent.write', 'identity.patient-access-pin.verify', 'identity.patient.open-own-facility',
+          'identity.patient.read', 'identity.registration.write', 'lab.import.read', 'lab.import.write',
+          'lab.result.released.read', 'lab.work-item.accept', 'ocr.job.read', 'ocr.job.start', 'ocr.job.write',
+          'ocr.patient.confirm', 'ocr.publication.write', 'ocr.validation.write', 'pharmacy.dispensing.read',
+          'pharmacy.import.read', 'pharmacy.import.write']),
+      ('clinician', 'b42ca0335673e504cb40113a8e33ca55',
+        array['ehr.diagnosis.read', 'ehr.diagnosis.write', 'ehr.document.read', 'ehr.document.write',
+          'ehr.encounter.read', 'ehr.encounter.write', 'ehr.lab-request.read', 'ehr.lab-request.write', 'ehr.note.read',
+          'ehr.note.write', 'ehr.order-route.send', 'ehr.prescription.read', 'ehr.prescription.write', 'ehr.vital.read',
+          'ehr.vital.write', 'identity.authorization.check', 'identity.break-glass.write', 'identity.consent.read',
+          'identity.consent.write', 'identity.patient-access-pin.verify', 'identity.patient.open-own-facility',
+          'identity.patient.read', 'identity.registration.write', 'lab.import.read', 'lab.import.write',
+          'lab.result.released.read', 'lab.work-item.accept', 'lab.work-item.read', 'ocr.job.read', 'ocr.job.start',
+          'ocr.job.write', 'ocr.patient.confirm', 'ocr.publication.write', 'ocr.validation.write',
+          'outreach.campaign.read', 'outreach.campaign.write', 'outreach.registration.read',
+          'outreach.registration.write', 'pharmacy.dispensing.read', 'pharmacy.import.read', 'pharmacy.import.write',
+          'pharmacy.work-item.read']),
+      ('nurse', '1cf6eca65a5ea51b817db099e32a0ef2',
+        array['ehr.diagnosis.read', 'ehr.document.read', 'ehr.document.write', 'ehr.encounter.read',
+          'ehr.encounter.write', 'ehr.lab-request.read', 'ehr.note.read', 'ehr.note.write', 'ehr.prescription.read',
+          'ehr.vital.read', 'ehr.vital.write', 'identity.authorization.check', 'identity.break-glass.write',
+          'identity.consent.read', 'identity.consent.write', 'identity.patient-access-pin.verify',
+          'identity.patient.open-own-facility', 'identity.patient.read', 'identity.registration.write',
+          'lab.import.read', 'lab.import.write', 'lab.result.released.read', 'lab.work-item.accept',
+          'lab.work-item.read', 'ocr.job.read', 'ocr.job.start', 'ocr.job.write', 'ocr.patient.confirm',
+          'ocr.publication.write', 'ocr.validation.write', 'outreach.campaign.read', 'outreach.campaign.write',
+          'outreach.registration.read', 'outreach.registration.write', 'pharmacy.dispensing.read',
+          'pharmacy.import.read', 'pharmacy.import.write', 'pharmacy.work-item.read'])
+    ) wanted(role_code, codes_md5, codes)
+   where md5(array_to_string(wanted.codes, ',')) is distinct from wanted.codes_md5
+      or not (wanted.codes <@ coalesce((select array_agg(grant_row.permission_code) from auth.role_permissions grant_row
+                                         where grant_row.role_code = wanted.role_code), array[]::text[]));
+  if v_mismatch is not null then
     raise exception using errcode = '55000',
-      message = '0160: the role table is not in the reviewed state (the codes of receptionist, doctor, clinician or '
-        || 'nurse differ from 0001-0151); nothing applied';
+      message = '0160: the role table is not in the reviewed state (' || v_mismatch || ' lacks a code 0001-0151 give '
+        || 'it); nothing applied';
   end if;
-  if (select pg_get_constraintdef(oid) from pg_constraint
-       where conrelid = 'ehr.visit_queue'::regclass and conname = 'visit_queue_check_in_basis_check')
-     is distinct from 'CHECK ((check_in_basis = ANY (ARRAY[''search''::text, ''own_facility''::text])))' then
-    raise exception using errcode = '55000', message = '0160: the waiting-list basis CHECK is not as 0135 left it';
+  -- The waiting-list basis CHECK: 0135's two values first, then only plain values another Release D lane added
+  -- (Emergency's 0168 adds 'emergency'), never 'appointment' (as 0168 accepts this file's CHECK). The definition
+  -- must be exactly the IN list of those values, so no other condition and no NOT VALID.
+  select pg_get_constraintdef(constraint_row.oid) into v_check_found from pg_constraint constraint_row
+   where constraint_row.conrelid = 'ehr.visit_queue'::regclass
+     and constraint_row.conname = 'visit_queue_check_in_basis_check' and constraint_row.contype = 'c';
+  select array_agg(found.value[1] order by found.position) into v_basis_found
+    from regexp_matches(coalesce(v_check_found, ''), '''([a-z][a-z0-9_]{0,39})''::text', 'g')
+         with ordinality as found(value, position);
+  if v_check_found is null or v_basis_found is null
+     or v_check_found is distinct from format('CHECK ((check_in_basis = ANY (ARRAY[%s])))',
+          (select string_agg(quote_literal(basis.value) || '::text', ', ' order by basis.position)
+             from unnest(v_basis_found) with ordinality as basis(value, position)))
+     or v_basis_found[1:2] is distinct from array['search', 'own_facility']
+     or 'appointment' = any (v_basis_found)
+     or cardinality(v_basis_found) <> (select count(distinct basis.value) from unnest(v_basis_found) basis(value)) then
+    raise exception using errcode = '55000',
+      message = '0160: the waiting-list basis CHECK is not as 0135 left it (search and own_facility, then only '
+        || 'values another lane added); nothing applied';
   end if;
 
   select string_agg(grant_row.role_code || ' ' || grant_row.permission_code || ' ' || grant_row.granted_at::text, ','
@@ -452,10 +516,12 @@ begin
     before update or delete on ehr.appointment_events
     for each row execute function ehr.appointment_events_immutable();
 
-  -- A6. The waiting-list basis.
+  -- A6. The waiting-list basis: search, own_facility, appointment, then every value another lane added, in its
+  -- order (so 0168 before or after this file leaves the same CHECK).
   alter table ehr.visit_queue drop constraint visit_queue_check_in_basis_check;
-  alter table ehr.visit_queue add constraint visit_queue_check_in_basis_check
-    check (check_in_basis in ('search', 'own_facility', 'appointment'));
+  execute format('alter table ehr.visit_queue add constraint visit_queue_check_in_basis_check check (check_in_basis in (%s))',
+    (select string_agg(quote_literal(basis.value), ', ' order by basis.position)
+       from unnest(array['search', 'own_facility', 'appointment'] || v_basis_found[3:]) with ordinality as basis(value, position)));
 
   -- A7. Helpers (no role may execute them; the functions below run them as their owner).
   create function ehr.appointment_caller(required_all text[], required_any text[])
@@ -1818,9 +1884,16 @@ begin
      or v_audited <> 7 then
     raise exception using errcode = '55000', message = '0160: post-check failed (the role table)';
   end if;
-  if (select pg_get_constraintdef(oid) from pg_constraint
-       where conrelid = 'ehr.visit_queue'::regclass and conname = 'visit_queue_check_in_basis_check')
-     is distinct from 'CHECK ((check_in_basis = ANY (ARRAY[''search''::text, ''own_facility''::text, ''appointment''::text])))' then
+  -- On 0001-0153 exactly CHECK ((check_in_basis = ANY (ARRAY['search'::text, 'own_facility'::text,
+  -- 'appointment'::text]))); after 0168, 'emergency'::text follows 'appointment'::text.
+  select pg_get_constraintdef(constraint_row.oid) into v_check_after from pg_constraint constraint_row
+   where constraint_row.conrelid = 'ehr.visit_queue'::regclass
+     and constraint_row.conname = 'visit_queue_check_in_basis_check' and constraint_row.contype = 'c'
+     and constraint_row.convalidated;
+  if v_check_after is distinct from format('CHECK ((check_in_basis = ANY (ARRAY[%s])))',
+       (select string_agg(quote_literal(basis.value) || '::text', ', ' order by basis.position)
+          from unnest(array['search', 'own_facility', 'appointment'] || v_basis_found[3:])
+               with ordinality as basis(value, position))) then
     raise exception using errcode = '55000', message = '0160: post-check failed (the waiting-list basis CHECK)';
   end if;
   if exists (select 1 from pg_class class_row, lateral aclexplode(coalesce(class_row.relacl, acldefault('r', class_row.relowner))) acl

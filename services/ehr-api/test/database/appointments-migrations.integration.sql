@@ -22,11 +22,17 @@
 --      nothing; then 0161 applies: its objects, the control seeded off, one
 --      audit row; it takes no lock beyond its header's and every lock its
 --      header declares;
---   4. 0160 taken away too: a half state, a changed pinned body, a changed
---      role table and a changed waiting-list CHECK refuse; then 0160 applies:
---      the four tables, the 18 functions, the seven role rows and seven audit
---      rows, the CHECK; it takes no lock beyond its header's and every lock
---      its header declares; then 0161 applies on top.
+--   4. 0160 taken away too, with a fictional active membership at a real
+--      facility holding one of the four roles (so 0160's closing count reads
+--      the seals, as on production): a half state, a changed pinned body, a
+--      front-desk code 0001-0151 give taken away and a waiting-list CHECK
+--      without own_facility refuse; another lane's additions (an extra
+--      front-desk code, as Billing's 0162; an extra basis value, as
+--      Emergency's 0168) are accepted, and the CHECK keeps the extra value
+--      after appointment; then 0160 applies: the four tables, the 18
+--      functions, the seven role rows and seven audit rows, the CHECK; it
+--      takes no lock beyond its header's and every lock its header declares;
+--      then 0161 applies on top.
 -- Synthetic values only.
 set plpgsql.variable_conflict = error;
 
@@ -381,20 +387,49 @@ select pg_temp.expect('4c a body it calls changed (0135''s check-in) is refused,
   '55000 0160: these bodies are not as 0001-0151 left them: ehr.visit_queue_check_in(text,uuid) | '
   || '0 tables, 0 functions, 0 role rows, 0 audit rows',
   pg_temp.answer('0160', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0160());
-insert into auth.role_permissions (role_code, permission_code) values ('receptionist', 'ehr.vital.write');
+delete from auth.role_permissions where role_code = 'receptionist' and permission_code = 'ehr.encounter.read';
 :run0160
 rollback to savepoint s160;
-select pg_temp.expect('4d the front desk''s codes changed: refused, nothing applied', '55000 | '
-  || '0 tables, 0 functions, 0 role rows, 0 audit rows',
-  :'LAST_ERROR_SQLSTATE' || ' | ' || pg_temp.made0160());
+select pg_temp.expect('4d a code 0001-0151 give the front desk taken away: refused, nothing applied',
+  '55000 0160: the role table is not in the reviewed state (receptionist lacks a code 0001-0151 give it); nothing '
+  || 'applied | 0 tables, 0 functions, 0 role rows, 0 audit rows',
+  pg_temp.answer('0160', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0160());
 alter table ehr.visit_queue drop constraint visit_queue_check_in_basis_check;
 alter table ehr.visit_queue add constraint visit_queue_check_in_basis_check
-  check (check_in_basis in ('search', 'own_facility', 'walk_in'));
+  check (check_in_basis in ('search', 'emergency')) not valid;
 :run0160
 rollback to savepoint s160;
-select pg_temp.expect('4e the waiting-list basis CHECK changed: refused, nothing applied',
-  '55000 0160: the waiting-list basis CHECK is not as 0135 left it | 0 tables, 0 functions, 0 role rows, 0 audit rows',
+-- (NOT VALID, so the waiting-list rows of a copy of production need not fit it.)
+select pg_temp.expect('4e a waiting-list basis CHECK without own_facility: refused, nothing applied',
+  '55000 0160: the waiting-list basis CHECK is not as 0135 left it (search and own_facility, then only values another '
+  || 'lane added); nothing applied | 0 tables, 0 functions, 0 role rows, 0 audit rows',
   pg_temp.answer('0160', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0160());
+alter table ehr.visit_queue drop constraint visit_queue_check_in_basis_check;
+alter table ehr.visit_queue add constraint visit_queue_check_in_basis_check
+  check (check_in_basis in ('search', 'own_facility', 'emergency') and check_in_basis <> 'own_facility_old');
+:run0160
+rollback to savepoint s160;
+select pg_temp.expect('4e2 a waiting-list basis CHECK with another condition: refused, nothing applied',
+  '55000 0160: the waiting-list basis CHECK is not as 0135 left it (search and own_facility, then only values another '
+  || 'lane added); nothing applied | 0 tables, 0 functions, 0 role rows, 0 audit rows',
+  pg_temp.answer('0160', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0160());
+-- Another lane's additions: a code added to the front desk (as Billing's 0162 adds its own) and a basis value added
+-- after 0135's two (as Emergency's 0168 adds emergency).
+insert into auth.role_permissions (role_code, permission_code) values ('receptionist', 'ehr.vital.write');
+alter table ehr.visit_queue drop constraint visit_queue_check_in_basis_check;
+alter table ehr.visit_queue add constraint visit_queue_check_in_basis_check
+  check (check_in_basis in ('search', 'own_facility', 'emergency'));
+:run0160
+select pg_temp.expect('4e3 another lane''s extra front-desk code and extra basis value: 0160 applies',
+  'applied | 4 tables, 18 functions, 7 role rows, 7 audit rows | receptionist keeps ehr.vital.write',
+  pg_temp.answer('0160', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0160() || ' | '
+  || (select 'receptionist keeps ' || string_agg(permission_code, ',') from auth.role_permissions
+       where role_code = 'receptionist' and permission_code = 'ehr.vital.write'));
+select pg_temp.expect('4e4 and the CHECK keeps the extra value after appointment (as 0168 leaves it after 0160)',
+  'CHECK ((check_in_basis = ANY (ARRAY[''search''::text, ''own_facility''::text, ''appointment''::text, ''emergency''::text])))',
+  (select pg_get_constraintdef(oid) from pg_constraint
+    where conrelid = 'ehr.visit_queue'::regclass and conname = 'visit_queue_check_in_basis_check'));
+rollback to savepoint s160;
 :run0161
 select pg_temp.expect('4f 0161 without 0160: refused', '55000 0161: 0160 must be applied first',
   pg_temp.answer('0161', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE'));

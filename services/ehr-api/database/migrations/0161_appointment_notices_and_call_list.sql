@@ -1,9 +1,11 @@
 -- 0161 APPT-1 Appointments: the patient's view, notices, reminders and the
 -- call list (Release D, the department sprint the owner approved on 25
 -- November 2026). Written on staging-novu-ci-20261005 at 95fa1e52 with 0160 of
--- this branch. The number is provisional, given at merge after the files
--- booked before it (0152-0154). It reads nothing 0152-0154 create or change.
--- The declaration in config/production-schema-compatibility.json stays
+-- this branch and merged with Release E (0cfddcc9, 0001-0153, live). The
+-- number is provisional, given at integration in release order (#258). It
+-- reads nothing 0152-0154 create or change, and nothing Billing (0162-0167)
+-- or Emergency (0168-0169) create or change, so it applies before or after
+-- them. The declaration in config/production-schema-compatibility.json stays
 -- unsigned until the owner signs this file.
 --
 -- Decision taken at the recommended option, not yet answered by the owner:
