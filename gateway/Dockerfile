@@ -22,7 +22,7 @@ USER 0
 # health check. Removing it also removes its unused libcurl dependency; no
 # curl fix is available in this Alpine branch. Keep nginx modules installed.
 RUN apk del --no-cache curl \
-    && apk add --no-cache 'pcre2=10.49-r0' 'libexpat=2.10.0-r0' 'zlib=1.4-r0' 'libx11=1.8.14-r0' 'brotli-libs=1.2.1-r0' \
+    && apk add --no-cache 'pcre2=10.49-r0' 'libexpat=2.11.0-r0' 'zlib=1.4-r0' 'libx11=1.8.14-r0' 'brotli-libs=1.2.1-r0' \
        'musl=1.2.6-r3' 'musl-utils=1.2.6-r3' 'libxslt=1.1.43-r4' 'libxml2=2.13.9-r3' \
     && apk add --no-cache -X https://nginx.org/packages/alpine/v3.24/main \
        'nginx=1.30.7-r1' 'nginx-module-njs=1.30.7.1.0.2-r1' 'nginx-module-xslt=1.30.7-r1' \
