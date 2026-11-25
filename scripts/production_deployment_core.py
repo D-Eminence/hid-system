@@ -466,17 +466,20 @@ def notify(aws, candidate, state):
 MIGRATIONS = "services/ehr-api/database/migrations/"
 # The role bootstrap revokes every runtime grant before it applies this file,
 # so a migration that grants to a runtime role needs the same grant here, or a
-# later bootstrap removes it. The release never applies this file (it runs only
-# scripts/apply-migrations.mjs); it is declared and reviewed with the new
-# migration that carries the grant to provisioned roles.
+# later bootstrap removes it. The release never applies this file (from the
+# migration image it runs scripts/apply-migrations.mjs and, only when a
+# dispatch asks for ORD-7's catalogue load, scripts/load-catalog.mjs, which
+# grants nothing); it is declared and reviewed with the new migration that
+# carries the grant to provisioned roles.
 RUNTIME_GRANTS = "services/ehr-api/database/runtime-grants.sql"
 
 def migration_files(contract):
     return [name for name in contract.get("files", {}) if name.startswith(MIGRATIONS)]
 
 # Database test suites live beside the migrations but the release never applies
-# them (it runs only scripts/apply-migrations.mjs), so a suite that changes with
-# a migration is not part of the schema change to declare.
+# them (it runs scripts/apply-migrations.mjs and, when asked, the catalogue
+# loader scripts/load-catalog.mjs), so a suite that changes with a migration is
+# not part of the schema change to declare.
 SCHEMA_TESTS = "services/ehr-api/database/tests/"
 
 def schema_contract(root, changed_paths, carry=False):

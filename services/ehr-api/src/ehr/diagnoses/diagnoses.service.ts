@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
@@ -35,6 +35,8 @@ const COLUMNS = `
 
 @Injectable()
 export class DiagnosesService {
+  private readonly logger = new Logger(DiagnosesService.name);
+
   constructor(private readonly repository: ClinicalRepository) {}
 
   list(context: DataAccessContext, patientId: string, encounterId: string, query: TimelineQueryDto) {
@@ -106,10 +108,53 @@ export class DiagnosesService {
           ],
         );
         const row = this.single(result.rows[0]);
+        await this.recordRecent(client, context, row);
         return { value: row, id: row.id };
       },
       (id) => this.findById(client, context, patientId, id),
     );
+  }
+
+  /**
+   * ORD-9 (0153): the member's recent diagnoses, written in the save's own
+   * transaction (the route's and EHR-C5's consultation's). It is a
+   * best-effort side record. What it guarantees: the record never waits for
+   * another save of the same membership (it skips the record while another
+   * open transaction of the membership, or of a membership whose id has the
+   * same hashtext value, holds the recording lock, which lasts to the end of
+   * that transaction). It reads the auth role tables
+   * (auth.membership_has_permission), so a DDL lock there can hold the save
+   * at the record up to the statement timeout (15 s, DatabaseService's
+   * pool), after which the error (57014) is rolled back to the savepoint as
+   * below and the save goes on.
+   * ehr.record_recent_diagnosis records only for a membership holding
+   * ehr.diagnosis.write at the session's facility, and nothing with no code;
+   * it holds no patient id (its display is the clinician's own text, which
+   * may name a patient).
+   * It runs in a savepoint, and any failure of the record (a schema without
+   * 0153, 42883; a deadlock, 40P01; a lock not available, 55P03; anything
+   * else) is rolled back to it and the diagnosis saves as before; after
+   * ROLLBACK TO SAVEPOINT the rest of the transaction commits normally. Only
+   * a serialization failure (40001) in a SERIALIZABLE transaction is passed
+   * on, so withTransaction runs the whole transaction again (no diagnosis
+   * path is SERIALIZABLE today). The warning names the SQLSTATE and the
+   * request's correlation id, as other ehr-api warnings do, and nothing of
+   * the patient or the member. An idempotent replay records nothing.
+   */
+  private async recordRecent(client: PoolClient, context: DataAccessContext, row: DiagnosisRow): Promise<void> {
+    await client.query('savepoint ehr_recent_diagnosis');
+    try {
+      await client.query('select ehr.record_recent_diagnosis($1, $2, $3)', [row.codeSystem, row.code, row.display]);
+      await client.query('release savepoint ehr_recent_diagnosis');
+    } catch (error) {
+      const code = sqlState(error);
+      await client.query('rollback to savepoint ehr_recent_diagnosis');
+      if (code === '40001' && await isSerializable(client)) throw error;
+      if (code !== '42883') {
+        this.logger.warn({ message: 'A recent diagnosis could not be recorded', sqlState: code,
+          correlationId: context.correlationId });
+      }
+    }
   }
 
   update(
@@ -180,4 +225,16 @@ export class DiagnosesService {
     if (!row) throw new DomainProblem(404, 'DIAGNOSIS_NOT_FOUND', 'Diagnosis was not found');
     return row;
   }
+}
+
+/** Whether the transaction the client holds is SERIALIZABLE (withTransaction's isolationLevel). */
+async function isSerializable(client: PoolClient): Promise<boolean> {
+  const result = await client.query<{ isolation: string }>(
+    "select current_setting('transaction_isolation') as isolation");
+  return result.rows[0]?.isolation === 'serializable';
+}
+
+function sqlState(error: unknown): string {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  return typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? code : 'unknown';
 }

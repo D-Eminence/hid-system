@@ -72,7 +72,7 @@ select pg_temp.expect('1a the lists are empty', '0 0 0',
   || (select count(*) from ehr.catalog_lab_tests));
 select pg_temp.expect('1b the status: neither list available, no seed file', 'lab_test f 0 -, medicine f 0 -',
   (select string_agg(format('%s %s %s %s', kind, available, offered, coalesce(file_sha256, '-')), ', ' order by kind)
-     from ehr.catalog_status()));
+     from ehr.catalog_status() where kind in ('lab_test', 'medicine')));
 select pg_temp.expect('1c a search before any list answers nothing', ' more=false', pg_temp.medicines('amox', 10));
 select pg_temp.expect('1d no runtime holds a privilege on the tables', '0',
   (select count(*)::text from pg_class relation, lateral aclexplode(coalesce(relation.relacl,
@@ -183,7 +183,7 @@ select pg_temp.expect('2o lab tests: an HID-LAB code', 'LAB-0003 HID-LAB MP-SMEA
 select pg_temp.expect('2p the status counts what is offered (the withdrawn row left out)',
   'lab_test t 2026.1 8, medicine t 2026.1 6',
   (select string_agg(format('%s %s %s %s', kind, available, list_version, offered), ', ' order by kind)
-     from ehr.catalog_status()));
+     from ehr.catalog_status() where kind in ('lab_test', 'medicine')));
 select pg_temp.expect('2q a second active version of a kind is refused', '23505',
   left(pg_temp.refusal($q$update ehr.catalog_versions set active = true
                           where id = 'c1490000-0000-4000-8000-000000000003'$q$), 5));
@@ -267,7 +267,7 @@ update ehr.catalog_versions set active = false where kind = 'medicine' and activ
 update ehr.catalog_versions set active = true where id = 'c1490000-0000-4000-8000-000000000001';
 select pg_temp.expect('3q the status names the seed file of each active version',
   'lab_test ' || repeat('b', 64) || ', medicine ' || repeat('a', 64),
-  (select string_agg(format('%s %s', kind, file_sha256), ', ' order by kind) from ehr.catalog_status()));
+  (select string_agg(format('%s %s', kind, file_sha256), ', ' order by kind) from ehr.catalog_status() where kind in ('lab_test', 'medicine')));
 
 -- Fixed ids (3b): a retired id, a changed id and a reused lab code are refused; an unchanged id in a new version loads.
 insert into ehr.catalog_retired_codes (kind, list_id, reason) values

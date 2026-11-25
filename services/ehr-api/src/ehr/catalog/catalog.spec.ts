@@ -1,19 +1,25 @@
-import { Logger, RequestMethod } from '@nestjs/common';
+import { type INestApplication, Logger, Module, RequestMethod } from '@nestjs/common';
 import type { ArgumentMetadata } from '@nestjs/common';
 import { HEADERS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { Test } from '@nestjs/testing';
+import type { NextFunction, Request, Response } from 'express';
+import type { AddressInfo } from 'node:net';
 import { ANY_PERMISSIONS, AUDIT_FAILURES_ONLY, PATIENT_ALLOWED, REQUIRED_PERMISSIONS } from '../../common/decorators';
-import { DomainProblem } from '../../common/problem';
+import { DomainProblem, ProblemDetailsFilter } from '../../common/problem';
 import type { HidRequest } from '../../common/request-context';
 import { createValidationPipe } from '../../common/validation-pipe';
-import type { DatabaseService } from '../../database/database.service';
+import { DatabaseService } from '../../database/database.service';
 import { EhrModule } from '../ehr.module';
-import { CATALOG_CACHE_CONTROL, CatalogController } from './catalog.controller';
-import { SearchCatalogLabTestsQueryDto, SearchCatalogMedicinesQueryDto } from './catalog.dto';
+import { CATALOG_CACHE_CONTROL, CatalogController, TerminologyController } from './catalog.controller';
+import {
+  RecentDiagnosesQueryDto, SearchCatalogLabTestsQueryDto, SearchCatalogMedicinesQueryDto, SearchDiagnosesQueryDto,
+} from './catalog.dto';
 import { CatalogModule } from './catalog.module';
 import {
-  CATALOG_SEARCHES_PER_WINDOW, CATALOG_SEARCH_WINDOW_MS, CatalogService, LAB_TESTS_SQL, MEDICINES_SQL, STATUS_SQL,
-  looksLikePersonIdentifier, medicineDisplay,
+  CATALOG_SEARCHES_PER_WINDOW, CATALOG_SEARCH_WINDOW_MS, CatalogService, DIAGNOSES_SQL, LAB_TESTS_SQL, MEDICINES_SQL,
+  STATUS_SQL, diagnosisSearchUnavailable, looksLikePersonIdentifier, medicineDisplay, typedIcd10,
 } from './catalog.service';
+import { RECENT_DIAGNOSES_SQL, RecentDiagnosesService, type RecentDiagnosesCaller } from './recent-diagnoses.service';
 
 // Fictional identifiers only. Medicine and test names are list facts, not patient data.
 const membershipA = '123e4567-e89b-42d3-a456-426614174004';
@@ -67,7 +73,7 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
 
     it('is registered in the EHR module', () => {
       expect(Reflect.getMetadata('imports', EhrModule)).toContain(CatalogModule);
-      expect(Reflect.getMetadata('controllers', CatalogModule)).toEqual([CatalogController]);
+      expect(Reflect.getMetadata('controllers', CatalogModule)).toEqual([CatalogController, TerminologyController]);
       expect(Reflect.getMetadata(PATH_METADATA, CatalogController)).toBe('ehr/catalog');
     });
 
@@ -175,7 +181,7 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       await expect(new CatalogService(database).status()).resolves.toEqual({
         medicines: { available: false, version: null, approvedAt: null, fileSha256: null },
         labTests: { available: false, version: null, approvedAt: null, fileSha256: null },
-        diagnoses: { available: false, release: null },
+        diagnoses: { available: false, release: null, fileSha256: null },
         labTestNameOnly: false, diagnosisNameOnly: false, classDuplicateCheck: false,
         attribution: [],
       });
@@ -350,6 +356,33 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
         [{ field: 'q', messages: ['q must be shorter than or equal to 100 characters'] }]]);
       expect(calls.map((call) => call.values[0])).toEqual([astral]);
     });
+
+    // Rahman's re-review of #320, nit 9c: U+0000 reached the database (22021) and answered 503.
+    it.each([
+      ['U+0000', 'amox\u0000'],
+      ['U+0001', '\u0001amox'],
+      ['a line feed', 'amox\nicillin'],
+      ['a carriage return', 'amox\ricillin'],
+      ['U+001F', 'amox\u001F'],
+    ])('q with %s is 400 VALIDATION_FAILED, and nothing is searched', async (_name, q) => {
+      const { database, calls } = fakeDatabase([]);
+      const service = new CatalogService(database);
+      for (const search of [service.searchMedicines(membershipA, medicines({ q })),
+        service.searchLabTests(membershipA, labTests({ q }))]) {
+        const problem = await problemOf(search);
+        expect([problem.getStatus(), problem.code, problem.errors]).toEqual([400, 'VALIDATION_FAILED',
+          [{ field: 'q', messages: ['q must not contain control characters'] }]]);
+      }
+      expect(calls).toEqual([]);
+    });
+
+    it('q with a tab, or with U+007F, is searched', async () => {
+      const { database, calls } = fakeDatabase([]);
+      const service = new CatalogService(database);
+      await service.searchMedicines(membershipA, medicines({ q: 'amox\tcap' }));
+      await service.searchLabTests(membershipA, labTests({ q: 'fbc\u007F' }));
+      expect(calls.map((call) => call.values[0])).toEqual(['amox\tcap', 'fbc\u007F']);
+    });
   });
 
   describe('300 searches per 5 minutes per membership', () => {
@@ -381,6 +414,232 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
     });
   });
 
+  describe('ORD-9 (0152): the ICD-11 diagnosis search', () => {
+    const diagnoses = (q?: string, limit = 10) => Object.assign(new SearchDiagnosesQueryDto(), { q, limit });
+
+    it('GET ehr/terminology/diagnoses: ehr.diagnosis.write, refusals audited only, in the catalogue module', () => {
+      const handler = (TerminologyController.prototype as unknown as Record<string, object>).diagnoses as object;
+      expect(Reflect.getMetadata(PATH_METADATA, TerminologyController)).toBe('ehr/terminology');
+      expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe('diagnoses');
+      expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(RequestMethod.GET);
+      expect(Reflect.getMetadata(REQUIRED_PERMISSIONS, handler)).toEqual(['ehr.diagnosis.write']);
+      expect(Reflect.getMetadata(AUDIT_FAILURES_ONLY, handler)).toBe(true);
+      expect(Reflect.getMetadata('controllers', CatalogModule)).toEqual([CatalogController, TerminologyController]);
+    });
+
+    it('answers the contract\'s shape: ICD-11, WHO\'s title as display, our other name that matched', async () => {
+      const { database, calls } = fakeDatabase([
+        { code: '1F40', title: 'Malaria due to Plasmodium falciparum', matched_name: 'falciparum malaria',
+          list_version: '2026-01', more: true },
+        { code: 'KA64.20', title: 'Congenital falciparum malaria', matched_name: null, list_version: '2026-01', more: true },
+      ]);
+      await expect(new CatalogService(database).searchDiagnoses(membershipA, diagnoses('falciparum', 2))).resolves.toEqual({
+        release: 'ICD-11 MMS 2026-01', more: true, typedIcd10: null,
+        results: [
+          { codeSystem: 'ICD-11', code: '1F40', display: 'Malaria due to Plasmodium falciparum',
+            matchedName: 'falciparum malaria' },
+          { codeSystem: 'ICD-11', code: 'KA64.20', display: 'Congenital falciparum malaria', matchedName: null },
+        ],
+      });
+      expect(calls).toEqual([{ sql: DIAGNOSES_SQL, values: ['falciparum', 2] }]);
+    });
+
+    it.each([
+      ['B50.9', { codeSystem: 'ICD-10', code: 'B50.9' }],
+      ['b50.9', { codeSystem: 'ICD-10', code: 'B50.9' }],
+      ['A09', { codeSystem: 'ICD-10', code: 'A09' }],
+      ['J45.909', { codeSystem: 'ICD-10', code: 'J45.909' }],
+      ['U07.1', { codeSystem: 'ICD-10', code: 'U07.1' }],
+      ['1F40', null],
+      ['BA00', null],
+      ['5A11.Z', null],
+      ['malaria', null],
+      ['B50.91234', null],
+      // Punctuation around the code comes off, as for an ICD-11 code (Rahman's re-review of #320, nit 9d).
+      ['B50.9.', { codeSystem: 'ICD-10', code: 'B50.9' }],
+      ['(B50.9)', { codeSystem: 'ICD-10', code: 'B50.9' }],
+      ['(b50.9).', { codeSystem: 'ICD-10', code: 'B50.9' }],
+      ['B50.9,', { codeSystem: 'ICD-10', code: 'B50.9' }],
+      ['.A09', { codeSystem: 'ICD-10', code: 'A09' }],
+      ['"J45.909"', { codeSystem: 'ICD-10', code: 'J45.909' }],
+      ['B50. ', { codeSystem: 'ICD-10', code: 'B50' }],
+      ['(1F40)', null],
+      ['(malaria)', null],
+      ['B50.9.1', null],
+    ])('q %j as an ICD-10 code: %j (accepted as typed; no ICD-10 title)', (q, expected) => {
+      expect(typedIcd10(q)).toEqual(expected);
+    });
+
+    it('an ICD-10 code copied with punctuation is searched as typed and named as the code', async () => {
+      const { database, calls } = fakeDatabase([]);
+      await expect(new CatalogService(database).searchDiagnoses(membershipA, diagnoses('(B50.9).'))).resolves.toEqual({
+        release: null, more: false, results: [], typedIcd10: { codeSystem: 'ICD-10', code: 'B50.9' } });
+      expect(calls.map((call) => call.values[0])).toEqual(['(B50.9).']);
+    });
+
+    it('an ICD-10 code typed finds nothing in ICD-11 and says so', async () => {
+      const { database } = fakeDatabase([]);
+      await expect(new CatalogService(database).searchDiagnoses(membershipA, diagnoses('B50.9'))).resolves.toEqual({
+        release: null, more: false, results: [], typedIcd10: { codeSystem: 'ICD-10', code: 'B50.9' } });
+    });
+
+    // Rahman's re-review of #320, nit 9b: a code typed without its dot can have a Health ID's shape (2B6B2Y for
+    // 2B6B.2Y); the words say to type the dot.
+    it('refuses as the catalogue does, with the diagnosis words for a Health ID or NIN: type a code with its dot',
+      async () => {
+        const { database, calls } = fakeDatabase([]);
+        const service = new CatalogService(database);
+        expect((await problemOf(service.searchDiagnoses(membershipA, diagnoses('m')))).code)
+          .toBe('CATALOG_SEARCH_TEXT_TOO_SHORT');
+        for (const q of ['HID-7KQ2M9', '2B6B2Y', '12345678901']) {
+          const problem = await problemOf(service.searchDiagnoses(membershipA, diagnoses(q)));
+          expect([problem.getStatus(), problem.code, problem.message]).toEqual([400, 'CATALOG_SEARCH_TEXT_NOT_ALLOWED',
+            'Search by diagnosis name or code, and type a code with its dot (such as 2B6B.2Y). Do not type a Health ID '
+            + 'or NIN here.']);
+        }
+        // The medicine and lab-test searches keep their words.
+        expect((await problemOf(service.searchMedicines(membershipA, medicines({ q: '2B6B2Y' })))).message)
+          .toBe('Search by medicine or test name. Do not type a Health ID or NIN here.');
+        await service.searchDiagnoses(membershipA, diagnoses('2B6B.2Y'));
+        expect(calls.map((call) => call.values[0])).toEqual(['2B6B.2Y']);
+      });
+
+    it('a q with a control character other than tab is 400 VALIDATION_FAILED, never searched (nit 9c)', async () => {
+      const { database, calls } = fakeDatabase([]);
+      const service = new CatalogService(database);
+      for (const q of ['malaria\u0000', '\u0000\u0000', 'mal\naria']) {
+        const problem = await problemOf(service.searchDiagnoses(membershipA, diagnoses(q)));
+        expect([problem.getStatus(), problem.code]).toEqual([400, 'VALIDATION_FAILED']);
+      }
+      expect(calls).toEqual([]);
+    });
+
+    // Rahman's review of #320, nit 6: admit() counts code points for the diagnosis search too, as char_length does.
+    it('counts q in code points: one astral character is too short, two are searched, over 100 is VALIDATION_FAILED',
+      async () => {
+        const { database, calls } = fakeDatabase([]);
+        const service = new CatalogService(database);
+        for (const q of ['\u{1F600}', '\u{1D538}']) {
+          const problem = await problemOf(service.searchDiagnoses(membershipA, diagnoses(q)));
+          expect([problem.getStatus(), problem.code]).toEqual([400, 'CATALOG_SEARCH_TEXT_TOO_SHORT']);
+        }
+        const tooLong = await problemOf(service.searchDiagnoses(membershipA, diagnoses('\u2764\uFE0F'.repeat(51))));
+        expect([tooLong.getStatus(), tooLong.code]).toEqual([400, 'VALIDATION_FAILED']);
+        await service.searchDiagnoses(membershipA, diagnoses('a\u{1D538}'));
+        expect(calls.map((call) => call.values[0])).toEqual(['a\u{1D538}']);
+      });
+
+    it.each(['42883', '42P01', '57014', '08006'])('%s is 503 CATALOG_UNAVAILABLE in words true in every case; q is never logged',
+      async (code) => {
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        const failed = await problemOf(new CatalogService(fakeDatabase(databaseError(code)).database)
+          .searchDiagnoses(membershipA, diagnoses('malaria')));
+        // The same words for a schema without 0152 (42883, 42P01) as for a passing failure, so no advice: trying again
+        // does not help while 0152 is not there, and a name alone is not accepted yet (clinical.dto.ts still requires
+        // the code), so no "type it instead" either.
+        expect([failed.getStatus(), failed.code, failed.message]).toEqual([503, 'CATALOG_UNAVAILABLE',
+          'Diagnosis search is not available right now.']);
+        expect(failed.message).not.toMatch(/try|again|minute|type|instead/i);
+        expect(diagnosisSearchUnavailable().message).toBe(failed.message);
+        expect(warn.mock.calls.map((call) => String(call[0])).join('\n')).not.toMatch(/malaria/);
+        expect(warn).toHaveBeenCalledTimes(code === '42883' || code === '42P01' ? 0 : 1);
+        warn.mockRestore();
+      });
+
+    it('the status names the loaded ICD-11 release and its notice', async () => {
+      const icd = 'ICD-11 notice';
+      const { database } = fakeDatabase([
+        { kind: 'diagnosis', available: true, list_version: '2026-01', approved_day: '2026-12-01', offered: 17255,
+          attribution: [icd], file_sha256: 'd'.repeat(64) },
+        { kind: 'lab_test', available: false, list_version: null, approved_day: null, offered: 0, attribution: [],
+          file_sha256: null },
+        { kind: 'medicine', available: false, list_version: null, approved_day: null, offered: 0, attribution: [],
+          file_sha256: null },
+      ]);
+      await expect(new CatalogService(database).status()).resolves.toMatchObject({
+        diagnoses: { available: true, release: 'ICD-11 MMS 2026-01', fileSha256: 'd'.repeat(64) },
+        medicines: { available: false }, attribution: [icd],
+      });
+    });
+  });
+
+  // Rahman's re-review of #320, nit 9a: what is sent, through the app's ProblemDetailsFilter and validation pipe.
+  // scripts/tests/catalog-diagnoses-contract.test.mjs checks that the planned contract says the same.
+  describe('ORD-9 over HTTP: the status, code and detail actually sent', () => {
+    let app: INestApplication | undefined;
+    afterEach(async () => {
+      await app?.close();
+      app = undefined;
+    });
+
+    const start = async (answer: readonly Record<string, unknown>[] | Error) => {
+      const { database, calls } = fakeDatabase(answer);
+      // The terminology controller also serves recent diagnoses; these HTTP tests never call that route.
+      @Module({ controllers: [CatalogController, TerminologyController],
+        providers: [CatalogService, { provide: DatabaseService, useValue: database },
+          { provide: RecentDiagnosesService, useValue: {} }] })
+      class TestModule {}
+      const moduleRef = await Test.createTestingModule({ imports: [TestModule] }).compile();
+      app = moduleRef.createNestApplication({ logger: false });
+      app.use((request: Request & Record<string, unknown>, _response: Response, next: NextFunction) => {
+        request.actor = { subject: 'staff:test', facility: { membershipId: membershipA } };
+        request.facilityId = 'facility';
+        request.correlationId = 'correlation-123456';
+        next();
+      });
+      app.useGlobalPipes(createValidationPipe());
+      app.useGlobalFilters(new ProblemDetailsFilter());
+      await app.listen(0, '127.0.0.1');
+      const port = (app.getHttpServer().address() as AddressInfo).port;
+      const get = async (path: string) => {
+        const response = await fetch(`http://127.0.0.1:${port}${path}`);
+        return { status: response.status, type: response.headers.get('content-type'),
+          cacheControl: response.headers.get('cache-control'), body: await response.json() as Record<string, unknown> };
+      };
+      return { get, calls };
+    };
+
+    it.each(['42883', '42P01', '57014'])('a database failure (%s) is sent as 503 CATALOG_UNAVAILABLE with the filter\'s '
+      + 'words for every 5xx', async (code) => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const { get, calls } = await start(databaseError(code));
+      const answer = await get('/ehr/terminology/diagnoses?q=malaria');
+      expect([answer.status, answer.body.code, answer.body.detail]).toEqual([503, 'CATALOG_UNAVAILABLE',
+        'The service could not complete the request.']);
+      expect(answer.type).toMatch(/^application\/problem\+json/);
+      expect(answer.cacheControl).not.toBe('private, max-age=60');
+      // The service's own words stay inside it.
+      expect(answer.body.detail).not.toBe(diagnosisSearchUnavailable().message);
+      expect(calls).toHaveLength(1);
+      warn.mockRestore();
+    });
+
+    it('a 400 is sent with the service\'s own words: a Health ID shape, and a control character', async () => {
+      const { get, calls } = await start([]);
+      const shaped = await get('/ehr/terminology/diagnoses?q=2B6B2Y');
+      expect([shaped.status, shaped.body.code, shaped.body.detail]).toEqual([400, 'CATALOG_SEARCH_TEXT_NOT_ALLOWED',
+        'Search by diagnosis name or code, and type a code with its dot (such as 2B6B.2Y). Do not type a Health ID or NIN '
+        + 'here.']);
+      for (const path of ['/ehr/terminology/diagnoses?q=malaria%00', '/ehr/catalog/medicines?q=amox%00',
+        '/ehr/catalog/lab-tests?q=fbc%0A1']) {
+        const refused = await get(path);
+        expect([refused.status, refused.body.code, refused.body.errors]).toEqual([400, 'VALIDATION_FAILED',
+          [{ field: 'q', messages: ['q must not contain control characters'] }]]);
+      }
+      expect(calls).toEqual([]);
+    });
+
+    it('an answer is sent as the service gives it, kept a minute', async () => {
+      const { get } = await start([{ code: 'NB91', title: 'Injury of intra-abdominal organs', matched_name: null,
+        list_version: '2026-01', more: false }]);
+      const answer = await get('/ehr/terminology/diagnoses?q=(B50.9).');
+      expect([answer.status, answer.cacheControl, answer.body]).toEqual([200, 'private, max-age=60', {
+        release: 'ICD-11 MMS 2026-01', more: false, typedIcd10: { codeSystem: 'ICD-10', code: 'B50.9' },
+        results: [{ codeSystem: 'ICD-11', code: 'NB91', display: 'Injury of intra-abdominal organs', matchedName: null }],
+      }]);
+    });
+  });
+
   describe('database failures', () => {
     it.each(['42883', '42P01', '57014', '08006', '42501'])('%s is 503 CATALOG_UNAVAILABLE, and q is never logged', async (code) => {
       const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
@@ -396,5 +655,116 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       expect(warn).toHaveBeenCalledTimes(code === '42883' || code === '42P01' ? 0 : 2);
       warn.mockRestore();
     });
+  });
+});
+
+describe('ORD-9 (0153): recent diagnoses', () => {
+  const facilityId = '123e4567-e89b-42d3-a456-426614174001';
+  const caller: RecentDiagnosesCaller = { subject: 'staff:test-doctor', accountId: '123e4567-e89b-42d3-a456-426614174002',
+    organizationId: '123e4567-e89b-42d3-a456-426614174003', facilityId, membershipId: membershipA,
+    correlationId: 'correlation-0153' };
+  const lastUsedAt = new Date('2026-11-23T10:42:00.000Z');
+
+  /** withStaffTransaction with one client; the audit row is written with that client. */
+  function fakeStaff(answer: readonly Record<string, unknown>[] | Error, auditFailure?: Error) {
+    const calls: { sql: string; values: unknown[] }[] = [];
+    const audits: { client: unknown; event: Record<string, unknown> }[] = [];
+    const client = { query: jest.fn(async (sql: string, values: unknown[] = []) => {
+      calls.push({ sql, values });
+      if (answer instanceof Error) throw answer;
+      return { rows: answer };
+    }) };
+    const database = {
+      withStaffTransaction: jest.fn(async (_staff: unknown, operation: (c: typeof client) => Promise<unknown>) =>
+        operation(client)),
+      withTransaction: jest.fn(async () => { throw new Error('recent diagnoses take no purpose of use'); }),
+    } as unknown as DatabaseService;
+    const audit = { recordWithClient: jest.fn(async (used: unknown, event: Record<string, unknown>) => {
+      if (auditFailure) throw auditFailure;
+      audits.push({ client: used, event });
+    }) };
+    return { service: new RecentDiagnosesService(database, audit as never), database, client, calls, audits };
+  }
+
+  it('GET ehr/terminology/diagnoses/recent: ehr.diagnosis.write, no purpose header, not kept, in the catalogue module', () => {
+    const handler = (TerminologyController.prototype as unknown as Record<string, object>).recentDiagnoses as object;
+    expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe('diagnoses/recent');
+    expect(Reflect.getMetadata(METHOD_METADATA, handler)).toBe(RequestMethod.GET);
+    expect(Reflect.getMetadata(REQUIRED_PERMISSIONS, handler)).toEqual(['ehr.diagnosis.write']);
+    expect(Reflect.getMetadata(AUDIT_FAILURES_ONLY, handler)).toBe(true);
+    expect(Reflect.getMetadata(HEADERS_METADATA, handler)).toBeUndefined();
+    expect(Reflect.getMetadata('providers', CatalogModule)).toEqual([CatalogService, RecentDiagnosesService]);
+  });
+
+  it('the route reads the guards\' actor at this facility, sets no header and needs no X-Purpose-Of-Use', async () => {
+    const { service } = fakeStaff([]);
+    const list = jest.spyOn(service, 'list');
+    const controller = new TerminologyController(new CatalogService(fakeDatabase([]).database), service);
+    const setHeader = jest.fn();
+    const request = { correlationId: 'correlation-0153', facilityId, res: { setHeader }, header: () => undefined,
+      actor: { subject: caller.subject, accountId: caller.accountId,
+        facility: { membershipId: membershipA, organizationId: caller.organizationId } } } as unknown as HidRequest;
+    await expect(controller.recentDiagnoses(request, Object.assign(new RecentDiagnosesQueryDto(), { limit: 5 })))
+      .resolves.toEqual({ items: [] });
+    expect(list).toHaveBeenCalledWith(caller, 5);
+    expect(setHeader).not.toHaveBeenCalled();
+    expect(() => controller.recentDiagnoses({ ...request, actor: undefined } as unknown as HidRequest,
+      new RecentDiagnosesQueryDto())).toThrow('Request context was not established by security guards');
+  });
+
+  it('limit is 1-50, default 20', async () => {
+    await expect(validate(RecentDiagnosesQueryDto, {})).resolves.toMatchObject({ limit: 20 });
+    await expect(validate(RecentDiagnosesQueryDto, { limit: '50' })).resolves.toMatchObject({ limit: 50 });
+    for (const limit of ['0', '51', '2.5', 'ten']) {
+      await expect(validate(RecentDiagnosesQueryDto, { limit })).rejects.toMatchObject({ status: 400 });
+    }
+    await expect(validate(RecentDiagnosesQueryDto, { limit: null }, 'body')).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('answers the contract\'s shape, newest first as read, and audits the read with the count only, in its transaction', async () => {
+    const { service, database, client, calls, audits } = fakeStaff([
+      { code_system: 'ICD-11', code: '1F40', display: 'Malaria due to Plasmodium falciparum', last_used_at: lastUsedAt,
+        use_count: 14 },
+      { code_system: 'ICD-10', code: 'B50.9', display: 'Malaria (test)', last_used_at: lastUsedAt, use_count: 1 },
+    ]);
+    await expect(service.list(caller, 20)).resolves.toEqual({ items: [
+      { codeSystem: 'ICD-11', code: '1F40', display: 'Malaria due to Plasmodium falciparum',
+        lastUsedAt: '2026-11-23T10:42:00.000Z', useCount: 14 },
+      { codeSystem: 'ICD-10', code: 'B50.9', display: 'Malaria (test)', lastUsedAt: '2026-11-23T10:42:00.000Z',
+        useCount: 1 },
+    ] });
+    expect(database.withStaffTransaction).toHaveBeenCalledWith(caller, expect.any(Function));
+    expect(calls).toEqual([{ sql: RECENT_DIAGNOSES_SQL, values: [20] }]);
+    expect(audits).toEqual([{ client, event: {
+      correlationId: 'correlation-0153', actorType: 'staff', actorSubject: caller.subject, actorAccountId: caller.accountId,
+      actorMembershipId: membershipA, organizationId: caller.organizationId, facilityId,
+      action: 'ehr.terminology.recent-read', resourceType: 'recent-diagnoses', outcome: 'success',
+      details: { resultCount: 2 } } }]);
+    expect(JSON.stringify(audits)).not.toMatch(/1F40|B50|Malaria/);
+  });
+
+  it.each(['42883', '42P01', '57014', '42501'])('%s is 503 CATALOG_UNAVAILABLE in the diagnosis search\'s words; a schema '
+    + 'without 0153 is not logged', async (code) => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const { service, audits } = fakeStaff(databaseError(code));
+    const problem = await problemOf(service.list(caller, 20));
+    // The same words as the diagnosis search's 503 (#320), so no advice: trying again does not help while 0153 is
+    // not there, and a name alone is not accepted yet, so no "type the name instead" either.
+    expect([problem.getStatus(), problem.code, problem.message]).toEqual([503, 'CATALOG_UNAVAILABLE',
+      'Diagnosis search is not available right now.']);
+    expect(problem.message).toBe(diagnosisSearchUnavailable().message);
+    expect(problem.message).not.toMatch(/try|again|minute|type|instead/i);
+    expect(audits).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(code === '42883' ? 0 : 1);
+    warn.mockRestore();
+  });
+
+  it('a read whose audit row cannot be written is refused (503), never answered unaudited', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const { service } = fakeStaff([], databaseError('53300'));
+    const problem = await problemOf(service.list(caller, 20));
+    expect([problem.getStatus(), problem.code, problem.message]).toEqual([503, 'CATALOG_UNAVAILABLE',
+      'Diagnosis search is not available right now.']);
+    warn.mockRestore();
   });
 });

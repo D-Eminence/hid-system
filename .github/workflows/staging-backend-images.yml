@@ -6,7 +6,7 @@ name: Staging backend images
 on:
   push:
     branches: [staging]
-    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'security/production-runtime-assessment.json', 'security/gateway-runtime.vex.json', '.github/workflows/staging-backend-images.yml']
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'security/production-runtime-assessment.json', 'security/gateway-runtime.vex.json', 'docs/codes/**', '.github/workflows/staging-backend-images.yml']
   workflow_dispatch:
     inputs:
       component:
