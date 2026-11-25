@@ -15,7 +15,11 @@
 --      Africa/Lagos time (what Identity sends back as $4);
 --   4. ninStatus (patientHasVerifiedNinSql): a case with no patient yet is
 --      verified; a patient with a checked NIN is verified; a patient whose
---      NIN was revoked, or who has none, is not.
+--      NIN was revoked, or who has none, is not;
+--   5. who started each case (createdByName, SX-9's name rule): the login's
+--      display name, else the staff record's full name (blank counts as
+--      unset), and no name once the login is deleted or neither is set; a
+--      disabled or locked login is still named, as SX-9 names past staff.
 --
 -- Each case records its outcome and the suite fails at the end listing every
 -- case whose outcome differs.
@@ -119,7 +123,8 @@ set local timezone = 'Africa/Lagos';
 create function pg_temp.registration_case_list(text, uuid, text, timestamptz, uuid, integer, text default null)
 returns table (id text, status text, row_version text, resolved_patient_id text, resolved_hid_code text,
   candidate_count text, contact_recorded boolean, nin_verified boolean, identity_evidence text, full_name text, dob text,
-  created_at timestamptz, updated_at timestamptz, created_at_cursor text, created_by_me boolean)
+  created_at timestamptz, updated_at timestamptz, created_at_cursor text, created_by_me boolean,
+  created_by_membership_id text, created_by_name text)
 language sql stable as $$
   select
              registration.id::text,
@@ -146,9 +151,20 @@ language sql stable as $$
              registration.created_at,
              registration.updated_at,
              registration.created_at::text as created_at_cursor,
-             (registration.created_by_account_id = $2::uuid) as created_by_me
+             (registration.created_by_account_id = $2::uuid) as created_by_me,
+             registration.created_by_membership_id::text as created_by_membership_id,
+             case when starter_account.status = 'deleted' then null
+                  else coalesce(nullif(btrim(starter_account.display_name), ''),
+                                nullif(btrim(starter.full_name), '')) end as created_by_name
            from identity.registration_cases registration
            left join identity.patients patient on patient.id = registration.resolved_patient_id
+           left join identity.staff_facility_memberships starter_membership
+             on starter_membership.id = registration.created_by_membership_id
+            and starter_membership.facility_id = registration.facility_id
+           left join identity.staff starter
+             on starter.id = starter_membership.staff_id
+            and starter.account_id = starter_membership.account_id
+           left join auth.accounts starter_account on starter_account.id = starter.account_id
           where registration.facility_id = platform.current_facility_id()
             and ($1::text = 'facility' or registration.created_by_account_id = $2::uuid)
             and ($3::text is null or registration.status = $3::text)
@@ -243,6 +259,24 @@ begin
     (select count(*)::text || '/' || string_agg(distinct listed.identity_evidence, ',')
        from pg_temp.registration_case_list('facility', 'a5100100-0000-4000-8000-000000000003',
          null, null, null, 101, 'nin_verified') listed));
+  -- 2i (SX-10, "All registrations" names who started each case): each row
+  -- carries the membership that started it, read under row-level security as
+  -- Identity's runtime; cases 1, 2 and 4 by desk 1's membership, 3 by desk 2's.
+  perform pg_temp.list_case('2i approver, view=facility: each case names the membership that started it',
+    'c2:m1,c1:m1,c3:m2,c4:m1',
+    (select string_agg('c' || right(listed.id, 1) || ':m' || right(listed.created_by_membership_id, 1), ','
+              order by listed.ord)
+       from (select row_number() over () as ord, page.*
+               from pg_temp.registration_case_list('facility', 'a5100100-0000-4000-8000-000000000003',
+                 null, null, null, 101) page) listed));
+  -- 2j: and that member's name, read the same way: desk 1 is Ada Desk, desk 2 Bola Desk.
+  perform pg_temp.list_case('2j approver, view=facility: each case names who started it',
+    'c2:Ada Desk,c1:Ada Desk,c3:Bola Desk,c4:Ada Desk',
+    (select string_agg('c' || right(listed.id, 1) || ':' || coalesce(listed.created_by_name, '-'), ','
+              order by listed.ord)
+       from (select row_number() over () as ord, page.*
+               from pg_temp.registration_case_list('facility', 'a5100100-0000-4000-8000-000000000003',
+                 null, null, null, 101) page) listed));
   reset role;
 end $$;
 
@@ -282,6 +316,71 @@ begin
     array_to_string(shown, ','));
   perform pg_temp.list_case('3b the cursor text is Lagos time with microseconds', '2026-11-18 11:00:58.123456+01',
     page_one);
+end $$;
+
+-- 5. The name rule (createdByName), read as the approver at A under
+-- row-level security as Identity's runtime, after fixture changes made
+-- without triggers and put back at the end: c2, c1 and c4 are desk 1's, c3
+-- desk 2's; '-' is no name.
+create function pg_temp.names_as_approver() returns text language plpgsql as $f$
+declare outcome text;
+begin
+  set local role hid_identity_api_runtime;
+  perform set_config('app.actor_subject', 'synthetic:list-member-3', true),
+    set_config('app.facility_id', 'a5100000-0000-4000-8000-000000000002', true),
+    set_config('app.correlation_id', 'list-suite-3', true),
+    set_config('app.membership_id', 'a5100300-0000-4000-8000-000000000003', true),
+    set_config('app.purpose_of_use', 'healthcare-operations', true);
+  begin
+    select coalesce(string_agg('c' || right(listed.id, 1) || ':' || coalesce(listed.created_by_name, '-'), ','
+        order by listed.ord), 'none')
+      into outcome
+      from (select row_number() over () as ord, page.* from pg_temp.registration_case_list('facility',
+              'a5100100-0000-4000-8000-000000000003', null, null, null, 101) page) listed;
+  exception when others then
+    outcome := sqlstate || ' ' || sqlerrm;
+  end;
+  reset role;
+  return outcome;
+end $f$;
+do $$
+begin
+  set local session_replication_role = replica;
+  -- 5a: the login's display name wins over the staff record's, trimmed.
+  update auth.accounts set display_name = '  Ada at the Desk ' where id = 'a5100100-0000-4000-8000-000000000001';
+  update identity.staff set full_name = 'Ada Staff Record' where id = 'a5100200-0000-4000-8000-000000000001';
+  -- 5a: a blank display name falls back to the staff record's full name.
+  update auth.accounts set display_name = '   ' where id = 'a5100100-0000-4000-8000-000000000002';
+  update identity.staff set full_name = ' Bola Staff Record ' where id = 'a5100200-0000-4000-8000-000000000002';
+  set local session_replication_role = origin;
+  perform pg_temp.list_case('5a display name first, else the staff full name, trimmed',
+    'c2:Ada at the Desk,c1:Ada at the Desk,c3:Bola Staff Record,c4:Ada at the Desk', pg_temp.names_as_approver());
+  set local session_replication_role = replica;
+  update identity.staff set full_name = '' where id = 'a5100200-0000-4000-8000-000000000002';
+  set local session_replication_role = origin;
+  perform pg_temp.list_case('5b neither name set: no name', 'c2:Ada at the Desk,c1:Ada at the Desk,c3:-,c4:Ada at the Desk',
+    pg_temp.names_as_approver());
+  set local session_replication_role = replica;
+  update identity.staff set full_name = 'Bola Desk' where id = 'a5100200-0000-4000-8000-000000000002';
+  update auth.accounts set display_name = 'Bola Desk', status = 'deleted' where id = 'a5100100-0000-4000-8000-000000000002';
+  set local session_replication_role = origin;
+  perform pg_temp.list_case('5c a deleted login: no name, though both names are set',
+    'c2:Ada at the Desk,c1:Ada at the Desk,c3:-,c4:Ada at the Desk', pg_temp.names_as_approver());
+  set local session_replication_role = replica;
+  update auth.accounts set status = 'disabled' where id = 'a5100100-0000-4000-8000-000000000002';
+  update auth.accounts set status = 'locked' where id = 'a5100100-0000-4000-8000-000000000001';
+  set local session_replication_role = origin;
+  perform pg_temp.list_case('5d a disabled or locked login is still named',
+    'c2:Ada at the Desk,c1:Ada at the Desk,c3:Bola Desk,c4:Ada at the Desk', pg_temp.names_as_approver());
+  -- Put the fixtures back.
+  set local session_replication_role = replica;
+  update auth.accounts set display_name = 'Ada Desk' where id = 'a5100100-0000-4000-8000-000000000001';
+  update identity.staff set full_name = 'Ada Desk' where id = 'a5100200-0000-4000-8000-000000000001';
+  update auth.accounts set status = 'active'
+   where id in ('a5100100-0000-4000-8000-000000000001', 'a5100100-0000-4000-8000-000000000002');
+  set local session_replication_role = origin;
+  perform pg_temp.list_case('5e fixtures put back', 'c2:Ada Desk,c1:Ada Desk,c3:Bola Desk,c4:Ada Desk',
+    pg_temp.names_as_approver());
 end $$;
 
 -- Result.

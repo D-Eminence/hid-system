@@ -7125,7 +7125,9 @@ Answer, newest first:
       "dateOfBirth": "1991-04-05",
       "createdAt": "2026-11-18T10:00:58.000Z",
       "updatedAt": "2026-11-18T10:05:58.000Z",
-      "createdByMe": true
+      "createdByMe": true,
+      "createdByMembershipId": "uuid",
+      "createdByName": "Ada Desk"
     }
   ],
   "nextCursor": null
@@ -7134,9 +7136,20 @@ Answer, newest first:
 
 The item has the same fields as `GET registration-cases/:caseId` (with
 `ninStatus` from ID-0; `patient` only once the case points at a patient), plus
-`fullName`, `dateOfBirth`, `createdAt`, `updatedAt` and `createdByMe`. No NIN
-digits are read or returned (not even the last four), and candidates are not
-listed; open one case for them.
+`fullName`, `dateOfBirth`, `createdAt`, `updatedAt`, `createdByMe`,
+`createdByMembershipId` (the membership at this facility that started the case,
+from `identity.registration_cases.created_by_membership_id`, 0011) and
+`createdByName`, that member's name by SX-9's rule: the login's display name,
+else the staff record's full name, trimmed, a blank name counting as unset;
+`null` once the login is deleted or when neither is set (a disabled or locked
+login is still named, as SX-9 names past staff). Only a name: no contact, account, role or
+licence of theirs is returned. The coordinator agreed it on #258 (25 Nov,
+21:20 UTC): approvers at the same facility may see the display name of the
+member who started a case, and the read needs no migration (Identity's runtime
+already reads `identity.staff_facility_memberships`, `identity.staff` and
+`auth.accounts`, none under row-level security). No NIN digits are read or
+returned (not even the last four), and candidates are not listed; open one
+case for them.
 
 Audit: one `identity.registration-case.list` row per answer, outcome
 `success`, details `{ view, status, page: "first" | "next", count, caseIds,
@@ -7158,8 +7171,10 @@ not null. Opening a row calls `GET registration-cases/:caseId`.
 
 `services/identity-api/src/identity/registration-case-list.spec.ts`: mine and
 facility views, another facility sees nothing, the refusal and its audit row,
-the success audit row, no NIN digits in the answer or the query, paging and
-bad cursors, and query parameters (a Health ID is refused). Those run on a
+the success audit row, no NIN digits in the answer or the query, who started
+each case (membership and name, `null` when the read gives no name, and no
+email, phone, licence or role read), paging and bad cursors, and query
+parameters (a Health ID is refused). Those run on a
 fake database; one test checks that the Postgres suite below runs the read
 the service sends, word for word.
 
@@ -7175,7 +7190,11 @@ A's list; `view=mine` shows only the member's own cases; the status filter;
 paging one case at a time through two cases with the same `created_at`, with
 the cursor's text in Africa/Lagos time; and `ninStatus` for a case with no
 patient yet (verified), a patient with a checked NIN (verified), a patient
-whose NIN was revoked (not verified) and one with none (not verified).
+whose NIN was revoked (not verified) and one with none (not verified); who
+started each case, by membership and by name, with the name rule: the
+display name first, trimmed, else the staff record's full name, no name when
+neither is set or once the login is deleted, and a disabled or locked login
+still named.
 
 `services/identity-api/src/identity/registration-case-list.http.spec.ts`
 (supertest, the real security guard, audit interceptor and the global
@@ -7244,7 +7263,7 @@ which shows these fields; the licence is shown as "Licence number ending
 Akos P1-10. OCR jobs no longer disappear when the page is left: the Migrate
 desk reads this facility's jobs, newest first, a page at a time, and shows
 who started each one by name. (The registration-case list is SX-10, lane A;
-it uses the same names route.)
+it carries the same name itself, as `createdByName`, by the same rule.)
 
 | Route (under `/api/v1`) | Who | Answer |
 | --- | --- | --- |
