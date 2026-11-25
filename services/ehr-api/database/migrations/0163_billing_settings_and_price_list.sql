@@ -86,8 +86,11 @@
 --
 -- 0. Locks and preconditions (55000 and nothing applied; "0163: already
 --    applied" when every function this file makes is there exactly as made).
--- 1-9. As above. 10. Post-checks: tables, RLS forced, policies, ACLs,
---    triggers, function owners, SECURITY DEFINER, search_path and md5.
+-- 1-9. As above. 10. Post-checks: tables, RLS forced, each table's one
+--    policy (permissive, for PUBLIC, its USING and WITH CHECK rule), ACLs,
+--    each table's exact triggers (name, type, enabled, no arguments, no
+--    column list, no WHEN, function), function owners, SECURITY DEFINER,
+--    search_path and md5.
 
 do $pre$
 declare
@@ -1282,6 +1285,11 @@ declare
     "commercial.settings_json(uuid)": "49d373b14f8c3a4c851e06690b43cdf1",
     "commercial.settings_put(jsonb,bigint,boolean,boolean,text,text)": "37aa9d24c36b299e0adb4f9c96b35de6"}';
   owner_oid oid := (select nspowner from pg_namespace where nspname = 'commercial');
+  -- The one policy's rule, as PostgreSQL shows it, for the owner (who made every table here).
+  owner_rule constant text := format('((CURRENT_USER = %L::name) AND (facility_id = platform.current_facility_id()))',
+    pg_get_userbyid(owner_oid));
+  -- The tables with append_only (no UPDATE or DELETE); the others have no_delete. Every table has no_truncate.
+  append_only_tables constant text[] := array['commercial.catalogue_events', 'commercial.commands', 'commercial.unpriced_code_hits'];
   computed jsonb;
   differing text;
   granted constant text[] := array['commercial.billing_switched_on(boolean)',
@@ -1323,13 +1331,23 @@ begin
          and relation.relrowsecurity and relation.relforcerowsecurity and relation.relowner = owner_oid
          and (select count(*) from pg_policy policy where policy.polrelid = relation.oid) = 1
          and exists (select 1 from pg_policy policy where policy.polrelid = relation.oid
-                      and policy.polname = 'facility_owner_rows' and policy.polcmd = '*')
+                      and policy.polname = 'facility_owner_rows' and policy.polcmd = '*' and policy.polpermissive
+                      and policy.polroles = array[0]::oid[]
+                      and pg_get_expr(policy.polqual, policy.polrelid) = owner_rule
+                      and pg_get_expr(policy.polwithcheck, policy.polrelid) = owner_rule)
          and not exists (select 1 from lateral aclexplode(coalesce(relation.relacl, acldefault('r', relation.relowner))) acl
                           where acl.grantee <> relation.relowner)
-         and (select count(*) from pg_trigger trigger_row where trigger_row.tgrelid = relation.oid
-               and not trigger_row.tgisinternal and trigger_row.tgfoid = 'platform.reject_mutation()'::regprocedure) = 2)
+         and (select string_agg(trigger_row.tgname || ':' || trigger_row.tgtype || ':' || trigger_row.tgenabled::text || ':'
+                                  || trigger_row.tgnargs || ':' || trigger_row.tgattr::text || ':'
+                                  || (trigger_row.tgqual is null) || ':' || trigger_row.tgfoid::regprocedure::text,
+                                ',' order by trigger_row.tgname collate "C")
+                from pg_trigger trigger_row where trigger_row.tgrelid = relation.oid and not trigger_row.tgisinternal)
+             = case when relation.oid = any (select to_regclass(name) from unnest(append_only_tables) name)
+                    then 'append_only:27:O:0::true:platform.reject_mutation(),'
+                    else 'no_delete:11:O:0::true:platform.reject_mutation(),' end
+               || 'no_truncate:34:O:0::true:platform.reject_mutation()')
      <> cardinality(tables) then
-    raise exception using errcode = '55000', message = '0163: post-check failed: a table''s row-level security, policy, ACL or guards';
+    raise exception using errcode = '55000', message = '0163: post-check failed: a table''s row-level security, policy, ACL or triggers';
   end if;
   if exists (select 1 from commercial.payment_settings) or exists (select 1 from commercial.catalogue_items) then
     raise exception using errcode = '55000', message = '0163: post-check failed: the tables must be empty';

@@ -155,7 +155,8 @@
 --       as this file leaves it; "0162: ... not in the reviewed state" when
 --       any of its objects exists otherwise);
 --    c. the eight role functions and the two checks exactly as Release C
---       leaves them (md5 of pg_proc.prosrc and the check definitions); these
+--       leaves them (md5 of pg_proc.prosrc, SECURITY DEFINER, search_path
+--       and grants, and the check definitions); these
 --       stay exact because this file rewrites them, so a change another lane
 --       made to them is refused, never overwritten (no wave 1 lane makes one);
 --    d. the eight roles active, each still holding every code 0001-0151 gave
@@ -169,7 +170,8 @@
 -- 3. Post-checks: the 58 rows of the new codes (md5 pinned), the role table
 --    compared row by row with the table before step 2 plus exactly those 58
 --    rows (so no other role's code changes), the eight
---    functions' md5 after, the two checks, the schema and its ACL, the 77
+--    functions' md5 after with their owner, SECURITY DEFINER, search_path
+--    and grants unchanged, the two checks, the schema and its ACL, the 77
 --    audit rows (plus 2 where the QA tenant is installed), the QA step's rows.
 
 do $bill1$
@@ -263,6 +265,23 @@ declare
       "outreach.registration.write"]}';
   -- The 58 rows this file adds: md5 of "role code" pairs in byte order (collate "C"), joined by ','.
   rows_md5 constant text := 'd73e63d61ea5cc52bbf1bcd56fa69304';
+  -- The eight role functions' SECURITY DEFINER, search_path and grants (to roles other than the owner), as Release C
+  -- leaves them and as they must be after CREATE OR REPLACE: "definer|search_path|grantee:privilege,...".
+  function_settings constant jsonb := '{
+    "identity.staff_invitable_roles(text,text)": "false|search_path=pg_catalog, pg_temp|",
+    "identity.staff_invitation_fields_valid(text,text,text,text,text,text)":
+      "false|search_path=pg_catalog, identity, pg_temp|",
+    "identity.attach_invited_member(identity.staff_invitations,uuid,uuid,boolean)":
+      "false|search_path=pg_catalog, identity, auth, platform, pg_temp|",
+    "identity.change_facility_staff_role(uuid,bigint,text,text,text,text,text)":
+      "true|search_path=pg_catalog, identity, auth, audit, platform, pg_temp|hid_identity_runtime:EXECUTE,hid_schema_test_runtime:EXECUTE",
+    "identity.add_facility_staff_role(uuid,bigint,text,text,text,text,text,text,character)":
+      "true|search_path=pg_catalog, pg_temp|hid_identity_runtime:EXECUTE",
+    "identity.remove_facility_staff_role(uuid,bigint,text,text)": "true|search_path=pg_catalog, pg_temp|hid_identity_runtime:EXECUTE",
+    "identity.admin_add_facility_staff_role(uuid,uuid,bigint,text,text,text,text,text,text,character)":
+      "true|search_path=pg_catalog, pg_temp|hid_identity_runtime:EXECUTE",
+    "identity.admin_remove_facility_staff_role(uuid,uuid,bigint,text,text,text,character)":
+      "true|search_path=pg_catalog, pg_temp|hid_identity_runtime:EXECUTE"}';
   -- The role functions: md5 of pg_proc.prosrc before (Release C) and after
   -- this file, and how many times each replacement applies.
   role_functions constant jsonb := '[
@@ -428,6 +447,19 @@ begin
             and constraint_row.conname = 'staff_invitations_licence_ck') is distinct from licence_check_before then
     raise exception using errcode = '55000',
       message = '0162: identity.staff_invitations'' role checks are not as Release C leaves them; nothing applied';
+  end if;
+  select string_agg(pinned.key, ', ' order by pinned.key) into missing
+    from jsonb_each_text(function_settings) pinned
+   where (select proc.prosecdef::text || '|' || coalesce(array_to_string(proc.proconfig, ';'), '') || '|'
+                  || coalesce((select string_agg(granted.entry, ',' order by granted.entry collate "C")
+                                 from (select case when acl.grantee = 0 then 'PUBLIC' else pg_get_userbyid(acl.grantee) end
+                                                || ':' || acl.privilege_type as entry
+                                         from aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
+                                        where acl.grantee <> proc.proowner) granted), '')
+             from pg_proc proc where proc.oid = to_regprocedure(pinned.key)) is distinct from pinned.value;
+  if missing is not null then
+    raise exception using errcode = '55000',
+      message = '0162: these role functions'' SECURITY DEFINER, search_path or grants differ from Release C: ' || missing;
   end if;
 
   -- d. The eight roles active, each still holding every code 0001-0151 gave it (others' additions accepted).
@@ -721,6 +753,20 @@ $invitable$;
          is distinct from fn.value->>'after';
   if missing is not null then
     raise exception using errcode = '55000', message = '0162: post-check failed: ' || missing;
+  end if;
+  select string_agg(pinned.key, ', ' order by pinned.key) into missing
+    from jsonb_each_text(function_settings) pinned
+   where (select proc.prosecdef::text || '|' || coalesce(array_to_string(proc.proconfig, ';'), '') || '|'
+                  || coalesce((select string_agg(granted.entry, ',' order by granted.entry collate "C")
+                                 from (select case when acl.grantee = 0 then 'PUBLIC' else pg_get_userbyid(acl.grantee) end
+                                                || ':' || acl.privilege_type as entry
+                                         from aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
+                                        where acl.grantee <> proc.proowner) granted), '')
+             from pg_proc proc where proc.oid = to_regprocedure(pinned.key)) is distinct from pinned.value
+      or (select proc.proowner from pg_proc proc where proc.oid = to_regprocedure(pinned.key)) is distinct from owner_oid;
+  if missing is not null then
+    raise exception using errcode = '55000',
+      message = '0162: post-check failed: these role functions'' owner, SECURITY DEFINER, search_path or grants: ' || missing;
   end if;
   if (select pg_get_constraintdef(constraint_row.oid) from pg_constraint constraint_row
        where constraint_row.conrelid = 'identity.staff_invitations'::regclass and constraint_row.convalidated

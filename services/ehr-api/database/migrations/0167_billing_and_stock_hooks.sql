@@ -4,9 +4,9 @@
 -- request. Provisional number (Release D block 0162-0167); nothing here reads
 -- 0152-0154. With ORD-12's 0154 refills (further dispensings of one work
 -- item), a work item keeps one automatic line, which bills its first
--- dispensing only (H5 records which); a refill takes stock and has no line,
--- and its reversal leaves the line alone (H6). Whether refills are billed is
--- for ORD-12's own follow-up. No
+-- dispensing only (H5 records which); a refill of a billed work item is
+-- refused until refills are billed (ORD-12's follow-up, H5), and a reversal
+-- of any dispensing but the billed one leaves the line alone (H6). No
 -- migration number appears inside a function body. The declaration is signed
 -- separately. Ola reviews this file and 0166 (the pharmacy and lab hooks);
 -- Rahman gives the final database check.
@@ -48,16 +48,23 @@
 --    the existing validators (trigger names fire in order): the pay-before
 --    gate (HB409 PAYMENT_REQUIRED or PAYMENT_PENDING_CHECK when the facility's
 --    pay-before for pharmacy is on, the work item has a line, and its bill is
---    neither paid, deferred, void nor an unknown patient's); then, for a
+--    neither paid, deferred, void nor an unknown patient's; the bill is read
+--    FOR SHARE, so a payment or void on it waits for the dispensing, or the
+--    dispensing for it); then, for a
 --    stock-kept item, the quantity in the item's stock unit and whole (HB409
 --    STOCK_UNIT_MISMATCH) taken expiry first (0166's
 --    pharmacy.take_stock_expiry_first; HB409 OUT_OF_STOCK takes nothing). The
 --    batch named by pharmacy-api in hid.stock_batch_id (transaction-local) is
 --    used when set; what was taken is left in hid.stock_taken for the
---    dispensing's audit row. Before the stock, once past the gate: the work
---    item's live automatic line that bills no dispensing yet records this
---    one (0164's commercial.bill_lines.dispensing_id), so a line bills
---    exactly the first dispensing of its work item.
+--    dispensing's audit row. First, a refill (ORD-12's 0154 fill_number
+--    above 1, read from the row so this file works with or without 0154) of
+--    a work item with a live line, or a line that billed a dispensing, is
+--    refused HB409 REFILL_BILLING_NOT_AVAILABLE until refills are billed
+--    (ORD-12's follow-up); a work item with no line is never refused. Before
+--    the stock, once past the gate: the work item's live automatic line that
+--    bills no dispensing yet records this one (0164's
+--    commercial.bill_lines.dispensing_id), so a line bills exactly the first
+--    dispensing of its work item.
 -- H6 pharmacy.dispensing_reversals BEFORE INSERT (zz_billing_reversal): the
 --    automatic line that bills the reversed dispensing (dispensing_id, H5; a
 --    corrected medicine comes as a new prescription with its own line) is
@@ -104,7 +111,8 @@
 --    file's zz_billing_* triggers of the same timing and event, as triggers
 --    fire in name order). 1. Helpers. 2. Hook functions. 3. Triggers.
 -- 4. Post-checks: function owners, SECURITY DEFINER, search_path, ACLs, md5,
---    and the seven triggers' tables, timing, events and functions.
+--    and the seven triggers' tables, timing, events, UPDATE OF column,
+--    functions, enabled state, no arguments and no WHEN condition.
 
 do $pre$
 declare
@@ -120,14 +128,14 @@ declare
        and namespace.nspname <> 'migration');
   made constant jsonb := '{
     "commercial.hook_check_in()": "0132c9412cbb3b0f3b73d2ebbbe60e90",
-    "commercial.hook_dispensing()": "01e1ae08809209866134a4b1d8ba9261",
+    "commercial.hook_dispensing()": "8edafc5d502ed188fa3d730de1605c1d",
     "commercial.hook_dispensing_reversal()": "26f47e77c559cac01724f6731c57bd03",
     "commercial.hook_facility(uuid)": "4efd0ae0c3c4ad8ce694a74b223cafa5",
     "commercial.hook_lab_work_item()": "903edbb2d3a10fc4a91610cec007349a",
     "commercial.hook_pharmacy_acceptance()": "2f5cabce9719e94cfc88d1e9bd7ca665",
     "commercial.hook_specimen_collected()": "2a1a70525c2c308fbc6017243a0c8529",
     "commercial.hook_triage()": "226774711ee8bb5a8496c50f9027feab",
-    "commercial.pay_before_refusal(uuid,text,uuid)": "fcd1d6c70faafe7c00c2db9dabbc777c",
+    "commercial.pay_before_refusal(uuid,text,uuid)": "221e77c9fa06bab796189469f4e38c99",
     "commercial.work_item_line(uuid,uuid,text,uuid,text,text,text,numeric,text)": "086363b9a7c85a1f131ae7b3026f34ff"}';
   -- The triggers Release C gives the six tables (name:tgtype); each must still be there.
   live_triggers constant jsonb := '{
@@ -237,7 +245,6 @@ $$;
 create function commercial.pay_before_refusal(requested_facility uuid, requested_kind text, requested_work uuid)
 returns text
 language plpgsql
-stable
 set search_path = pg_catalog, pg_temp
 as $$
 declare
@@ -253,7 +260,8 @@ begin
   select bill_row.* into bill from commercial.bill_lines line
     join commercial.bills bill_row on bill_row.id = line.bill_id
    where line.facility_id = requested_facility and line.work_item_kind = requested_kind
-     and line.work_item_id = requested_work and not line.cancelled;
+     and line.work_item_id = requested_work and not line.cancelled
+     for share of bill_row;
   if not found or bill.voided_at is not null or bill.deferred_reason is not null
      or (bill.patient_id is not null and identity.patient_record_kind(bill.patient_id) = 'unknown') then
     return null;
@@ -425,12 +433,22 @@ begin
   if not commercial.hook_facility(new.facility_id) then
     return new;
   end if;
+  -- A refill (ORD-12's fill_number above 1, read so this file works with or without 0154) of a work item billing
+  -- knows (a live line, or one that billed a dispensing) is refused until refills are billed (ORD-12's follow-up):
+  -- it would otherwise be given with no charge on the bill, even after the first fill's charge was refunded.
+  if coalesce((to_jsonb(new)->>'fill_number')::integer, 1) > 1
+     and exists (select 1 from commercial.bill_lines bill_line
+                  where bill_line.facility_id = new.facility_id and bill_line.work_item_kind = 'pharmacy'
+                    and bill_line.work_item_id = new.work_item_id
+                    and (not bill_line.cancelled or bill_line.dispensing_id is not null)) then
+    raise exception using errcode = 'HB409', message = 'REFILL_BILLING_NOT_AVAILABLE';
+  end if;
   refusal := commercial.pay_before_refusal(new.facility_id, 'pharmacy', new.work_item_id);
   if refusal is not null then
     raise exception using errcode = 'HB409', message = refusal;
   end if;
   -- The work item's live line bills this dispensing when it bills none yet (the first one). Any later dispensing of
-  -- the same work item (a refill) is not the line's, so its reversal never touches the line.
+  -- the same work item is not the line's, so its reversal never touches the line.
   update commercial.bill_lines bill_line set dispensing_id = new.id
    where bill_line.facility_id = new.facility_id and bill_line.work_item_kind = 'pharmacy'
      and bill_line.work_item_id = new.work_item_id and not bill_line.cancelled and bill_line.dispensing_id is null;
@@ -564,14 +582,14 @@ do $post$
 declare
   made constant jsonb := '{
     "commercial.hook_check_in()": "0132c9412cbb3b0f3b73d2ebbbe60e90",
-    "commercial.hook_dispensing()": "01e1ae08809209866134a4b1d8ba9261",
+    "commercial.hook_dispensing()": "8edafc5d502ed188fa3d730de1605c1d",
     "commercial.hook_dispensing_reversal()": "26f47e77c559cac01724f6731c57bd03",
     "commercial.hook_facility(uuid)": "4efd0ae0c3c4ad8ce694a74b223cafa5",
     "commercial.hook_lab_work_item()": "903edbb2d3a10fc4a91610cec007349a",
     "commercial.hook_pharmacy_acceptance()": "2f5cabce9719e94cfc88d1e9bd7ca665",
     "commercial.hook_specimen_collected()": "2a1a70525c2c308fbc6017243a0c8529",
     "commercial.hook_triage()": "226774711ee8bb5a8496c50f9027feab",
-    "commercial.pay_before_refusal(uuid,text,uuid)": "fcd1d6c70faafe7c00c2db9dabbc777c",
+    "commercial.pay_before_refusal(uuid,text,uuid)": "221e77c9fa06bab796189469f4e38c99",
     "commercial.work_item_line(uuid,uuid,text,uuid,text,text,text,numeric,text)": "086363b9a7c85a1f131ae7b3026f34ff"}';
   owner_oid oid := (select nspowner from pg_namespace where nspname = 'commercial');
   computed jsonb;
@@ -583,15 +601,15 @@ declare
   definers constant text[] := array['commercial.hook_check_in()', 'commercial.hook_triage()',
     'commercial.hook_pharmacy_acceptance()', 'commercial.hook_lab_work_item()', 'commercial.hook_dispensing()',
     'commercial.hook_dispensing_reversal()', 'commercial.hook_specimen_collected()'];
-  -- table, trigger, tgtype, function
+  -- table, trigger, tgtype, function, the column of UPDATE OF (none: every column)
   expected constant text[] := array[
-    'ehr.visit_queue|zz_billing_check_in|5|commercial.hook_check_in',
-    'ehr.visit_queue|zz_billing_triage|17|commercial.hook_triage',
-    'pharmacy.work_item_acceptances|zz_billing_acceptance|5|commercial.hook_pharmacy_acceptance',
-    'lab.work_items|zz_billing_lab_work_item|5|commercial.hook_lab_work_item',
-    'pharmacy.dispensings|zz_billing_stock_and_gate|7|commercial.hook_dispensing',
-    'pharmacy.dispensing_reversals|zz_billing_reversal|7|commercial.hook_dispensing_reversal',
-    'lab.specimens|zz_billing_collect_gate|19|commercial.hook_specimen_collected'];
+    'ehr.visit_queue|zz_billing_check_in|5|commercial.hook_check_in|',
+    'ehr.visit_queue|zz_billing_triage|17|commercial.hook_triage|triage_level',
+    'pharmacy.work_item_acceptances|zz_billing_acceptance|5|commercial.hook_pharmacy_acceptance|',
+    'lab.work_items|zz_billing_lab_work_item|5|commercial.hook_lab_work_item|',
+    'pharmacy.dispensings|zz_billing_stock_and_gate|7|commercial.hook_dispensing|',
+    'pharmacy.dispensing_reversals|zz_billing_reversal|7|commercial.hook_dispensing_reversal|',
+    'lab.specimens|zz_billing_collect_gate|19|commercial.hook_specimen_collected|status'];
 begin
   select jsonb_object_agg(signature, md5(proc.prosrc)) into computed
     from unnest(hooks) signature join pg_proc proc on proc.oid = to_regprocedure(signature);
@@ -617,7 +635,13 @@ begin
         and trigger_row.tgname = split_part(target.value, '|', 2)
         and trigger_row.tgtype = split_part(target.value, '|', 3)::smallint
         and trigger_row.tgfoid = (split_part(target.value, '|', 4) || '()')::regprocedure
-        and trigger_row.tgenabled = 'O' and not trigger_row.tgisinternal) <> cardinality(expected) then
+        and trigger_row.tgenabled = 'O' and not trigger_row.tgisinternal
+        and trigger_row.tgnargs = 0 and trigger_row.tgqual is null
+        and trigger_row.tgattr::text = coalesce((select attribute_row.attnum::text from pg_attribute attribute_row
+                                                  where attribute_row.attrelid = trigger_row.tgrelid
+                                                    and attribute_row.attname = split_part(target.value, '|', 5)
+                                                    and not attribute_row.attisdropped), ''))
+     <> cardinality(expected) then
     raise exception using errcode = '55000', message = '0167: post-check failed: the seven triggers';
   end if;
   if (select count(*) from pg_trigger trigger_row where not trigger_row.tgisinternal

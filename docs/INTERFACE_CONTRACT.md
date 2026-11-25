@@ -12481,14 +12481,17 @@ ehr-api; `pricing` and `demo-requests` stay on identity-api.
 an optional `batchId`; a stock-kept item is taken expiry-first (409
 `OUT_OF_STOCK` with `onHand`, `unit`, `expiredOnHand`; 409
 `STOCK_UNIT_MISMATCH`), and with pay-before on, 409 `PAYMENT_REQUIRED` or
-`PAYMENT_PENDING_CHECK` (audited as the dispensing's denied row); the
+`PAYMENT_PENDING_CHECK`; an ORD-12 refill of a work item with a line on a
+bill, 409 `REFILL_BILLING_NOT_AVAILABLE` until refills are billed (each
+audited as the dispensing's denied row); the
 dispensing's audit row gains `stockTaken` (batch ids and counts). When that
 dispensing would have accepted the item (ORD-4), the acceptance is recorded on
 its own after the pay-before refusal (audited `pharmacy.work-item.pharmacist-accept`
 with `forPayment: true`), so its bill line stays for the cashier and the next
 Dispense after payment goes through. A dispensing reversal moves no stock; the
-work item's line is always cancelled ("Dispensing reversed"), unpaid, part
-paid or paid, so its unpaid balance is never asked for. What was collected
+line that bills the reversed dispensing (its work item's first) is always
+cancelled ("Dispensing reversed"), unpaid, part paid or paid, so its unpaid
+balance is never asked for; a reversal of another dispensing changes no bill. What was collected
 beyond the bill's new total is the bill's `refundDueKobo` (the patient's money
 first) and `coverOverKobo` (waiver or HMO cover to cancel and record again);
 while a refund is due the work item's `bill` keeps `dispensingReversed: true`

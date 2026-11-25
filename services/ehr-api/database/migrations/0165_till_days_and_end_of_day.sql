@@ -23,7 +23,10 @@
 --    the facility, one cashier (membership) or one till, as the facility's
 --    dayCloseBy says; who opened it and when, the opening cash, and once
 --    closed who closed it, the counted cash, the expected cash, the
---    difference and the note. A closed day never changes (a trigger).
+--    difference and the note. A closed day never changes (a trigger). The
+--    opening and counted cash are 0 to 100,000,000,000 kobo (N1,000,000,000;
+--    a busy day's cash goes far past N1,000,000, and its true count must
+--    close the day).
 -- T2 commercial.payments.till_day_id and void_till_day_id get their foreign
 --    keys (added NOT VALID, then validated): a payment is recorded in the day
 --    it was taken in; its void is a negative entry in the voider's open day,
@@ -82,17 +85,17 @@ declare
        and namespace.nspname <> 'migration');
   made constant jsonb := '{
     "commercial.counter_staff_only(uuid)": "9352cab0a5c41b0c964aa989bc7cc117",
-    "commercial.day_close(uuid,bigint,text,bigint,text,text)": "354d601cef08c55eb26a70665b2fcb4d",
+    "commercial.day_close(uuid,bigint,text,bigint,text,text)": "13f9e4fee72c0a56d15fb4179713015f",
     "commercial.day_current(uuid)": "28d175fd06c967cf3933e51fe7e02f28",
     "commercial.day_json(uuid)": "c4d01a0472dbba61f795ea4d6f10db9c",
     "commercial.day_list(date,boolean)": "49816c5c8a3bca9b495895eedbc0f8f3",
-    "commercial.day_open(uuid,bigint,text,text)": "6fc0ed7510afc308baec9c2357013234",
+    "commercial.day_open(uuid,bigint,text,text)": "06c424aea19e8753d8ab9c3a5cd29b09",
     "commercial.day_scope(uuid,uuid,uuid)": "8566e0d7bac1aad56398e605c5e4371c",
     "commercial.open_day(uuid,text,uuid,uuid)": "32cfdd2e39dbc54d2ac9b170bdcb3b7e",
     "commercial.open_day_locked(uuid,text,uuid,uuid)": "5016c4e0b55e28efa2c80c1d09fc91c5",
     "commercial.payment_confirm(uuid,uuid,bigint,text,text)": "f3e5670564647a04af1bdaf72a396868",
-    "commercial.payment_record(uuid,jsonb,bigint,text,text)": "61c88da07fae036d859071519071e676",
-    "commercial.payment_record_online(uuid,bigint,text)": "f83e3f675446586606710ac8a924f213",
+    "commercial.payment_record(uuid,jsonb,bigint,text,text)": "6f90a43b811f4094dd5d65523d40937d",
+    "commercial.payment_record_online(uuid,bigint,text)": "f0741c3f2bbbd224478fe17472a0c8ed",
     "commercial.payment_void(uuid,uuid,text,bigint,uuid,text,text)": "6c6151f8517b360d3b1d7dcf49260c4b",
     "commercial.receipt(uuid,uuid)": "c8966d9f317b4a4771af010ae42dd76d",
     "commercial.till_day_closed_guard()": "3201a28156e7eadb975afd56adc0c9ea"}';
@@ -147,10 +150,10 @@ create table commercial.till_days (
   till_id uuid,
   opened_by_membership_id uuid not null references identity.staff_facility_memberships(id) on delete restrict,
   opened_at timestamptz not null default clock_timestamp(),
-  opening_cash_kobo bigint not null check (opening_cash_kobo between 0 and 100000000),
+  opening_cash_kobo bigint not null check (opening_cash_kobo between 0 and 100000000000),
   closed_by_membership_id uuid references identity.staff_facility_memberships(id) on delete restrict,
   closed_at timestamptz,
-  counted_cash_kobo bigint check (counted_cash_kobo between 0 and 100000000),
+  counted_cash_kobo bigint check (counted_cash_kobo between 0 and 100000000000),
   expected_cash_kobo bigint,
   difference_kobo bigint,
   note text check (note is null or length(note) <= 500),
@@ -386,7 +389,7 @@ begin
   if replay.replayed then
     return commercial.day_json(replay.resource_id) || jsonb_build_object('replayed', true);
   end if;
-  if opening_cash is null or opening_cash not between 0 and 100000000 then
+  if opening_cash is null or opening_cash not between 0 and 100000000000 then
     raise exception using errcode = 'HB400', message = 'VALIDATION_FAILED', detail = '{"field": "openingCashKobo"}';
   end if;
   select * into scope_row from commercial.day_scope(actor.facility_id, actor.membership_id, requested_till);
@@ -443,7 +446,7 @@ begin
   if expected_version is null or expected_version <> day_row.row_version then
     raise exception using errcode = 'HB412', message = 'VERSION_CONFLICT';
   end if;
-  if counted_cash is null or counted_cash not between 0 and 100000000 then
+  if counted_cash is null or counted_cash not between 0 and 100000000000 then
     raise exception using errcode = 'HB400', message = 'VALIDATION_FAILED', detail = '{"field": "countedCashKobo"}';
   end if;
   if note_value is not null and char_length(note_value) > 500 then
@@ -629,7 +632,9 @@ begin
     return commercial.bill_json(bill.id);
   end if;
 
-  receipt := 'R-' || year_value::text || '-' || lpad(commercial.next_number(actor.facility_id, 'receipt', year_value)::text, 6, '0');
+  -- Six digits at least, all of them past 999999 (never cut to six, which would repeat a number).
+  receipt := 'R-' || year_value::text || '-' || (select lpad(numbered.n::text, greatest(6, length(numbered.n::text)), '0')
+    from (select commercial.next_number(actor.facility_id, 'receipt', year_value) as n) numbered);
   insert into commercial.payments (facility_id, bill_id, method, amount_kobo, reference, reason, status, receipt_number,
     till_day_id, paper_receipt_number, received_by_membership_id, idempotency_key, request_sha256)
   values (actor.facility_id, bill.id, method_value, amount, reference_value,
@@ -840,7 +845,8 @@ begin
   insert into commercial.payments (facility_id, bill_id, method, amount_kobo, status, receipt_number, till_day_id,
     online_reference_sha256)
   values (facility_value, bill.id, 'online', amount, 'recorded',
-    'R-' || year_value::text || '-' || lpad(commercial.next_number(facility_value, 'receipt', year_value)::text, 6, '0'),
+    'R-' || year_value::text || '-' || (select lpad(numbered.n::text, greatest(6, length(numbered.n::text)), '0')
+      from (select commercial.next_number(facility_value, 'receipt', year_value) as n) numbered),
     day_id, reference_sha256)
   returning id into payment_id;
   perform commercial.bill_recompute(bill.id);
@@ -883,22 +889,24 @@ $grants$;
 comment on table commercial.till_days is
   '0165 (BILL-10, recommended option: "till day", so "shift" stays free for the clinical rota): one open day per scope (facility, cashier or till); a payment is recorded in the day it was taken in and its void in the voider''s open day, so a closed day never changes.';
 
--- Post-checks.
+-- Post-checks: the functions (md5, owner, search_path, SECURITY DEFINER, grants), and each new table's
+-- row-level security, its one policy (permissive, for PUBLIC, its USING and WITH CHECK rule), its ACL and its
+-- exact triggers (name, type, enabled, no arguments, no column list, no WHEN, function).
 do $post$
 declare
   made constant jsonb := '{
     "commercial.counter_staff_only(uuid)": "9352cab0a5c41b0c964aa989bc7cc117",
-    "commercial.day_close(uuid,bigint,text,bigint,text,text)": "354d601cef08c55eb26a70665b2fcb4d",
+    "commercial.day_close(uuid,bigint,text,bigint,text,text)": "13f9e4fee72c0a56d15fb4179713015f",
     "commercial.day_current(uuid)": "28d175fd06c967cf3933e51fe7e02f28",
     "commercial.day_json(uuid)": "c4d01a0472dbba61f795ea4d6f10db9c",
     "commercial.day_list(date,boolean)": "49816c5c8a3bca9b495895eedbc0f8f3",
-    "commercial.day_open(uuid,bigint,text,text)": "6fc0ed7510afc308baec9c2357013234",
+    "commercial.day_open(uuid,bigint,text,text)": "06c424aea19e8753d8ab9c3a5cd29b09",
     "commercial.day_scope(uuid,uuid,uuid)": "8566e0d7bac1aad56398e605c5e4371c",
     "commercial.open_day(uuid,text,uuid,uuid)": "32cfdd2e39dbc54d2ac9b170bdcb3b7e",
     "commercial.open_day_locked(uuid,text,uuid,uuid)": "5016c4e0b55e28efa2c80c1d09fc91c5",
     "commercial.payment_confirm(uuid,uuid,bigint,text,text)": "f3e5670564647a04af1bdaf72a396868",
-    "commercial.payment_record(uuid,jsonb,bigint,text,text)": "61c88da07fae036d859071519071e676",
-    "commercial.payment_record_online(uuid,bigint,text)": "f83e3f675446586606710ac8a924f213",
+    "commercial.payment_record(uuid,jsonb,bigint,text,text)": "6f90a43b811f4094dd5d65523d40937d",
+    "commercial.payment_record_online(uuid,bigint,text)": "f0741c3f2bbbd224478fe17472a0c8ed",
     "commercial.payment_void(uuid,uuid,text,bigint,uuid,text,text)": "6c6151f8517b360d3b1d7dcf49260c4b",
     "commercial.receipt(uuid,uuid)": "c8966d9f317b4a4771af010ae42dd76d",
     "commercial.till_day_closed_guard()": "3201a28156e7eadb975afd56adc0c9ea"}';
@@ -916,6 +924,9 @@ declare
     'commercial.payment_void(uuid,uuid,text,bigint,uuid,text,text)', 'commercial.receipt(uuid,uuid)',
     'commercial.payment_record_online(uuid,bigint,text)'];
   owner_oid oid := (select nspowner from pg_namespace where nspname = 'commercial');
+  -- The one policy's rule, as PostgreSQL shows it, for the owner (who made the table).
+  owner_rule constant text := format('((CURRENT_USER = %L::name) AND (facility_id = platform.current_facility_id()))',
+    pg_get_userbyid(owner_oid));
   computed jsonb;
   differing text;
 begin
@@ -947,12 +958,29 @@ begin
                   where relation.oid = 'commercial.till_days'::regclass and relation.relrowsecurity
                     and relation.relforcerowsecurity and relation.relowner = owner_oid
                     and (select count(*) from pg_policy policy where policy.polrelid = relation.oid) = 1
+                    and exists (select 1 from pg_policy policy where policy.polrelid = relation.oid
+                                 and policy.polname = 'facility_owner_rows' and policy.polcmd = '*'
+                                 and policy.polpermissive and policy.polroles = array[0]::oid[]
+                                 and pg_get_expr(policy.polqual, policy.polrelid) = owner_rule
+                                 and pg_get_expr(policy.polwithcheck, policy.polrelid) = owner_rule)
                     and not exists (select 1 from lateral aclexplode(coalesce(relation.relacl,
-                                      acldefault('r', relation.relowner))) acl where acl.grantee <> relation.relowner))
+                                      acldefault('r', relation.relowner))) acl where acl.grantee <> relation.relowner)
+                    and (select string_agg(trigger_row.tgname || ':' || trigger_row.tgtype || ':' || trigger_row.tgenabled::text
+                                             || ':' || trigger_row.tgnargs || ':' || trigger_row.tgattr::text || ':'
+                                             || (trigger_row.tgqual is null) || ':'
+                                             || trigger_row.tgfoid::regprocedure::text,
+                                           ',' order by trigger_row.tgname collate "C")
+                           from pg_trigger trigger_row
+                          where trigger_row.tgrelid = relation.oid and not trigger_row.tgisinternal)
+                        = 'closed_day_guard:19:O:0::true:commercial.till_day_closed_guard(),'
+                          || 'no_delete:11:O:0::true:platform.reject_mutation(),'
+                          || 'no_truncate:34:O:0::true:platform.reject_mutation()')
      or (select count(*) from pg_constraint constraint_row
           where constraint_row.conrelid = 'commercial.payments'::regclass and constraint_row.convalidated
             and constraint_row.conname in ('payments_till_day_fk', 'payments_void_till_day_fk')) <> 2 then
-    raise exception using errcode = '55000', message = '0165: post-check failed: commercial.till_days or the payments'' day keys';
+    raise exception using errcode = '55000',
+      message = '0165: post-check failed: commercial.till_days (row-level security, policy, ACL or triggers) '
+        || 'or the payments'' day keys';
   end if;
 end
 $post$;

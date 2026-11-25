@@ -1037,8 +1037,8 @@ describe('BILL-1 (0167) with ORD-4: a pay-before refusal of a dispensing that ac
     expect(h.committed.acceptances.filter((row) => row.work_item_id === id(1))).toHaveLength(1);
   });
 
-  it.each(['OUT_OF_STOCK', 'STOCK_UNIT_MISMATCH'])('keeps nothing for a stock refusal (%s): the dispensing and its '
-    + 'acceptance stay one step', async (code) => {
+  it.each(['OUT_OF_STOCK', 'STOCK_UNIT_MISMATCH', 'REFILL_BILLING_NOT_AVAILABLE'])('keeps nothing for a stock or '
+    + 'refill refusal (%s): the dispensing and its acceptance stay one step', async (code) => {
     const h = harness({ dispensingErrors: [billingRefusal(code)] });
     await expect(h.service.dispense(pharmacist, id(1), dispenseInput, dispenseKey)).rejects.toMatchObject({ code });
     expect(h.committed.acceptances.filter((row) => row.work_item_id === id(1))).toEqual([]);

@@ -929,7 +929,9 @@ comment on table pharmacy.stock_batches is
 comment on table pharmacy.stock_movements is
   '0166: the append-only stock ledger: receipt, adjustment, dispensing, counter_sale (a dispensing reversal moves no stock; what comes back is counted back). No patient.';
 
--- Post-checks.
+-- Post-checks: the functions (md5, owner, search_path, SECURITY DEFINER, grants), and each new table's
+-- row-level security, its one policy (permissive, for PUBLIC, its USING and WITH CHECK rule), its ACL and its
+-- exact triggers (name, type, enabled, no arguments, no column list, no WHEN, function).
 do $post$
 declare
   made constant jsonb := '{
@@ -961,6 +963,12 @@ declare
   tables constant text[] := array['pharmacy.stock_items', 'pharmacy.stock_batches', 'pharmacy.stock_receipts',
     'pharmacy.stock_receipt_lines', 'pharmacy.stock_adjustments', 'pharmacy.stock_movements'];
   owner_oid oid := (select nspowner from pg_namespace where nspname = 'commercial');
+  -- The one policy's rule, as PostgreSQL shows it, for the owner (who made every table here).
+  owner_rule constant text := format('((CURRENT_USER = %L::name) AND (facility_id = platform.current_facility_id()))',
+    pg_get_userbyid(owner_oid));
+  -- The tables with append_only (no UPDATE or DELETE); the others have no_delete. Every table has no_truncate.
+  append_only_tables constant text[] := array['pharmacy.stock_receipts', 'pharmacy.stock_receipt_lines',
+    'pharmacy.stock_adjustments', 'pharmacy.stock_movements'];
   computed jsonb;
   differing text;
 begin
@@ -992,12 +1000,24 @@ begin
        where relation.oid = any (select to_regclass(name) from unnest(tables) name)
          and relation.relrowsecurity and relation.relforcerowsecurity and relation.relowner = owner_oid
          and (select count(*) from pg_policy policy where policy.polrelid = relation.oid) = 1
+         and exists (select 1 from pg_policy policy where policy.polrelid = relation.oid
+                      and policy.polname = 'facility_owner_rows' and policy.polcmd = '*' and policy.polpermissive
+                      and policy.polroles = array[0]::oid[]
+                      and pg_get_expr(policy.polqual, policy.polrelid) = owner_rule
+                      and pg_get_expr(policy.polwithcheck, policy.polrelid) = owner_rule)
          and not exists (select 1 from lateral aclexplode(coalesce(relation.relacl, acldefault('r', relation.relowner))) acl
                           where acl.grantee <> relation.relowner)
-         and (select count(*) from pg_trigger trigger_row where trigger_row.tgrelid = relation.oid
-               and not trigger_row.tgisinternal and trigger_row.tgfoid = 'platform.reject_mutation()'::regprocedure) = 2)
+         and (select string_agg(trigger_row.tgname || ':' || trigger_row.tgtype || ':' || trigger_row.tgenabled::text || ':'
+                                  || trigger_row.tgnargs || ':' || trigger_row.tgattr::text || ':'
+                                  || (trigger_row.tgqual is null) || ':' || trigger_row.tgfoid::regprocedure::text,
+                                ',' order by trigger_row.tgname collate "C")
+                from pg_trigger trigger_row where trigger_row.tgrelid = relation.oid and not trigger_row.tgisinternal)
+             = case when relation.oid = any (select to_regclass(name) from unnest(append_only_tables) name)
+                    then 'append_only:27:O:0::true:platform.reject_mutation(),'
+                    else 'no_delete:11:O:0::true:platform.reject_mutation(),' end
+               || 'no_truncate:34:O:0::true:platform.reject_mutation()')
      <> cardinality(tables) then
-    raise exception using errcode = '55000', message = '0166: post-check failed: a table''s row-level security, policy, ACL or guards';
+    raise exception using errcode = '55000', message = '0166: post-check failed: a table''s row-level security, policy, ACL or triggers';
   end if;
 end
 $post$;

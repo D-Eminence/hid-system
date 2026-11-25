@@ -88,18 +88,24 @@
 --    Pharmacy and Lab runtimes too, commercial.work_item_bills (the bill
 --    badge of the caller's own work items). Each checks the caller's code at
 --    the session facility and writes its audit rows (one per patient shown on
---    a list).
+--    a list). Money collected beyond a bill's total after a reversal is easy
+--    to find: bill_list's status money_over, bill_summary's moneyOver (the
+--    facility's count and sums) and hmo_receivables' overBill marks (a cover
+--    on such a bill, to cancel and record again before it is claimed). A
+--    walk-in with no name reads "Walk-in" everywhere ("Counter sale" for a
+--    counter sale).
 -- Grants: EXECUTE on F2 to hid_ehr_runtime and hid_schema_test_runtime;
 -- USAGE on schema commercial and EXECUTE on commercial.work_item_bills to
 -- hid_pharmacy_runtime and hid_lab_runtime; where those roles exist (and in
 -- runtime-grants.sql).
 --
 -- Locks: SHARE ROW EXCLUSIVE NOWAIT on identity.facilities,
--- identity.staff_facility_memberships, identity.patients and ehr.visit_queue
--- (the new tables' foreign keys), in one attempt made up to 50 times 100 ms
--- apart, or once when this transaction holds an earlier file's locks; busy
--- refusals begin "0164: ". Readers go on; writers of those four tables wait
--- for the commit (milliseconds).
+-- identity.staff_facility_memberships, identity.patients, ehr.visit_queue,
+-- commercial.catalogue_items and commercial.facility_hmos (the new tables'
+-- foreign keys; 0163's two are checked to exist first), in one attempt made
+-- up to 50 times 100 ms apart, or once when this transaction holds an
+-- earlier file's locks; busy refusals begin "0164: ". Readers go on; writers
+-- of those six tables wait for the commit (milliseconds).
 --
 -- Old services: nothing calls the new functions. New services on a schema
 -- without it: 503 BILLING_UNAVAILABLE.
@@ -131,16 +137,16 @@ declare
     "commercial.bill_line_add(uuid,jsonb,bigint,text,text)": "8187254afca47cbd8a6801d1a11a1791",
     "commercial.bill_line_cancel(uuid,uuid,text,bigint,text,text)": "4f5688921056a3896a28d28242d7ee53",
     "commercial.bill_line_put(uuid,uuid,integer,text,text,uuid,boolean,text,uuid,text,text)": "3bd0607d682ebe97f3921303ed5bd8fc",
-    "commercial.bill_list(text,text,text,date,integer)": "2133b8cbb626092c193a0356ea73b272",
+    "commercial.bill_list(text,text,text,date,integer)": "b552b51876dad0b20a039e711aed66e7",
     "commercial.bill_lock(uuid,uuid,bigint)": "10056a5864f81b6310e3acd35dfad566",
-    "commercial.bill_new(uuid,text,uuid,uuid,text,boolean,uuid,text,text)": "8f3f64785861919b6f603d8ba53d48fa",
+    "commercial.bill_new(uuid,text,uuid,uuid,text,boolean,uuid,text,text)": "1339a9c111a6fa972c9c87397750660c",
     "commercial.bill_recompute(uuid)": "628ee7944cccea79e71e6ea7f8fbf978",
-    "commercial.bill_summary(date)": "8d3315e77d0def44e712b497e33da2b4",
+    "commercial.bill_summary(date)": "f165ea48bbeaaa609f015a208406bb9e",
     "commercial.bill_sums(uuid)": "c6fd7055dfa3c85b0dfe77c285484fcd",
     "commercial.bill_totals_agree(uuid)": "ec44041889c9f4c4a7fdd6096cd01624",
     "commercial.bill_void(uuid,text,bigint,text,text)": "ad03076e11f20979dacb90883c92af7d",
     "commercial.hmo_cover_cancel(uuid,uuid,text,bigint,text,text)": "d5dd9af97e8c38b3f3d54bee53792c98",
-    "commercial.hmo_receivables(uuid,integer)": "5032198e84267e549604f31c35239fd4",
+    "commercial.hmo_receivables(uuid,integer)": "46540681f4a2e54f5557ae8492d2641e",
     "commercial.outstanding(integer,integer)": "ef8cc7adf8f88bcecef4f4119885896f",
     "commercial.patient_card(uuid)": "b51e6a898739b4219696ccedca1877ec",
     "commercial.resolve_health_id(text,text)": "99e6d5e1a4c27dea25f9b2cb7799eb7e",
@@ -149,23 +155,30 @@ declare
   present integer;
   differing text;
 begin
+  -- 0163's two tables are locked below (the new tables' foreign keys), so they must be there first.
+  if to_regclass('commercial.catalogue_items') is null or to_regclass('commercial.facility_hmos') is null then
+    raise exception using errcode = '55000', message = '0164: 0001-0151, 0162 and 0163 must be applied first';
+  end if;
   loop
     attempt := attempt + 1;
     begin
-      lock table identity.facilities, identity.staff_facility_memberships, identity.patients, ehr.visit_queue
+      lock table identity.facilities, identity.staff_facility_memberships, identity.patients, ehr.visit_queue,
+        commercial.catalogue_items, commercial.facility_hmos
         in share row exclusive mode nowait;
       exit;
     exception when lock_not_available then
       if holding then
         raise exception using errcode = '55P03',
-          message = '0164: identity.facilities, identity.staff_facility_memberships, identity.patients or '
-            || 'ehr.visit_queue is busy, and this transaction already holds an earlier migration''s locks, so it does '
-            || 'not wait; nothing applied; run the release again at a quieter time';
+          message = '0164: identity.facilities, identity.staff_facility_memberships, identity.patients, '
+            || 'ehr.visit_queue, commercial.catalogue_items or commercial.facility_hmos is busy, and this transaction '
+            || 'already holds an earlier migration''s locks, so it does not wait; nothing applied; run the release '
+            || 'again at a quieter time';
       end if;
       if attempt >= 50 then
         raise exception using errcode = '55P03',
-          message = '0164: identity.facilities, identity.staff_facility_memberships, identity.patients or '
-            || 'ehr.visit_queue stayed busy for 5 seconds; nothing applied; run the release again at a quieter time';
+          message = '0164: identity.facilities, identity.staff_facility_memberships, identity.patients, '
+            || 'ehr.visit_queue, commercial.catalogue_items or commercial.facility_hmos stayed busy for 5 seconds; '
+            || 'nothing applied; run the release again at a quieter time';
       end if;
       perform pg_sleep(0.1);
     end;
@@ -300,6 +313,8 @@ create table commercial.bill_lines (
 create unique index bill_lines_one_per_work_uq on commercial.bill_lines (work_item_kind, work_item_id)
   where work_item_id is not null and not cancelled;
 create index bill_lines_bill_idx on commercial.bill_lines (bill_id, created_at);
+-- Every line of a work item, cancelled or not (the work list's bill badge reads reversed lines too).
+create index bill_lines_work_idx on commercial.bill_lines (work_item_kind, work_item_id) where work_item_id is not null;
 create unique index bill_lines_dispensing_uq on commercial.bill_lines (dispensing_id) where dispensing_id is not null;
 
 create table commercial.payments (
@@ -658,7 +673,8 @@ declare
 begin
   insert into commercial.bills (facility_id, number, source, patient_id, anonymous_name, visit_queue_entry_id, counter,
     created_by_membership_id, idempotency_key, request_sha256)
-  values (requested_facility, 'B-' || lpad(commercial.next_number(requested_facility, 'bill', 0)::text, 6, '0'),
+  values (requested_facility, 'B-' || (select lpad(numbered.n::text, greatest(6, length(numbered.n::text)), '0')
+                                        from (select commercial.next_number(requested_facility, 'bill', 0) as n) numbered),
     source_value, patient_value, nullif(btrim(anonymous_value), ''), entry_value, coalesce(counter_value, false),
     member_value, key_value, sha_value)
   returning id into bill_id;
@@ -822,7 +838,8 @@ declare
   answer jsonb;
 begin
   select * into actor from commercial.caller('billing.bill.read');
-  if (requested_status is not null and requested_status not in ('unpaid', 'part_paid', 'paid', 'deferred', 'void', 'open'))
+  if (requested_status is not null
+      and requested_status not in ('unpaid', 'part_paid', 'paid', 'deferred', 'void', 'open', 'money_over'))
      or (requested_source is not null and requested_source not in ('visit', 'pharmacy', 'lab'))
      or page_value not between 1 and 1000 then
     raise exception using errcode = 'HB400', message = 'VALIDATION_FAILED', detail = '{"field": "status"}';
@@ -834,6 +851,8 @@ begin
      where bill.facility_id = actor.facility_id
        and (requested_status is null
             or (requested_status = 'open' and bill.status in ('unpaid', 'part_paid', 'deferred'))
+            or (requested_status = 'money_over' and bill.status <> 'void'
+                and bill.refund_due_kobo + bill.cover_over_kobo > 0)
             or bill.status = requested_status)
        and (requested_source is null
             or (requested_source = 'pharmacy' and (bill.source = 'pharmacy' or exists (
@@ -846,7 +865,9 @@ begin
             or lower(bill.number) = q or lower(bill.number) = 'b-' || q
             or exists (select 1 from commercial.payments payment
                         where payment.bill_id = bill.id and lower(payment.receipt_number) = q)
-            or commercial.name_matches(case when bill.patient_id is null then coalesce(bill.anonymous_name, 'Counter sale')
+            or commercial.name_matches(
+                 case when bill.patient_id is null
+                      then coalesce(bill.anonymous_name, case when bill.counter then 'Counter sale' else 'Walk-in' end)
                  else (select patient.full_name from identity.patients patient where patient.id = bill.patient_id) end, q))
      order by bill.created_at desc, bill.id desc
      offset (page_value - 1) * 25 limit 26) listed;
@@ -894,7 +915,13 @@ begin
                                    and commercial.lagos_day(cover.recorded_at) = day_value), 0),
     'outstandingKobo', coalesce((select sum(open_bill.due_kobo) from commercial.bills open_bill
                                   where open_bill.facility_id = actor.facility_id and open_bill.status <> 'void'), 0),
-    'billCount', count(*) filter (where bill.status <> 'void'))
+    'billCount', count(*) filter (where bill.status <> 'void'),
+    'moneyOver', (select jsonb_build_object('billCount', count(*),
+                    'refundDueKobo', coalesce(sum(over_bill.refund_due_kobo), 0),
+                    'coverOverKobo', coalesce(sum(over_bill.cover_over_kobo), 0))
+                    from commercial.bills over_bill
+                   where over_bill.facility_id = actor.facility_id and over_bill.status <> 'void'
+                     and over_bill.refund_due_kobo + over_bill.cover_over_kobo > 0))
     into answer
     from commercial.bills bill
    where bill.facility_id = actor.facility_id and commercial.lagos_day(bill.created_at) = day_value;
@@ -1349,11 +1376,15 @@ begin
   if requested_hmo is null then
     select jsonb_build_object('items', coalesce(jsonb_agg(jsonb_build_object('hmoId', hmo.id, 'hmoName', hmo.name,
              'count', grouped.covers, 'amountKobo', grouped.amount,
-             'oldestDays', commercial.lagos_day(clock_timestamp()) - commercial.lagos_day(grouped.oldest))
+             'oldestDays', commercial.lagos_day(clock_timestamp()) - commercial.lagos_day(grouped.oldest),
+             'overBillCount', grouped.over_covers, 'overBillKobo', grouped.over_amount)
              order by lower(hmo.name), hmo.id), '[]'::jsonb))
       into answer
-      from (select cover.hmo_id, count(*) as covers, sum(cover.amount_kobo) as amount, min(cover.recorded_at) as oldest
+      from (select cover.hmo_id, count(*) as covers, sum(cover.amount_kobo) as amount, min(cover.recorded_at) as oldest,
+                   count(*) filter (where bill.cover_over_kobo > 0) as over_covers,
+                   coalesce(sum(cover.amount_kobo) filter (where bill.cover_over_kobo > 0), 0) as over_amount
               from commercial.hmo_covers cover
+              join commercial.bills bill on bill.id = cover.bill_id
              where cover.facility_id = actor.facility_id and cover.status = 'pending_claim'
              group by cover.hmo_id) grouped
       join commercial.facility_hmos hmo on hmo.id = grouped.hmo_id;
@@ -1369,9 +1400,11 @@ begin
      order by cover.recorded_at, cover.id offset (page_value - 1) * 50 limit 51) listed;
   answer := jsonb_build_object('hmoId', requested_hmo,
     'items', coalesce((select jsonb_agg(jsonb_build_object('coverId', cover.id, 'billId', bill.id, 'billNumber', bill.number,
-        'displayName', case when bill.patient_id is null then coalesce(bill.anonymous_name, 'Counter sale')
+        'displayName', case when bill.patient_id is null
+                            then coalesce(bill.anonymous_name, case when bill.counter then 'Counter sale' else 'Walk-in' end)
                             else (select patient.full_name from identity.patients patient where patient.id = bill.patient_id) end,
-        'approvalCode', cover.approval_code, 'amountKobo', cover.amount_kobo, 'recordedAt', cover.recorded_at)
+        'approvalCode', cover.approval_code, 'amountKobo', cover.amount_kobo, 'recordedAt', cover.recorded_at,
+        'overBill', bill.cover_over_kobo > 0)
         order by listed.ord)
       from unnest(coalesce(ids[1:50], array[]::uuid[])) with ordinality listed(id, ord)
       join commercial.hmo_covers cover on cover.id = listed.id
@@ -1482,7 +1515,9 @@ comment on table commercial.payments is
 comment on table commercial.hmo_covers is
   '0164 (BILL-8, recommended option): what an HMO is to pay: owed by the HMO until a claim is accepted (Release 2); never money received, never in a day''s totals, no receipt.';
 
--- Post-checks.
+-- Post-checks: the functions (md5, owner, search_path, SECURITY DEFINER, grants), and each new table's
+-- row-level security, its one policy (permissive, for PUBLIC, its USING and WITH CHECK rule), its ACL and its
+-- exact triggers (name, type, enabled, no arguments, no column list, no WHEN, function).
 do $post$
 declare
   made constant jsonb := '{
@@ -1497,16 +1532,16 @@ declare
     "commercial.bill_line_add(uuid,jsonb,bigint,text,text)": "8187254afca47cbd8a6801d1a11a1791",
     "commercial.bill_line_cancel(uuid,uuid,text,bigint,text,text)": "4f5688921056a3896a28d28242d7ee53",
     "commercial.bill_line_put(uuid,uuid,integer,text,text,uuid,boolean,text,uuid,text,text)": "3bd0607d682ebe97f3921303ed5bd8fc",
-    "commercial.bill_list(text,text,text,date,integer)": "2133b8cbb626092c193a0356ea73b272",
+    "commercial.bill_list(text,text,text,date,integer)": "b552b51876dad0b20a039e711aed66e7",
     "commercial.bill_lock(uuid,uuid,bigint)": "10056a5864f81b6310e3acd35dfad566",
-    "commercial.bill_new(uuid,text,uuid,uuid,text,boolean,uuid,text,text)": "8f3f64785861919b6f603d8ba53d48fa",
+    "commercial.bill_new(uuid,text,uuid,uuid,text,boolean,uuid,text,text)": "1339a9c111a6fa972c9c87397750660c",
     "commercial.bill_recompute(uuid)": "628ee7944cccea79e71e6ea7f8fbf978",
-    "commercial.bill_summary(date)": "8d3315e77d0def44e712b497e33da2b4",
+    "commercial.bill_summary(date)": "f165ea48bbeaaa609f015a208406bb9e",
     "commercial.bill_sums(uuid)": "c6fd7055dfa3c85b0dfe77c285484fcd",
     "commercial.bill_totals_agree(uuid)": "ec44041889c9f4c4a7fdd6096cd01624",
     "commercial.bill_void(uuid,text,bigint,text,text)": "ad03076e11f20979dacb90883c92af7d",
     "commercial.hmo_cover_cancel(uuid,uuid,text,bigint,text,text)": "d5dd9af97e8c38b3f3d54bee53792c98",
-    "commercial.hmo_receivables(uuid,integer)": "5032198e84267e549604f31c35239fd4",
+    "commercial.hmo_receivables(uuid,integer)": "46540681f4a2e54f5557ae8492d2641e",
     "commercial.outstanding(integer,integer)": "ef8cc7adf8f88bcecef4f4119885896f",
     "commercial.patient_card(uuid)": "b51e6a898739b4219696ccedca1877ec",
     "commercial.resolve_health_id(text,text)": "99e6d5e1a4c27dea25f9b2cb7799eb7e",
@@ -1526,6 +1561,11 @@ declare
     'commercial.hmo_cover_cancel(uuid,uuid,text,bigint,text,text)', 'commercial.outstanding(integer,integer)',
     'commercial.hmo_receivables(uuid,integer)', 'commercial.work_item_bills(text,uuid[])'];
   owner_oid oid := (select nspowner from pg_namespace where nspname = 'commercial');
+  -- The one policy's rule, as PostgreSQL shows it, for the owner (who made every table here).
+  owner_rule constant text := format('((CURRENT_USER = %L::name) AND (facility_id = platform.current_facility_id()))',
+    pg_get_userbyid(owner_oid));
+  -- The tables with append_only (no UPDATE or DELETE); the others have no_delete. Every table has no_truncate.
+  append_only_tables constant text[] := array['commercial.bill_events'];
   computed jsonb;
   differing text;
   granted constant text[] := array['commercial.bill_list(text,text,text,date,integer)', 'commercial.bill_summary(date)',
@@ -1571,13 +1611,23 @@ begin
          and relation.relrowsecurity and relation.relforcerowsecurity and relation.relowner = owner_oid
          and (select count(*) from pg_policy policy where policy.polrelid = relation.oid) = 1
          and exists (select 1 from pg_policy policy where policy.polrelid = relation.oid
-                      and policy.polname = 'facility_owner_rows' and policy.polcmd = '*')
+                      and policy.polname = 'facility_owner_rows' and policy.polcmd = '*' and policy.polpermissive
+                      and policy.polroles = array[0]::oid[]
+                      and pg_get_expr(policy.polqual, policy.polrelid) = owner_rule
+                      and pg_get_expr(policy.polwithcheck, policy.polrelid) = owner_rule)
          and not exists (select 1 from lateral aclexplode(coalesce(relation.relacl, acldefault('r', relation.relowner))) acl
                           where acl.grantee <> relation.relowner)
-         and (select count(*) from pg_trigger trigger_row where trigger_row.tgrelid = relation.oid
-               and not trigger_row.tgisinternal and trigger_row.tgfoid = 'platform.reject_mutation()'::regprocedure) = 2)
+         and (select string_agg(trigger_row.tgname || ':' || trigger_row.tgtype || ':' || trigger_row.tgenabled::text || ':'
+                                  || trigger_row.tgnargs || ':' || trigger_row.tgattr::text || ':'
+                                  || (trigger_row.tgqual is null) || ':' || trigger_row.tgfoid::regprocedure::text,
+                                ',' order by trigger_row.tgname collate "C")
+                from pg_trigger trigger_row where trigger_row.tgrelid = relation.oid and not trigger_row.tgisinternal)
+             = case when relation.oid = any (select to_regclass(name) from unnest(append_only_tables) name)
+                    then 'append_only:27:O:0::true:platform.reject_mutation(),'
+                    else 'no_delete:11:O:0::true:platform.reject_mutation(),' end
+               || 'no_truncate:34:O:0::true:platform.reject_mutation()')
      <> cardinality(tables) then
-    raise exception using errcode = '55000', message = '0164: post-check failed: a table''s row-level security, policy, ACL or guards';
+    raise exception using errcode = '55000', message = '0164: post-check failed: a table''s row-level security, policy, ACL or triggers';
   end if;
 end
 $post$;

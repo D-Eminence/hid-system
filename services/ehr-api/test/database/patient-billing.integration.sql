@@ -43,9 +43,12 @@
 --      one partly covered by an HMO and of one partly waived (the patient's
 --      money is given back first; cover left over the bill is shown); an
 --      anonymous walk-in lab bill;
---  11. a second dispensing of one work item (a refill, simulated): the line
---      bills the first dispensing only, so the second's reversal leaves the
---      line and the bill, and the first one's reversal takes the line off.
+--  11. refills (0154, or simulated without it): the line bills the first
+--      dispensing only; a refill of a billed work item is refused
+--      REFILL_BILLING_NOT_AVAILABLE and takes no stock; a second dispensing
+--      recorded where no hook acts is not the line's, so its reversal leaves
+--      the line and the bill; the first one's reversal takes the line off.
+--  12. bill and receipt numbers past 999999 have seven digits.
 --
 -- Each case records its outcome; the suite fails at the end listing every
 -- case whose outcome differs.
@@ -504,6 +507,14 @@ select pg_temp.check_case('6 expected cash is opening plus cash taken', '130000'
   (select pg_temp.v('cur1')->'shift'->>'expectedCashKobo'));
 select pg_temp.check_case('6 a difference needs a note', 'HB400 VALIDATION_FAILED',
   pg_temp.ehr('x', 1, format($s$select commercial.day_close('%s', 120000, null, %s, 'kbillingclose00000001', repeat('1', 64))$s$, pg_temp.ids('day1'), pg_temp.v('cur1')->'shift'->>'version')));
+select pg_temp.check_case('6 a count above N1,000,000,000 is refused', 'HB400 VALIDATION_FAILED',
+  pg_temp.ehr('x', 1, format($s$select commercial.day_close('%s', 100000000001, 'Too much', %s, 'kbillingclose00000009', repeat('9', 64))$s$, pg_temp.ids('day1'), pg_temp.v('cur1')->'shift'->>'version')));
+-- A true count far above N1,000,000 closes the day (shown, then rolled back so the day closes as below).
+savepoint big_count;
+select pg_temp.ehr('bigclose', 1, format($s$select commercial.day_close('%s', 150000000, 'Large cash sale counted', %s, 'kbillingclose00000008', repeat('8', 64))$s$, pg_temp.ids('day1'), pg_temp.v('cur1')->'shift'->>'version')) as big_close \gset
+select pg_temp.v('bigclose')->>'countedCashKobo' as big_counted \gset
+rollback to savepoint big_count;
+select pg_temp.check_case('6 a count of N1,500,000 closes the day', 'ok/150000000', :'big_close' || '/' || :'big_counted');
 select pg_temp.check_case('6 the day closes with a note', 'ok',
   pg_temp.ehr('close1', 1, format($s$select commercial.day_close('%s', 120000, 'Counted twice; 100 naira notes short', %s, 'kbillingclose00000002', repeat('2', 64))$s$, pg_temp.ids('day1'), pg_temp.v('cur1')->'shift'->>'version')));
 select pg_temp.check_case('6 the difference', '-10000',
@@ -1053,6 +1064,35 @@ select pg_temp.reverse(6, 8);
 select pg_temp.check_case('10 HMO part: the 5000 unpaid is dropped, p8''s 5000 is refund due, the HMO''s 20000 is cover over the bill',
   '0/5000/20000/0/0/5000/20000/paid', pg_temp.money(pg_temp.bill_of(8)));
 select pg_temp.check_case('10 p8''s badge shows only the patient''s refund', 'true/5000/0', pg_temp.badge(6));
+-- Money over the bill is easy to find: the list's money_over filter, the summary's moneyOver, the receivables' marks.
+select pg_temp.check_case('10 the money_over list answers', 'ok',
+  pg_temp.ehr('over', 2, $s$select commercial.bill_list('money_over', null, null, null, 1)$s$));
+select pg_temp.check_case('10 the money_over list finds p8''s bill', 'true',
+  (select exists (select 1 from jsonb_array_elements(pg_temp.v('over')->'items') item
+                   where item->>'id' = pg_temp.bill_of(8)::text)::text));
+select pg_temp.check_case('10 it lists exactly the bills with money over', 'true',
+  (select (jsonb_array_length(pg_temp.v('over')->'items') = (select count(*) from commercial.bills
+     where facility_id = 'b1620000-0000-4000-8000-000000000002' and status <> 'void'
+       and refund_due_kobo + cover_over_kobo > 0))::text));
+select pg_temp.check_case('10 the summary answers', 'ok',
+  pg_temp.ehr('sum-over', 1, $s$select commercial.bill_summary(null)$s$));
+select pg_temp.check_case('10 the summary counts money over', 'true',
+  (select (pg_temp.v('sum-over')->'moneyOver' = (select jsonb_build_object('billCount', count(*),
+             'refundDueKobo', coalesce(sum(refund_due_kobo), 0), 'coverOverKobo', coalesce(sum(cover_over_kobo), 0))
+             from commercial.bills where facility_id = 'b1620000-0000-4000-8000-000000000002' and status <> 'void'
+               and refund_due_kobo + cover_over_kobo > 0))::text));
+select pg_temp.check_case('10 the receivables by HMO answer', 'ok',
+  pg_temp.ehr('recv-over', 2, $s$select commercial.hmo_receivables(null, 1)$s$));
+select pg_temp.check_case('10 the receivables count p8''s cover as over the bill', '1/20000',
+  (select format('%s/%s', item->>'overBillCount', item->>'overBillKobo')
+     from jsonb_array_elements(pg_temp.v('recv-over')->'items') item where item->>'hmoName' = 'Demo HMO'));
+select pg_temp.check_case('10 the HMO''s covers answer', 'ok',
+  pg_temp.ehr('recv-hmo', 2, format($s$select commercial.hmo_receivables('%s', 1)$s$,
+    (select hmo_id from commercial.hmo_covers where bill_id = pg_temp.bill_of(8)))));
+select pg_temp.check_case('10 p8''s cover is marked over the bill, p1''s is not', 'true/false',
+  (select string_agg(item->>'overBill', '/' order by item->>'billId' = pg_temp.bill_of(8)::text desc)
+     from jsonb_array_elements(pg_temp.v('recv-hmo')->'items') item
+    where item->>'billId' in (pg_temp.bill_of(8)::text, pg_temp.bill_of(1)::text)));
 select pg_temp.check_case('10 another officer cancels the HMO cover', 'ok',
   pg_temp.ehr('x', 9, format($s$select commercial.hmo_cover_cancel('%s', '%s', 'Medicine not given', null, 'kbillingcover00001001', repeat('2', 64))$s$,
     pg_temp.bill_of(8), (select id from commercial.hmo_covers where bill_id = pg_temp.bill_of(8)))));
@@ -1100,10 +1140,14 @@ select pg_temp.check_case('10 the stock ledger still agrees', 'true',
   (select pharmacy.stock_ledger_agrees('b1620000-0000-4000-8000-000000000002')::text));
 select pg_temp.check_case('10 every bill''s totals agree at the end', '0', pg_temp.agree());
 
--- 11. A second dispensing of one work item, as ORD-12's refills record them (simulated here: 0023's one-dispensing
--- key is dropped for this transaction only). p8's prescription 8 (2 capsules): the line bills the first dispensing
--- only; the second takes stock and changes no bill; its reversal leaves the line and the bill; the first one's
--- reversal takes the line off.
+-- 11. Refills (ORD-12's 0154: further dispensings of one work item, numbered by fill_number). Without 0154 this
+-- transaction adds its fill_number column and drops 0023's one-dispensing key (rolled back at the end); with 0154
+-- both are already so. p8's prescription 8 (2 capsules): the line bills the first dispensing only; a refill is
+-- refused while billing knows the work item (before and after the first one's reversal), and takes no stock; a
+-- second dispensing recorded where no hook acts (no session facility) is not the line's, so its reversal leaves the
+-- line and the bill; the first one's reversal takes the line off.
+alter table pharmacy.dispensings add column if not exists fill_number smallint not null default 1;
+alter table pharmacy.dispensings drop constraint if exists dispensings_work_item_id_key;
 set local session_replication_role = replica;
 insert into ehr.prescriptions (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
   medication_code_system, medication_code, medication_display, frequency, instructions, status, quantity_to_dispense,
@@ -1138,6 +1182,24 @@ create function pg_temp.amox_on_hand() returns bigint language sql as $f$
   select sum(on_hand)::bigint from pharmacy.stock_batches
    where facility_id = 'b1620000-0000-4000-8000-000000000002' and catalogue_item_id = (pg_temp.ids('amox'))::uuid
 $f$;
+create function pg_temp.refill(fill integer, in_session boolean) returns text language plpgsql as $f$
+begin
+  perform pg_temp.as_member(3, 'direct-care');
+  if not in_session then
+    perform set_config('app.facility_id', '', true);
+  end if;
+  insert into pharmacy.dispensings (id, work_item_id, work_item_version, patient_id, facility_id, medication_code_system,
+    medication_code, medication_display, quantity_dispensed, quantity_unit, status, dispensed_by,
+    dispensed_by_membership_id, reason, idempotency_key, request_sha256, correlation_id, fill_number)
+  values (('b162064' || fill || '-0000-4000-8000-000000000008')::uuid, 'b1620620-0000-4000-8000-000000000008', 1,
+    pg_temp.patient(8), 'b1620000-0000-4000-8000-000000000002', 'HID-MED', 'MED-00042', 'Amoxicillin 500 mg capsule', 2,
+    'capsule', 'dispensed', 'b1620100-0000-4000-8000-000000000003', pg_temp.member(3), 'Next supply as prescribed',
+    'billing-refill-key-0000' || fill, repeat('0', 64), 'billing-suite-correlation', fill);
+  return 'dispensed';
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end
+$f$;
 select pg_temp.check_case('11 the line bills no dispensing before the first', 'pharmacy/30000/f/f/none',
   pg_temp.refill_line());
 select pg_temp.check_case('11 the first dispensing is given', 'dispensed', pg_temp.dispense(8, 8, 2));
@@ -1145,28 +1207,11 @@ select pg_temp.check_case('11 the line bills the first dispensing',
   'pharmacy/30000/f/f/b1620640-0000-4000-8000-000000000008', pg_temp.refill_line());
 insert into pg_temp.b_saved (label, value) values
   ('refill-money', to_jsonb(pg_temp.money(pg_temp.refill_bill()))), ('refill-stock', to_jsonb(pg_temp.amox_on_hand()));
-alter table pharmacy.dispensings drop constraint if exists dispensings_work_item_id_key;
-do $$
-declare
-  answer text;
-begin
-  perform pg_temp.as_member(3, 'direct-care');
-  begin
-    insert into pharmacy.dispensings (id, work_item_id, work_item_version, patient_id, facility_id, medication_code_system,
-      medication_code, medication_display, quantity_dispensed, quantity_unit, status, dispensed_by,
-      dispensed_by_membership_id, reason, idempotency_key, request_sha256, correlation_id)
-    values ('b1620641-0000-4000-8000-000000000008', 'b1620620-0000-4000-8000-000000000008', 1, pg_temp.patient(8),
-      'b1620000-0000-4000-8000-000000000002', 'HID-MED', 'MED-00042', 'Amoxicillin 500 mg capsule', 2, 'capsule',
-      'dispensed', 'b1620100-0000-4000-8000-000000000003', pg_temp.member(3), 'Second supply as prescribed',
-      'billing-dispense-key-208', repeat('0', 64), 'billing-suite-correlation');
-    answer := 'dispensed';
-  exception when others then
-    answer := sqlstate || ' ' || sqlerrm;
-  end;
-  perform pg_temp.check_case('11 a second dispensing of the same work item is given', 'dispensed', answer);
-end $$;
-select pg_temp.check_case('11 the second dispensing takes stock', '2',
+select pg_temp.check_case('11 a refill of the billed medicine is refused', 'HB409 REFILL_BILLING_NOT_AVAILABLE',
+  pg_temp.refill(2, true));
+select pg_temp.check_case('11 the refused refill takes no stock', '0',
   (select ((pg_temp.v('refill-stock'))::bigint - pg_temp.amox_on_hand())::text));
+select pg_temp.check_case('11 a second dispensing where no hook acts is recorded', 'dispensed', pg_temp.refill(2, false));
 select pg_temp.check_case('11 the line still bills the first dispensing',
   'pharmacy/30000/f/f/b1620640-0000-4000-8000-000000000008', pg_temp.refill_line());
 select pg_temp.check_case('11 the second dispensing changes no bill', 'true',
@@ -1175,7 +1220,7 @@ do $$ begin
   perform pg_temp.as_member(3, 'direct-care');
   insert into pharmacy.dispensing_reversals (dispensing_id, dispensing_version, work_item_id, patient_id, facility_id,
     status, reversed_by, reversed_by_membership_id, reason, idempotency_key, request_sha256, correlation_id)
-  values ('b1620641-0000-4000-8000-000000000008', 1, 'b1620620-0000-4000-8000-000000000008', pg_temp.patient(8),
+  values ('b1620642-0000-4000-8000-000000000008', 1, 'b1620620-0000-4000-8000-000000000008', pg_temp.patient(8),
     'b1620000-0000-4000-8000-000000000002', 'reversed', 'b1620100-0000-4000-8000-000000000003', pg_temp.member(3),
     'Second supply given in error', 'billing-reverse-key-208', repeat('0', 64), 'billing-suite-correlation');
 end $$;
@@ -1192,9 +1237,32 @@ select pg_temp.check_case('11 reversing the first dispensing takes the line off'
 select pg_temp.check_case('11 the bill''s log has that reversal', '1',
   (select count(*)::text from commercial.bill_events where bill_id = pg_temp.refill_bill()
       and (details->>'dispensingReversed')::boolean));
+select pg_temp.check_case('11 after the first one''s reversal a refill is still refused',
+  'HB409 REFILL_BILLING_NOT_AVAILABLE', pg_temp.refill(3, true));
 select pg_temp.check_case('11 the stock ledger still agrees', 'true',
   (select pharmacy.stock_ledger_agrees('b1620000-0000-4000-8000-000000000002')::text));
 select pg_temp.check_case('11 every bill''s totals agree at the end', '0', pg_temp.agree());
+
+-- 12. Bill and receipt numbers past 999999: seven digits, never cut to six (which would repeat a number).
+update commercial.number_counters set next_value = 999999
+ where facility_id = 'b1620000-0000-4000-8000-000000000002' and kind = 'bill';
+update commercial.number_counters set next_value = 999999
+ where facility_id = 'b1620000-0000-4000-8000-000000000002' and kind = 'receipt'
+   and year = extract(year from clock_timestamp() at time zone 'Africa/Lagos')::integer;
+select pg_temp.check_case('12 bill 999999', 'ok',
+  pg_temp.ehr('n6', 3, format($s$select commercial.bill_create('{"source":"pharmacy","patient":{"anonymous":true,"name":"Number check"},"lines":[{"catalogueItemId":"%s","quantity":1}]}', 'kbillingnumbers000001', repeat('1', 64))$s$, pg_temp.ids('consult'))));
+select pg_temp.check_case('12 bill 1000000', 'ok',
+  pg_temp.ehr('n7', 3, format($s$select commercial.bill_create('{"source":"pharmacy","patient":{"anonymous":true,"name":"Number check"},"lines":[{"catalogueItemId":"%s","quantity":1}]}', 'kbillingnumbers000002', repeat('2', 64))$s$, pg_temp.ids('consult'))));
+select pg_temp.check_case('12 the bill numbers', 'B-999999/B-1000000',
+  (select pg_temp.v('n6')->'bill'->>'number' || '/' || (pg_temp.v('n7')->'bill'->>'number')));
+select pg_temp.check_case('12 receipt 999999', 'ok',
+  pg_temp.ehr('r6', 3, format($s$select commercial.payment_record('%s', '{"method":"cash","amountKobo":1000}', null, 'kbillingnumbers000003', repeat('3', 64))$s$, pg_temp.v('n7')->'bill'->>'id')));
+select pg_temp.check_case('12 receipt 1000000', 'ok',
+  pg_temp.ehr('r7', 3, format($s$select commercial.payment_record('%s', '{"method":"cash","amountKobo":1000}', null, 'kbillingnumbers000004', repeat('4', 64))$s$, pg_temp.v('n7')->'bill'->>'id')));
+select pg_temp.check_case('12 the receipt numbers', '999999/1000000',
+  (select string_agg(split_part(receipt_number, '-', 3), '/' order by receipt_number collate "C" desc)
+     from commercial.payments where bill_id = (pg_temp.v('n7')->'bill'->>'id')::uuid));
+select pg_temp.check_case('12 every bill''s totals agree', '0', pg_temp.agree());
 
 do $$
 declare

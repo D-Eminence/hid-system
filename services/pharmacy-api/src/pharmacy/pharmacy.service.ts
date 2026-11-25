@@ -281,9 +281,9 @@ function routedDispensingRefusal(error: unknown): DomainProblem | undefined {
  * That one answers its own detail and the problem member `withdrawnReason`.
  * There is no check before the insert: the database decides, free of races.
  */
-/** BILL-1 (0167): the dispensing hook's refusals (pay-before and stock), in the contract's words. */
+/** BILL-1 (0167): the dispensing hook's refusals (pay-before, stock, a billed refill), in the contract's words. */
 const DISPENSING_BILLING_REFUSALS = new Set(['PAYMENT_REQUIRED', 'PAYMENT_PENDING_CHECK', 'OUT_OF_STOCK',
-  'STOCK_UNIT_MISMATCH']);
+  'STOCK_UNIT_MISMATCH', 'REFILL_BILLING_NOT_AVAILABLE']);
 /** BILL-1 (0167): the pay-before refusals, which leave the medicine's line on the bill for the cashier to collect. */
 const PAY_BEFORE_REFUSALS = new Set(['PAYMENT_REQUIRED', 'PAYMENT_PENDING_CHECK']);
 export const STOCK_BATCH_SQL = "select set_config('hid.stock_batch_id', $1, true), set_config('hid.billing_source', 'pharmacy-api', true)";

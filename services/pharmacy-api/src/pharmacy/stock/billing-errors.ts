@@ -53,6 +53,8 @@ export const BILLING_MESSAGES: Readonly<Record<string, readonly [number, string]
   BATCH_EXPIRY_MISMATCH: [409, 'This batch number already has another expiry date.'],
   ALREADY_HANDED_OVER: [409, 'These items were already handed over.'],
   WALK_IN_QUEUE_NOT_AVAILABLE: [409, 'Sell it at the counter. Queuing outside prescriptions is not available yet.'],
+  REFILL_BILLING_NOT_AVAILABLE: [409,
+    'Refills of a billed medicine cannot be recorded yet. Ask the prescriber for a new prescription.'],
   IDEMPOTENCY_KEY_REUSED: [409, 'This Idempotency-Key was already used for a different request'],
   VERSION_CONFLICT: [412, 'Someone else changed this. Reload it and try again.'],
   PRESCRIPTION_REQUIRED: [422, 'This medicine needs a doctor\'s prescription.'],
