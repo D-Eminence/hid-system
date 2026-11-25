@@ -2185,3 +2185,96 @@ revoke all on function
 revoke all on commercial.ward_charge_items, commercial.bed_day_charges from public;
 grant execute on function identity.open_ward_stay(uuid) to hid_identity_runtime;
 revoke all on function identity.open_ward_stay(uuid), identity.end_ward_stay_grants(uuid, text) from public;
+
+-- Nursing on the ward (NUR-1 of Release D, 0174-0177; the owner's sprint
+-- approval of 25 November 2026), exactly as those files grant and revoke
+-- them. 0174: the observation chart to the EHR runtime only; the new vitals
+-- columns need no grant (the EHR runtime's privileges on ehr.vitals and
+-- ehr.vital_corrections above are table-wide). 0175: the medicine round, the
+-- ward round, recording a dose and marking one entered in error to the EHR
+-- runtime only; the nine schedule columns on ehr.prescriptions need no grant
+-- (table-wide, as 0125's). 0176: the task list and the four task steps, fluid
+-- balance (read, record, entered in error), clinical shifts (list, create,
+-- change), shift assignments (read, set) and the handover sheet (read, note,
+-- give, accept) to the EHR runtime only; identity.open_ward_stay (replaced by
+-- 0176, still switched off) keeps 0173's grant to the Identity runtime. No
+-- privilege for any runtime on the new tables (only these functions read and
+-- write them, as their owner) and none on the helpers (the caller, the keys,
+-- the due doses, the pharmacy state, the JSON builders, the shift windows, the
+-- fluid day and hours, the discharge hook, the step bodies and the guards).
+-- The codes themselves (0177) add no grant.
+grant execute on function
+  ehr.observation_chart(uuid, timestamptz, timestamptz, boolean),
+  ehr.mar_read(uuid, timestamptz, timestamptz),
+  ehr.mar_ward_round(uuid, text),
+  ehr.mar_record(uuid, uuid, timestamptz, text, timestamptz, numeric, text, text, text, text, text, text, text, text,
+    text, text),
+  ehr.mar_entered_in_error(uuid, bigint, text, text, text),
+  ehr.nursing_task_list(uuid, uuid, text, boolean),
+  ehr.nursing_task_create(uuid, text, timestamptz, uuid, integer, text, text),
+  ehr.nursing_task_start(uuid, bigint, text, text),
+  ehr.nursing_task_complete(uuid, bigint, text, text, text),
+  ehr.nursing_task_cancel(uuid, bigint, text, text, text),
+  ehr.nursing_task_update(uuid, bigint, uuid, timestamptz, text, text),
+  ehr.fluid_balance_read(uuid, date),
+  ehr.fluid_balance_record(uuid, text, text, integer, boolean, timestamptz, text, text, text),
+  ehr.fluid_balance_entered_in_error(uuid, bigint, text, text, text),
+  ehr.clinical_shift_list(),
+  ehr.clinical_shift_create(text, text, text, text, text),
+  ehr.clinical_shift_update(uuid, bigint, text, boolean, text, text),
+  ehr.shift_assignments_read(date, uuid, uuid),
+  ehr.shift_assignments_set(date, uuid, uuid, integer, jsonb, text, text),
+  ehr.handover_read(uuid, date, uuid),
+  ehr.handover_note_put(uuid, uuid, uuid, date, uuid, bigint, text, boolean, text, text),
+  ehr.handover_give(uuid, bigint, text, text),
+  ehr.handover_accept(uuid, bigint, text, text) to hid_ehr_runtime;
+revoke all on function
+  ehr.observation_chart(uuid, timestamptz, timestamptz, boolean),
+  ehr.nursing_caller(text, text[]),
+  ehr.observation_fluid_hours(uuid, timestamptz, timestamptz),
+  ehr.mar_read(uuid, timestamptz, timestamptz),
+  ehr.mar_ward_round(uuid, text),
+  ehr.mar_record(uuid, uuid, timestamptz, text, timestamptz, numeric, text, text, text, text, text, text, text, text,
+    text, text),
+  ehr.mar_entered_in_error(uuid, bigint, text, text, text),
+  ehr.mar_pharmacy_state(uuid),
+  ehr.mar_due_doses(uuid, timestamptz, timestamptz),
+  ehr.mar_administration_json(uuid),
+  ehr.mar_order_json(uuid, uuid, timestamptz, timestamptz),
+  ehr.nursing_key(uuid, text, text),
+  ehr.nursing_key_record(uuid, uuid, text, text, text, uuid),
+  ehr.nursing_requests_immutable(),
+  ehr.prescriptions_inpatient_schedule_guard(),
+  ehr.medication_administrations_guard(),
+  ehr.nursing_task_list(uuid, uuid, text, boolean),
+  ehr.nursing_task_create(uuid, text, timestamptz, uuid, integer, text, text),
+  ehr.nursing_task_step(uuid, bigint, text, text, uuid, timestamptz, text, text),
+  ehr.nursing_task_start(uuid, bigint, text, text),
+  ehr.nursing_task_complete(uuid, bigint, text, text, text),
+  ehr.nursing_task_cancel(uuid, bigint, text, text, text),
+  ehr.nursing_task_update(uuid, bigint, uuid, timestamptz, text, text),
+  ehr.nursing_task_json(uuid, boolean, jsonb),
+  ehr.nursing_tasks_close_for_discharge(),
+  ehr.nursing_tasks_no_delete(),
+  ehr.fluid_balance_read(uuid, date),
+  ehr.fluid_balance_record(uuid, text, text, integer, boolean, timestamptz, text, text, text),
+  ehr.fluid_balance_entered_in_error(uuid, bigint, text, text, text),
+  ehr.fluid_balance_guard(),
+  ehr.nursing_fluid_day_start_hour(uuid),
+  ehr.clinical_shift_window(uuid, date),
+  ehr.clinical_shifts_at(uuid, timestamptz),
+  ehr.clinical_shift_next(uuid, date),
+  ehr.clinical_shift_list(),
+  ehr.clinical_shift_write(uuid, bigint, text, text, text, boolean, text, text),
+  ehr.clinical_shift_create(text, text, text, text, text),
+  ehr.clinical_shift_update(uuid, bigint, text, boolean, text, text),
+  ehr.shift_assignments_read(date, uuid, uuid),
+  ehr.shift_assignments_set(date, uuid, uuid, integer, jsonb, text, text),
+  ehr.handover_read(uuid, date, uuid),
+  ehr.handover_note_put(uuid, uuid, uuid, date, uuid, bigint, text, boolean, text, text),
+  ehr.handover_step(uuid, bigint, text, text, text),
+  ehr.handover_give(uuid, bigint, text, text),
+  ehr.handover_accept(uuid, bigint, text, text) from public;
+revoke all on ehr.medication_administrations, ehr.nursing_requests, ehr.nursing_tasks, ehr.fluid_balance_entries,
+  ehr.facility_nursing_settings, ehr.clinical_shifts, ehr.shift_assignments, ehr.shift_patient_allocations,
+  ehr.shift_assignment_events, ehr.shift_handovers, ehr.shift_handover_items from public;

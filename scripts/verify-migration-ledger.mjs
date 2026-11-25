@@ -171,6 +171,11 @@ const acceptedMigrations = new Map([
   ['0171_inpatient_admissions_and_discharge.sql', '2ebfa6cfe8283764c6812d7ea6fa00001611d54bef8a8ed8c2fabd50235f4e9d'],
   ['0172_inpatient_admission_charges.sql', 'cfcc828ad32296c42dbfdaa83eca07c23ce8911f74d3dd2fc24a33e2851758e1'],
   ['0173_inpatient_access_and_ward_team.sql', 'b0c9c43a53de4218c33b2ae93206dec2692b9b6888dee28f4d131e276215b0c3'],
+  // NUR-1 (Release D), numbers provisional (given at merge, after ADT-1's 0170-0173), unsigned.
+  ['0174_nursing_observation_chart.sql', '9d4e54122c280a51b92d716664e38ed96fccec459ad04e0095fdd255bbb0cb40'],
+  ['0175_nursing_medicine_round.sql', '93aade726fb84df494677b2041b861eb2e8326901f0caf5ed2efa0f20fa94cdc'],
+  ['0176_nursing_tasks_fluid_shifts_handover.sql', 'bea2663d33b7775b03e95a0ee64bcc421e60f4ee5bd9c3bd39afa1d0974acece'],
+  ['0177_nursing_access_codes.sql', '80e579d064b118a811f69849dd4d4b0690e155af942a89b08d197a2c2ab69147'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

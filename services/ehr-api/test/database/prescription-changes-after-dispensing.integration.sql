@@ -226,7 +226,10 @@ begin
                   where proc.prosecdef and proc.prosrc ~* 'ehr\.prescriptions' and proc.proowner = validator_owner
                     -- ADT-1's 0171 discharge functions read the stay's prescriptions only with the caller's chart
                     -- write access (their own suite, inpatient-adt).
-                    and proc.oid::regprocedure::text not like 'ehr.admission\_%'),
+                    and proc.oid::regprocedure::text not like 'ehr.admission\_%'
+                    -- NUR-1's 0175 medicine round reads the stay's orders only with the caller's chart access, or
+                    -- (counts only) through prescriptions_mar_owner_read (its own suite, nursing).
+                    and proc.oid::regprocedure::text not like 'ehr.mar\_%'),
     '0 | ehr.list_my_orders(text[],boolean,date,timestamp with time zone,text,uuid,integer) '
     || 'ehr.patient_list_order_routes() ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,'
     || 'character) ehr.send_prescription_to_own_pharmacy(uuid,bigint) ehr.withdraw_own_pharmacy_send(uuid) '

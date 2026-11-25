@@ -37,6 +37,8 @@ import { ConsultationDraftsModule } from './consultation-drafts/consultation-dra
 import { MyOrdersModule } from './my-orders/my-orders.module';
 // ADT-1 (0170-0173): inpatient admission, wards and beds, behind INPATIENT_ENABLED.
 import { InpatientModule } from './inpatient/inpatient.module';
+// NUR-1 (0174-0177): nursing on the ward, behind NURSING_ENABLED.
+import { NursingModule } from './nursing/nursing.module';
 @Module({
   imports: [
     ClinicalInfrastructureModule,
@@ -59,6 +61,8 @@ import { InpatientModule } from './inpatient/inpatient.module';
     CatalogModule,
     // ADT-1 (0170-0173): inpatient admission, wards and beds, behind INPATIENT_ENABLED.
     InpatientModule,
+    // NUR-1 (0174-0177): nursing on the ward, behind NURSING_ENABLED.
+    NursingModule,
   ],
   controllers: [PatientRecordsController,StaffPatientChatController,HealthProfileController],
   providers: [StaffChatScopeService,StaffEvidenceService,StaffChatHistoryService,PatientRecordsService, ImportedAttachmentService, BedrockAiService, ClaudeAiService, PatientAttachmentTextService,PatientEvidenceService, PatientChatService, PatientChatHistoryService, PatientChatSourceService,

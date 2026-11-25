@@ -857,6 +857,77 @@ begin
   end loop;
 end
 $away$;
+-- NUR-1's 0174-0177 stand on 0170-0173: where they are applied, they are taken away for the rest of this
+-- transaction first (as nursing-migrations.integration.sql takes them away, putting back 0171's and 0173's bodies
+-- 0176 replaced), so each ADT-1 file below can be taken away and applied again.
+do $nur$
+declare
+  target regprocedure;
+begin
+  if to_regclass('ehr.medication_administrations') is null then
+    return;
+  end if;
+  delete from auth.role_permissions where permission_code in ('ehr.mar.read', 'ehr.mar.record', 'ehr.nursing-task.read',
+    'ehr.nursing-task.write', 'ehr.handover.write', 'ehr.shift-assignment.manage', 'ehr.clinical-shift.manage');
+  delete from auth.permissions where code in ('ehr.mar.read', 'ehr.mar.record', 'ehr.nursing-task.read',
+    'ehr.nursing-task.write', 'ehr.handover.write', 'ehr.shift-assignment.manage', 'ehr.clinical-shift.manage');
+  set local session_replication_role = replica;
+  delete from audit.events where correlation_id = '0177-nursing-nur1';
+  set local session_replication_role = origin;
+  drop trigger admissions_nursing_tasks_close on ehr.admissions;
+  drop table ehr.shift_handover_items, ehr.shift_handovers, ehr.shift_patient_allocations, ehr.shift_assignments,
+    ehr.shift_assignment_events, ehr.nursing_tasks, ehr.fluid_balance_entries, ehr.facility_nursing_settings,
+    ehr.clinical_shifts, ehr.medication_administrations, ehr.nursing_requests;
+  drop policy prescriptions_mar_owner_read on ehr.prescriptions;
+  drop trigger prescriptions_inpatient_schedule_guard on ehr.prescriptions;
+  for target in select proc.oid::regprocedure from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
+                 where namespace.nspname = 'ehr'
+                   and (proc.proname like 'nursing\_%' or proc.proname like 'fluid\_balance\_%'
+                        or proc.proname like 'clinical\_shift%' or proc.proname like 'shift\_%'
+                        or proc.proname like 'handover\_%' or proc.proname like 'mar\_%'
+                        or proc.proname like 'observation\_%'
+                        or proc.proname in ('prescriptions_inpatient_schedule_guard', 'medication_administrations_guard')) loop
+    execute format('drop function %s', target);
+  end loop;
+  alter table ehr.prescriptions drop constraint prescriptions_inpatient_schedule_ck, drop column schedule_kind,
+    drop column scheduled_times, drop column first_due_at, drop column as_needed_reason,
+    drop column as_needed_min_interval_minutes, drop column as_needed_max_doses_per_24h,
+    drop column infusion_rate_ml_per_hour, drop column infusion_volume_ml, drop column infusion_fluid;
+  alter table ehr.vitals drop constraint vitals_oxygen_ck, drop constraint vitals_gcs_ck,
+    drop constraint vitals_one_value_ck,
+    add constraint vitals_check check (num_nonnulls(height_cm, weight_kg, temperature_c, pulse_bpm, respiratory_rate,
+      systolic_mmhg, diastolic_mmhg, oxygen_saturation_percent) > 0),
+    drop column pain_score, drop column avpu, drop column blood_glucose_mmol_l, drop column oxygen_device,
+    drop column oxygen_flow_l_per_min, drop column fio2_percent, drop column gcs_eye, drop column gcs_verbal,
+    drop column gcs_verbal_not_testable, drop column gcs_motor;
+  alter table ehr.vital_corrections drop constraint vital_corrections_keys_ck,
+    add constraint vital_corrections_replacement_values_check3 check ((replacement_values - array['height_cm',
+      'weight_kg', 'temperature_c', 'pulse_bpm', 'respiratory_rate', 'systolic_mmhg', 'diastolic_mmhg',
+      'oxygen_saturation_percent']) = '{}'::jsonb);
+  execute $orig$create or replace function ehr.admission_notice_recipients(requested_admission uuid)
+  returns table (membership_id uuid, why text)
+  language sql
+  stable
+  set search_path = pg_catalog, pg_temp
+  as $fn$
+    select admission.responsible_membership_id, 'responsible_doctor'
+      from ehr.admissions admission
+      join identity.staff_facility_memberships membership on membership.id = admission.responsible_membership_id
+     where admission.id = requested_admission and admission.status in ('requested', 'admitted', 'discharge_ready')
+       and membership.active and membership.migration_hold_reason is null
+  $fn$$orig$;
+  execute replace(pg_get_functiondef('identity.open_ward_stay(uuid)'::regprocedure),
+    E'                           and staff.membership_id = actor_membership)\n'
+    || E'               -- 0176 (NUR-1, Q193 A): a nurse allocated to the patient on the current clinical shift.\n'
+    || E'               or exists (select 1 from ehr.shift_patient_allocations allocation\n'
+    || E'                            join ehr.clinical_shifts_at(actor_facility, clock_timestamp()) current_shift\n'
+    || E'                              on current_shift.shift_id = allocation.shift_id\n'
+    || E'                             and current_shift.shift_date = allocation.shift_date\n'
+    || E'                           where allocation.admission_id = admission_row.id\n'
+    || E'                             and allocation.membership_id = actor_membership)) then\n',
+    E'                           and staff.membership_id = actor_membership)) then\n');
+end
+$nur$;
 create temporary table existing_tables as
   select array_agg(namespace.nspname || '.' || relation.relname) as tables from pg_class relation
     join pg_namespace namespace on namespace.oid = relation.relnamespace

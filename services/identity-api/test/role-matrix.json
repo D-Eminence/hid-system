@@ -309,6 +309,32 @@
         "facilityAdmin": "full"
       },
       "derived": "Not a row of Akos's table: ADT-1 (migrations 0170-0173, owner sprint approval of 25 November 2026, owner decisions Q185 A and Q191 A) adds inpatient admission, wards and beds; each cell is the contract's role table (docs/EHR_PLANNED_CONTRACT.md, ADT-1, Roles and access codes): nurses, clinicians and doctors see the wards, read the admission reason, give and move beds and print bands (doctors and clinicians also admit and discharge, checked by those routes); facility admins and owners set up wards and beds."
+    },
+    {
+      "label": "Medicine round and nursing tasks",
+      "module": "nursingCare",
+      "cells": {
+        "frontDesk": "hidden",
+        "nurse": "full",
+        "doctor": "full",
+        "lab": "hidden",
+        "pharmacy": "hidden",
+        "facilityAdmin": "hidden"
+      },
+      "derived": "Not a row of Akos's table: NUR-1 (migrations 0174-0177, owner sprint approval of 25 November 2026, owner decision Q200 A) adds the medicine round, nursing tasks, fluid balance, clinical shifts and shift handover; each cell is the contract's role table (docs/EHR_PLANNED_CONTRACT.md, NUR-1, Roles and access codes): nurses, clinicians and doctors see and use the medicine round and nursing tasks (nurses and clinicians also write handover notes); nurses in charge (the nurse role) and facility admins and owners assign shifts; facility admins and owners set up clinical shifts."
+    },
+    {
+      "label": "Clinical shifts",
+      "module": "clinicalShifts",
+      "cells": {
+        "frontDesk": "hidden",
+        "nurse": "view",
+        "doctor": "hidden",
+        "lab": "hidden",
+        "pharmacy": "hidden",
+        "facilityAdmin": "full"
+      },
+      "derived": "Not a row of Akos's table: NUR-1 (migrations 0174-0177, owner sprint approval of 25 November 2026, owner decision Q200 A) adds the medicine round, nursing tasks, fluid balance, clinical shifts and shift handover; each cell is the contract's role table (docs/EHR_PLANNED_CONTRACT.md, NUR-1, Roles and access codes): nurses, clinicians and doctors see and use the medicine round and nursing tasks (nurses and clinicians also write handover notes); nurses in charge (the nurse role) and facility admins and owners assign shifts; facility admins and owners set up clinical shifts."
     }
   ],
   "todayRolePermissions": {
@@ -339,10 +365,16 @@
       "ehr.document.write",
       "ehr.encounter.read",
       "ehr.encounter.write",
+      "ehr.handover.write",
       "ehr.lab-request.read",
+      "ehr.mar.read",
+      "ehr.mar.record",
       "ehr.note.read",
       "ehr.note.write",
+      "ehr.nursing-task.read",
+      "ehr.nursing-task.write",
       "ehr.prescription.read",
+      "ehr.shift-assignment.manage",
       "ehr.vital.read",
       "ehr.vital.write",
       "ehr.ward.read",
@@ -386,8 +418,12 @@
       "ehr.encounter.write",
       "ehr.lab-request.read",
       "ehr.lab-request.write",
+      "ehr.mar.read",
+      "ehr.mar.record",
       "ehr.note.read",
       "ehr.note.write",
+      "ehr.nursing-task.read",
+      "ehr.nursing-task.write",
       "ehr.order-route.send",
       "ehr.prescription.read",
       "ehr.prescription.write",
@@ -426,10 +462,15 @@
       "ehr.document.write",
       "ehr.encounter.read",
       "ehr.encounter.write",
+      "ehr.handover.write",
       "ehr.lab-request.read",
       "ehr.lab-request.write",
+      "ehr.mar.read",
+      "ehr.mar.record",
       "ehr.note.read",
       "ehr.note.write",
+      "ehr.nursing-task.read",
+      "ehr.nursing-task.write",
       "ehr.order-route.send",
       "ehr.prescription.read",
       "ehr.prescription.write",
@@ -512,6 +553,8 @@
     ],
     "admin": [
       "audit.read",
+      "ehr.clinical-shift.manage",
+      "ehr.shift-assignment.manage",
       "ehr.ward.manage",
       "identity.registration.approve",
       "identity.registration.write",
@@ -531,6 +574,8 @@
     ],
     "org_admin": [
       "audit.read",
+      "ehr.clinical-shift.manage",
+      "ehr.shift-assignment.manage",
       "ehr.ward.manage",
       "identity.registration.approve",
       "identity.registration.write",

@@ -4301,7 +4301,7 @@ Release D, Phase 2. Size **L**: four migrations (0170-0173, provisional), about 
 
 Department: Nursing observations beyond what exists (observation chart, medicine administration record, nursing tasks, fluid balance, handover), and the first ICU chart (owner decision Q202 A, 25 Nov 2026). Roadmap Phase 2. Stacked on ADT-1: every chart, dose, task and fluid entry here belongs to an admission.
 
-Status: planned, not live.
+Status: planned, not live. Built on claude/sprint-inpatient-backend (migrations 0174-0177, unsigned, stacked on ADT-1's 0170-0173; routes in ehr-api; `docs/INTERFACE_CONTRACT.md` NUR-1); not live until signed and switched on.
 
 Surveyed before writing (health origin/main 8168ec3d; hid-system staging 95fa1e52):
 - **Nursing observations** (live): `clinical/pages.ts:31` (`ehr.note.read`), `clinical/nursing/observations.ts:15-21,37-60`. An observation is a clinical note of type "Nursing observation" with the categories Medication administration, Handover and Care task; "Vitals" was withdrawn on 1 Nov 2026. It is tied to a visit picked from a list (`NewObservation.tsx:43-46`), not to an admission.
@@ -4477,7 +4477,7 @@ Every route that shows chart content (values, doses, notes) checks chart read ac
 | `overrideReason` | `as_needed` only: required (8-300) when inside the minimum gap or past the most doses in 24 hours (Q-NUR-10) |
 | `infusionAction` | for an order with `infusion`: `started` or `stopped`. A rate change needs a new order |
 
-- Answer `201 { "administration": …, "warnings": ["late", "dose_differs", "as_needed_inside_gap", "before_dispensing"] }`. Warnings never block; the screen shows them.
+- Answer `201 { "administration": …, "warnings": ["late", "dose_differs", "as_needed_inside_gap", "as_needed_over_max", "before_dispensing"] }`. Warnings never block; the screen shows them. (`as_needed_over_max`, past the most doses in 24 hours, is the second half of Q-NUR-10's rule, kept apart from the gap so the screen can say which.)
 - The pharmacy state at the time is kept with the dose (`pharmacyStateAtRecord`).
 - A dose is never edited or deleted.
 
@@ -4533,9 +4533,9 @@ Every route that shows chart content (values, doses, notes) checks chart read ac
 - Counts come from the chart, the MAR, the tasks and fluid balance. The note text, flags and fluid balance show only for patients whose chart the member can read (`noteHidden`); counts of tasks show for all.
 - A sheet that does not exist yet is answered as a draft with no notes (`handoverId: null`).
 
-**17. `PUT /ehr/handovers/:handoverId/patients/:admissionId`** (or `PUT /ehr/handovers/new/patients/:admissionId` with `wardId`, `date`, `shiftId` in the body): body `{ "expectedRowVersion"?, "note": "1-2000 characters", "watch": false }`. Needs `ehr.handover.write` and chart write access. Writes the note as a clinical note of type "Nursing handover" on the stay's encounter, or a new revision of this sheet's note. Only while the sheet is a draft.
+**17. `PUT /ehr/handovers/:handoverId/patients/:admissionId`** (or `PUT /ehr/handovers/new/patients/:admissionId` with `wardId`, `date`, `shiftId` in the body): body `{ "expectedRowVersion"?, "note": "1-2000 characters", "watch": false }`. Needs `ehr.handover.write` and chart write access. Writes the note as a clinical note of type "Nursing handover" on the stay's encounter, or a new revision of this sheet's note. Only while the sheet is a draft. Built: each note is signed by the member who writes it (a revision makes it "amended"), so it is signed whoever gives the sheet, under the clinical notes' own write rule; giving the sheet ends its changes.
 
-**18. `POST /ehr/handovers/:handoverId/give`** (`ehr.handover.write`; the sheet becomes `given`, with who gave it) and **`POST /ehr/handovers/:handoverId/accept`** (`ehr.handover.write`; by a nurse assigned to the next shift on this ward, 409 `HANDOVER_NOT_YOURS` otherwise; the sheet becomes `accepted`). A given sheet's notes are signed with it.
+**18. `POST /ehr/handovers/:handoverId/give`** (`ehr.handover.write`; the sheet becomes `given`, with who gave it) and **`POST /ehr/handovers/:handoverId/accept`** (`ehr.handover.write`; by a nurse assigned to the next shift on this ward, 409 `HANDOVER_NOT_YOURS` otherwise; the sheet becomes `accepted`). A given sheet's notes are signed with it. Both send `{ "expectedRowVersion" }`. The next shift is the facility's active shift whose start comes first after this one's. Accepting a sheet not given yet is 409 `HANDOVER_NOT_GIVEN`; accepting it twice 409 `HANDOVER_ALREADY_ACCEPTED`.
 
 ### Names and chart content on ward lists
 
@@ -4564,7 +4564,7 @@ Ward-level lists (routes 5, 8, 16) name patients under ADT-1's "Names on ward li
 | 403 | `SHIFT_SETUP_NOT_ALLOWED` | "Only the facility's admins can set up clinical shifts." |
 | 403 | `SHIFT_ASSIGN_NOT_ALLOWED` | "Only nurses in charge and admins can assign shifts." |
 | 403 | `CHART_ACCESS_REQUIRED` | "Open this patient's record first, then try again." |
-| 404 | `ADMISSION_NOT_FOUND`, `ADMINISTRATION_NOT_FOUND`, `TASK_NOT_FOUND`, `FLUID_ENTRY_NOT_FOUND`, `HANDOVER_NOT_FOUND` | "This record is not at this facility." |
+| 404 | `ADMISSION_NOT_FOUND`, `ADMINISTRATION_NOT_FOUND`, `TASK_NOT_FOUND`, `FLUID_ENTRY_NOT_FOUND`, `HANDOVER_NOT_FOUND`, `SHIFT_NOT_FOUND`, `WARD_NOT_FOUND` | "This record is not at this facility." |
 | 409 | `ADMISSION_NOT_OPEN` | "This patient has been discharged. The record can still be read." |
 | 409 | `MAR_ORDER_NOT_ACTIVE` | "This order is not active. Ask the prescriber." |
 | 409 | `DOSE_ALREADY_RECORDED` | "This dose is already recorded. Mark it entered in error if it is wrong." |
@@ -4572,6 +4572,10 @@ Ward-level lists (routes 5, 8, 16) name patients under ADT-1's "Names on ward li
 | 409 | `TASK_STATE_INVALID` | "This task has moved on. Reload it." |
 | 409 | `HANDOVER_NOT_YOURS` | "Only a nurse on the next shift for this ward can accept the handover." |
 | 409 | `HANDOVER_NOT_DRAFT` | "This handover has been given. Write any change in the next one." |
+| 409 | `HANDOVER_NOT_GIVEN` | "This handover has not been given yet." |
+| 409 | `HANDOVER_ALREADY_ACCEPTED` | "This handover has already been accepted." |
+| 409 | `SHIFT_NAME_TAKEN` | "This name is already used. Choose another." |
+| 409 | `SHIFT_LIMIT_REACHED` | "This facility already has 8 active shifts. Stop one first." |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | as ID-6 |
 | 412 | `NURSING_VERSION_CONFLICT` | "Someone else changed this. Reload it and try again." |
 | 503 | `NURSING_NOT_AVAILABLE` | "The medicine round and nursing tasks are not switched on yet." (flag off, or a database without 0174) |
@@ -4617,7 +4621,8 @@ New tables have row-level security enabled and no policy or privilege for any ru
   - CHECKs: dose and route exactly for `given`; a reason code for every other outcome, from that outcome's list; `supply_source` only for `given`.
   - Unique (prescription, scheduled_for) where `recorded` and `scheduled_for` is not null: one record per scheduled dose under any race.
   - A trigger refuses any change but the one-way move to `entered_in_error`, and any delete.
-- Functions: `ehr.mar_read`, `ehr.mar_ward_round`, `ehr.mar_record`, `ehr.mar_entered_in_error`, and `ehr.mar_due_doses(admission, from, to)` (no role may execute it; it works out the due doses in Lagos time). `ehr.mar_record` reads the pharmacy state through ORD-4's tables as the owner and stores it with the dose. It locks the prescription `FOR SHARE` and the admission `FOR SHARE`, so an order stopped at the same moment either wins or sees the dose.
+- Functions: `ehr.mar_read`, `ehr.mar_ward_round`, `ehr.mar_record`, `ehr.mar_entered_in_error`, and `ehr.mar_due_doses(admission, from, to)` (no role may execute it; it works out the due doses in Lagos time).
+- Built: `ehr.prescriptions` keeps forced row-level security, so the owner reads only the orders the caller's chart access lets it read. For the counts of route 5 and the handover (due, late, missed, due next shift) of a patient whose chart the member cannot read, 0175 adds one owner-only policy, `prescriptions_mar_owner_read`, as 0171's: the function owner reads the active scheduled orders of the one inpatient visit a transaction-local marker names; only counts leave the functions for such a patient, never a medicine name or dose. No runtime role is a member of the owner. `ehr.nursing_requests` holds the `Idempotency-Key` and SHA-256 of every NUR-1 write (0176's too). `ehr.mar_record` reads the pharmacy state through ORD-4's tables as the owner and stores it with the dose. It locks the prescription `FOR SHARE` and the admission `FOR SHARE`, so an order stopped at the same moment either wins or sees the dose.
 - Locks: ACCESS EXCLUSIVE on `ehr.prescriptions` (column adds, CHECK and trigger; one validating scan); SHARE ROW EXCLUSIVE on `ehr.admissions`, `ehr.encounters`, `identity.staff_facility_memberships` (foreign keys of the new table); ACCESS SHARE on ORD-4's work-item, acceptance and dispensing tables (body checks); ROW EXCLUSIVE on `audit.events`.
 - Old images on this schema: today's ehr-api and pharmacy-api never set the schedule columns. Prescriptions they create are outpatient as today.
 
@@ -4630,7 +4635,7 @@ New tables have row-level security enabled and no policy or privilege for any ru
 - `ehr.shift_patient_allocations`: assignment, admission; unique (shift_date, shift, admission) so a patient has one nurse per shift.
 - `ehr.shift_assignment_events`: every replacement of a ward's list, append-only.
 - `ehr.shift_handovers`: ward, `shift_date`, shift, `status` (`draft`, `given`, `accepted`), given by and at, accepted by and at; unique (ward, shift_date, shift). `ehr.shift_handover_items`: handover, admission, `clinical_note_id` (references `ehr.clinical_notes`), `watch`.
-- Functions for routes 8-18, plus a replacement of ADT-1's `ehr.admission_notice_recipients` (md5-pinned before and after) that adds the nurses allocated to the patient on the current shift, the ward's nurse in charge and its on-call doctor (Q194). `ehr.admission_discharge` cancels the admission's open tasks through `ehr.nursing_tasks_close_for_discharge`, which no role may execute; it is called from a trigger AFTER UPDATE OF `status` on `ehr.admissions`, so ADT-1's function body does not change.
+- Functions for routes 8-18, plus a replacement of ADT-1's `ehr.admission_notice_recipients` (md5-pinned before and after) that adds the nurses allocated to the patient on the current shift, the ward's nurse in charge and its on-call doctor (Q194), and a replacement of 0173's `identity.open_ward_stay` (md5-pinned before and after; still switched off) in which a nurse allocated to the patient on the current clinical shift counts as the patient's ward team (route 15's rule; ADT-1 route 23's "(with NUR-1)"). Rahman and the DPO review that part as an identity and consent change. 0174's `ehr.observation_fluid_hours` (the ICU grid's hourly fluid, empty in 0174) is replaced too. `ehr.admission_discharge` cancels the admission's open tasks through `ehr.nursing_tasks_close_for_discharge`, which no role may execute; it is called from a trigger AFTER UPDATE OF `status` on `ehr.admissions`, so ADT-1's function body does not change.
 - Locks: SHARE ROW EXCLUSIVE on `ehr.admissions`, `ehr.wards`, `ehr.encounters`, `ehr.clinical_notes`, `identity.facilities` and `identity.staff_facility_memberships` (foreign keys and the trigger); ROW EXCLUSIVE on `audit.events`.
 
 **0177 Nursing access codes and sealed test shifts.** Needs 0174-0176 and ADT-1's 0173.
@@ -4693,8 +4698,8 @@ Rules for the screens:
   - shifts across midnight; one nurse in charge and one on-call doctor per ward and shift; one nurse per patient per shift; ICU allocation;
   - handover: notes as clinical notes, give and accept, only the next shift's nurse accepts;
   - names and chart content hidden as ADT-1's rule; every refusal and its audit row; no medicine name, dose, value or note text in any audit row; sealed demo and QA isolation.
-- **Migration:** each file's busy refusal ("0174: …" to "0177: …"), "already applied", half state, pinned bodies; 0174's CHECK swaps from 0004's definitions only; 0175 on a table with existing prescriptions.
-- **Release C's live verifiers:** the rehearsal with `HID_REHEARSAL_LIVE_TREE` set to a `git archive` of 95fa1e52 and `HID_REHEARSAL_LIVE_POINTS` set to the four files' final numbers (after ADT-1's). All twelve live runtime verifiers pass after each file; the vitals verifiers matter most for 0174.
+- **Migration** (`services/ehr-api/test/database/nursing-migrations.integration.sql`): each file's busy refusal ("0174: …" to "0177: …"), "already applied", half state, pinned bodies; 0174's CHECK swaps from 0004's definitions only; 0175 on a table with existing prescriptions.
+- **Release E's live verifiers:** the rehearsal with `HID_REHEARSAL_LIVE_TREE` set to a `git archive` of the live commit 0cfddcc9 (Release E, 0001-0153) and `HID_REHEARSAL_LIVE_POINTS` set to the four files' final numbers (after ADT-1's). All twelve live runtime verifiers pass after each file; the vitals verifiers matter most for 0174.
 - **New runtime verifier:** `services/ehr-api/scripts/verify-nursing-runtime.mjs` (a reading with the new fields, a scheduled order, a dose of each outcome, a task, a fluid entry, a shift, a handover), added to the rehearsal.
 - **Services:** unit specs; the flag off; `role-matrix.json`; the SX-1 areas; the vitals DTO with the new fields.
 - **Website:** chart, ICU grid, medicine round, tasks, fluid balance, shifts and handover, with the device zone away from Lagos; no score shown; no Health ID in any URL; no "permission" in staff text.

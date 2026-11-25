@@ -12627,3 +12627,241 @@ patient's record first, then try again.").
 None to the patient on admission, transfer or discharge; nothing for a death. Staff notices come with ORD-11's staff
 inbox (Q151 A, Q194 A), which will read `ehr.admission_notice_recipients` (the responsible doctor; NUR-1 adds the nurses
 on shift and the on-call doctor).
+
+## NUR-1. Nursing on the ward: observation chart, medicine round, tasks, fluid balance, clinical shifts and handover (Release D, migrations 0174-0177, provisional; not live until signed)
+
+Built as `docs/EHR_PLANNED_CONTRACT.md` NUR-1 says, on the owner's approval of the sprint decision sheet on 25 November
+2026 (verbatim: "I approve Q147–Q290 at the recommended options"; NUR-1 rests on Q157, Q158, Q161, Q193-Q202) and at
+the recommended option of the section's smaller choices (Q-NUR-6 A to Q-NUR-16 A, not yet answered by the owner).
+Numbers 0174-0177 are provisional (given at merge, after ADT-1's 0170-0173, on which every chart, dose, task and fluid
+entry stands).
+
+One service flag, `NURSING_ENABLED` in ehr-api, off by default, and ADT-1's `INPATIENT_ENABLED` too. While either is
+off, every route below answers 503 `NURSING_NOT_AVAILABLE` ("The medicine round and nursing tasks are not switched on
+yet."), and the new vitals fields (route 1) and the prescription schedule (route 3) are refused with 400
+`NURSING_FIELDS_NOT_AVAILABLE` ("These fields are not switched on yet."); every other vitals and prescription answer is
+exactly as before. A database without 0174-0176 answers 503 `NURSING_NOT_AVAILABLE` too. On in staging and at the
+sealed demo and QA facilities; in production only after the clinical lead's checklist and the owner's go-live (Q160 A).
+
+All routes are under `/api/v1/ehr/` (the gateway already sends them to ehr-api; **the gateway nginx template does not
+change**). They need `X-Facility-Id` and `X-Purpose-Of-Use: direct-care`; clinical shift setup (route 14 writes) needs
+`healthcare-operations`; the shift list and assignments (routes 14 read, 15) take either. Every write needs an
+`Idempotency-Key` (16-128 URL-safe characters): a replay with the same body answers with `"replayed": true`; the same
+key with another body is 409 `IDEMPOTENCY_KEY_REUSED`. Writes on a record send `expectedRowVersion` (assignments send
+`expectedVersion`); a stale one is 412 `NURSING_VERSION_CONFLICT` ("Someone else changed this. Reload it and try
+again."). No Health ID or NIN in any path, query, body or answer: admissions, orders, doses, tasks, entries, shifts and
+sheets by UUID. Times are ISO UTC; schedules, shifts and fluid days are Lagos time; screens show Lagos time, "18 Nov
+2026" dates and the 24-hour clock whatever the device's zone.
+
+**Who** (seven new codes, 0177; nineteen role rows). Observations and fluid balance keep `ehr.vital.read` and
+`ehr.vital.write` (Q-NUR-6 A); inpatient orders keep `ehr.prescription.write`.
+
+| Backend role | `ehr.mar.read` | `ehr.mar.record` | `ehr.nursing-task.read` | `ehr.nursing-task.write` | `ehr.handover.write` | `ehr.shift-assignment.manage` | `ehr.clinical-shift.manage` |
+|---|---|---|---|---|---|---|---|
+| `nurse` | yes | yes | yes | yes | yes | yes | no |
+| `clinician` | yes | yes | yes | yes | yes | no | no |
+| `doctor` | yes | yes | yes | yes | no | no | no |
+| `admin`, `org_admin` | no | no | no | no | no | yes | yes |
+| `receptionist`, `lab`, `pharmacist`, `cashier`, `billing_officer`, others | no | no | no | no | no | no | no |
+
+Session areas (SX-1): `nursingCare`, "Medicine round and nursing tasks" (shown with `ehr.mar.read` and
+`ehr.nursing-task.read`; full with `ehr.mar.record` and `ehr.nursing-task.write`: nurses, clinicians and doctors full),
+and `clinicalShifts`, "Clinical shifts" (shown with `ehr.shift-assignment.manage`: nurses; full with
+`ehr.clinical-shift.manage`: admins and owners). Every route that shows chart content (values, doses, medicine names,
+notes, completion records) checks the patient's chart read access, and every write of chart content checks write
+access, as today's vitals and notes do. Refusals in plain words, never "permission": 403 `NURSING_NOT_ALLOWED` ("Only
+nurses, clinicians and doctors of this facility can use the medicine round and nursing tasks."), 403
+`MAR_RECORD_NOT_ALLOWED` ("Only nurses, clinicians and doctors can record doses."), 403 `SHIFT_SETUP_NOT_ALLOWED`
+("Only the facility's admins can set up clinical shifts."), 403 `SHIFT_ASSIGN_NOT_ALLOWED` ("Only nurses in charge and
+admins can assign shifts."), 403 `CHART_ACCESS_REQUIRED` ("Open this patient's record first, then try again.").
+
+**Names and chart content on ward lists** (routes 5, 8, 16; Q190, Q-NUR-13 A): patients are named under ADT-1's rule
+(the admission card: `nameHidden` until the DPO's switch, except where the member can read the chart). Chart content
+on those lists shows only where the member can read the chart now; counts (due, late, missed, open, overdue) show for
+every patient on the ward. Every ward list says: "Do not show this list on a screen patients or visitors can see."
+
+### Observation chart (Q195 A, Q199 A, Q202 A)
+
+1. Today's `POST /ehr/patients/:patientId/encounters/:encounterId/vitals` and `POST …/vitals/:vitalId/corrections`
+   accept, and every vitals answer returns (only while the flag is on): `painScore` (0-10), `avpu` (`alert`, `voice`,
+   `pain`, `unresponsive`), `bloodGlucoseMmolL` (0.5-50.0, one decimal), `oxygenDevice` (`room_air`, `nasal_cannula`,
+   `simple_mask`, `venturi_mask`, `non_rebreather_mask`, `high_flow_nasal`, `cpap_or_niv`, `tracheostomy_mask`,
+   `ventilator`, `other`; "ventilator" records only that the patient is ventilated), `oxygenFlowLPerMin` (0.5-70.0,
+   only with a device other than room air), `fio2Percent` (21-100; on room air only 21), `gcsEye` (1-4), `gcsVerbal`
+   (1-5), `gcsVerbalNotTestable` (in place of `gcsVerbal`, shown "VT"), `gcsMotor` (1-6). A reading still needs one
+   value from any field. 400 `OXYGEN_FIELDS_INVALID` ("Enter the flow or FiO2 with an oxygen device, or 21% on room
+   air."); 400 `GCS_INCOMPLETE` ("Enter all three GCS parts, or mark the verbal part as not testable."). A correction
+   may replace any new field; the rules hold for the values after it. Old readings have them `null`.
+2. `GET /ehr/admissions/:admissionId/observation-chart[?from=…&to=…&view=all|hourly]` (`ehr.vital.read`,
+   `ehr.admission.read`, chart read access; default the last 24 hours, up to 7 days): `{ "admissionId",
+   "encounterId", "wardType", "from", "to", "readings": [ { "vitalId", "recordedAt", "status", "corrected", "values":
+   { …the measures entered, after the current correction }, "flags": [ { "measure", "level" } ],
+   "recordedByMembershipId", "rowVersion" } ], "hours"?: [ { "hourStart", "readingIds", "fluidInMl", "fluidOutMl",
+   "runningBalanceMl" } ], "rangesVersion", "score": null }`. `hours` (the ICU grid) by default for an ICU ward and
+   with `view=hourly`; the running balance restarts at the fluid day's start. `flags` are VIT-1's soft flags, each
+   value its own (never a total or a colour from several values), worked out on each read; a reading entered in error
+   is shown with its status and no flag. **`score` is always `null`: no early-warning or severity score is computed.**
+   The screen may show MAP and the GCS total as plain arithmetic of the values entered. 404 `ADMISSION_NOT_FOUND`;
+   403 `CHART_ACCESS_REQUIRED`.
+
+### Inpatient medicine orders (Q197 A)
+
+3. Today's `POST /ehr/patients/:patientId/encounters/:encounterId/prescriptions` accepts `"inpatientSchedule": {
+   "kind": "regular" | "as_needed" | "stat" | "once", "times"?: ["06:00", …] (regular only, 1-12, distinct, sorted,
+   Lagos), "firstDueAt"?: "…" (left out: now; required for once), "asNeeded"?: { "reason" (1-200),
+   "minIntervalMinutes" (15-1440), "maxDosesPer24h" (1-24) } (as_needed only), "infusion"?: { "rateMlPerHour"
+   (0.1-2000), "volumeMl" (1-5000), "fluid"? (0-120) } (regular, stat or once) }`, only on an open admission's
+   inpatient visit (400 `INPATIENT_SCHEDULE_NOT_ALLOWED`, "Set times, as needed, STAT and infusions are for admitted
+   patients only."). A wrong shape: 400 `INPATIENT_SCHEDULE_INVALID` ("Check the schedule: times, gap and most doses in
+   24 hours."). STAT also sets `priority: "stat"`. Today's `frequency` text is still required (the screen fills it
+   from the schedule). The schedule is set at creation only; to change it, stop the order and write a new one. Every
+   prescription answer carries `inpatientSchedule` (the object above, or `null`) while the flag is on. The pharmacy
+   sees an ordinary prescription.
+
+### The medicine round (Q196 A, Q198 A, Q-NUR-9 A to Q-NUR-12 A)
+
+4. `GET /ehr/admissions/:admissionId/medicine-round[?from=…&to=…]` (`ehr.mar.read`, chart read access; default the
+   last 24 hours and the next 24; up to 7 days): `{ "admissionId", "from", "to", "orders": [ { "prescriptionId",
+   "medicationDisplay", "strength", "doseForm", "dose": { "quantity", "unit" } | null, "route", "frequency",
+   "status", "schedule": { "kind", "times", "firstDueAt", "infusion" } | null, "pharmacyState", "doses": [ {
+   "scheduledFor", "state", "administrationId" } ], "asNeeded": { "reason", "minIntervalMinutes", "maxDosesPer24h",
+   "givenLast24h" } | null, "lastGivenAt", "nextAllowedAt" } ], "administrations": [ dose, … ] }`. Every order of the
+   stay but drafts; orders with no schedule last ("No schedule"). Due doses are worked out on each read in Lagos time:
+   `state` `upcoming` (more than 60 minutes ahead), `due` (60 minutes either side), `late`, or the recorded outcome.
+   An order on hold, completed, cancelled or entered in error has no due doses. `pharmacyState`: `not_sent`, `sent`,
+   `accepted`, `dispensed`, `part_dispensed`, `not_dispensable`, `reversed` (ORD-4 and Q132 A).
+5. `GET /ehr/medicine-round?wardId=…[&window=now|next_4h]` (`ehr.mar.read`): `{ "wardId", "wardName", "wardType",
+   "window", "at", "items": [ { "admissionId", "patient": card, "bedName", "chartShown", "medicinesHidden", "counts": {
+   "due", "late", "upcoming" }, "doses": [ { "prescriptionId", "medicationDisplay", "strength", "scheduledFor",
+   "state" } ] } ] }`: each admitted patient with doses due or late (and with `next_4h`, due in the next 4 hours).
+   `doses` is empty and `medicinesHidden: true` where the member cannot read the chart ("Open the record to see the
+   medicines"); the counts show for all.
+6. `POST /ehr/admissions/:admissionId/medicine-administrations` (`ehr.mar.record`, chart write access): `{
+   "prescriptionId", "scheduledFor" (a due time of a regular, stat or once order; null for as needed and for orders
+   with no schedule), "outcome": "given" | "held" | "refused" | "omitted" | "not_available", "givenAt" (not in the
+   future, at most 12 hours ago), "dose": { "quantity", "unit" } and "route" (given only, both required),
+   "doseDiffersReason"? (8-300), "reasonCode"? , "reasonText"? (0-300), "supplySource"? (`ward_stock`, `patient_own`,
+   `bought_outside`), "overrideReason"? (8-300), "infusionAction"? (`started`, `stopped`) }` → 201 `{ "administration":
+   dose, "warnings": [ … ], "replayed" }`. `reasonCode` is required for every outcome but given: held
+   `clinical_decision`, `awaiting_result`, `nil_by_mouth`; omitted `patient_away`, `no_access`, `nil_by_mouth`, `other`;
+   not available `not_in_stock`, `awaiting_pharmacy`, `patient_to_buy`; refused `patient_refused`; `reasonText` (8 or
+   more) for `clinical_decision` and `other`. `warnings` never block: `late` (given more than 60 minutes after the due
+   time), `dose_differs`, `as_needed_inside_gap`, `as_needed_over_max`, `before_dispensing`. The dose: `{
+   "administrationId", "admissionId", "prescriptionId", "scheduledFor", "outcome", "givenAt", "recordedAt",
+   "recordedLate" (entered more than 60 minutes after), "late", "dose", "doseDiffersReason", "route", "reasonCode",
+   "reasonText", "supplySource", "pharmacyStateAtRecord", "overrideReason", "infusionAction", "warnings",
+   "recordedByMembershipId", "status": "recorded" | "entered_in_error", "enteredInErrorReason", "enteredInErrorAt",
+   "enteredInErrorByMembershipId", "rowVersion" }`. Refusals: 400 `DOSE_REASON_REQUIRED` ("Choose a reason for a dose
+   that was not given."), 400 `DOSE_DIFFERS_REASON_REQUIRED` ("Say why the dose differs from the order."), 400
+   `SUPPLY_SOURCE_REQUIRED` ("The pharmacy has not dispensed this medicine. Say where it came from."), 400
+   `AS_NEEDED_OVERRIDE_REASON_REQUIRED` ("This is sooner or more often than ordered. Say why."), 400
+   `DOSE_TIME_INVALID` ("The time can be up to 12 hours ago, and not in the future."), 400 `VALIDATION_FAILED` (a
+   time that is not a due time of the order, an infusion action on an order with no infusion), 404
+   `ADMISSION_NOT_FOUND`, 409 `ADMISSION_NOT_OPEN` ("This patient has been discharged. The record can still be
+   read."), 409 `MAR_ORDER_NOT_ACTIVE` ("This order is not active. Ask the prescriber."), 409 `DOSE_ALREADY_RECORDED`
+   ("This dose is already recorded. Mark it entered in error if it is wrong."; `details.administrationId`). One record
+   per scheduled dose under any race. A dose is never edited or deleted.
+7. `POST /ehr/medicine-administrations/:administrationId/entered-in-error` (`ehr.mar.record`, chart write access) `{
+   "expectedRowVersion", "reason" (8-500) }` → `{ "administration", "replayed" }`. One way; the record stays (struck
+   through) and the scheduled dose is due again. 409 `ALREADY_ENTERED_IN_ERROR`; 404 `ADMINISTRATION_NOT_FOUND`.
+
+### Nursing tasks
+
+8. `GET /ehr/nursing-tasks?wardId=…` or `?admissionId=…` `[&status=open|done][&mine=true]` (`ehr.nursing-task.read`):
+   `{ "items": [ { "taskId", "admissionId", "patient": card, "bedName", "name", "dueAt", "overdue", "status",
+   "assignedMembershipId", "repeatEveryHours", "startedAt", "completedAt", "completionRecorded", "completionRecord",
+   "cancelledAt", "previousTaskId", "rowVersion" } ] }`, open first, by due time. `status`: `assigned`, `in_progress`,
+   `completed`, `cancelled`. `completionRecord` (chart content) is `null` where the member cannot read the chart.
+9. `POST /ehr/admissions/:admissionId/nursing-tasks` (`ehr.nursing-task.write`) `{ "name" (1-120), "dueAt",
+   "assignedMembershipId"?, "repeatEveryHours"? (1-168) }` → 201 `{ "task", "replayed" }`. Only for an open admission
+   (409 `ADMISSION_NOT_OPEN`); the assignee an active nurse, clinician or doctor here (400 `TASK_ASSIGNEE_INVALID`,
+   "Choose a nurse, clinician or doctor who works at this facility.").
+10. `POST /ehr/nursing-tasks/:taskId/start` `{ "expectedRowVersion" }` (assigned → in progress); `POST …/complete` `{
+    "expectedRowVersion", "completionRecord"? (1-2000; needs chart write access) }` (in progress → completed; a
+    repeating task makes the next one, due its repeat after this one was due, answered as `nextTaskId`); `POST
+    …/cancel` `{ "expectedRowVersion", "reason" (8-300) }` (from assigned or in progress); `PATCH
+    /ehr/nursing-tasks/:taskId` `{ "expectedRowVersion", "assignedMembershipId"?, "dueAt"? }`. Each needs
+    `ehr.nursing-task.write` and answers `{ "task", "replayed" }`. A step out of order: 409 `TASK_STATE_INVALID`
+    ("This task has moved on. Reload it."); 404 `TASK_NOT_FOUND`. A discharge (or a cancelled request) cancels the
+    stay's open tasks with the reason "Discharged".
+
+### Fluid balance (Q-NUR-6 A, Q-NUR-15 A)
+
+11. `GET /ehr/admissions/:admissionId/fluid-balance[?day=YYYY-MM-DD]` (`ehr.vital.read`, chart read access): one
+    fluid day (07:00 to 07:00 Lagos time unless the facility chose another start hour; today's when no day is given):
+    `{ "admissionId", "day", "dayStartsAtHour", "from", "to", "entries": [ { "entryId", "direction", "kind", "volumeMl",
+    "notMeasured", "recordedAt", "note", "status", "enteredInErrorReason", "enteredInErrorAt",
+    "recordedByMembershipId", "rowVersion" } ], "totals": { "intakeMl", "outputMl", "balanceMl",
+    "unmeasuredIntakeCount", "unmeasuredOutputCount" }, "byHour": [ { "hourStart", "inMl", "outMl",
+    "runningBalanceMl" } ], "byShift": [ { "shiftId", "name", "shiftDate", "from", "to", "inMl", "outMl" } ] }`.
+    Unmeasured entries are counted apart and never added to a total; entries in error are shown and left out of every
+    total.
+12. `POST /ehr/admissions/:admissionId/fluid-balance` (`ehr.vital.write`, chart write access) `{ "direction": "in" |
+    "out", "kind" (in: `oral`, `iv`, `enteral_tube`, `blood_product`, `other`; out: `urine`, `vomit`, `drain`,
+    `stool`, `tube_aspirate`, `blood_loss`, `other`), "volumeMl"? (1-10000) or "notMeasured": true, "recordedAt" (not
+    in the future, at most 24 hours ago), "note"? (0-200) }` → 201 `{ "entryId", "replayed" }`. 400
+    `FLUID_ENTRY_INVALID` ("Enter the amount in mL, or mark it as not measured.").
+13. `POST /ehr/fluid-balance/:entryId/entered-in-error` `{ "expectedRowVersion", "reason" (8-500) }` → `{ "entryId",
+    "replayed" }`. As route 7; 404 `FLUID_ENTRY_NOT_FOUND`.
+
+### Clinical shifts and assignments (Q193 A, Q194 A)
+
+14. `GET /ehr/clinical-shifts` (`ehr.nursing-task.read`, `ehr.shift-assignment.manage` or `ehr.clinical-shift.manage`):
+    `{ "items": [ { "shiftId", "name", "startsAt": "HH:MM", "endsAt": "HH:MM", "crossesMidnight", "active",
+    "rowVersion" } ], "fluidDayStartsAtHour" }`. `POST /ehr/clinical-shifts` (`ehr.clinical-shift.manage`,
+    healthcare operations) `{ "name" (1-40, unique among active), "startsAt", "endsAt" (Lagos; it may cross midnight)
+    }` → 201 `{ "shiftId", "replayed" }`; `PATCH /ehr/clinical-shifts/:shiftId` `{ "expectedRowVersion", "name"?,
+    "active"? }`. Never deleted; up to 8 active. 400 `SHIFT_TIMES_INVALID` ("Enter a start and end time. A shift can
+    run past midnight."), 409 `SHIFT_NAME_TAKEN` ("This name is already used. Choose another."), 409
+    `SHIFT_LIMIT_REACHED` ("This facility already has 8 active shifts. Stop one first."), 404 `SHIFT_NOT_FOUND`. No
+    shift is seeded for a real facility (Q-NUR-16 A); the setup screen offers Morning 07:30-14:30, Afternoon
+    14:00-21:00 and Night 20:30-08:00 as a starting point. The cashier's day is BILL-1's "till day".
+15. `GET /ehr/shift-assignments?date=YYYY-MM-DD&shiftId=…&wardId=…` (`ehr.nursing-task.read` or
+    `ehr.shift-assignment.manage`): `{ "date", "shiftId", "wardId", "from", "to", "version", "assignments": [ {
+    "membershipId", "duty", "admissionIds" } ] }`. `PUT /ehr/shift-assignments` (`ehr.shift-assignment.manage`) `{
+    "date" (yesterday to 14 days ahead, Lagos), "shiftId", "wardId", "expectedVersion", "assignments": [ {
+    "membershipId", "duty": "nurse" | "nurse_in_charge" | "on_call_doctor", "admissionIds"? } ] }` → `{ "list",
+    "warnings", "replayed" }`: the whole ward's list for that shift is replaced; every version is kept. Nurses and the
+    nurse in charge must be active nurses or clinicians here, the on-call doctor an active doctor or clinician (400
+    `SHIFT_ASSIGNEE_INVALID`); at most one nurse in charge and one on-call doctor; a patient is allocated to one nurse
+    per shift and must be an open admission on that ward (400 `VALIDATION_FAILED`). `warnings`:
+    `icu_nurse_over_two` (an ICU nurse with more than two patients; never a refusal). An assignment opens no chart;
+    with ADT-1's ward-team access switched on, a nurse allocated to a patient on the current shift counts as that
+    patient's ward team for the shift. Who is told of a critical result for an admitted patient (Q194 A, for ORD-11's
+    staff inbox): the responsible doctor, the nurses allocated to the patient on the current shift, the ward's nurse in
+    charge and its on-call doctor.
+
+### Shift handover (Q193 A)
+
+16. `GET /ehr/handovers?wardId=…&date=…&shiftId=…` (`ehr.nursing-task.read`): `{ "handoverId" | null, "status":
+    "draft" | "given" | "accepted", "wardId", "wardType", "date", "shiftId", "from", "to", "nextShift": { "shiftId",
+    "date", "from", "to" } | null, "fromMembershipIds", "toMembershipIds", "givenByMembershipId", "givenAt",
+    "acceptedByMembershipId", "acceptedAt", "rowVersion", "patients": [ { "admissionId", "patient": card, "bedName",
+    "chartShown", "lastObservationAt", "flagsSinceLastShift", "dosesMissedThisShift", "dosesDueNextShift", "openTasks",
+    "overdueTasks", "fluidBalanceMl", "watch", "handoverNoteId", "handoverNote", "noteHidden", "itemRowVersion" } ]
+    }`. A sheet not made yet is a draft with no notes (`handoverId: null`). `lastObservationAt`, `flagsSinceLastShift`
+    (readings this shift with a soft flag), `fluidBalanceMl` (the fluid day so far) and `handoverNote` are `null` where
+    the member cannot read the chart (`noteHidden: true`); the dose and task counts show for all.
+17. `PUT /ehr/handovers/:handoverId/patients/:admissionId` `{ "expectedRowVersion"?, "note" (1-2000), "watch"? }`, or
+    on a sheet not made yet `PUT /ehr/handovers/new/patients/:admissionId` with `"wardId", "date", "shiftId"` in the
+    body (`ehr.handover.write`, chart write access) → `{ "handoverId", "item": { "admissionId", "handoverNoteId",
+    "watch", "rowVersion" }, "replayed" }`. The note is a clinical note "Nursing handover" of the stay's visit, signed
+    by the member who writes it; a later write on the draft sheet is a new revision of the same note. Only while the
+    sheet is a draft (409 `HANDOVER_NOT_DRAFT`, "This handover has been given. Write any change in the next one.").
+18. `POST /ehr/handovers/:handoverId/give` and `POST …/accept` `{ "expectedRowVersion" }` (`ehr.handover.write`) → `{
+    "handover": { "handoverId", "status", "givenByMembershipId", "givenAt", "acceptedByMembershipId", "acceptedAt",
+    "rowVersion" }, "replayed" }`. Accept only by a nurse (or the nurse in charge) assigned to the next shift on this
+    ward (409 `HANDOVER_NOT_YOURS`, "Only a nurse on the next shift for this ward can accept the handover."); a sheet
+    not given yet: 409 `HANDOVER_NOT_GIVEN` ("This handover has not been given yet."); already accepted: 409
+    `HANDOVER_ALREADY_ACCEPTED` ("This handover has already been accepted."); 404 `HANDOVER_NOT_FOUND`.
+
+### Audit
+
+Every route writes its rows in the request's transaction, refusals included: `ehr.observation-chart.read`;
+`ehr.mar.read`, `ehr.mar.ward-round` (with the patient ids shown, and one `.shown` row per patient), `ehr.mar.record`
+(outcome, reason code, pharmacy state, supply source, and whether late, recorded late, dose differs or an override
+was given), `ehr.mar.entered-in-error`; `ehr.nursing-task.list` (with `.shown` per patient), `.create`, `.start`,
+`.complete`, `.cancel`, `.update`; `ehr.fluid-balance.read`, `.record`, `.entered-in-error`;
+`ehr.clinical-shift.create`, `.update`; `ehr.shift-assignment.set`; `ehr.handover.read` (with `.shown` per patient),
+`.note`, `.give`, `.accept`. No row ever holds a name, Health ID, medicine name, dose, value, task name, note text,
+completion record or reason text.

@@ -4,6 +4,7 @@ import {
   IsBoolean,
   IsDateString,
   IsEnum,
+  IsIn,
   IsInt,
   IsNotEmpty,
   IsNumber,
@@ -229,6 +230,12 @@ export class CreateClinicalNoteRevisionDto extends OptionalReasonVersionedUpdate
   content!: string;
 }
 
+/** NUR-1 (0174, Q-NUR-8 A): AVPU as decided. */
+export const AVPU_VALUES = ['alert', 'voice', 'pain', 'unresponsive'] as const;
+/** NUR-1 (0174): the oxygen devices. "ventilator" records only that the patient is ventilated (Q202 A). */
+export const OXYGEN_DEVICES = ['room_air', 'nasal_cannula', 'simple_mask', 'venturi_mask', 'non_rebreather_mask',
+  'high_flow_nasal', 'cpap_or_niv', 'tracheostomy_mask', 'ventilator', 'other'] as const;
+
 export class VitalMeasurementsDto {
   @IsOptionalButNotNull()
   @IsNumber({ maxDecimalPlaces: 2 })
@@ -277,6 +284,63 @@ export class VitalMeasurementsDto {
   @Min(0)
   @Max(100)
   oxygenSaturationPercent?: number;
+
+  // NUR-1 (0174, owner decision Q195 A): the observation chart's fields. Accepted only while NURSING_ENABLED is on
+  // (VitalsService refuses them with 400 NURSING_FIELDS_NOT_AVAILABLE otherwise); the oxygen and GCS rules are the
+  // service's (OXYGEN_FIELDS_INVALID, GCS_INCOMPLETE) and 0174's CHECKs.
+  @IsOptionalButNotNull()
+  @IsInt()
+  @Min(0)
+  @Max(10)
+  painScore?: number;
+
+  @IsOptionalButNotNull()
+  @IsIn(AVPU_VALUES)
+  avpu?: (typeof AVPU_VALUES)[number];
+
+  @IsOptionalButNotNull()
+  @IsNumber({ maxDecimalPlaces: 1 })
+  @Min(0.5)
+  @Max(50)
+  bloodGlucoseMmolL?: number;
+
+  @IsOptionalButNotNull()
+  @IsIn(OXYGEN_DEVICES)
+  oxygenDevice?: (typeof OXYGEN_DEVICES)[number];
+
+  @IsOptionalButNotNull()
+  @IsNumber({ maxDecimalPlaces: 1 })
+  @Min(0.5)
+  @Max(70)
+  oxygenFlowLPerMin?: number;
+
+  @IsOptionalButNotNull()
+  @IsInt()
+  @Min(21)
+  @Max(100)
+  fio2Percent?: number;
+
+  @IsOptionalButNotNull()
+  @IsInt()
+  @Min(1)
+  @Max(4)
+  gcsEye?: number;
+
+  @IsOptionalButNotNull()
+  @IsInt()
+  @Min(1)
+  @Max(5)
+  gcsVerbal?: number;
+
+  @IsOptionalButNotNull()
+  @IsBoolean()
+  gcsVerbalNotTestable?: boolean;
+
+  @IsOptionalButNotNull()
+  @IsInt()
+  @Min(1)
+  @Max(6)
+  gcsMotor?: number;
 }
 
 export class CreateVitalDto extends VitalMeasurementsDto {
@@ -634,5 +698,13 @@ export function hasMeasurements(value: VitalMeasurementsDto): boolean {
     value.systolicMmhg,
     value.diastolicMmhg,
     value.oxygenSaturationPercent,
+    // NUR-1 (0174): a reading may hold only the new fields (0174's vitals_one_value_ck counts them).
+    value.painScore,
+    value.avpu,
+    value.bloodGlucoseMmolL,
+    value.oxygenDevice,
+    value.oxygenFlowLPerMin,
+    value.fio2Percent,
+    value.gcsEye,
   ].some((measurement) => measurement !== undefined);
 }
