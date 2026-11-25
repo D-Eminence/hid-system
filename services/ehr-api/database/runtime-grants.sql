@@ -2065,3 +2065,79 @@ grant execute on function ehr.record_recent_diagnosis(text, text, text), ehr.rec
   to hid_ehr_runtime, hid_schema_test_runtime;
 revoke all on function ehr.record_recent_diagnosis(text, text, text), ehr.recent_diagnoses(integer) from public;
 revoke all on ehr.clinician_recent_diagnoses from public;
+
+-- Licence renewals (0199, ROS-1 of Release D; owner decisions Q243 A and Q247 A,
+-- and Q-ROS-12 A to Q-ROS-15 A at the recommended option, not yet answered by
+-- the owner), exactly as 0199 grants and revokes them: the list, one member's
+-- licences, the export's rows, record and withdraw a renewal to the Identity
+-- runtime only. No privilege for any runtime on identity.staff_licence_renewals
+-- or identity.staff_licence_renewal_withdrawals (only these functions read and
+-- write them, as their owner), and none on the status, rows, renewal answer and
+-- audit helpers.
+grant execute on function identity.staff_licence_status_list(), identity.staff_licence_member_read(uuid),
+  identity.staff_licence_export_rows(),
+  identity.staff_licence_renewal_record(uuid, text, text, integer, date, text, date, text, text, text),
+  identity.staff_licence_renewal_withdraw(uuid, text, text, text) to hid_identity_runtime;
+revoke all on function identity.staff_licence_status_of(date, date), identity.staff_licence_renewal_json(uuid),
+  identity.staff_licence_status_rows(uuid, date),
+  identity.staff_licence_audit(text, uuid, uuid, uuid, uuid, text, text, text, text, text, jsonb),
+  identity.staff_licence_status_list(), identity.staff_licence_member_read(uuid),
+  identity.staff_licence_export_rows(),
+  identity.staff_licence_renewal_record(uuid, text, text, integer, date, text, date, text, text, text),
+  identity.staff_licence_renewal_withdraw(uuid, text, text, text) from public;
+revoke all on identity.staff_licence_renewals, identity.staff_licence_renewal_withdrawals from public;
+
+-- Leave and department in-charges (0200, ROS-1; Q244 A, Q245 A and Q-ROS-8 A),
+-- exactly as 0200 grants and revokes them: the in-charge list, add and end,
+-- my leave requests, ask for and cancel leave, leave to decide and the
+-- decision to the Identity runtime only. No privilege for any runtime on
+-- identity.workforce_department_in_charges, identity.staff_leave_requests or
+-- identity.workforce_events, and none on the caller, membership-code,
+-- department, card, idempotency and audit helpers. 0201 (who holds the three
+-- codes) adds no grant.
+grant execute on function identity.workforce_in_charge_list(), identity.workforce_in_charge_add(text, uuid, text, text),
+  identity.workforce_in_charge_end(uuid, bigint, text, text), identity.staff_leave_requests_mine(),
+  identity.staff_leave_request_create(text, date, date, text, text, text),
+  identity.staff_leave_request_cancel(uuid, bigint, text, text),
+  identity.staff_leave_requests_to_decide(text, text),
+  identity.staff_leave_request_decide(uuid, text, bigint, text, text) to hid_identity_runtime;
+revoke all on function identity.workforce_member_holds(uuid, text), identity.workforce_actor(text),
+  identity.workforce_facility_departments(uuid), identity.workforce_editor_departments(uuid),
+  identity.staff_leave_card(identity.staff_leave_requests, boolean), identity.workforce_in_charge_card(uuid),
+  identity.workforce_idempotency(uuid, text, text),
+  identity.workforce_audit(text, uuid, uuid, uuid, uuid, text, text, text, text, text, jsonb),
+  identity.workforce_in_charge_list(), identity.workforce_in_charge_add(text, uuid, text, text),
+  identity.workforce_in_charge_end(uuid, bigint, text, text), identity.staff_leave_requests_mine(),
+  identity.staff_leave_request_create(text, date, date, text, text, text),
+  identity.staff_leave_request_cancel(uuid, bigint, text, text),
+  identity.staff_leave_requests_to_decide(text, text),
+  identity.staff_leave_request_decide(uuid, text, bigint, text, text) from public;
+revoke all on identity.workforce_department_in_charges, identity.staff_leave_requests, identity.workforce_events
+  from public;
+
+-- The duty roster (0202, ROS-1; Q193 A, Q242 A, Q246 A and Q-ROS-9 A to
+-- Q-ROS-11 A), exactly as 0202 grants and revokes it: the week's rosters, one
+-- roster, make, save the duties, publish, mark attendance, who is on duty now
+-- and my duties to the Identity runtime only. No privilege for any runtime on
+-- identity.duty_roster_rules, identity.duty_rosters,
+-- identity.duty_roster_assignments or identity.duty_roster_events, and none on
+-- the shift window, week, card, on-duty, idempotency helpers or the two
+-- trigger functions (the guard and the leave clash run as the writer, the
+-- tables' owner).
+grant execute on function identity.duty_roster_list(date), identity.duty_roster_read(uuid),
+  identity.duty_roster_create(text, date, text, text),
+  identity.duty_roster_assignments_set(uuid, bigint, jsonb, text, text),
+  identity.duty_roster_publish(uuid, bigint, text, text),
+  identity.duty_roster_attendance_mark(uuid, uuid, bigint, text, uuid, text, text),
+  identity.duty_roster_on_duty(text), identity.duty_roster_my_duties() to hid_identity_runtime;
+revoke all on function identity.duty_roster_shift_window(uuid, date), identity.duty_roster_week_ok(date),
+  identity.duty_roster_assignment_card(uuid), identity.duty_roster_card(uuid, boolean),
+  identity.duty_roster_on_duty_at(uuid, timestamptz), identity.duty_roster_idempotency(uuid, text, text),
+  identity.duty_roster_assignments_guard(), identity.staff_leave_requests_roster_clash(),
+  identity.duty_roster_list(date), identity.duty_roster_read(uuid), identity.duty_roster_create(text, date, text, text),
+  identity.duty_roster_assignments_set(uuid, bigint, jsonb, text, text),
+  identity.duty_roster_publish(uuid, bigint, text, text),
+  identity.duty_roster_attendance_mark(uuid, uuid, bigint, text, uuid, text, text),
+  identity.duty_roster_on_duty(text), identity.duty_roster_my_duties() from public;
+revoke all on identity.duty_roster_rules, identity.duty_rosters, identity.duty_roster_assignments,
+  identity.duty_roster_events from public;
