@@ -135,7 +135,7 @@ declare
     "commercial.bill_void(uuid,text,bigint,text,text)": "ad03076e11f20979dacb90883c92af7d",
     "commercial.hmo_cover_cancel(uuid,uuid,text,bigint,text,text)": "d5dd9af97e8c38b3f3d54bee53792c98",
     "commercial.hmo_receivables(uuid,integer)": "5032198e84267e549604f31c35239fd4",
-    "commercial.outstanding(integer,integer)": "d050476d03e7ce04cb694ee08c08cb9a",
+    "commercial.outstanding(integer,integer)": "ef8cc7adf8f88bcecef4f4119885896f",
     "commercial.patient_card(uuid)": "b51e6a898739b4219696ccedca1877ec",
     "commercial.resolve_health_id(text,text)": "99e6d5e1a4c27dea25f9b2cb7799eb7e",
     "commercial.staff_source(uuid)": "df47a040ca9124981981cccb083bb8f1",
@@ -1250,7 +1250,10 @@ end
 $$;
 
 -- Bills with money due, by patient, oldest bill first; anonymous sales as one
--- group with no patient. 25 groups per page.
+-- group with no patient. 25 groups per page. The groups are held in an array
+-- in this function, never in a temporary table: a definer must not use one,
+-- because the caller's session could have made a table of that name first,
+-- with a trigger that would then run as this function's owner.
 create function commercial.outstanding(older_than_days integer, requested_page integer)
 returns jsonb
 language plpgsql
@@ -1262,22 +1265,26 @@ declare
   page_value integer := coalesce(requested_page, 1);
   older integer := coalesce(older_than_days, 0);
   answer jsonb;
+  listed_ids uuid[];
+  page_ids uuid[];
   more boolean;
 begin
   select * into actor from commercial.caller('billing.report.read');
   if older not between 0 and 365 or page_value not between 1 and 1000 then
     raise exception using errcode = 'HB400', message = 'VALIDATION_FAILED', detail = '{"field": "olderThanDays"}';
   end if;
-  create temporary table if not exists pg_temp.commercial_outstanding (patient_id uuid, ord bigint) on commit drop;
-  truncate pg_temp.commercial_outstanding;
-  insert into pg_temp.commercial_outstanding
-  select grouped.patient_id, row_number() over (order by grouped.oldest, grouped.patient_id nulls last)
+  -- The patient groups (null: the anonymous sales) in list order, up to one past this page.
+  select array_agg(grouped.patient_id order by grouped.oldest, grouped.patient_id nulls last)
+    into listed_ids
     from (select bill.patient_id, min(bill.created_at) as oldest
             from commercial.bills bill
            where bill.facility_id = actor.facility_id and bill.due_kobo > 0 and bill.status <> 'void'
              and bill.created_at <= clock_timestamp() - make_interval(days => older)
-           group by bill.patient_id) grouped;
-  more := exists (select 1 from pg_temp.commercial_outstanding listed where listed.ord > page_value * 25);
+           group by bill.patient_id
+           order by min(bill.created_at), bill.patient_id nulls last
+           limit page_value * 25 + 1) grouped;
+  more := coalesce(cardinality(listed_ids), 0) > page_value * 25;
+  page_ids := coalesce(listed_ids[(page_value - 1) * 25 + 1 : page_value * 25], '{}'::uuid[]);
   select jsonb_build_object(
     'items', coalesce(jsonb_agg(jsonb_build_object(
       'patient', case when listed.patient_id is null then null else commercial.patient_card(listed.patient_id) end,
@@ -1302,14 +1309,13 @@ begin
                         and bill.created_at <= clock_timestamp() - make_interval(days => older)),
     'nextPage', case when more then page_value + 1 end)
     into answer
-    from pg_temp.commercial_outstanding listed
-   where listed.ord > (page_value - 1) * 25 and listed.ord <= page_value * 25;
+    from unnest(page_ids) with ordinality as listed(patient_id, ord);
   perform commercial.audit('commercial.outstanding.read', 'success', 'bill', null, null,
     jsonb_build_object('page', page_value, 'olderThanDays', older), 'ehr-api');
   perform commercial.audit('commercial.outstanding.shown', 'success', 'patient', listed.patient_id::text,
       listed.patient_id, '{}'::jsonb, 'ehr-api')
-     from pg_temp.commercial_outstanding listed
-    where listed.patient_id is not null and listed.ord > (page_value - 1) * 25 and listed.ord <= page_value * 25;
+     from unnest(page_ids) with ordinality as listed(patient_id, ord)
+    where listed.patient_id is not null;
   return answer;
 end
 $$;
@@ -1492,7 +1498,7 @@ declare
     "commercial.bill_void(uuid,text,bigint,text,text)": "ad03076e11f20979dacb90883c92af7d",
     "commercial.hmo_cover_cancel(uuid,uuid,text,bigint,text,text)": "d5dd9af97e8c38b3f3d54bee53792c98",
     "commercial.hmo_receivables(uuid,integer)": "5032198e84267e549604f31c35239fd4",
-    "commercial.outstanding(integer,integer)": "d050476d03e7ce04cb694ee08c08cb9a",
+    "commercial.outstanding(integer,integer)": "ef8cc7adf8f88bcecef4f4119885896f",
     "commercial.patient_card(uuid)": "b51e6a898739b4219696ccedca1877ec",
     "commercial.resolve_health_id(text,text)": "99e6d5e1a4c27dea25f9b2cb7799eb7e",
     "commercial.staff_source(uuid)": "df47a040ca9124981981cccb083bb8f1",

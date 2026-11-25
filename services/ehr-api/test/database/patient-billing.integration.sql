@@ -447,6 +447,43 @@ select pg_temp.check_case('4 outstanding includes p1''s 70000', 'true',
                    where item->'patient'->>'healthIdLast4' = 'AA22' and (item->>'dueKobo')::bigint = 70000)::text));
 select pg_temp.check_case('4 the cashier cannot read the outstanding list', 'HB403 BILLING_NOT_ALLOWED',
   pg_temp.ehr('x', 1, $s$select commercial.outstanding(0, 1)$s$));
+-- The EHR runtime makes, in its own session, a temporary table of the name an earlier 0164 used
+-- (pg_temp.commercial_outstanding), open to everyone, with a trigger on TRUNCATE and on every write that would
+-- record who ran it and give the runtime SELECT on identity.patients. The list uses no temporary table, so it
+-- answers as before, nothing fires and nothing is granted. (The earlier 0164 left its own table of that name in
+-- this session after the call above; it is dropped first so that this case fails against that version.)
+drop table if exists pg_temp.commercial_outstanding;
+set local role hid_ehr_api_runtime;
+create temporary table commercial_outstanding (patient_id uuid, ord bigint);
+create temporary table b_hijack_fired (fired_as text, fired_on text);
+grant all on pg_temp.commercial_outstanding, pg_temp.b_hijack_fired to public;
+create function pg_temp.b_hijack() returns trigger language plpgsql as $f$
+begin
+  insert into pg_temp.b_hijack_fired values (current_user, tg_op);
+  execute 'grant select on identity.patients to hid_ehr_api_runtime';
+  return null;
+end
+$f$;
+create trigger b_hijack before insert or update or delete or truncate on pg_temp.commercial_outstanding
+  for each statement execute function pg_temp.b_hijack();
+reset role;
+select pg_temp.check_case('4 with the runtime''s own pg_temp.commercial_outstanding: the list answers', 'ok',
+  pg_temp.ehr('out-again', 2, $s$select commercial.outstanding(0, 1)$s$));
+select pg_temp.check_case('4 with the runtime''s own pg_temp.commercial_outstanding: the same answer', 'true',
+  (select (pg_temp.v('out-again') = pg_temp.v('out'))::text));
+select pg_temp.check_case('4 with the runtime''s own pg_temp.commercial_outstanding: nothing fired', '0',
+  (select count(*)::text from pg_temp.b_hijack_fired));
+select pg_temp.check_case('4 with the runtime''s own pg_temp.commercial_outstanding: its table is untouched', '0',
+  (select count(*)::text from pg_temp.commercial_outstanding));
+select pg_temp.check_case('4 with the runtime''s own pg_temp.commercial_outstanding: no SELECT on patients', 'false',
+  (select has_table_privilege('hid_ehr_api_runtime', 'identity.patients', 'SELECT')::text));
+-- No function this release makes names a temporary table (a caller's session could have made one first).
+select pg_temp.check_case('4 no billing or stock function uses a temporary table', '0',
+  (select count(*)::text from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
+    where (namespace.nspname = 'commercial'
+           or (namespace.nspname = 'pharmacy' and (proc.proname like 'stock\_%' or proc.proname in
+               ('take_stock_expiry_first', 'counter_sale_create', 'sale_hand_over'))))
+      and (proc.prosrc ~* '\mtemp(orary)?\s+table' or proc.prosrc ~* '\mpg_temp\s*\.')));
 select pg_temp.check_case('4 every bill''s totals agree', '0', pg_temp.agree());
 
 -- 5. Other facilities and the runtime.
