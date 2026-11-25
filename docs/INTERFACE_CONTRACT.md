@@ -12423,3 +12423,318 @@ when `dateOfBirthEstimated`, and "NIN Not Verified". On `sent_for_review`
 show the message and nobody else's details. After `identified`, offer
 "Verify NIN" (ID-6). Never show `firstName`/`lastName` of a record whose
 `recordKind` is `unknown`.
+
+## DEN-1. Dental clinic: dentist role, tooth chart and procedures (Release D, migrations 0194-0196, provisional; not live until signed)
+
+Built exactly as `docs/EHR_PLANNED_CONTRACT.md` DEN-1 says, on the owner's decisions of 25 Nov 2026 (Q155 A, Q156 A,
+Q157 A, Q149 A, Q254 A, Q255 A, Q256 A, Q257 A, Q124 A, Q160 A, Q161 A; the roadmap's D1-D5 A) and at the recommended
+option of each question it raises (not yet answered by the owner; the owner can still change them): Q-DEN-1 A
+(dentists only see the dental chart), Q-DEN-2 A (no emergency access for dentists), Q-DEN-3 A (patients get the
+printed summary; no dental chart in the patient app yet), Q-DEN-4 A (only the signer marks a done procedure entered in
+error), Q-DEN-5 A (procedures by name always allowed), Q-DEN-6 A (the local anaesthetic is required on a done
+procedure). Numbers 0194-0196 are provisional (given at merge). 0196 (the dentist's own-facility opening, Q156 A) is
+signed only after Rahman and the DPO agree; until then the dentist opens a chart with the patient's Access PIN or
+approval, as any member without 0131's code does.
+
+**The visit.** A dental visit is an ordinary outpatient visit (EHR-C1, `encounterType: "ambulatory"`) with the dental
+record attached. The front desk checks the patient in on the waiting list (EHR-C7) and sets the dentist as the one who
+sees the patient; the dentist opens the chart as today, starts or reuses the visit, and starts the dental record
+(route 2). Notes, diagnoses (ORD-9 search, or by name while `DIAGNOSIS_NAME_ONLY_ENABLED` is on), prescriptions with
+the pharmacy send, lab requests, vitals and documents (X-ray images) are the live routes, unchanged.
+
+**Switches.** `DENTAL_ENABLED` (ehr-api and identity-api), off by default. While off, every route below answers 503
+`DENTAL_NOT_AVAILABLE`, and identity-api neither offers nor accepts the `dentist` role (below). A database without 0195
+also answers 503 `DENTAL_NOT_AVAILABLE`. On in staging; in production only after the clinical lead's sign-off and the
+owner's go-live. `DENTAL_PHOTOS_ENABLED` (ehr-api), off everywhere: route 1 answers `photosAvailable: false` until the
+DPO agrees to intraoral and facial photos. When facility setup (gap map F2) ships, the facility's own `dental` switch
+must also be on. (A 503 answer's `detail` is the service's generic text; screens show their own words for the code:
+"The dental clinic is not switched on yet.")
+
+Staff routes need `X-Facility-Id` and `X-Purpose-Of-Use: direct-care`. Every write needs an `Idempotency-Key` (a replay
+with the same body answers the first answer with `"replayed": true`; another body 409 `IDEMPOTENCY_KEY_REUSED`). No
+Health ID or NIN in any path, query, body or answer: patients, visits, chart versions and procedures by UUID.
+
+**Who** (two new codes, 0194):
+
+| Backend role | `ehr.dental.read` | `ehr.dental.write` |
+|---|---|---|
+| `dentist` (new) | yes | yes |
+| every other role | no | no |
+
+Every route also needs the patient's consent for this member at this facility for direct care, the clinical tables'
+own rule (0005's `ehr.context_allows`): `read_records` for reads, `write_records` for writes. Without it: 403
+`CONSENT_REQUIRED`, as today's clinical routes.
+
+**The `dentist` role** (0194; Q155 A, D1 A). Licence body MDCN. 25 codes: `ehr.dental.read`, `ehr.dental.write`,
+`ehr.encounter.read`, `ehr.encounter.write`, `ehr.note.read`, `ehr.note.write`, `ehr.diagnosis.read`,
+`ehr.diagnosis.write`, `ehr.prescription.read`, `ehr.prescription.write`, `ehr.lab-request.read`,
+`ehr.lab-request.write`, `ehr.vital.read`, `ehr.vital.write`, `ehr.document.read`, `ehr.document.write`,
+`ehr.order-route.send`, `identity.authorization.check`, `identity.consent.read`, `identity.consent.write`,
+`identity.patient-access-pin.verify`, `identity.patient.read`, `lab.result.released.read`, `lab.work-item.accept`,
+`pharmacy.dispensing.read`. With 0196 (held), also `identity.patient.open-own-facility`.
+- Identity's staff routes (`POST /identity/staff-invitations`, `POST /identity/facility-staff/:membershipId/role`,
+  `.../roles/add`, `.../roles/remove`, and support's add and remove) accept `dentist` at hospitals and clinics (and
+  `other` organisations with the EHR or Migrate product) with an MDCN licence, as for `doctor`; the staff answers list
+  it with the title "Dentist". While `DENTAL_ENABLED` is off, `dentist` is not offered, and an invitation, role change
+  or role add naming it answers 409 `STAFF_ROLE_NOT_AVAILABLE` ("Dentists can be added once the dental clinic is
+  switched on."). Removing the role is always allowed.
+- Session areas (SX-1): `dental`, "Dental", shown with `ehr.dental.read`, used in full with `ehr.dental.write`. Every
+  key is still present in every answer; `dental` is added after the last existing key.
+
+**The patient card** (route 5 only): `{ "patientId", "fullName", "sex", "dateOfBirth", "healthIdLast4" }`, as the
+waiting list's card. Staff names come from `GET /identity/facility-staff-names` (SX-9).
+
+**The visit** (`DentalVisit`, every answer that names one):
+
+```json
+{ "visitId": "uuid", "patientId": "uuid", "encounterId": "uuid", "encounterStatus": "in_progress",
+  "encounterStartedAt": "2026-12-03T08:40:00.000Z", "startedAt": "2026-12-03T08:52:00.000Z",
+  "startedByMembershipId": "uuid", "stage": "treated", "followUpOn": "2027-06-03",
+  "followUpNote": "Recall for scaling and polishing in six months", "rowVersion": 2 }
+```
+
+- `stage` (derived, never stored): `started` (nothing recorded yet), `assessed` (a chart saved or a procedure planned
+  in this visit), `treated` (a procedure done in this visit), `completed` (the visit is completed).
+- `followUpOn`: a Lagos calendar date or `null`. `followUpNote`: 1-500 characters or `null`.
+
+**The chart** (`DentalChart`):
+
+```json
+{ "versionId": "uuid", "versionNo": 3, "basedOnVersionId": "uuid", "encounterId": "uuid",
+  "dentition": "permanent", "recordedAt": "2026-12-03T09:05:00.000Z", "recordedByMembershipId": "uuid",
+  "listVersion": "HID-DENT-2026-11-DRAFT", "listStatus": "draft",
+  "findings": [ { "tooth": 36, "condition": "decayed", "surfaces": "MO", "note": null },
+                { "tooth": 46, "condition": "missing", "surfaces": null, "note": null } ],
+  "note": "Generalised plaque, gingivitis lower anterior", "enteredInError": null }
+```
+
+- `tooth`: FDI two-digit (ISO 3950). Permanent 11-18, 21-28, 31-38, 41-48; primary 51-55, 61-65, 71-75, 81-85.
+  `dentition` `permanent` allows permanent teeth, `primary` primary teeth, `mixed` both.
+- `condition`: a code of the active tooth-condition list (route 1). `surfaces`: for a condition that takes surfaces,
+  1-5 of `M`, `O`, `D`, `B`, `L`, each once, answered in that order; otherwise `null`. A tooth with no finding is
+  present and sound.
+- Findings are sorted by tooth, then condition code. At most 200 per version; one per tooth and condition.
+- `enteredInError`: `null`, or `{ "at", "byMembershipId", "reason" }`. A version marked so is never the newest.
+
+**The procedure** (`DentalProcedure`):
+
+```json
+{ "procedureId": "uuid", "patientId": "uuid", "procedureCode": "DEN-021", "procedureName": "Composite filling",
+  "byName": false, "listVersion": "HID-DENT-2026-11-DRAFT", "listStatus": "draft",
+  "site": "tooth_surfaces", "tooth": 36, "surfaces": "MO", "quadrant": null, "arch": null,
+  "status": "done", "plannedEncounterId": "uuid", "plannedAt": "2026-11-20T10:10:00.000Z",
+  "plannedByMembershipId": "uuid", "doneEncounterId": "uuid", "doneAt": "2026-12-03T09:30:00.000Z",
+  "performedByMembershipId": "uuid", "signedAt": "2026-12-03T09:41:00.000Z",
+  "anaesthetic": { "agentCode": "lidocaine_2_adrenaline", "agentName": "Lidocaine 2% with adrenaline 1:80,000",
+                   "agentOther": null, "techniqueCode": "inferior_alveolar_block",
+                   "techniqueName": "Inferior alveolar nerve block", "cartridges": 1.5 },
+  "notes": null, "cancelled": null, "enteredInError": null, "rowVersion": 2 }
+```
+
+- `status`: `planned`, `done`, `cancelled` or `entered_in_error`. `cancelled` and `enteredInError`: `null`, or
+  `{ "at", "byMembershipId", "reason" }`.
+- `site`: `tooth` (needs `tooth`), `tooth_surfaces` (needs `tooth` and `surfaces`), `quadrant` (needs `quadrant`
+  1-4: 1 upper right, 2 upper left, 3 lower left, 4 lower right), `arch` (needs `arch`, `upper` or `lower`),
+  `whole_mouth` (none of them). A listed procedure's site is the list's; a procedure by name chooses its site.
+- `byName: true` when `procedureCode` is `null` and `procedureName` was typed (2-120 characters). Show "Not on the
+  list".
+- `anaesthetic`: `null` while planned. On a done procedure it is always present: `agentCode` `none` ("No local
+  anaesthetic") with no technique or amount, or an agent with `techniqueCode` and `cartridges` (0.5-10 in steps of
+  0.5); `agentOther` (2-120) only with `agentCode` `other`.
+- `signedAt` and `performedByMembershipId`: the dentist who recorded it done; the signature is that member's explicit
+  attestation, with no cryptographic signature claim.
+
+**1. `GET /api/v1/ehr/dental/lists`** (`ehr.dental.read`; no consent; no patient):
+
+```json
+{ "toothConditions": { "version": "HID-DENT-2026-11-DRAFT", "status": "draft",
+    "items": [ { "code": "decayed", "label": "Decayed", "takesSurfaces": true } ] },
+  "procedures": { "version": "HID-DENT-2026-11-DRAFT", "status": "draft",
+    "items": [ { "code": "DEN-021", "name": "Composite filling", "category": "restorative", "site": "tooth_surfaces" } ] },
+  "anaesthetics": { "version": "HID-DENT-2026-11-DRAFT", "status": "draft",
+    "items": [ { "code": "none", "name": "No local anaesthetic" } ] },
+  "techniques": { "version": "HID-DENT-2026-11-DRAFT", "status": "draft",
+    "items": [ { "code": "infiltration", "name": "Infiltration" } ] },
+  "surfaces": [ "M", "O", "D", "B", "L" ], "photosAvailable": false }
+```
+
+`status` is `draft` until the clinical lead signs the list; screens then say "Draft list: not yet signed by the
+clinical lead". `category`: `diagnostic`, `preventive`, `restorative`, `endodontic`, `periodontal`, `surgical`,
+`prosthetic` or `other`.
+
+**2. `POST /api/v1/ehr/patients/:patientId/encounters/:encounterId/dental-visit`** (`ehr.dental.write`, write consent):
+body `{}`. Answer 201 `{ "outcome": "started" | "already_started", "visit": DentalVisit, "replayed": false }`.
+
+**3. `GET /api/v1/ehr/patients/:patientId/encounters/:encounterId/dental-visit`** (`ehr.dental.read`, read consent):
+
+```json
+{ "visit": DentalVisit, "chart": DentalChart | null,
+  "chartVersionsThisVisit": [ { "versionId": "uuid", "versionNo": 3, "recordedAt": "…", "enteredInError": false } ],
+  "plannedProcedures": [ DentalProcedure ], "doneThisVisit": [ DentalProcedure ] }
+```
+
+`chart` is the newest chart of the patient at this facility, from this visit or an earlier one (`null` when none).
+`plannedProcedures` is every planned procedure of the patient at this facility (the treatment plan), oldest first.
+404 `DENTAL_VISIT_NOT_FOUND` when the dental record was not started on this visit.
+
+**4. `PATCH /api/v1/ehr/patients/:patientId/encounters/:encounterId/dental-visit`** (`ehr.dental.write`, write
+consent): body `{ "expectedRowVersion", "followUpOn": "2027-06-03" | null, "followUpNote": "…" | null }`, at least one
+of the two. `followUpOn`: from tomorrow to two years ahead (Lagos days), else 400 `DENTAL_FOLLOW_UP_INVALID`. Allowed
+also after the visit is completed. Answer 200 `{ "visit": DentalVisit, "replayed": false }`.
+
+**5. `GET /api/v1/ehr/dental-visits[?days=1-30]`** (`ehr.dental.read`): this facility's dental visits started in the
+last `days` Lagos days (default 1: today), newest first, at most 200. Only patients this member may read now for
+direct care are listed; the rest are counted.
+
+```json
+{ "items": [ { "patient": card, "visit": DentalVisit } ], "hiddenCount": 2, "hasMore": false, "limit": 200 }
+```
+
+**6. `GET /api/v1/ehr/patients/:patientId/dental-chart[?versionId=uuid]`** (`ehr.dental.read`, read consent):
+`{ "chart": DentalChart | null, "versions": [ { "versionId", "versionNo", "recordedAt", "recordedByMembershipId",
+"encounterId", "enteredInError": false } ] }`, the versions newest first. With `versionId`, `chart` is that version
+(404 `DENTAL_CHART_NOT_FOUND` if it is not this patient's at this facility); without it, the newest one not marked
+entered in error. Only this facility's charts are read.
+
+**7. `POST /api/v1/ehr/patients/:patientId/encounters/:encounterId/dental-chart`** (`ehr.dental.write`, write consent):
+
+```json
+{ "basedOnVersionId": "uuid" , "dentition": "permanent",
+  "findings": [ { "tooth": 36, "condition": "decayed", "surfaces": "MO", "note": null } ],
+  "note": "Generalised plaque" }
+```
+
+| Field | Rule |
+|---|---|
+| `basedOnVersionId` | the newest version the screen started from, or `null` when the patient has no chart here. Anything else: 409 `DENTAL_CHART_CHANGED` |
+| `dentition` | required: `permanent`, `primary` or `mixed` |
+| `findings` | 0-200. `tooth` as above (400 `DENTAL_TOOTH_INVALID`); `condition` from the active list (400 `DENTAL_CONDITION_INVALID`); `surfaces` as above (400 `DENTAL_SURFACES_INVALID`); `note` 0-200, trimmed, no control characters; one per tooth and condition (400 `VALIDATION_FAILED`) |
+| `note` | 0-1000, trimmed, no control characters |
+
+The whole chart is sent each time: a save is a new version, never an edit. Needs the dental record started on this
+visit (409 `DENTAL_VISIT_NOT_STARTED`) and the visit open (409 `DENTAL_VISIT_CLOSED`). Answer 201 `{ "chart":
+DentalChart, "replayed": false }`.
+
+**8. `POST /api/v1/ehr/patients/:patientId/dental-chart/:versionId/entered-in-error`** (`ehr.dental.write`, write
+consent): body `{ "reason": "8-500 characters" }`. Only the newest version (409 `DENTAL_CHART_NOT_LATEST`); the one
+before it becomes the newest again. Answer 200 `{ "chart": DentalChart | null, "replayed": false }` (the newest chart
+after the change).
+
+**9. `POST /api/v1/ehr/patients/:patientId/encounters/:encounterId/dental-procedures`** (`ehr.dental.write`, write
+consent): plan a procedure, or record one done (signed).
+
+```json
+{ "status": "done", "procedureCode": "DEN-021", "procedureName": null, "site": null,
+  "tooth": 36, "surfaces": "MO", "quadrant": null, "arch": null, "doneAt": "2026-12-03T09:30:00.000Z",
+  "anaesthetic": { "agentCode": "lidocaine_2_adrenaline", "agentOther": null,
+                   "techniqueCode": "inferior_alveolar_block", "cartridges": 1.5 },
+  "notes": null }
+```
+
+| Field | Rule |
+|---|---|
+| `status` | `planned` or `done` |
+| `procedureCode` or `procedureName` | exactly one. A code of the active procedure list (400 `DENTAL_PROCEDURE_INVALID`), or a typed name of 2-120 characters (Q-DEN-5 A) |
+| `site` | only with `procedureName`: one of the five sites. With a code, the list's site (a different `site` is 400 `DENTAL_SITE_INVALID`) |
+| `tooth`, `surfaces`, `quadrant`, `arch` | exactly what the site needs, `null` otherwise (400 `DENTAL_SITE_INVALID`; a bad tooth 400 `DENTAL_TOOTH_INVALID`, bad surfaces 400 `DENTAL_SURFACES_INVALID`) |
+| `doneAt` | only with `done`; optional (left out: now); from the visit's start to now (up to 2 minutes ahead is taken as now), else 400 `DENTAL_DONE_TIME_INVALID` |
+| `anaesthetic` | required with `done` (Q-DEN-6 A), not allowed with `planned`; as the procedure shape (400 `DENTAL_ANAESTHETIC_INVALID`) |
+| `notes` | 0-1000, trimmed, no control characters |
+
+Needs the dental record started (409 `DENTAL_VISIT_NOT_STARTED`) and the visit open (409 `DENTAL_VISIT_CLOSED`).
+Answer 201 `{ "procedure": DentalProcedure, "replayed": false }`.
+
+**10. `POST /api/v1/ehr/patients/:patientId/encounters/:encounterId/dental-procedures/:procedureId/done`**
+(`ehr.dental.write`, write consent): body `{ "expectedRowVersion", "doneAt"?, "anaesthetic", "surfaces"?, "notes"? }`.
+Records a planned procedure (planned at this or an earlier visit at this facility) as done in this visit, signed by
+the caller. `surfaces` may refine a `tooth_surfaces` procedure's surfaces. Only from `planned` (409
+`DENTAL_PROCEDURE_NOT_PLANNED`). Answer 200 `{ "procedure": DentalProcedure, "replayed": false }`.
+
+**11. `POST /api/v1/ehr/patients/:patientId/dental-procedures/:procedureId/cancel`** (`ehr.dental.write`, write
+consent): body `{ "expectedRowVersion", "reason": "8-500 characters" }`. Only from `planned` (409
+`DENTAL_PROCEDURE_NOT_PLANNED`). Answer 200 `{ "procedure": DentalProcedure, "replayed": false }`.
+
+**12. `POST /api/v1/ehr/patients/:patientId/dental-procedures/:procedureId/entered-in-error`** (`ehr.dental.write`,
+write consent): body `{ "expectedRowVersion", "reason": "8-500 characters" }`. Only from `done` (409
+`DENTAL_PROCEDURE_NOT_DONE`), and only by the dentist who signed it (403 `DENTAL_NOT_SIGNER`, Q-DEN-4 A). Answer 200
+`{ "procedure": DentalProcedure, "replayed": false }`.
+
+**13. `GET /api/v1/ehr/patients/:patientId/dental-procedures[?status=planned|done|all]`** (`ehr.dental.read`, read
+consent): the patient's dental procedures at this facility, newest first (`all` also lists cancelled and entered in
+error ones), at most 200: `{ "items": [ DentalProcedure ], "hasMore": false, "limit": 200 }`. Default `all`.
+
+**14. `GET /api/v1/ehr/patients/:patientId/encounters/:encounterId/dental-summary`** (`ehr.dental.read`, read
+consent): the printable visit summary, audited as a print.
+
+```json
+{ "patient": { "fullName": "Ada Toothone", "sex": "female", "dateOfBirth": "1990-05-14", "healthIdLast4": "DE77" },
+  "facilityName": "Fictional Dental Clinic", "visit": DentalVisit,
+  "encounter": { "startedAt": "…", "endedAt": null, "status": "in_progress", "chiefComplaint": "Toothache, lower left" },
+  "chart": DentalChart | null, "doneThisVisit": [ DentalProcedure ], "plannedProcedures": [ DentalProcedure ],
+  "diagnoses": [ { "codeSystem": "ICD-11", "code": "…", "display": "…", "clinicalStatus": "active" } ],
+  "prescriptions": [ { "medicationDisplay": "…", "doseQuantity": 1, "doseUnit": "tablet", "routeCode": "…",
+                       "frequency": "…", "instructions": "…", "startsOn": "…", "endsOn": "…", "status": "active" } ],
+  "listStatus": "draft", "printedAt": "2026-12-03T09:50:00.000Z" }
+```
+
+`chart` is the newest version recorded in this visit, else the newest at this facility. `diagnoses` and
+`prescriptions` are this visit's, with the fields their live routes answer (entered-in-error and cancelled ones left
+out); a diagnosis by name has `codeSystem` and `code` `null` (ORD-9).
+The screen prints every date and time in Lagos time ("18 Nov 2026", 24-hour clock), the dentists' names from SX-9,
+and "Draft list" while `listStatus` is `draft`.
+
+**Errors:**
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | "Check the highlighted fields." |
+| 400 | `DENTAL_TOOTH_INVALID` | "Choose a tooth by its two-digit FDI number, for example 36." |
+| 400 | `DENTAL_SURFACES_INVALID` | "Choose surfaces from M, O, D, B and L, each once, only for a condition or procedure that takes surfaces." |
+| 400 | `DENTAL_CONDITION_INVALID` | "Choose a condition from the dental list." |
+| 400 | `DENTAL_PROCEDURE_INVALID` | "Choose a procedure from the dental list, or type its name." |
+| 400 | `DENTAL_SITE_INVALID` | "Say where this procedure was done: the tooth, the quadrant, the arch or the whole mouth, as the procedure needs." |
+| 400 | `DENTAL_ANAESTHETIC_INVALID` | "Choose the local anaesthetic used, or No local anaesthetic." |
+| 400 | `DENTAL_DONE_TIME_INVALID` | "The time it was done can be from the start of this visit to now." |
+| 400 | `DENTAL_FOLLOW_UP_INVALID` | "Choose a follow-up date from tomorrow to two years ahead." |
+| 400 | `DENTAL_REASON_REQUIRED` | "Say why in at least 8 characters." |
+| 400 | `DENTAL_VISIT_ENCOUNTER_INVALID` | "Dental records go on an outpatient visit of this patient at this facility." (not `ambulatory`, or `cancelled` or `entered_in_error`) |
+| 400 | `PURPOSE_OF_USE_REQUIRED`, `IDEMPOTENCY_KEY_REQUIRED` | as EHR-C7 and ID-6 |
+| 403 | `DENTAL_NOT_ALLOWED` | "Only dentists of this facility can open or record the dental chart." |
+| 403 | `DENTAL_NOT_SIGNER` | "Only the dentist who signed this procedure can mark it entered in error." |
+| 403 | `CONSENT_REQUIRED` | as today's clinical routes |
+| 404 | `ENCOUNTER_NOT_FOUND` | as today's clinical routes (also another patient's or another facility's visit) |
+| 404 | `DENTAL_VISIT_NOT_FOUND`, `DENTAL_CHART_NOT_FOUND`, `DENTAL_PROCEDURE_NOT_FOUND` | "No dental record was started on this visit." / "This chart version was not found." / "This procedure was not found." (also another facility's) |
+| 409 | `DENTAL_VISIT_NOT_STARTED` | "Start the dental record on this visit first." |
+| 409 | `DENTAL_VISIT_CLOSED` | "This visit is finished. Open a new visit to record more." |
+| 409 | `DENTAL_CHART_CHANGED` | "Someone saved this chart after you opened it. Reload it to start from the newest chart." |
+| 409 | `DENTAL_CHART_NOT_LATEST` | "Only the newest chart can be marked entered in error." |
+| 409 | `DENTAL_PROCEDURE_NOT_PLANNED` | "Only a planned procedure can be recorded as done or cancelled." |
+| 409 | `DENTAL_PROCEDURE_NOT_DONE` | "Only a done procedure can be marked entered in error." |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | as ID-6 |
+| 409 | `STAFF_ROLE_NOT_AVAILABLE` | (identity-api) "Dentists can be added once the dental clinic is switched on." |
+| 412 | `DENTAL_VERSION_CONFLICT` | "Someone else changed this record. Reload it and try again." |
+| 503 | `DENTAL_NOT_AVAILABLE` | "The dental clinic is not switched on yet." |
+
+Staff screens show the message and never the word "permission".
+
+**Audit**, written by the database functions in the request's transaction, refusals included:
+`ehr.dental.visit.start`, `ehr.dental.visit.read`, `ehr.dental.visit.follow-up`, `ehr.dental.visit.list` (plus one
+`ehr.dental.visit.list.shown` per patient shown), `ehr.dental.chart.read`, `ehr.dental.chart.save`,
+`ehr.dental.chart.entered-in-error`, `ehr.dental.procedure.plan`, `.done`, `.cancel`, `.entered-in-error`,
+`ehr.dental.procedure.list`, `ehr.dental.summary.print`. Rows hold ids, outcomes, refusal kinds, version numbers,
+statuses and counts; never a finding, surface, procedure code or name, anaesthetic, note, reason, name, date of birth
+or Health ID. Route 1 reads no patient and writes no row.
+
+**What patients see:** the printed summary (Q-DEN-3 A). In the patient app, the visit, its diagnoses and
+prescriptions and their access history as today; no dental chart or procedure. No notification of any kind (no recall
+reminder: Q257 A).
+
+**Database** (EHR_PLANNED_CONTRACT DEN-1 has the full design): 0194 adds the two codes, the `dentist` role and its 25
+rows, the role in the staff vocabulary (licence body MDCN; invitable at hospitals and clinics; tolerant of the other
+Release D lanes' role additions) and one sealed QA login (`dentist@healthidentitydirectory.com`, QA Hospital only);
+0195 adds `ehr.dental_list_versions`, `ehr.dental_list_items` (the draft lists), `ehr.dental_visits`,
+`ehr.dental_chart_versions`, `ehr.dental_chart_findings`, `ehr.dental_procedures` and `ehr.dental_events`, with RLS
+forced and owner-only policies on the five patient tables (the two list tables hold no patient data and have no RLS),
+no runtime privilege on any table, append-only guards including BEFORE TRUNCATE, and SECURITY DEFINER functions with
+`search_path = pg_catalog, pg_temp`, EXECUTE for `hid_ehr_runtime` only (in `runtime-grants.sql`); 0196 (held) gives
+the dentist `identity.patient.open-own-facility`.

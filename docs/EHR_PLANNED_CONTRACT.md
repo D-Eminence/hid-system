@@ -1,4 +1,4 @@
-# HID planned contract for the rest of Akos's EHR list (Release B and C, not live)
+# HID planned contract for the rest of Akos's EHR list (Release B, C and D, not live)
 
 This file lists the API that Akos's EHR frontend will need but that is not built yet. With it, he can build each screen once: the shape now, and the fallback he shows until the route ships.
 
@@ -44,6 +44,7 @@ Rules that hold in every section:
 | [ORD-6: Several tests in one lab request](#ord-6-several-tests-in-one-lab-request-planned-release-c-needs-a-migration-yes) | N-7 | C | yes | M |
 | [ORD-8: Order sets, favourites, and note and visit templates](#ord-8-order-sets-favourites-and-note-and-visit-templates-planned-release-c-needs-a-migration-yes) | P0-5, P1-13, P1-12 | C | yes | L |
 | [ORD-11: Result and dispensed notices to the ordering doctor](#ord-11-result-and-dispensed-notices-to-the-ordering-doctor-planned-release-c-needs-a-migration-yes) | P1-6 | C | yes | L |
+| [DEN-1: Dental clinic: dentist role, FDI tooth chart and signed procedures](#den-1-dental-clinic-dentist-role-fdi-tooth-chart-and-signed-procedures-planned-release-d-needs-a-migration-yes) | department Dental (gap F1), Phase 4 | D | yes (0194-0196, provisional) | M |
 | [ORD-13: No drug-interaction checks](#ord-13-no-drug-interaction-checks-not-planned-no-release-needs-a-migration-no) | P0-5, N-9 (interactions) | not planned | no | — |
 | [P2-1: National ID type per country and a neutral company number](#p2-1-national-id-type-per-country-and-a-neutral-company-number-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-1 | after C | yes, when designed | M |
 | [P2-2: Interface translations and language](#p2-2-interface-translations-and-language-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-2, P1-8 (language) | after C | yes, when designed | L |
@@ -3712,6 +3713,350 @@ Release C (lane D). Size **L**:
 - four routes;
 - audit;
 - a runtime check across Lab, Pharmacy and EHR.
+
+# Release D
+
+Release D holds the department first versions of the two-week sprint the owner approved on 25 Nov 2026: every department ships a first working version on Akos's blue design, anything that needs outside approval is built but switched off, every change gets an independent agent review and Rahman's final database check, and real patients use it only after the clinical lead's checklist and the owner's go-live.
+
+This Release D is the sprint's department release: the roadmap's Phase 1 departments first, then later departments in later waves of the same sprint. It is not the separate release the ID-8 section mentions for ID-8b, which would take another name if it is needed.
+
+Decisions in Release D sections are marked **(recommended option, not yet answered by the owner)**. The section is built with that option. The owner can still choose the other option; the PR that builds it says which lines change.
+
+## DEN-1: Dental clinic: dentist role, FDI tooth chart and signed procedures (planned, Release D, needs a migration: yes)
+
+Department: Dental (the roadmap's Phase 4 department "Dental: a visit on the waiting list, an FDI odontogram, and a signed procedure list"; built in sprint wave 3 from 25 Nov 2026). Gap map row `docs/HEALTH_ID_COMPLETE_FRONTEND_GAP_MAP.md:128` ("No ... dental ... API").
+
+Status: planned, not live.
+
+Surveyed before writing (health `origin/main` b44b0d56, the live website; hid-system `staging-novu-ci-20261005` 0cfddcc9, migrations 0001-0153 live):
+- The design is a sample at the four demo facilities only. `apps/patient-web/src/ehr-blue/clinical/sample/definitions.ts:221-232` and `frame/sample/catalog.ts:703-745` (kind `procedure`, department Dental): fields Appointment and Complaint; stages `booked` -> "Record assessment" (Findings, Treatment plan; `edit`) -> `assessed` -> "Record treatment" (Treatment documentation; `sign`) -> `treated` -> "Arrange follow-up" (Follow-up plan; `edit`) -> `completed`. There is no tooth chart, tooth numbering, surfaces or procedure list.
+- Navigation: `frame/pages.ts:91` and `clinical/pages.ts:35` (`dental/*`, sample, icon `tooth` at `clinical/parts/icons.tsx:32`), grouped under "Wards & units" (`frame/BlueFrame.tsx:51`). Access: part of the design's CLINICAL set (`frame/sampleAccess.ts:16`), so every doctor sees it. The design's sixteen roles have no dentist (`frame/roleView.tsx:4-7`).
+- One fictional seed row (`clinical/sample/seed.ts:257-259`, toothache, assessed). `seed.ts:105` cites a design capture (`dental-3-detail.png`) that is not in the repository.
+- The live visit shell the chart attaches to: `clinical/consult/EncounterPage.tsx` (notes, diagnoses with ORD-9 search, prescriptions, lab requests, vitals, documents) and the clinical print (`clinical/parts/clinicalPrint.tsx`).
+- Backend: no dental domain. The department code `dental` exists (INTERFACE_CONTRACT 43.6; 0114). Encounters (0004, type `ambulatory`), the waiting list (0135), own-facility opening (0131), ORD-9 diagnosis search (0152-0153, Release E, live), documents with virus scan, and the role table (0136, 0139, 0147, 0150) are reused as they are.
+
+### What staff get
+
+The first working version is a dental clinic visit that is a real record. Nothing else.
+
+1. **The visit.** The front desk checks the patient in on the live waiting list (EHR-C7) and sets the dentist as the one who sees the patient (0135's assignee rule takes any active member holding `ehr.encounter.write` and `ehr.note.write`, which the dentist holds). The dentist opens the patient's chart as today (Access PIN or approval) and starts or reuses today's outpatient visit (EHR-C1, `encounterType: "ambulatory"`, `reuseOpenVisit: true`), then selects "Start dental record". Notes, diagnoses (ORD-9 search, or by name while `DIAGNOSIS_NAME_ONLY_ENABLED` is on), prescriptions with the live pharmacy send, lab requests, vitals and documents all work on that visit exactly as today.
+2. **The dental chart.** An odontogram in FDI two-digit notation (ISO 3950): adult (permanent, 11-48), child (primary, 51-85) or mixed dentition. Each tooth can carry one or more findings from the dental condition list (decayed, filled, missing, crowned, root canal treated, for extraction and the rest), with the affected surfaces (M, O, D, B, L) where the condition takes surfaces. Every save is a new dated version, so the next visit starts from the newest chart at this facility and the old versions stay readable.
+3. **The treatment record.** Procedures from the Health ID dental procedure list (scaling and polishing, extraction, amalgam or composite filling, root canal treatment and the rest), or typed by name when they are not on the list, each linked to its tooth and surfaces (or quadrant, arch or whole mouth). A procedure is either **planned** (the treatment plan) or **done**. Recording it done records the local anaesthetic used and is signed by the dentist: an explicit attestation of who did it and when, as the lab's release attestation (0021), with no cryptographic signature claim. A planned procedure can be done at a later visit, or cancelled with a reason. A done procedure is never changed; a mistake is marked entered in error with a reason.
+4. **Follow-up and print.** A follow-up date and a short recall note on the visit, and a printable visit summary (chart findings, procedures done, the treatment plan still open, the visit's diagnoses and prescriptions, the follow-up).
+5. **X-rays as documents.** Periapical, bitewing and panoramic (OPG) images are attached to the visit with the live documents routes (upload, virus scan, download) until Radiology ships. Intraoral and facial photos are built but switched off (see "Switches").
+
+The design's stages are shown, derived from the record (Q256 A): `started` (dental record started, nothing recorded), `assessed` (a chart saved or a procedure planned in this visit), `treated` (a procedure done in this visit), `completed` (the visit is completed). The design's `booked` is the waiting-list check-in before the visit opens.
+
+Not in this release: periodontal charting (pocket depths), orthodontics, booking appointments (Q257 A; check-in and a follow-up date instead), recall reminders of any kind, lab work orders to dental technicians, dental prices and bills (point-of-care billing), insurance or HMO claims, imaging device integration, a dental chart from another facility, the dental chart in the patient app (Q-DEN-3), and offline use (Q161 A: a paper dental chart is the back-up).
+
+### Decisions this section is built on
+
+Owner decisions of 25 Nov 2026 ("I approve Q147–Q290 at the recommended options"), and the roadmap's Phase 4 dental decisions D1-D5 (all A):
+
+| Decision | Built with |
+|---|---|
+| Q155 A (DEN-1, D1 A) New staff roles | A new `dentist` role with its own migration (0194), role-table update, sealed QA test login and department switch. Dental nurses use the nurse role. No Consultant or Medical Director role |
+| Q156 A Chart access for the new roles | The dentist opens charts as nurses do (this facility's own patients, 24 hours, 0131). **Built but switched off until Rahman and the DPO agree:** it is its own file (0196), signed only after both agree. Until then the dentist opens a chart with the patient's Access PIN or approval |
+| Q157 A Specialist reviewers | The clinical lead signs all dental content and picks a dentistry adviser before the department sees real patients |
+| Q149 A One switch per department | The service flag `DENTAL_ENABLED`, off by default; and, when facility setup (gap map F2) ships, the facility's own `dental` switch, seeded off |
+| Q154 A | This section, written before the build |
+| Q254 A (D2 A) The dental record | A structured FDI tooth chart plus coded procedures |
+| Q255 A (D3 A) Procedure codes | A Health ID dental procedure list signed by a dentist; no ADA CDT (licensed); "by name only" as the fallback |
+| Q256 A (D4 A) The visit | An ordinary outpatient (ambulatory) encounter with the chart and procedures attached; the design's stages are derived |
+| Q257 A (D5 A) Booking | No appointments: waiting-list check-in and a follow-up date |
+| Q124 A Clinical lists | Every dental list ships as **draft** data awaiting the clinical lead's sign-off |
+| Q160 A Go-live gate | Hazard log, a test with real clinicians at Demo Hospital, a short staff guide, a written paper back-up, and the production switch applied with the owner's AWS access |
+| Q161 A Offline | Online only, with a paper dental chart as the back-up |
+| Q181 A, Q182 A (P2-4) | Lagos time, "18 Nov 2026" and the 24-hour clock on every screen and print |
+| Q147 A Progress | Dental counts toward 100% only when its production switch is on and its routes are served |
+
+Questions this section raises, built at the recommended option **(recommended option, not yet answered by the owner)**:
+
+| Question | Built with | The other option |
+|---|---|---|
+| Q-DEN-1 Who opens the dental chart | **A**: dentists only. Doctors, clinicians and nurses do not see the Dental page (D1's reason: dental screens stay off every doctor's menu). They still see the dental visit, its notes, diagnoses and prescriptions like any visit | B: nurses (dental nurses) read the chart too |
+| Q-DEN-2 Emergency access (break-glass) for dentists | **A**: no. Dental care is planned care; a dentist has no `identity.break-glass.write` | B: as doctors |
+| Q-DEN-3 What patients see | **A**: the printed visit summary, handed over at the visit. The dental chart and procedures are not in the patient app, chat or record evidence in this release; the visit, its diagnoses and prescriptions show there as today | B: the chart and procedures in the patient app now (needs the clinical lead's patient words) |
+| Q-DEN-4 Who marks a signed procedure entered in error | **A**: the dentist who signed it, with a reason | B: any dentist at the facility |
+| Q-DEN-5 Procedures by name | **A**: always allowed, marked "Not on the list", and counted so the clinical lead can complete the list | B: only behind a switch, as ORD-7's lab tests by name |
+| Q-DEN-6 Local anaesthetic on a done procedure | **A**: required: an agent from the list, or "No local anaesthetic" | B: optional |
+
+### Routes
+
+All routes are ehr-api routes under `/api/v1`. The exact bodies, answers and field rules are in INTERFACE_CONTRACT.md "DEN-1". Staff routes need `X-Facility-Id` and `X-Purpose-Of-Use: direct-care`. Every write needs an `Idempotency-Key`; a replay with the same body answers the first answer with `"replayed": true`, another body 409 `IDEMPOTENCY_KEY_REUSED`. No Health ID or NIN appears in any path, query, body or answer: patients, visits, chart versions and procedures are named by UUID.
+
+| # | Route | Needs | What it does |
+|---|---|---|---|
+| 1 | `GET /ehr/dental/lists` | `ehr.dental.read` | The active dental lists (conditions, procedures, anaesthetic agents and techniques) with their version and `draft` or `signed` status, and `photosAvailable`. No patient data |
+| 2 | `POST /ehr/patients/:patientId/encounters/:encounterId/dental-visit` | `ehr.dental.write`, write consent | Start the dental record on this outpatient visit: `started` or `already_started` |
+| 3 | `GET /ehr/patients/:patientId/encounters/:encounterId/dental-visit` | `ehr.dental.read`, read consent | The visit's dental record: the visit and stage, the newest chart, this visit's chart versions, the open treatment plan, the procedures done in this visit, the follow-up |
+| 4 | `PATCH /ehr/patients/:patientId/encounters/:encounterId/dental-visit` | `ehr.dental.write`, write consent | Set or clear the follow-up date and recall note |
+| 5 | `GET /ehr/dental-visits[?days=1-30]` | `ehr.dental.read` | This facility's dental visits of the last `days` Lagos days (default 1, today), only patients the member may read now; the rest counted in `hiddenCount` |
+| 6 | `GET /ehr/patients/:patientId/dental-chart[?versionId=]` | `ehr.dental.read`, read consent | The newest chart at this facility (or one version) and the list of versions |
+| 7 | `POST /ehr/patients/:patientId/encounters/:encounterId/dental-chart` | `ehr.dental.write`, write consent | Save a new chart version, based on the newest one |
+| 8 | `POST /ehr/patients/:patientId/dental-chart/:versionId/entered-in-error` | `ehr.dental.write`, write consent | Mark the newest version entered in error, with a reason; the one before it is the newest again |
+| 9 | `POST /ehr/patients/:patientId/encounters/:encounterId/dental-procedures` | `ehr.dental.write`, write consent | Plan a procedure, or record one done (signed) |
+| 10 | `POST /ehr/patients/:patientId/encounters/:encounterId/dental-procedures/:procedureId/done` | `ehr.dental.write`, write consent | Record a planned procedure as done in this visit (signed) |
+| 11 | `POST /ehr/patients/:patientId/dental-procedures/:procedureId/cancel` | `ehr.dental.write`, write consent | Cancel a planned procedure, with a reason |
+| 12 | `POST /ehr/patients/:patientId/dental-procedures/:procedureId/entered-in-error` | `ehr.dental.write`, write consent; the signer (Q-DEN-4) | Mark a done procedure entered in error, with a reason |
+| 13 | `GET /ehr/patients/:patientId/dental-procedures[?status=planned\|done\|all]` | `ehr.dental.read`, read consent | The patient's dental procedures at this facility, newest first: the treatment plan and the history |
+| 14 | `GET /ehr/patients/:patientId/encounters/:encounterId/dental-summary` | `ehr.dental.read`, read consent | The printable visit summary; audited as a print |
+
+"Read consent" and "write consent" are the clinical tables' own rule (0005's `ehr.context_allows`: a grant for this member at this facility for direct care, `read_records` or `write_records`), so the dental record opens and closes with the visit's other records. The diagnoses and prescriptions on the print are read with ehr-api's existing reads, under the same consent.
+
+The visit named in a path must be this patient's and at this facility; otherwise 404 `ENCOUNTER_NOT_FOUND`, as today's clinical routes answer, so nothing tells another facility's visit apart from none. It must be of type `ambulatory` and not `cancelled` or `entered_in_error` (otherwise 400 `DENTAL_VISIT_ENCOUNTER_INVALID`). Writes on it (routes 2, 7, 9 and 10) need it open: `planned`, `in_progress` or `on_hold` (otherwise 409 `DENTAL_VISIT_CLOSED`). The follow-up (route 4) can still be set after the visit is completed. Corrections (routes 8, 11 and 12) can be made at any time.
+
+### Errors
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | "Check the highlighted fields." (unknown field, length or count outside the rules) |
+| 400 | `DENTAL_TOOTH_INVALID` | "Choose a tooth by its two-digit FDI number, for example 36." (also a tooth not in the chosen dentition) |
+| 400 | `DENTAL_SURFACES_INVALID` | "Choose surfaces from M, O, D, B and L, each once, only for a condition or procedure that takes surfaces." |
+| 400 | `DENTAL_CONDITION_INVALID` | "Choose a condition from the dental list." |
+| 400 | `DENTAL_PROCEDURE_INVALID` | "Choose a procedure from the dental list, or type its name." |
+| 400 | `DENTAL_SITE_INVALID` | "Say where this procedure was done: the tooth, the quadrant, the arch or the whole mouth, as the procedure needs." |
+| 400 | `DENTAL_ANAESTHETIC_INVALID` | "Choose the local anaesthetic used, or No local anaesthetic." |
+| 400 | `DENTAL_DONE_TIME_INVALID` | "The time it was done can be from the start of this visit to now." |
+| 400 | `DENTAL_FOLLOW_UP_INVALID` | "Choose a follow-up date from tomorrow to two years ahead." |
+| 400 | `DENTAL_REASON_REQUIRED` | "Say why in at least 8 characters." |
+| 400 | `DENTAL_VISIT_ENCOUNTER_INVALID` | "Dental records go on an outpatient visit of this patient at this facility." |
+| 400 | `PURPOSE_OF_USE_REQUIRED`, `IDEMPOTENCY_KEY_REQUIRED` | as EHR-C7 and ID-6 |
+| 403 | `DENTAL_NOT_ALLOWED` | "Only dentists of this facility can open or record the dental chart." |
+| 403 | `DENTAL_NOT_SIGNER` | "Only the dentist who signed this procedure can mark it entered in error." |
+| 403 | `CONSENT_REQUIRED` | as today's clinical routes (the screen offers the Access PIN or an access request) |
+| 404 | `ENCOUNTER_NOT_FOUND` | as today's clinical routes |
+| 404 | `DENTAL_VISIT_NOT_FOUND` | "No dental record was started on this visit." |
+| 404 | `DENTAL_CHART_NOT_FOUND` | "This chart version was not found." |
+| 404 | `DENTAL_PROCEDURE_NOT_FOUND` | "This procedure was not found." |
+| 409 | `DENTAL_VISIT_NOT_STARTED` | "Start the dental record on this visit first." |
+| 409 | `DENTAL_VISIT_CLOSED` | "This visit is finished. Open a new visit to record more." |
+| 409 | `DENTAL_CHART_CHANGED` | "Someone saved this chart after you opened it. Reload it to start from the newest chart." |
+| 409 | `DENTAL_CHART_NOT_LATEST` | "Only the newest chart can be marked entered in error." |
+| 409 | `DENTAL_PROCEDURE_NOT_PLANNED` | "Only a planned procedure can be recorded as done or cancelled." |
+| 409 | `DENTAL_PROCEDURE_NOT_DONE` | "Only a done procedure can be marked entered in error." |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | as ID-6 |
+| 409 | `STAFF_ROLE_NOT_AVAILABLE` | (identity-api, while `DENTAL_ENABLED` is off) "Dentists can be added once the dental clinic is switched on." |
+| 412 | `DENTAL_VERSION_CONFLICT` | "Someone else changed this record. Reload it and try again." |
+| 503 | `DENTAL_NOT_AVAILABLE` | "The dental clinic is not switched on yet." (flag off, or a database without 0195) |
+
+Staff screens show the message and never the word "permission".
+
+### Roles and access codes
+
+Two new codes (0194): `ehr.dental.read` (open the dental chart, the procedures and the summary) and `ehr.dental.write` (record the chart; plan, record, sign, cancel and correct procedures; the follow-up).
+
+| Backend role | `ehr.dental.read` | `ehr.dental.write` | Design role it stands for |
+|---|---|---|---|
+| `dentist` (new) | yes | yes | none in the design; the dental surgeon (MDCN dental register) |
+| `doctor`, `clinician`, `nurse` | no (Q-DEN-1 A) | no | Doctor, Consultant, Medical Director, Nurse |
+| `receptionist`, `lab`, `pharmacist`, `admin`, `org_admin`, others | no | no | — |
+
+The `dentist` role (Q155 A, D1 A) holds 25 codes: the two dental codes and the doctor's codes for the visit, prescribing and lab ordering, and nothing for registration, Migrate, imports, outreach or emergency access:
+
+- `ehr.dental.read`, `ehr.dental.write`;
+- `ehr.encounter.read`, `ehr.encounter.write`, `ehr.note.read`, `ehr.note.write`, `ehr.diagnosis.read`, `ehr.diagnosis.write`, `ehr.prescription.read`, `ehr.prescription.write`, `ehr.lab-request.read`, `ehr.lab-request.write`, `ehr.vital.read`, `ehr.vital.write`, `ehr.document.read`, `ehr.document.write`, `ehr.order-route.send`;
+- `identity.authorization.check`, `identity.consent.read`, `identity.consent.write`, `identity.patient-access-pin.verify`, `identity.patient.read`;
+- `lab.result.released.read`, `lab.work-item.accept`, `pharmacy.dispensing.read`.
+
+Not given: `identity.break-glass.write` (Q-DEN-2 A), `identity.registration.write`, `ocr.*`, `lab.import.*`, `pharmacy.import.*`, `outreach.*`, and the other Release D lanes' codes (appointments, ED board, billing); each of those lanes may add the dentist in its own later file. `identity.patient.open-own-facility` comes only with 0196 (Q156 A, held).
+
+The dentist is a licensed role: licence body **MDCN** (the Medical and Dental Council of Nigeria keeps the dental register), checked as the doctor's is. Facility administrators invite and add dentists through the live staff routes (SX-4, 0139) at hospitals and clinics (and `other` organisations with the EHR or Migrate product). Laboratory and pharmacy organisations cannot. The administrator's clinical role at the self-service review stays as today (doctor, nurse, lab, pharmacist); a dentist who runs a clinic is added as `dentist` through SX-4 after the review.
+
+SX-1 (`services/identity-api/src/auth/facility-modules.ts`) gains the area `dental`, "Dental": shown with `ehr.dental.read`, used in full with `ehr.dental.write`. A dentist's session also shows `patients`, `accessRequests`, `triage`, `consultation`, `orders`, `labResults` and `prescriptions`, and not `registration`, `emergencyAccess`, `migrate` or `outreach`. `services/identity-api/test/role-matrix.json` gains a "Dentist" column and a derived "Dental" row in the same pull request.
+
+### Switches
+
+- **`DENTAL_ENABLED`** (ehr-api and identity-api), `false` by default in the code, `.env.example` and the production configuration. While it is off:
+  - every route above answers 503 `DENTAL_NOT_AVAILABLE`;
+  - identity-api leaves `dentist` out of the roles it offers for invitations and SX-4, and an invitation, role change or role add naming `dentist` answers 409 `STAFF_ROLE_NOT_AVAILABLE` ("Dentists can be added once the dental clinic is switched on."), so no real facility gains a dentist before go-live. The database accepts the role once 0194 is applied; identity-api is the gate, as it already refuses unknown roles early.
+  - It is on in staging, where the sealed QA dentist login tests it. In production it is switched on only after the clinical lead's checklist and the owner's go-live (Q160 A).
+- **`DENTAL_PHOTOS_ENABLED`** (ehr-api), `false` everywhere. Route 1 answers `photosAvailable: false` and the Dental page offers "Attach X-ray image" only. "Attach photo" (intraoral or facial photos) appears only when it is `true`, after the DPO agrees.
+- **The facility's `dental` switch** (Q149 A): when facility setup (gap map F2) ships, the facility's own `dental` switch, seeded off, must also be on.
+- **0196** (the dentist's own-facility opening, Q156 A) is the database half that stays off: the file is reviewed and kept unsigned until Rahman and the DPO agree.
+
+### Database design
+
+Three migrations, **0194, 0195 and 0196, provisional** (numbers are given at merge, after the files booked before them). Each needs the owner's verbatim signature, Rahman's final database check and an independent agent review. All are written on `staging-novu-ci-20261005` at 0cfddcc9 (0001-0153 live). None reads anything 0154-0193 create; where another Release D lane changes the same object (the staff role lists), the precondition accepts it (below).
+
+Every file follows 0147, 0150, 0151 and the wave 1 files:
+- the whole file is one `do` block, so nothing applies if any part raises;
+- **locks first, NOWAIT**, every table the file writes, alters or references, and every table read by a function the file creates or calls (for example `identity.sealed_demo_members` and `identity.sealed_qa_members` through the seal check), tried 50 times 100 ms apart. If this transaction already holds an earlier file's blocking locks, one try and no sleep. A busy refusal raises 55P03 beginning "0195: " (or "0194: ", "0196: ") and ending "run the release again at a quieter time";
+- **preconditions** are catalog reads that raise 55000 and apply nothing. They require markers only of the earlier files whose objects the file uses, and the md5 of each function body the file calls or replaces. Role and code checks are **subsets**: the codes the file names must exist; codes and roles other lanes add are allowed;
+- **already applied** is detected exactly: running the file again where it is applied raises "0195: already applied" and changes nothing; any half state raises "0195: the schema is not in the reviewed state";
+- **post-checks** in the 0148/0152 form: tables, columns, constraints and indexes; RLS enabled and forced, and the exact policies; no privilege for any runtime role on any new table; each function's owner, SECURITY DEFINER, fixed `search_path` and body md5; EXECUTE grants exactly as listed; each trigger's `tgtype`, `tgqual`, `tgattr`, `tgnargs`, `tgfoid` and `tgenabled`; seeded rows by count and md5;
+- audit rows as the system actor for what the file changes in data;
+- `services/ehr-api/database/runtime-grants.sql` is the staging file followed by this section's block; `config/production-schema-compatibility.json` gains an unsigned declaration that stays unsigned until the owner signs.
+
+Rules for every SECURITY DEFINER function in these files (wave 1 review lessons):
+- `set search_path = pg_catalog, pg_temp`, fixed; every table, function and type name is schema-qualified; no temporary table is created or read, and no name resolves through `pg_temp`;
+- owned by the owner of `identity.has_active_consent_grant` (as 0135's); EXECUTE revoked from PUBLIC and granted to `hid_ehr_runtime` only (helpers: to no role);
+- no new sequence or identity column: ids are UUIDs, and version numbers are counted under a lock, so there is nothing to grant on a sequence.
+
+**0194 `0194_dentist_role_and_dental_codes.sql`: the dentist role and the dental codes.**
+- G1 `auth.permissions`: `ehr.dental.read`, `ehr.dental.write`.
+- G2 `auth.roles`: `dentist` ("Dentist"), active.
+- G3 `auth.role_permissions`: the dentist's 25 rows above. No row for any other role; no code taken from any role. 0136's count is not needed: no member holds the new role when the file applies.
+- G4 The staff vocabulary, the 0136/0139/0150 way:
+  - `identity.staff_role_licence_body(text)` gains `when 'dentist' then 'MDCN'` after the doctor's line;
+  - `identity.staff_invitable_roles(text, text)` gains `'dentist'` after `'doctor'` in the hospital and clinic list;
+  - the six functions whose bodies hold the five-role list `('doctor', 'nurse', 'lab', 'pharmacist', 'receptionist'` (`identity.staff_invitation_fields_valid`, `identity.change_facility_staff_role`, `identity.add_facility_staff_role`, `identity.remove_facility_staff_role`, `identity.admin_add_facility_staff_role`, `identity.admin_remove_facility_staff_role`) gain `'dentist'` after `'doctor'` in each such list, and nothing else;
+  - `identity.staff_invitations`' `staff_invitations_role_code_check` gains `'dentist'`, added NOT VALID and validated under the lock; the licence check is unchanged (a dentist takes its non-receptionist branch, so it needs an MDCN licence).
+  - **Tolerant of the other lanes** (BILL-1's 0162 adds `cashier` and `billing_officer` to the same lists; radiology adds its roles): the precondition takes each function's current body, removes the roles any Release D lane appends after `'receptionist'`, and requires the md5 that 0001-0153 leave. The replacement inserts `'dentist', ` after `'doctor', ` in each list, keeping whatever another lane appended. The post-check proves the new body is the old body with exactly those insertions (the count per function is pinned), with owner, ACL, SECURITY DEFINER and `search_path` unchanged. The CHECK keeps every value it finds. So 0194 applies before or after 0162 and the radiology file.
+- G5 Sealed QA step (Q155 A), only where 0123 installed the sealed QA tenant, exactly as 0151 and 0162 seed theirs: one fictional login at QA Hospital, `dentist@healthidentitydirectory.com`, "QA Dentist", `pending_reset`, no password, email verified; account `c0a00003-0000-4000-8000-0000000000de`, staff `c0a00004-0000-4000-8000-0000000000de`, membership `c0a00005-0000-4000-8000-000000000de1`; a sealed QA member first, one staff record, one membership, one facility role with the membership's id, and one `identity.sealed-qa.staff-login-add` audit row. Refused 55000 `0194: SEALED_QA_ADDRESS_TAKEN` or `0194: SEALED_QA_ID_TAKEN` (so a clash with another lane's fixed ids stops the file, never merges). On every other database nothing is written for this step, and a NOTICE says so. **The owner confirms the mailbox receives mail before signing**; if not, the step is left out of the signed file (BILL-17's rule).
+- G6 `audit.events`, system actor, correlation `0194-dentist-role-and-dental-codes`: one `auth.permission.add` per code (2), one `auth.role.add` (1), one `auth.role-permission.add` per row (25), plus the QA row: 28 or 29 rows. Details hold codes, the migration and the decision; never a name or address.
+- Locks (expected; measured with `pg_locks` before commit and pinned when the file is written): SHARE ROW EXCLUSIVE on `auth.roles`, `auth.permissions`, `auth.role_permissions`; ACCESS EXCLUSIVE on `identity.staff_invitations` (the CHECK swap; a small table); ROW EXCLUSIVE on `audit.events`, `identity.sealed_qa_members`, `auth.accounts`, `identity.staff`, `identity.staff_facility_memberships`, `auth.account_roles`; SHARE on `identity.organization_applications`; ROW SHARE on `identity.organizations`, `identity.facilities`, `identity.patients`, `identity.outreach_organisations`; ACCESS SHARE on `identity.sealed_demo_members`; 0123's sealed QA install lock, tried and not waited for. The replaced functions are replaced in place; the runner's `lock_timeout` ends any wait on them.
+- Old images on this schema: the old roles answer exactly as before (only `dentist` is added to their lists). Old identity-api images do not know `dentist` and refuse it early (400), which is harmless.
+
+**0195 `0195_dental_chart_and_procedures.sql`: the dental record and the draft lists.**
+
+Tables (schema `ehr`):
+- `ehr.dental_list_versions`: one row per list version: `id`, `kind` (`tooth_condition`, `procedure`, `anaesthetic`, `anaesthetic_technique`), `version_label`, `status` (`draft` or `signed`), `active`, `signed_at`, `sign_off_reference` (the clinical lead's approval reference; never a name), `created_at`. One active version per kind (unique partial index). Seeded: four `draft` versions, label `HID-DENT-2026-11-DRAFT`.
+- `ehr.dental_list_items`: `version_id`, `kind`, `code`, `label`, `category` and `site` (procedures), `takes_surfaces` (conditions), `sort_order`; key (`version_id`, `code`). Seeded with the draft lists below (59 rows).
+- `ehr.dental_visits`: one per visit (`encounter_id` unique): `patient_id`, `facility_id`, `encounter_id` (references `ehr.encounters (id, patient_id, facility_id)`), `follow_up_on` (date, Lagos), `follow_up_note` (1-500), `started_by` and `started_by_membership_id`, `created_at`, `updated_at`, `row_version`.
+- `ehr.dental_chart_versions`: one row per saved chart: `patient_id`, `facility_id`, `encounter_id`, `dental_visit_id`, `version_no` (1, 2, ... per patient per facility; unique), `based_on_version_id` (null only for the first), `dentition` (`permanent`, `primary`, `mixed`), `note` (0-1000), `list_version_id`, `recorded_at`, `created_by`, `created_by_membership_id`; and the one-way mark `entered_in_error_at`, `entered_in_error_by_membership_id`, `entered_in_error_reason` (8-500).
+- `ehr.dental_chart_findings`: `chart_version_id`, `tooth` (smallint; CHECK an FDI tooth: 11-18, 21-28, 31-38, 41-48, 51-55, 61-65, 71-75, 81-85), `condition_code`, `surfaces` (null, or 1-5 of `MODBL` each once in that order), `note` (0-200); key (`chart_version_id`, `tooth`, `condition_code`); at most 200 rows per version (checked by the function).
+- `ehr.dental_procedures`: `patient_id`, `facility_id`, `planned_encounter_id` (null when recorded done directly), `done_encounter_id`, `list_version_id` and `procedure_code` (null when by name), `procedure_name` (the list's name copied, or the typed name, 2-120), `by_name`, `site` (`tooth`, `tooth_surfaces`, `quadrant`, `arch`, `whole_mouth`), `tooth`, `surfaces`, `quadrant` (1-4), `arch` (`upper`, `lower`), `status` (`planned`, `done`, `cancelled`, `entered_in_error`), `planned_at`, `planned_by_membership_id`, `done_at`, `performed_by` and `performed_by_membership_id`, `signed_at`, `anaesthetic_code`, `anaesthetic_other` (2-120, only with `other`), `anaesthetic_technique_code`, `anaesthetic_cartridges` (0.5-10 in steps of 0.5), `notes` (0-1000), the cancel and entered-in-error columns (when, by whom, reason 8-500), `row_version`, `created_at`, `updated_at`. CHECKs tie the site to exactly its columns, the status to exactly its columns, and `done` to a signer, a time and an anaesthetic (Q-DEN-6 A).
+- `ehr.dental_events`: append-only, one row per write: `kind` (`visit_started`, `follow_up_set`, `chart_saved`, `chart_entered_in_error`, `procedure_planned`, `procedure_done`, `procedure_cancelled`, `procedure_entered_in_error`), the record ids, the actor (account, membership), `at`, and the `Idempotency-Key` with the request's SHA-256 (unique per membership and key), and the answer's record id for replays.
+
+Row-level security: the five patient tables (`dental_visits`, `dental_chart_versions`, `dental_chart_findings`, `dental_procedures`, `dental_events`) have RLS enabled **and forced**, with one owner-only policy each (0131's `encounters_owner_read` form: `pg_has_role(<table owner>, 'member')`; no runtime role is a member of the owner). No runtime role has any privilege on them: only the functions below read or write them. **Stated exception:** the two list tables hold no patient data, so RLS is not enabled on them (as 0149's and 0152's lists); no runtime role has any privilege on them either.
+
+Guards (triggers; each fingerprinted in the post-checks):
+- every dental table: BEFORE DELETE (row) and **BEFORE TRUNCATE** (statement) call 0001's `platform.reject_mutation()`;
+- `dental_list_items`, `dental_chart_findings` and `dental_events`: BEFORE UPDATE rejects (append-only);
+- `dental_list_versions`: BEFORE UPDATE allows only `draft` to `signed` with `signed_at` and a reference, and the active switch; nothing else;
+- `dental_chart_versions`: BEFORE UPDATE allows only the one-way entered-in-error mark;
+- `dental_procedures`: BEFORE UPDATE allows only `planned` to `done` (the done columns), `planned` to `cancelled`, and `done` to `entered_in_error`, each raising `row_version` by one; a done row's clinical columns never change;
+- `dental_visits`: BEFORE UPDATE allows only the follow-up columns, `updated_at` and `row_version`.
+
+Functions (SECURITY DEFINER, rules above; EXECUTE for `hid_ehr_runtime` only):
+- `ehr.dental_lists()` (route 1);
+- `ehr.dental_visit_start`, `ehr.dental_visit_read`, `ehr.dental_visit_follow_up`, `ehr.dental_visits_list` (routes 2-5);
+- `ehr.dental_chart_read`, `ehr.dental_chart_save`, `ehr.dental_chart_entered_in_error` (routes 6-8);
+- `ehr.dental_procedure_record`, `ehr.dental_procedure_done`, `ehr.dental_procedure_cancel`, `ehr.dental_procedure_entered_in_error`, `ehr.dental_procedures_list` (routes 9-13);
+- `ehr.dental_summary_read` (route 14: the dental part of the print, and the print's audit row);
+- helpers with no EXECUTE for any role: `ehr.dental_caller(...)` (the caller check below) and `ehr.dental_cards(...)` (the list's patient card fields).
+
+Each function checks, in this order: an active, unheld membership at the session facility; the code (`ehr.dental.read` or `ehr.dental.write`) through `auth.membership_has_permission` (md5 pinned); purpose `direct-care`; the facility's seal (a sealed demo or QA facility sees only its own sealed patients, as 0135); the patient's consent through `ehr.context_allows(patient, facility, 'read_records' | 'write_records')` (md5 pinned), the same rule as the visit's other records; and the visit, as "Routes" says. Writes take an advisory transaction lock `dental-chart:<facility>:<patient>` (chart saves and their entered-in-error) or `FOR UPDATE` on the procedure or visit row, check `row_version` or `based_on_version_id`, and write one `ehr.dental_events` row. Without 0194 no role holds a dental code, so every function refuses.
+
+The draft lists (Q124 A; **draft until the clinical lead signs**):
+- **Tooth conditions** (16): decayed*, filled*, fractured*, fissure sealant*, missing, not yet erupted, impacted, retained root, for extraction, crowned, root canal treated, mobile, bridge abutment, bridge pontic, implant, replaced by a denture (* takes surfaces). A tooth with no finding is present and sound.
+- **Surfaces** (5, a CHECK, not a list row): M mesial, O occlusal (incisal on front teeth), D distal, B buccal (labial on front teeth), L lingual (palatal on upper teeth).
+- **Procedures** (30), code `DEN-nnn`, category and site: oral examination (whole mouth); periapical radiograph (tooth); bitewing radiographs, panoramic radiograph (OPG) (whole mouth); pulp vitality test (tooth); scaling and polishing, topical fluoride, oral hygiene instruction (whole mouth); fissure sealant (tooth surfaces); amalgam, composite, glass ionomer and temporary fillings, atraumatic restorative treatment (ART) (tooth surfaces); pulpotomy, pulpectomy, root canal treatment (tooth); incision and drainage of a dental abscess (tooth); root planing (quadrant); simple extraction, surgical extraction, removal of a retained root, dressing of a dry socket, control of bleeding after extraction, reimplantation of an avulsed tooth (tooth); crown (tooth); partial denture, complete denture, denture repair (arch); splinting of mobile teeth (quadrant).
+- **Local anaesthetic agents** (8): no local anaesthetic; lidocaine 2% with adrenaline 1:80,000; lidocaine 2% plain; articaine 4% with adrenaline 1:100,000; mepivacaine 3% plain; prilocaine 3% with felypressin; topical benzocaine 20% only; other (named).
+- **Techniques** (5): infiltration; inferior alveolar nerve block; palatal; intraligamentary; topical only. The amount is in cartridges.
+- No ADA CDT code or text anywhere (Q255 A).
+- The sign-off is recorded by a later signed file (the version moves from `draft` to `signed` with the lead's approval reference, or a corrected list loads as a new version). If the lead signs before the owner signs 0195, 0195 is re-cut with the signed lists before signing. While a list is `draft`, the screens say "Draft list: not yet signed by the clinical lead"; real facilities cannot use it anyway, because `DENTAL_ENABLED` stays off until the go-live, which needs the sign-off.
+
+Locks (expected; measured with `pg_locks` before commit and pinned when the file is written): SHARE ROW EXCLUSIVE on `identity.patients`, `identity.facilities`, `identity.staff_facility_memberships`, `auth.accounts` and `ehr.encounters` (foreign keys of new, empty tables); ACCESS SHARE on every table the new functions and the functions they call read (`identity.consent_grants`, `identity.consent_directives`, `identity.consent_directive_versions`, `identity.sealed_demo_members`, `identity.sealed_qa_members`, `identity.staff`, `auth.permissions`, `auth.role_permissions`, `auth.roles`, `auth.account_roles`, and any other the measurement finds); ROW EXCLUSIVE on `audit.events`. Old images: nothing calls the new functions.
+
+**0196 `0196_dentist_own_facility_opening.sql`: the dentist opens this facility's own patients (Q156 A), held.**
+- One row: `auth.role_permissions` (`dentist`, `identity.patient.open-own-facility`), and one `auth.role-permission.add` audit row (reason "DEN-1 dentist own-facility opening (Q156 A)").
+- Preconditions: 0131's code and 0194's role exist; the row is absent ("already applied" when it is the only change). Post-check: the code's holders are 0131's three roles plus `dentist`, plus any role another Release D lane's own file adds (subset rule).
+- Nothing else changes: 0131's `identity.open_own_facility_patient` already decides by the code, and 0139's role removal already ends the member's own-facility grants by the code.
+- Locks: as 0169 (SHARE ROW EXCLUSIVE on `auth.role_permissions`; ROW EXCLUSIVE on `audit.events`; ROW SHARE on `auth.roles` and the audit rows' foreign-key tables).
+- **Built but switched off:** reviewed with 0194 and 0195, and signed only after Rahman and the DPO agree (an identity and consent change). The numbering keeps its place; it can ship in a later release than 0194-0195.
+
+### Audit
+
+Every function writes its rows in the request's transaction, refusals included (as 0135). Rows hold ids (patient, visit, encounter, chart version, procedure), the outcome or refusal kind, version numbers, statuses and counts. **No row ever holds a tooth finding, surface, procedure code or name, anaesthetic, note, reason, follow-up note, name, date of birth or Health ID.**
+
+- `ehr.dental.visit.start` (`started` or `already_started`), `ehr.dental.visit.read`, `ehr.dental.visit.follow-up`;
+- `ehr.dental.visit.list`, one collection row (count, `hiddenCount`, the patient ids shown), plus one `ehr.dental.visit.list.shown` row per patient shown;
+- `ehr.dental.chart.read`, `ehr.dental.chart.save` (version number, findings count), `ehr.dental.chart.entered-in-error`;
+- `ehr.dental.procedure.plan`, `.done`, `.cancel`, `.entered-in-error`, `ehr.dental.procedure.list`;
+- `ehr.dental.summary.print`;
+- route 1 reads no patient and writes no row (as 0149's searches); a 503 with the flag off is in ehr-api's request audit only.
+
+### Notifications
+
+None. No recall reminder (Q257 A; SMS is not approved, Q170 A), no inbox notice, no push or email, and no staff notice. The follow-up date is on the printed summary.
+
+### What patients see
+
+- **The printed visit summary**, handed over at the visit (Q-DEN-3 A).
+- In the patient app, as today: the visit, its diagnoses and prescriptions, and their access history (the dentist's PIN or approval grant, and later the own-facility opening if 0196 is signed).
+- Not in this release: the dental chart or dental procedures in the patient app, patient chat or record evidence. None of those reads the dental tables.
+
+### Website screens (health `apps/patient-web/src/ehr-blue/`, branch `claude/sprint-dental-web`)
+
+| Design (sample) | Live screen | Calls |
+|---|---|---|
+| `clinical/pages.ts:35`, `frame/pages.ts:91` (`dental/*`, sample) | Live page "Dental" with `ehr.dental.read`: "Assigned to me" from the waiting list, and the dental visits list (today, 7 days, 30 days) | EHR-C7, route 5 |
+| `frame/sampleAccess.ts:16` (Dental in the doctors' CLINICAL set) | Live grants from the role table: dentists only (Q-DEN-1 A) | — |
+| `clinical/sample/SampleCreate.tsx` with `definitions.ts:226` (Appointment, Complaint) | No booking (Q257 A). The front desk checks the patient in and sets the dentist (EHR-C7). The complaint is the visit's chief complaint (EHR-C1) | EHR-C7, EHR-C1 |
+| `definitions.ts:228` ("Record assessment": Findings, Treatment plan) | The tooth chart (FDI odontogram, adult and child), findings per tooth with surfaces; free-text findings in the visit's note; "Plan procedure" for the treatment plan | routes 1, 2, 3, 6, 7, 8, 9; notes (live) |
+| `definitions.ts:229` ("Record treatment", `sign`) | "Record as done" on a planned procedure, or a new done procedure: tooth and surfaces, local anaesthetic, notes; the dentist's signature line | routes 9, 10, 11, 12, 13 |
+| `definitions.ts:230` ("Arrange follow-up") | Follow-up date and recall note | route 4 |
+| `clinical/sample/SampleDetail.tsx` (record page, history) | The dental record card on the visit page (`clinical/consult/EncounterPage.tsx`), with the derived stage and the chart versions | routes 3, 6 |
+| `clinical/consult/Documents.tsx` | "Attach X-ray image" (live documents routes). "Attach photo" only when `photosAvailable` | documents (live), route 1 |
+| `clinical/parts/clinicalPrint.tsx` | "Print dental visit summary" | route 14, diagnoses and prescriptions (live) |
+| `clinical/sample/seed.ts:257-259` (fictional row) | Removed from the live page | — |
+| `frame/roleView.tsx:4-7` (no dentist) | "Dentist" in the staff role choices when identity offers it | identity staff routes |
+
+Rules for the screens:
+- Every date and time through `@hid/ui/display` (Lagos time, "18 Nov 2026", 24-hour clock); phones the same way.
+- Never put a Health ID in a URL: visit and chart URLs carry UUIDs only. Show "NIN Verified" / "NIN Not Verified" where a patient card shows NIN status.
+- No "permission" wording on staff screens.
+- Show "Draft list: not yet signed by the clinical lead" while a list is `draft`; show "Not on the list" on a procedure recorded by name.
+- The `packages/contracts/src/registry.ts` entries go from `proposed` to `served` only when this ships. **Before it ships**, the sample stays at the four demo facilities only, with its banner, and sends nothing.
+
+### Tests
+
+- **Database** (throwaway PostgreSQL 16 in Docker, fictional patients only, applied by a NOSUPERUSER NOBYPASSRLS migrator): `services/ehr-api/test/database/dental.integration.sql` and `services/ehr-api/src/ehr/dental/dental.pg.spec.ts`:
+  - every route function's caller check: no code, another facility, no consent, a consent that has ended, a deny directive, the wrong purpose, a sealed demo or QA facility and a real patient;
+  - the visit rules: another patient's visit, another facility's, an emergency or inpatient visit, a cancelled one, a completed one (writes refused, follow-up allowed);
+  - charts: version numbers under two concurrent saves (one `DENTAL_CHART_CHANGED`), FDI and dentition checks, surfaces only where the condition takes them, entered in error only on the newest, the one before becoming newest;
+  - procedures: plan, done at a later visit, cancel, entered in error by the signer only, a done row never changing, anaesthetic required, by name, every site rule;
+  - idempotent replays and `IDEMPOTENCY_KEY_REUSED`; version conflicts;
+  - every refusal and its audit row; no finding, code, name, note or reason in any audit row;
+  - DELETE, UPDATE and TRUNCATE refused on the append-only tables, also for the table owner's direct statements;
+  - the list's `hiddenCount`;
+  - a runtime role reading any dental table directly gets nothing.
+- **Migrations** (`services/ehr-api/test/database/dental-migrations.integration.sql`): each file's busy refusal with a lock held by another session (including a lock on `identity.sealed_qa_members`); "already applied" on a second run; a half state refused; 0194 on 0001-0153's role functions and on BILL-1's 0162 versions (either order), with the CHECK keeping extra values; a changed pinned body refused; the seeded lists' md5; every post-check; 0196 after 0194.
+- **Release C's live verifiers:** `scripts/tuf-staging-migration-rehearsal.mjs` with `HID_REHEARSAL_LIVE_TREE` set to the live commit and `HID_REHEARSAL_LIVE_POINTS=0194,0195,0196`; all live runtime verifiers pass after each file.
+- **New runtime verifier** `services/ehr-api/scripts/verify-dental-runtime.mjs` (a QA dentist: start a visit, save two chart versions, plan and do a procedure, cancel one, mark one entered in error, set the follow-up, read the summary), added to the rehearsal.
+- **Services:** ehr-api `src/ehr/dental/` controller and service specs (validation, the flag off answering `DENTAL_NOT_AVAILABLE`, idempotency); identity-api staff vocabulary specs with `DENTAL_ENABLED` on and off, `facility-modules.spec.ts` and `role-matrix.spec.ts` with the new column and row.
+- **Expected on the sprint branch:** release tests 45, 53 and 99 (and similar) fail with "missing migration prefix", because 0154-0193 are not on this branch. That is the numbering gap, reported and not worked around; they pass once the files are numbered at merge.
+
+### Depends on
+
+- Live: EHR-C1 and EHR-C5 (the visit), EHR-C7 / 0135 (check-in and assignee), 0131 (own-facility opening, for 0196), 0132 (staff search), ORD-9 / 0152-0153 (diagnosis search, Release E), the documents routes, SX-1, SX-4 / 0139, SX-9 (staff names), 0114 (the `dental` department code), 0123 and 0151 (sealed QA).
+- Other Release D lanes: BILL-1's 0162 and the radiology file change the same staff role lists; 0194 applies before or after either. Nothing else is shared.
+- Not needed: Appointments (Q257 A), Radiology (X-rays as documents until it ships, then imaging requests), point-of-care billing.
+- ID-8 (merge), when built, must move a source record's dental rows to the kept record.
+
+### Clinical lead sign-off list (before real patients; a dentist adviser, Q157 A)
+
+- The tooth condition list, and which conditions take surfaces.
+- The surfaces (M, O, D, B, L) and how they read on front and upper teeth.
+- FDI notation and the child and mixed charts.
+- The dental procedure list: names, categories, and where each is done (tooth, surfaces, quadrant, arch, whole mouth).
+- The local anaesthetic list, the techniques, the amount in cartridges, and that it is required on a done procedure (Q-DEN-6).
+- Procedures by name (Q-DEN-5).
+- The printed visit summary: its content and layout.
+- That only dentists see the chart (Q-DEN-1), and the follow-up window (tomorrow to two years).
+- Q160 A's go-live items: the hazard log, a test with real dentists at Demo Hospital, the staff guide and the paper back-up (a paper dental chart).
+
+### DPO items
+
+- Only if intraoral or facial photos are included (identifiable images): `DENTAL_PHOTOS_ENABLED` stays off until the DPO agrees.
+- Q156 A: the dentist's own-facility opening (0196) is an identity and consent change, reviewed with Rahman before it is signed.
+- Otherwise the dental record is covered by the existing EHR processing.
+
+### Rahman
+
+- The new role and its 25 codes (0194), the role-list replacements and their tolerance, and the QA login.
+- The RLS, definer functions, locks and guards of 0195.
+- 0196 with the DPO.
+
+### Target
+
+Release D, sprint wave 3 (from 25 Nov 2026). Size **M**.
+- Backend: 0194-0196; ehr-api `src/ehr/dental/` and the two flags; identity-api's staff vocabulary (`staff-licence.ts`: `dentist`, MDCN, "Dentist"), the flag gate and the SX-1 `dental` area; the role matrix.
+- Website: the Dental page, the dental card on the visit, the print.
+- Review: Rahman (database, identity and security), an independent agent review per change, and the owner's verbatim signature on each migration (0196 only after Rahman and the DPO agree).
+- Go-live: `DENTAL_ENABLED` on in production only after the clinical lead's sign-off list and Q160 A's gate, applied with the owner's AWS access.
 
 # Not planned yet
 
