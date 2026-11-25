@@ -117,7 +117,11 @@
 // the first accepts the item; the prescriber's ownProgress keeps the first
 // fill's time. Reversing fill 2 is refused (409
 // PHARMACY_DISPENSING_NOT_LATEST_FILL); fill 3 is reversed, and the
-// prescriber still reads dispensed (fills 1 and 2 stand). An edit after
+// prescriber still reads dispensed (fills 1 and 2 stand). pharmacy-api's
+// progress answer, for one patient and in the several-patient form
+// (progress/batch) alike, reads dispensed at the first fill's time with
+// lastFilledAt the latest fill's, after fill 3 and after its reversal (no
+// reversedAt). An edit after
 // fill 1 of another prescription closes its refills (changed) and shows
 // 0148's notice (edited, 1); a hold closes them (stopped; on_hold, 1); each
 // refused refill is 409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE. Every item's
@@ -1294,6 +1298,17 @@ try {
       body: { patientId: patient.id, sourceEhrPrescriptionIds: ids },
       headers: { 'x-hid-internal-caller': 'ehr-api', 'x-hid-service-token': tokens.pharmacy, 'x-hid-own-progress': '0133',
         'x-hid-own-progress-accepted': 'ord4' } }), 200, label).items;
+  // The same ask in the several-patient form (decision 4, progress/batch): the patient's entry, answered; its items.
+  const pharmacyBatchProgress = async (ids, label) => {
+    const { patients } = expectStatus(await http(pharmacy, 'POST', '/pharmacy/work-items/progress/batch',
+      { cookie: doctor.cookie, facility: hospital.facilityId, purpose: 'direct-care',
+        body: { patients: [{ patientId: patient.id, sourceEhrPrescriptionIds: ids }] },
+        headers: { 'x-hid-internal-caller': 'ehr-api', 'x-hid-service-token': tokens.pharmacy, 'x-hid-own-progress': '0133',
+          'x-hid-own-progress-accepted': 'ord4' } }), 200, label);
+    assert.deepEqual(patients?.map(entry => [entry.patientId, entry.outcome]), [[patient.id, 'answered']],
+      `${label}: ${JSON.stringify(patients)}`);
+    return patients[0].items;
+  };
   // The Lagos day `offset` days from now (Africa/Lagos is UTC+1, no daylight saving), YYYY-MM-DD.
   const lagosDay = (offset = 0) => new Date(Date.now() + 3_600_000 + offset * 86_400_000).toISOString().slice(0, 10);
   // A day (YYYY-MM-DD) plus `days`.
@@ -1497,8 +1512,12 @@ try {
     const dispensedR = { status: 'dispensed', receivedAt: itemR.acceptedAt, acceptedAt: acceptedR[0].accepted_at,
       dispensedAt: fill1At, reversedAt: null };
     assert.deepEqual(await ownProgressOf(rxRefills), dispensedR, 'the prescriber reads dispensed, at the first fill\'s time');
-    assert.deepEqual(await pharmacyProgress([rxRefills.id], 'progress after fill 3'), [{ sourceEhrPrescriptionId: rxRefills.id,
-      ...dispensedR, lastFilledAt: fill3.dispensedAt }], 'one progress row: the first fill\'s time, and the latest');
+    const progressR = [{ sourceEhrPrescriptionId: rxRefills.id, ...dispensedR, lastFilledAt: fill3.dispensedAt }];
+    assert.deepEqual(await pharmacyProgress([rxRefills.id], 'progress after fill 3'), progressR,
+      'one progress row: the first fill\'s time, and the latest');
+    // The several-patient form answers the patient's entry exactly so (lastFilledAt the latest fill's, not the first's).
+    assert.deepEqual(await pharmacyBatchProgress([rxRefills.id], 'batch progress after fill 3'), progressR,
+      'the batch entry after fill 3, as the one-patient answer: the first fill\'s time, and the latest');
     step('ORD-12: the pharmacist without a grant records fills 1-3 of a prescription with 2 refills on its one work item '
       + '(fillNumber each), each refill from its day (the latest fill\'s Lagos day + 8 for 10 days; before it 409 '
       + 'PHARMACY_REFILL_TOO_SOON with the day, and the item not_yet, done work); a 4th is refused '
@@ -1523,11 +1542,13 @@ try {
     // item whose every fill is reversed reads dispensing_reversed); pharmacy-api's own answer says the same.
     assert.deepEqual(await ownProgressOf(rxRefills), dispensedR,
       'a reversed refill, earlier fills standing: the prescriber reads dispensed, the first fill\'s time');
-    assert.deepEqual(await pharmacyProgress([rxRefills.id], 'progress after fill 3 was reversed'),
-      [{ sourceEhrPrescriptionId: rxRefills.id, ...dispensedR, lastFilledAt: fill3.dispensedAt }],
-    'pharmacy-api\'s progress after the reversal of fill 3: dispensed, no reversedAt');
+    assert.deepEqual(await pharmacyProgress([rxRefills.id], 'progress after fill 3 was reversed'), progressR,
+      'pharmacy-api\'s progress after the reversal of fill 3: dispensed, no reversedAt');
+    assert.deepEqual(await pharmacyBatchProgress([rxRefills.id], 'batch progress after fill 3 was reversed'), progressR,
+      'the batch entry after the reversal of fill 3, as the one-patient answer: dispensed, no reversedAt');
     step('ORD-12: reversing fill 2 of 3 is refused (PHARMACY_DISPENSING_NOT_LATEST_FILL); fill 3 is reversed, and the '
-      + 'prescriber still reads dispensed (fills 1 and 2 stand)');
+      + 'prescriber still reads dispensed (fills 1 and 2 stand); pharmacy-api\'s progress, for one patient and in the '
+      + 'several-patient form alike, dispensed at the first fill\'s time, lastFilledAt the latest, no reversedAt');
 
     // An edit after fill 1 ends the refills (changed) and shows 0148's notice; so does a hold (stopped).
     const changedFill = expectStatus(await dispenseFill(itemChanged), 201, 'fill 1 of rxChanged, without fillNumber');
@@ -1588,7 +1609,8 @@ try {
     item: { rows: 1, refills: { allowed: 2, recorded: 3, open: false, closedReason: 'none_left', nextFillOn: null,
       endsOn: 'the Lagos day written + 40 (2 refills of 10 days)' },
     dispensing: 'the latest fill', listOrder: 'first fills, then refills open, then done' },
-    progress: { ownProgress: 'the first fill\'s time', pharmacy: 'lastFilledAt the latest' },
+    progress: { ownProgress: 'the first fill\'s time', pharmacy: 'lastFilledAt the latest',
+      pharmacyBatch: 'the patient\'s entry equals the one-patient answer, after fill 3 and after its reversal' },
     reversal: { fill2: 'PHARMACY_DISPENSING_NOT_LATEST_FILL', fill3: 201,
       ownProgressAfter: 'dispensed (fills 1 and 2 stand), reversedAt null' },
     changedAfterFill1: { closedReason: 'changed', notice: 'edited (1)', refill: 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE' },
@@ -1755,10 +1777,12 @@ try {
     assert.deepEqual(offProgress.map(item => [item.sourceEhrPrescriptionId, item.status, item.dispensedAt,
       item.reversedAt, 'lastFilledAt' in item]), [[rxRefills.id, 'dispensed', fill1At, null, false],
       [rxOpen.id, 'dispensed', openFillAt, null, false]], `the progress with refills off: ${JSON.stringify(offProgress)}`);
+    assert.deepEqual(await pharmacyBatchProgress([rxRefills.id, rxOpen.id], 'batch progress with refills off'),
+      offProgress, 'with refills off the batch entry is the one-patient answer, with no lastFilledAt');
     evidence.ord12.off = { list: 'one row per item, the latest fill, today\'s fields only',
       refillLeft: 'done work, as before', secondDispensing: 'PHARMACY_WORK_ITEM_ALREADY_DISPENSED, as before',
       sameRequest: '201 replay of fill 1', fillNumber: 400, refillsAllowedOnCreate: 400,
-      progress: 'one row per item, the first fill\'s time, dispensed while a fill stands' };
+      progress: 'one row per item, the first fill\'s time, dispensed while a fill stands; the batch entry the same' };
     step('ORD-12 with PRESCRIPTION_REFILLS_ENABLED off (both services booted again): one row per item (the latest fill), '
       + 'today\'s fields only; a second dispensing is refused as before (PHARMACY_WORK_ITEM_ALREADY_DISPENSED), fillNumber '
       + 'and refillsAllowed are unknown fields');

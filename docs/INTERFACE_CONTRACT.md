@@ -13427,7 +13427,10 @@ own-facility work verifier runs twice: with `PRESCRIPTION_REFILLS_ENABLED`
 on in ehr-api and pharmacy-api (its ORD-12 steps: refills need a duration,
 each refill refused before its day with `PHARMACY_REFILL_TOO_SOON` and
 recorded on it, the clock moved on by moving the fill back as the owner, in
-replica mode; every item's `refills.endsOn`; the expiry: a prescription with
+replica mode; pharmacy-api's progress after fill 3 and after its reversal,
+for one patient and in the several-patient form alike: `dispensed` at the
+first fill's time, `lastFilledAt` the latest, no `reversedAt`; every item's
+`refills.endsOn`; the expiry: a prescription with
 1 refill and a 1-day duration, filled once, reads `endsOn` 3 days after it
 was written, and once that day has passed (the clock moved on by moving its
 writing and its fill back 4 days as the owner, in replica mode, which writes
@@ -13444,7 +13447,8 @@ done work, and its refill is refused 409
 `PHARMACY_REFILL_PRESCRIPTION_ENDED` with `refillsEndedOn` that day, in the
 words "...end on <date>, before this refill would be due..." (the words
 of both refusals checked), no fill recorded; then the restart with the
-setting off; no list it reads says `refillsUnavailable`), and with it off in
+setting off (the progress, one patient and several alike, without
+`lastFilledAt`); no list it reads says `refillsUnavailable`), and with it off in
 both from the start (every step before ORD-12's unchanged; nothing of
 refills shown; `fillNumber` and `refillsAllowed` unknown fields). pharmacy-api
 booted from source against a database without 0154 answers `live` 200 and
