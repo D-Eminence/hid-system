@@ -12423,3 +12423,205 @@ when `dateOfBirthEstimated`, and "NIN Not Verified". On `sent_for_review`
 show the message and nobody else's details. After `identified`, offer
 "Verify NIN" (ID-6). Never show `firstName`/`lastName` of a record whose
 `recordKind` is `unknown`.
+
+## BB-1. Blood bank (hospital transfusion service) inside Lab (Release D, migrations 0186-0190, provisional; not live until signed)
+
+Built exactly as `docs/EHR_PLANNED_CONTRACT.md` BB-1 says. It rests on the owner's decisions of 25 November 2026
+(the sprint sheet, approved at the recommended options): Q203 A (a hospital transfusion service; donors only as donation
+numbers), Q204 A (the database enforces the compatibility table and the crossmatch window; the one exception is an
+audited emergency release of group O red cells), Q205 A (only a lab-verified group from this facility counts; the
+self-reported group is never read), Q206 A (inside Lab: lab-api, the `lab` role, the `laboratory` department code),
+Q207 A (a two-person check at issue; the one-person night exception built and switched off), Q208 A (bedside start,
+end, vitals and reactions), Q149 A, Q151 A, Q160 A, Q161 A (online only) and Q181/Q182 A. The smaller choices are built
+at their recommended option, not yet answered by the owner (Q-BB-1 to Q-BB-8 in the plan). Numbers 0186-0190 are
+provisional; no file reads anything 0154-0185 create or change.
+
+**Draft rules.** The compatibility table, crossmatch window, shelf lives, return windows, screen list, reaction types
+and severity grades, two-sample rule and bedside time windows are DRAFT data (`draft-1`) awaiting the clinical lead's
+sign-off with her transfusion adviser (Q124 A, Q157 A). Real facilities are refused while the active set is a draft.
+
+**Switched off three ways.**
+1. The service flag `BLOOD_BANK_ENABLED` in lab-api, off by default. While it is off, every route below answers 503
+   `BB_NOT_AVAILABLE` (also a database without 0186-0190).
+2. The department switch `department_live` in `lab.bb_switches`, seeded `false`. While it is off, every route answers
+   503 `BB_NOT_LIVE_HERE` at any facility that is not a sealed demo or QA facility.
+3. Signed rules. A draft rule set also answers 503 `BB_NOT_LIVE_HERE` at real facilities.
+
+The switch and the signed rules change only by a later signed migration. The second switch, `one_person_night_issue`,
+is seeded `false`; while it is off, a one-person check answers 503 `BB_NIGHT_EXCEPTION_NOT_AVAILABLE`. A 503 answer's
+`detail` is the service's generic text; screens show their own words for the code.
+
+**Headers and identifiers.**
+- Every route is in lab-api under `/api/v1/lab/`, which the gateway already sends there, so the gateway does not
+  change.
+- Every route needs `X-Facility-Id` and `X-Purpose-Of-Use: direct-care`. An emergency (break-glass) session cannot use
+  them.
+- Every write needs an `Idempotency-Key`. A replay with the same body answers the first answer with `"replayed": true`;
+  another body answers 409 `IDEMPOTENCY_KEY_REUSED`.
+- Writes on an existing record send `expectedRowVersion`; a stale one answers 412 `BB_VERSION_CONFLICT`.
+- No Health ID, NIN or donation number appears in any path or query: records are named by UUID, and a donation number
+  is searched in a POST body. The full Health ID is only in the print answer's body.
+
+**Who** (six new codes, 0190; fourteen role rows):
+
+| Backend role | `lab.blood-bank.read` | `lab.blood-bank.work` | `lab.blood-issue.check` | `lab.transfusion-request.read` | `lab.transfusion-request.write` | `lab.transfusion.record` |
+|---|---|---|---|---|---|---|
+| `lab` | yes | yes | yes | no | no | no |
+| `nurse` | no | no | yes | yes | no | yes |
+| `clinician`, `doctor` | no | no | yes | yes | yes | yes |
+| `admin`, `org_admin`, `receptionist`, `pharmacist`, others | no | no | no | no | no | no |
+
+**Bases.**
+- **The blood bank basis.** A member with `lab.blood-bank.read` here sees patients with a transfusion request or a
+  blood group record at this facility: their card (name, sex, date of birth, last 4 of the Health ID, unknown record
+  label) and their blood bank records, never the chart. The patient must be active and not hidden from the member by a
+  deny directive (as 0133). A sealed facility sees only its own sealed patients.
+- **The chart basis.** Doctors', clinicians' and nurses' routes also need the patient's chart access as EHR checks it
+  (read, or write for a write).
+- **The second person at issue** needs `lab.blood-issue.check` and either basis.
+
+Session areas (SX-1): `bloodBank`, "Blood bank" (shown with `lab.blood-bank.read`, used in full with
+`lab.blood-bank.work`) and `transfusion`, "Blood transfusion" (shown with `lab.transfusion-request.read`, used in full
+with `lab.transfusion.record`).
+
+**Routes** (cards as the plan: unit, request, issue, transfusion, reaction).
+
+- **Units** (`lab.blood-bank.read`; writes `lab.blood-bank.work`):
+  - **1.** `GET /api/v1/lab/blood-bank/rules`: the active rule set. Also readable with `lab.transfusion-request.read`
+    or `lab.transfusion.record`.
+  - **2.** `GET /api/v1/lab/blood-bank/stock`: counts by component, ABO and RhD for available, reserved, quarantine
+    and expiring within 72 hours, and the expired units waiting for disposal.
+  - **3.** `GET /api/v1/lab/blood-bank/units[?status=&component=&abo=&rhd=&expiringSoon=true&limit=&cursor=]`.
+  - **4.** `POST /api/v1/lab/blood-bank/units/find` with `{ "donationNumber" }`.
+  - **5.** `POST /api/v1/lab/blood-bank/units`: receive a unit, into quarantine. Body: `donationNumber` (4-40),
+    `component` (`whole_blood`, `packed_red_cells`, `fresh_frozen_plasma`, `platelets`), `labelledAbo`, `labelledRhd`,
+    `volumeMl` (10-1000), `collectedOn`, `expiresAt`, `source` (`national_blood_service`, `in_house`),
+    `supplierReference`? and `receivedAt`?.
+  - **6.** `GET /api/v1/lab/blood-bank/units/:unitId`: the card, its history and the vein-to-vein trace.
+  - **7.** `POST .../units/:unitId/screens`: HIV, HBsAg, HCV and syphilis; `negative`, `reactive` or
+    `indeterminate`; tested by `supplier` or `this_lab`.
+  - **8.** `POST .../units/:unitId/confirm-group`: this lab's ABO and RhD for the unit.
+  - **9.** `POST .../units/:unitId/release`: only with every required screen negative, this lab's group equal to the
+    label, and not expired.
+  - **10.** `POST .../units/:unitId/dispose`: with a reason code (`expired`, `screen_reactive`, `group_mismatch`,
+    `damaged`, `returned_out_of_time`, `storage_failure`, `returned_to_supplier`, `other` with a note).
+- **The patient's group** (writes `lab.blood-bank.work`):
+  - **11.** `GET /api/v1/lab/blood-bank/patients/:patientId/group`: `established`, `not_established` or `discrepant`,
+    with the records. Under the blood bank basis, or with `lab.transfusion-request.read` and chart read access.
+  - **12.** `POST /api/v1/lab/blood-bank/patient-groups`: `{ "resultId", "resultVersion", "abo", "rhd",
+    "antibodyScreen" }`, from a released result of this facility's own lab work.
+  - **13.** `POST .../patient-groups/:groupId/confirm`: blind re-entry by another lab member.
+  - **14.** `POST .../patient-groups/:groupId/entered-in-error`.
+- **Requests** (`lab.transfusion-request.write` with chart write access; reads `lab.transfusion-request.read` with
+  chart read access):
+  - **15.** `POST /api/v1/lab/transfusion-requests`: `{ "patientId", "encounterId" (an open visit of any type),
+    "component", "quantity" (1-10), "indication" (3-300), "urgency" (routine, urgent, emergency), "neededBy",
+    "labRequestIds" (0-4) }`.
+  - **16.** `GET /api/v1/lab/transfusion-requests?patientId=`.
+  - **17.** `GET /api/v1/lab/transfusion-requests/:requestId` (also under the blood bank basis).
+  - **18.** `POST .../transfusion-requests/:requestId/lab-requests`.
+  - **19.** `POST .../transfusion-requests/:requestId/cancel` (before any unit is issued).
+- **The work list, crossmatch and reservation** (`lab.blood-bank.read`; writes `lab.blood-bank.work`):
+  - **20.** `GET /api/v1/lab/blood-bank/requests[?status=open|closed_today]`: emergency first.
+  - **21.** `POST .../blood-bank/requests/:requestId/close`: `fulfilled` or `not_needed`.
+  - **22.** `POST .../blood-bank/requests/:requestId/crossmatches`: `{ "unitId", "specimenId", "method"
+    (`immediate_spin`, `ahg`), "result" (`compatible`, `incompatible`) }`. Also retrospective, after an emergency
+    release.
+  - **23.** `POST .../blood-bank/crossmatches/:crossmatchId/entered-in-error`.
+  - **24.** `POST .../blood-bank/requests/:requestId/reservations`: `{ "unitId", "crossmatchId"? }`.
+  - **25.** `POST .../blood-bank/reservations/:reservationId/release`.
+- **Issue** (`lab.blood-bank.work` prepares; `lab.blood-issue.check` checks):
+  - **26.** `POST .../blood-bank/requests/:requestId/issues`: `{ "kind": "standard", "reservationId" }` or
+    `{ "kind": "emergency", "unitId", "reason", "authorizedByMembershipId" }`.
+  - **27.** `GET .../blood-bank/issues/:issueId`.
+  - **28.** `GET .../blood-bank/issues?status=awaiting_check`. The cards are blind while waiting: no donation number
+    and no Health ID last 4.
+  - **29.** `POST .../blood-bank/issues/:issueId/check`: `{ "donationNumber", "patientHealthIdLast4", "bagIntact":
+    true, "labelAttached": true, "onePersonException"? }`, by a member who is not the one who prepared it.
+  - **30.** `POST .../blood-bank/issues/:issueId/cancel`.
+  - **31.** `POST .../blood-bank/units/:unitId/print`: `compatibility_label` or `issue_slip`; a reprint needs a
+    reason.
+  - **32.** `POST .../blood-bank/units/:unitId/return`: back to stock only within the return window with the storage
+    confirmed; otherwise disposed of in the same step.
+- **Bedside** (`lab.transfusion.record` with chart write access):
+  - **33.** `POST /api/v1/lab/transfusions`: the bedside check (`donationNumber`, `patientHealthIdLast4`,
+    `patientConfirmed`) and the start, with `preTransfusionVitalId` and a `lateStartReason` when late.
+  - **34.** `GET /api/v1/lab/transfusions/:transfusionId`.
+  - **35.** `POST .../transfusions/:transfusionId/vitals`.
+  - **36.** `POST .../transfusions/:transfusionId/end`: `completed`, `stopped_reaction` or `stopped_other`.
+  - **37.** `POST .../transfusions/:transfusionId/reactions`: type and severity from the rule set.
+  - **38.** `GET /api/v1/lab/blood-bank/reactions?status=reported` (`lab.blood-bank.read`).
+  - **39.** `POST .../blood-bank/reactions/:reactionId/acknowledge` (`lab.blood-bank.work`).
+  - **40.** `GET /api/v1/lab/blood-bank/patients/:patientId/transfusions`: vein-to-vein from the patient, under the
+    blood bank basis.
+
+**Errors.** The codes and messages are the plan's "Errors" table. In short:
+- 400 `VALIDATION_FAILED` and the `BB_*_INVALID` and `BB_*_REQUIRED` codes;
+- 403 `BB_NOT_ALLOWED`, `BB_REQUEST_NOT_ALLOWED`, `BB_ISSUE_CHECK_NOT_ALLOWED`, `BB_TRANSFUSION_NOT_ALLOWED` and
+  `BB_CHART_ACCESS_REQUIRED`;
+- 404 `BB_*_NOT_FOUND` (also another facility's record);
+- 409 for the safety refusals (`BB_UNIT_EXPIRED`, `BB_UNIT_NOT_SCREENED`, `BB_UNIT_SCREEN_REACTIVE`,
+  `BB_UNIT_GROUP_MISMATCH`, `BB_UNIT_INCOMPATIBLE`, `BB_PATIENT_GROUP_DISCREPANT`, `BB_CROSSMATCH_REQUIRED`,
+  `BB_CROSSMATCH_INCOMPATIBLE`, `BB_CROSSMATCH_EXPIRED`, `BB_CROSSMATCH_SAMPLE_NOT_GROUPED`,
+  `BB_CROSSMATCH_AHG_REQUIRED`, `BB_EMERGENCY_UNIT_NOT_ALLOWED`, `BB_GROUP_CONFIRM_SAME_PERSON`,
+  `BB_GROUP_CONFIRM_MISMATCH`, `BB_ISSUE_CHECK_SAME_PERSON`, `BB_ISSUE_CHECK_UNIT_MISMATCH`,
+  `BB_ISSUE_CHECK_PATIENT_MISMATCH`, `BB_BEDSIDE_CHECK_MISMATCH`) and for state (`BB_*_STATE_INVALID`, `BB_*_EXISTS`,
+  `BB_REQUEST_CLOSED`, `BB_REQUEST_QUANTITY_REACHED`, `BB_REQUEST_HAS_ISSUED_UNITS`, `BB_ISSUE_AWAITING_CHECK`,
+  `BB_EMERGENCY_NEEDS_EMERGENCY_REQUEST`, `BB_REACTION_REQUIRED`, `BB_REACTION_WINDOW_CLOSED`,
+  `IDEMPOTENCY_KEY_REUSED`);
+- 412 `BB_VERSION_CONFLICT`;
+- 503 `BB_NOT_AVAILABLE`, `BB_NOT_LIVE_HERE` and `BB_NIGHT_EXCEPTION_NOT_AVAILABLE`.
+
+Refusals are in plain words, never "permission".
+
+### Audit
+
+Every route writes its rows in the request's transaction, refusals included: `lab.blood-unit.*`, `lab.blood-group.*`,
+`lab.transfusion-request.*`, `lab.blood-bank.queue` with `.shown`, `lab.blood-crossmatch.*`, `lab.blood-unit.reserve`,
+`lab.blood-reservation.*`, `lab.blood-issue.*` (with the emergency release's authoriser and whether the one-person
+exception was used), `lab.transfusion.*` and `lab.transfusion-reaction.*`. No row holds a name, date of birth, Health
+ID, donation number, blood group, antibody screen, indication, reaction type or severity, reason, note or stop reason.
+
+### Notifications
+
+None to the patient. No staff notices until ORD-11's staff inbox ships (Q151 A): the work list reads again every 30
+seconds and shows emergency requests, issues waiting for their check, open reactions and incompatible crossmatches after
+an emergency release at the top. After a reaction is reported, the screen tells the nurse to call the doctor and the
+blood bank. 0189's `lab.bb_reaction_notice_recipients` and `lab.bb_request_notice_recipients` name the recipients for
+the inbox.
+
+### Database (0186-0190)
+
+- **0186:** the draft rule set (`lab.bb_rule_sets`, `lab.bb_component_rules`, `lab.bb_compatibility_rules`,
+  `lab.bb_screen_rules`, `lab.bb_reaction_codes`), `lab.bb_switches` (both `false`), `lab.bb_units`,
+  `lab.bb_unit_screens`, `lab.bb_unit_events` and `lab.bb_command_keys`.
+- **0187:** `lab.bb_patient_groups` with its events, `lab.bb_counters`, `lab.bb_requests`,
+  `lab.bb_request_lab_requests` and the request events.
+- **0188:** `lab.bb_crossmatches`, `lab.bb_reservations` (one live reservation per unit), `lab.bb_issues` (the checker
+  is not the preparer unless the exception) and `lab.bb_prints`.
+- **0189:** `lab.bb_transfusions`, `lab.bb_transfusion_vitals`, `lab.bb_reactions` and the transfusion events.
+- **0190:** the six codes, fourteen role rows and fourteen `auth.role-permission.add` audit rows, and four fictional
+  units at sealed QA Hospital.
+
+Rules for every file:
+- Every new table has row-level security enabled and forced, with one owner-only policy and no privilege for any
+  runtime.
+- History tables refuse UPDATE, DELETE and TRUNCATE.
+- Every function is SECURITY DEFINER with `search_path = pg_catalog, pg_temp`, schema-qualified names and no temporary
+  table. Route functions are EXECUTE for `hid_lab_runtime` and `hid_schema_test_runtime` only, as
+  `runtime-grants.sql`; helpers for no role.
+- No new sequence.
+- Existing lab and EHR tables are read under their own forced row-level security in the caller's session; no existing
+  policy, CHECK or function changes.
+- Every file takes its locks first, NOWAIT, with busy refusals that begin with its own number (the runner's dry-run
+  retry).
+
+### Screen notes
+
+- Show times in Lagos with "18 Nov 2026" dates and the 24-hour clock, on screens and prints.
+- Never put a Health ID or a donation number in a URL.
+- An unknown patient shows "Unknown patient U-0007" and "Estimated age".
+- Show "Draft rules: awaiting the haematology sign-off" while the rules are a draft.
+- Issuing never runs offline: "Issuing needs a connection. Use the paper issue register."
+- Show "NIN Verified" / "NIN Not Verified" where a patient card shows NIN status.
+- Before go-live, keep the sample Blood Bank page at the demo facilities only, with its banner, and send nothing.
