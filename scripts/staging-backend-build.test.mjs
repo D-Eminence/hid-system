@@ -47,8 +47,8 @@ test('only verified not-affected VEX matches can pass; unknowns and changed pack
 });
 test('gateway VEX edits rebuild only the staging gateway',()=>assert.deepEqual(selectComponents(['security/gateway-runtime.vex.json']),['gateway']));
 test('staging gateway scans accept only exact VEX-applied statements from the committed gateway VEX',()=>{
-  const purl='pkg:apk/alpine/libssl3@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl',now=Date.now();
-  const m={vulnerability:{id:'CVE-2026-88823',severity:'High'},artifact:{name:'libssl3',version:'3.5.9-r0',type:'apk',purl},
+  const purl='pkg:apk/alpine/libssl3@3.5.9-r1?arch=aarch64&distro=alpine-3.24.2&upstream=openssl',now=Date.now();
+  const m={vulnerability:{id:'CVE-2026-84786',severity:'High'},artifact:{name:'libssl3',version:'3.5.9-r1',type:'apk',purl},
     appliedIgnoreRules:[{namespace:'vex','vex-status':'not_affected'}]};
   const vex={'@context':'https://openvex.dev/ns/v0.2.0',timestamp:new Date(now-86400000).toISOString(),hid_expires_at:new Date(now+86400000).toISOString(),
     hid_bound_files:gatewayBoundFileHashes(),
