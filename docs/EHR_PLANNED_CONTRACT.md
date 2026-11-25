@@ -1941,8 +1941,10 @@ exist and will not be built (owner decision Q124 A, 19 Nov 2026).
 ### Routes
 
 ehr-api `ehr/terminology/`. `X-Facility-Id` is required, and there is no
-purpose header (no patient data). `q` follows the ORD-7 rules: no Health ID
-or NIN shapes, never logged.
+purpose header: neither route reads a patient's record or returns a patient
+id (the recent list's `display` is the clinician's own text, which may name
+a patient). `q` follows the ORD-7 rules: no Health ID or NIN shapes, never
+logged.
 
 | Method and path | Who may call | Permission |
 | --- | --- | --- |
@@ -2005,11 +2007,20 @@ facility, newest first. `limit` is 1-50, default 20.
 ```
 
 - The list is kept in its own table (`ehr.clinician_recent_diagnoses`:
-  membership, code system, code, display, last used, count). It is written
-  in the same transaction as each diagnosis this member saves, at most 200
-  per membership, and the oldest drop off.
-- It holds **no patient id**, so it stays usable after a grant ends and
-  shows no patient.
+  membership, code system, code, display, last used, count), at most 200
+  per membership, and the oldest drop off. It is a best-effort record,
+  written in the same transaction as a diagnosis with a code this member
+  saves, and a save may skip it while the diagnosis still saves: when
+  another save of the same membership, or of a membership whose id has
+  the same `hashtext` value (even at another facility), has recorded a
+  pick in a transaction that is still open, or when the record fails (the
+  second slice, below).
+- It holds **no patient id**, so it stays usable after a grant ends. Its
+  display is the clinician's own text, which may name a patient.
+- Picks are kept as saved across an ICD-11 release switch: a code the new
+  release dropped, or an old title, is still offered, with nothing marking
+  it, until the `codeStatus` slice changes the read (the second slice,
+  below, "Across an ICD-11 release switch").
 - The read is audited as `ehr.terminology.recent-read` with the count only.
 - Favourites are ORD-8 (Release C).
 
@@ -2092,7 +2103,10 @@ facility, newest first. `limit` is 1-50, default 20.
 - **After it ships:**
   - Search the route as the clinician types (about 250 ms after typing
     stops).
-  - Show the recent list when the field is empty.
+  - Show the recent list when the field is empty, each pick's `display` as
+    saved. After a release switch, until the `codeStatus` slice, that can
+    be a dropped code or an old title, shown as saved with nothing marking
+    it.
   - Show `display` exactly as given (WHO's licence does not allow changing
     the title). Show `matchedName` in grey, as "matched falciparum malaria".
   - When `typedIcd10` is present, offer "Use ICD-10 code B50.9". Then the
@@ -2253,8 +2267,128 @@ file's seed in `docs/codes/catalog-approvals.json`.
     ms, `NB91` 1.7 ms. Before, the search read both releases' rows from the
     sixth call on a connection: `of` 194 ms, `in` 119 ms, `di` 76 ms, `NB91`
     2.7 ms.
-- **Not in this slice:** recent diagnoses, diagnoses by name only and
-  `codeStatus`, which alter `ehr.diagnoses` and need a lock plan.
+- **Not in this slice:** recent diagnoses (the next slice, below), and
+  diagnoses by name only and `codeStatus`, which alter `ehr.diagnoses` and
+  need a lock plan.
+
+### Second slice, first part: recent diagnoses (0153, draft, not live)
+
+Built on 23 Nov 2026 (lane D), on 0152 (#320), as the sizing note on
+hid-system#258 (14:18 UTC) set out. The number 0153 is provisional. No
+live table is altered.
+
+- **Database (0153):** `ehr.clinician_recent_diagnoses` (membership,
+  facility, code system, code, display, last used, count; key membership,
+  code system and code). It has no foreign key, so no live table is locked,
+  and no patient id. Row-level security is on with no policy and no grant:
+  only two SECURITY DEFINER functions use it.
+  - `ehr.record_recent_diagnosis(code system, code, display)` reads the
+    session's actor, membership and facility (as ehr-api sets them) and
+    records only for a membership holding `ehr.diagnosis.write` at that
+    facility (`auth.membership_has_permission`), and nothing with no code.
+    The same pick again updates its display, time and count. At most 200
+    per membership; the oldest drop off. It never waits for another save:
+    it first takes the membership's recording lock,
+    `pg_try_advisory_xact_lock(7409, hashtext(membership id))` (class key
+    7409 for this record only), held to the end of the save's transaction,
+    and records nothing while another transaction holds it. No other code
+    takes the two-key form: ehr-api's `allergy-reader.ts` takes the one-key
+    form on `hashtext` of a text key, and every other advisory lock in the
+    repository the one-key form on `hashtextextended` of a text key.
+    PostgreSQL keeps the one-key and two-key key spaces apart, so class key
+    7409 cannot collide with any of them. So two saves of one clinician
+    cannot deadlock on their picks or on the 200-cap trim; the later one
+    may skip its record. The lock is keyed on the hash of the membership
+    id, not the id, so a save also skips its record while a save of
+    another membership whose id has the same `hashtext` value holds it,
+    even at another facility (0153's header says so too, lines 63-64:
+    "two memberships whose ids share a hash only skip a record now and
+    then"). The runtime verifier
+    (`verify-prescription-details-runtime.mjs`) checks this with two
+    sessions as the EHR runtime: while one save of the doctor's has
+    recorded a pick and is still open (holding the recording lock and that
+    pick's row), another, with `lock_timeout` 1500 ms, records the same
+    pick and then a different one for the same membership; each must come
+    back in under 500 ms, record nothing and raise nothing, and once the
+    first commits both are kept. The database suite's case 1f only checks
+    the function as written (the try-lock call and the early return).
+  - `ehr.recent_diagnoses(limit)` gives the session's membership's picks at
+    its facility, newest first, and none without the permission. 22023
+    `RECENT_DIAGNOSES_INVALID` outside 1-50.
+  - EXECUTE on both to the EHR runtime and the schema test runtime only.
+- **Recording:** `DiagnosesService.createInTransaction` (the route's and
+  EHR-C5's consultation's) calls the record after the insert, in a
+  savepoint. It is a best-effort side record. What it guarantees is that
+  the record never waits for another save of the same membership (the
+  recording lock, above). It can still hold the save up: it reads the
+  auth role tables (through `auth.membership_has_permission`), so a DDL
+  lock on one of them can hold the save at the record up to ehr-api's
+  statement timeout (15 s, `database.service.ts:289`), after which the
+  error (57014) is rolled back to the savepoint like any other and the
+  save goes on. Any failure of the record, a schema without 0153
+  (42883), a deadlock (40P01) or a lock not available (55P03) included, is
+  rolled back to the savepoint and the diagnosis saves as before, with a
+  warning naming the SQLSTATE and the request's correlation id, as other
+  ehr-api warnings do, and nothing of the patient or the member (none for
+  42883). Only a serialization failure (40001) in a SERIALIZABLE
+  transaction is passed on, so the whole transaction is run again; the
+  diagnosis saves are READ COMMITTED. An idempotent replay records nothing.
+- **Route:** `GET /api/v1/ehr/terminology/diagnoses/recent?limit=` as
+  above. It takes `X-Facility-Id` and no purpose header, and needs
+  `ehr.diagnosis.write`. The answer is never kept (the global
+  `private, no-store`).
+  - The read and its audit row (`ehr.terminology.recent-read`, details
+    `{ resultCount }` only) commit in one transaction. A read whose audit
+    row cannot be written is refused.
+  - A schema without 0153, or any database failure, answers 503
+    `CATALOG_UNAVAILABLE`, sent as "The service could not complete the
+    request." (as every 5xx, as for the search; the service's own words,
+    "Diagnosis search is not available right now.", the search's, give no
+    advice and stay inside it: trying again does not help while 0153 is
+    not there, and a name alone is not accepted yet). The screen reads the
+    status and the code, and shows the empty field as before.
+  - A refusal is audited by the interceptor, as for the search.
+- **Across an ICD-11 release switch** (Rahman's re-review of #321, minor
+  1; Ola, clinical owner, 24 Nov 2026): picks are kept as saved. The read
+  (`0153:183-188`) does not look at the active release, and its answer
+  carries no release or in-list field. So after a new release goes live,
+  a code that release dropped, or a code under its old title, is still
+  offered from the recent list with nothing marking it, and picking it
+  again raises its count. A diagnosis saved from such a pick is stored as
+  typed: a code not in the list is allowed by design (`not_in_list` once
+  `codeStatus` is built). Meanwhile the screen shows each pick's
+  `display` as saved, the old title included. 0153 is not changed for
+  this.
+  - **Booked:** the `codeStatus` slice, which alters `ehr.diagnoses`
+    anyway, replaces the read, `ehr.recent_diagnoses`, so that it returns
+    the active release's current title, with an in-list flag, or leaves
+    dropped codes out, and the database suite gains a case for a release
+    switch. That slice ships before any second ICD-11 release is loaded.
+    - Returning the current title, or leaving dropped codes out, keeps the
+      read's columns, so `create or replace` keeps its owner and grants
+      and no grant is needed (one owner, the migration owner, owns the
+      recent table, `ehr.catalog_versions` and `ehr.catalog_diagnoses`).
+      The new definition restates SECURITY DEFINER and its `search_path`,
+      which `create or replace` would otherwise drop.
+    - An in-list flag is a new column, which `create or replace` refuses
+      ("cannot change return type of existing function"). So the read is
+      then dropped and made again, with EXECUTE granted again to the EHR
+      runtime and the schema test runtime (in that migration and in
+      `runtime-grants.sql`) and checked again by its post-checks, or the
+      flag goes in a new function.
+  - No second ICD-11 release can go live until the clinical lead signs a
+    WHO update: nothing is loaded until the lead signs the release file's
+    seed in `docs/codes/catalog-approvals.json` (the first slice, above;
+    owner decision Q124 A, 19 Nov 2026).
+- **0153's header** is left as it is: lines 16-17 still say the table
+  "shows no patient", and lines 34-35 that the record "never fails or
+  holds up a clinical save". This section says what holds: no patient
+  id, a display that may name a patient, and a record that never waits
+  for another save of the same membership. The header changes only if
+  0153 changes for another reason (0153 is cleared to sign at sha256
+  `45faa6a7…`).
+- **Not in this slice:** diagnoses by name only and `codeStatus` (with
+  the recent read's change for a release switch, above).
 
 
 ### Target
