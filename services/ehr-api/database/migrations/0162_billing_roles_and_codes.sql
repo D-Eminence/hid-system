@@ -148,20 +148,27 @@
 -- however the file is run, applies nothing:
 -- 0. The locks (above).
 -- 1. Preconditions (55000, or 42501 for ownership; nothing applied):
---    a. 0001-0151 applied (a marker of 0147, 0149, 0150 and 0151);
+--    a. markers of the earlier files whose objects it uses only: 0123 (the
+--       sealed QA tenant) and 0150 (doctor's ocr.job.start, one of the codes
+--       d requires); c, d and e check everything else it reads exactly;
 --    b. not applied yet ("0162: already applied" when every object is exactly
 --       as this file leaves it; "0162: ... not in the reviewed state" when
 --       any of its objects exists otherwise);
 --    c. the eight role functions and the two checks exactly as Release C
---       leaves them (md5 of pg_proc.prosrc and the check definitions);
---    d. the eight roles' codes exactly as Release C and 0150 leave them (md5
---       pinned), roles and codes this file adds absent, schema commercial
---       absent;
+--       leaves them (md5 of pg_proc.prosrc and the check definitions); these
+--       stay exact because this file rewrites them, so a change another lane
+--       made to them is refused, never overwritten (no wave 1 lane makes one);
+--    d. the eight roles active, each still holding every code 0001-0151 gave
+--       it (listed); codes other release lanes add to them are accepted, so
+--       no role's whole list is pinned (coordinator, #258, 25 November 2026:
+--       wave 1 releases in order of readiness); roles and codes this file adds
+--       absent, schema commercial absent;
 --    e. the QA step's helpers and seal triggers as 0151 checks them, and
 --       one owner for what it writes (0151's step f).
 -- 2. B1-B8.
--- 3. Post-checks: every role's codes (md5 after), the role table compared row
---    by row with the table before step 2 plus exactly the 58 rows, the eight
+-- 3. Post-checks: the 58 rows of the new codes (md5 pinned), the role table
+--    compared row by row with the table before step 2 plus exactly those 58
+--    rows (so no other role's code changes), the eight
 --    functions' md5 after, the two checks, the schema and its ACL, the 77
 --    audit rows (plus 2 where the QA tenant is installed), the QA step's rows.
 
@@ -199,17 +206,63 @@ declare
     ["pharmacy.walk-in.create", "Sell at the pharmacy counter"],
     ["pharmacy.stock.read", "Read the pharmacy''s stock"],
     ["pharmacy.stock.manage", "Receive and adjust the pharmacy''s stock"]]';
-  -- Each role's codes as Release C and 0150 leave them, and as this file leaves
-  -- them: md5 of the codes in byte order (collate "C"), joined by ','.
-  before_md5 constant jsonb := '{"admin": "dd2f9e8ee8b3eb6417023af2fb31d24f",
-    "clinician": "b42ca0335673e504cb40113a8e33ca55", "doctor": "9da3f7c9be69ae834e9f7a7555eb3e07",
-    "lab": "4fe3562dfb2abd8e75763d06fde38216", "nurse": "1cf6eca65a5ea51b817db099e32a0ef2",
-    "org_admin": "8d80fc5c90dc0146b5b01936504cb443", "pharmacist": "51526445b7773bdabbb2e0c3e0785bd4",
-    "receptionist": "a06d876a6f2e1bbd524ed89e59acd110"}';
-  after_md5 constant jsonb := '{"admin": "69bb8b0db93896191987909da4235c75", "billing_officer": "078798e4c0e189241f3cb024c2f975ef",
-    "cashier": "b5241ba59f83087c692b07539fd78cd5", "clinician": "9913205828d846304432db10da0e0925", "doctor": "e4f1316ecf4d079339862a1032bc6a97",
-    "lab": "b65e25549a3240b6051b7c78e8d0e2c7", "nurse": "98754b354343e55a56fd0aaddce4bef0", "org_admin": "1b08f1dd592cdfb2c00dd0ca72efcf1d",
-    "pharmacist": "3225c9c8341b198cc1c2ae44121abdff", "receptionist": "2af3a56fd4af2775297a0fe01f76b0ca"}';
+  -- Each role's codes as 0001-0151 leave them (Release C and 0150; 0152-0153 add none). Every one must still be
+  -- held. Codes other release lanes add to these roles are accepted (coordinator, #258, 25 November 2026: wave 1
+  -- releases in order of readiness), so no role's whole list is pinned.
+  release_c_codes constant jsonb := '{
+    "admin": ["audit.read", "identity.registration.approve", "identity.registration.write", "lab.accession.read",
+      "lab.execution.read", "lab.import.read", "lab.result.released.read", "ocr.job.read", "organization.manage",
+      "outreach.campaign.read", "outreach.campaign.write", "outreach.registration.read", "outreach.registration.write",
+      "pharmacy.dispensing.read", "pharmacy.import.read", "workforce.manage"],
+    "clinician": ["ehr.diagnosis.read", "ehr.diagnosis.write", "ehr.document.read", "ehr.document.write",
+      "ehr.encounter.read", "ehr.encounter.write", "ehr.lab-request.read", "ehr.lab-request.write", "ehr.note.read",
+      "ehr.note.write", "ehr.order-route.send", "ehr.prescription.read", "ehr.prescription.write", "ehr.vital.read",
+      "ehr.vital.write", "identity.authorization.check", "identity.break-glass.write", "identity.consent.read",
+      "identity.consent.write", "identity.patient-access-pin.verify", "identity.patient.open-own-facility",
+      "identity.patient.read", "identity.registration.write", "lab.import.read", "lab.import.write",
+      "lab.result.released.read", "lab.work-item.accept", "lab.work-item.read", "ocr.job.read", "ocr.job.start",
+      "ocr.job.write", "ocr.patient.confirm", "ocr.publication.write", "ocr.validation.write", "outreach.campaign.read",
+      "outreach.campaign.write", "outreach.registration.read", "outreach.registration.write",
+      "pharmacy.dispensing.read", "pharmacy.import.read", "pharmacy.import.write", "pharmacy.work-item.read"],
+    "doctor": ["ehr.diagnosis.read", "ehr.diagnosis.write", "ehr.document.read", "ehr.document.write",
+      "ehr.encounter.read", "ehr.encounter.write", "ehr.lab-request.read", "ehr.lab-request.write", "ehr.note.read",
+      "ehr.note.write", "ehr.order-route.send", "ehr.prescription.read", "ehr.prescription.write", "ehr.vital.read",
+      "ehr.vital.write", "identity.authorization.check", "identity.break-glass.write", "identity.consent.read",
+      "identity.consent.write", "identity.patient-access-pin.verify", "identity.patient.open-own-facility",
+      "identity.patient.read", "identity.registration.write", "lab.import.read", "lab.import.write",
+      "lab.result.released.read", "lab.work-item.accept", "ocr.job.read", "ocr.job.start", "ocr.job.write",
+      "ocr.patient.confirm", "ocr.publication.write", "ocr.validation.write", "pharmacy.dispensing.read",
+      "pharmacy.import.read", "pharmacy.import.write"],
+    "lab": ["ehr.document.read", "ehr.document.write", "ehr.lab-request.read", "ehr.lab-request.write",
+      "identity.authorization.check", "identity.consent.read", "identity.consent.write", "identity.patient.read",
+      "lab.accession.create", "lab.accession.read", "lab.execution.complete", "lab.execution.read",
+      "lab.execution.start", "lab.import.read", "lab.import.write", "lab.order-route.receive", "lab.result.correct",
+      "lab.result.enter", "lab.result.entered-in-error", "lab.result.release", "lab.result.released.read",
+      "lab.result.revise-released", "lab.result.verify", "lab.specimen.collect", "lab.specimen.receive",
+      "lab.specimen.reject", "lab.work-item.accept", "lab.work-item.read"],
+    "nurse": ["ehr.diagnosis.read", "ehr.document.read", "ehr.document.write", "ehr.encounter.read",
+      "ehr.encounter.write", "ehr.lab-request.read", "ehr.note.read", "ehr.note.write", "ehr.prescription.read",
+      "ehr.vital.read", "ehr.vital.write", "identity.authorization.check", "identity.break-glass.write",
+      "identity.consent.read", "identity.consent.write", "identity.patient-access-pin.verify",
+      "identity.patient.open-own-facility", "identity.patient.read", "identity.registration.write", "lab.import.read",
+      "lab.import.write", "lab.result.released.read", "lab.work-item.accept", "lab.work-item.read", "ocr.job.read",
+      "ocr.job.start", "ocr.job.write", "ocr.patient.confirm", "ocr.publication.write", "ocr.validation.write",
+      "outreach.campaign.read", "outreach.campaign.write", "outreach.registration.read", "outreach.registration.write",
+      "pharmacy.dispensing.read", "pharmacy.import.read", "pharmacy.import.write", "pharmacy.work-item.read"],
+    "org_admin": ["audit.read", "identity.registration.approve", "identity.registration.write", "organization.manage",
+      "outreach.campaign.read", "outreach.campaign.write", "outreach.registration.read", "outreach.registration.write",
+      "workforce.manage"],
+    "pharmacist": ["ehr.encounter.read", "ehr.prescription.read", "identity.authorization.check",
+      "identity.consent.read", "identity.consent.write", "identity.patient.read", "pharmacy.dispensing.create",
+      "pharmacy.dispensing.read", "pharmacy.dispensing.reverse", "pharmacy.import.read", "pharmacy.import.write",
+      "pharmacy.order-route.receive", "pharmacy.work-item.accept", "pharmacy.work-item.read"],
+    "receptionist": ["ehr.document.read-own", "ehr.document.write", "ehr.encounter.read", "ehr.encounter.write",
+      "ehr.vital.read", "identity.authorization.check", "identity.consent.read", "identity.consent.write",
+      "identity.patient.read", "identity.registration.write", "ocr.job.read-own", "ocr.job.start", "ocr.job.write",
+      "outreach.campaign.read", "outreach.campaign.write", "outreach.registration.read",
+      "outreach.registration.write"]}';
+  -- The 58 rows this file adds: md5 of "role code" pairs in byte order (collate "C"), joined by ','.
+  rows_md5 constant text := 'd73e63d61ea5cc52bbf1bcd56fa69304';
   -- The role functions: md5 of pg_proc.prosrc before (Release C) and after
   -- this file, and how many times each replacement applies.
   role_functions constant jsonb := '[
@@ -320,14 +373,10 @@ begin
   end loop;
 
   -- 1. Preconditions.
-  -- a. 0001-0151 applied.
-  if not exists (select 1 from auth.roles where code = 'reading_starter')
-     or to_regclass('ehr.catalog_versions') is null
-     or not exists (select 1 from auth.role_permissions where role_code = 'doctor' and permission_code = 'ocr.job.start')
-     or to_regprocedure('identity.sealed_qa_install()') is null
-     or to_regclass('ehr.visit_queue') is null
-     or to_regclass('pharmacy.work_item_acceptances') is null
-     or to_regprocedure('identity.patient_record_kind(uuid)') is null then
+  -- a. Markers of the earlier files whose objects this file uses only (coordinator, #258, 25 November 2026): 0123's
+  -- sealed QA tenant (the QA step) and 0150's row (in the roles' codes, d). c, d and e check the rest exactly.
+  if not exists (select 1 from auth.role_permissions where role_code = 'doctor' and permission_code = 'ocr.job.start')
+     or to_regprocedure('identity.sealed_qa_install()') is null then
     raise exception using errcode = '55000', message = '0162: 0001-0151 must be applied first';
   end if;
 
@@ -340,10 +389,10 @@ begin
        and (select count(*) from auth.permissions
              where code in (select value->>0 from jsonb_array_elements(new_codes)) and active) = 17
        and to_regnamespace('commercial') is not null
-       and not exists (select 1 from jsonb_each_text(after_md5) pinned
-                        where (select md5(string_agg(grant_row.permission_code, ',' order by grant_row.permission_code collate "C"))
-                                 from auth.role_permissions grant_row where grant_row.role_code = pinned.key)
-                              is distinct from pinned.value)
+       and (select md5(string_agg(grant_row.role_code || ' ' || grant_row.permission_code, ','
+                                  order by grant_row.role_code collate "C", grant_row.permission_code collate "C"))
+              from auth.role_permissions grant_row
+             where grant_row.permission_code in (select value->>0 from jsonb_array_elements(new_codes))) = rows_md5
        and (select md5(proc.prosrc) from pg_proc proc
              where proc.oid = to_regprocedure('identity.staff_invitable_roles(text,text)')) = invitable_after_md5
        and not exists (select 1 from jsonb_array_elements(role_functions) fn
@@ -381,15 +430,16 @@ begin
       message = '0162: identity.staff_invitations'' role checks are not as Release C leaves them; nothing applied';
   end if;
 
-  -- d. The eight roles' codes as Release C and 0150 leave them.
+  -- d. The eight roles active, each still holding every code 0001-0151 gave it (others' additions accepted).
   select string_agg(pinned.key, ', ' order by pinned.key) into missing
-    from jsonb_each_text(before_md5) pinned
+    from jsonb_each(release_c_codes) pinned
    where not exists (select 1 from auth.roles role_row where role_row.code = pinned.key and role_row.active)
-      or (select md5(string_agg(grant_row.permission_code, ',' order by grant_row.permission_code collate "C"))
-            from auth.role_permissions grant_row where grant_row.role_code = pinned.key) is distinct from pinned.value;
+      or exists (select 1 from jsonb_array_elements_text(pinned.value) wanted(code)
+                  where not exists (select 1 from auth.role_permissions grant_row
+                                     where grant_row.role_code = pinned.key and grant_row.permission_code = wanted.code));
   if missing is not null then
     raise exception using errcode = '55000',
-      message = '0162: these roles are inactive or their codes differ from Release C and 0150: ' || missing;
+      message = '0162: these roles are inactive or lack a code 0001-0151 gave them: ' || missing;
   end if;
 
   -- e. The QA step's helpers and seal triggers as 0151 checks them.
@@ -642,12 +692,12 @@ $invitable$;
   end if;
 
   -- 3. Post-checks.
-  select string_agg(pinned.key, ', ' order by pinned.key) into missing
-    from jsonb_each_text(after_md5) pinned
-   where (select md5(string_agg(grant_row.permission_code, ',' order by grant_row.permission_code collate "C"))
-            from auth.role_permissions grant_row where grant_row.role_code = pinned.key) is distinct from pinned.value;
-  if missing is not null then
-    raise exception using errcode = '55000', message = '0162: post-check failed: these roles'' codes: ' || missing;
+  if (select md5(string_agg(grant_row.role_code || ' ' || grant_row.permission_code, ','
+                            order by grant_row.role_code collate "C", grant_row.permission_code collate "C"))
+        from auth.role_permissions grant_row
+       where grant_row.permission_code in (select value->>0 from jsonb_array_elements(new_codes)))
+     is distinct from rows_md5 then
+    raise exception using errcode = '55000', message = '0162: post-check failed: the 58 rows of the new codes';
   end if;
   if (select string_agg(grant_row.role_code || ' ' || grant_row.permission_code || ' ' || grant_row.granted_at::text,
                         ',' order by grant_row.role_code collate "C", grant_row.permission_code collate "C")

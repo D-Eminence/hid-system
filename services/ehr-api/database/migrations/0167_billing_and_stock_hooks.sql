@@ -90,7 +90,12 @@
 --
 -- 0. Locks and preconditions (55000 and nothing applied; "0167: already
 --    applied" when every function and trigger this file makes is there
---    exactly as made). 1. Helpers. 2. Hook functions. 3. Triggers.
+--    exactly as made). Each of the six tables must still have every trigger
+--    Release C gave it (name and type); triggers other release lanes add are
+--    accepted (coordinator, #258, 25 November 2026: wave 1 releases in order
+--    of readiness; 0168 adds two to ehr.visit_queue, which fire before this
+--    file's zz_billing_* triggers of the same timing and event, as triggers
+--    fire in name order). 1. Helpers. 2. Hook functions. 3. Triggers.
 -- 4. Post-checks: function owners, SECURITY DEFINER, search_path, ACLs, md5,
 --    and the seven triggers' tables, timing, events and functions.
 
@@ -117,7 +122,7 @@ declare
     "commercial.hook_triage()": "226774711ee8bb5a8496c50f9027feab",
     "commercial.pay_before_refusal(uuid,text,uuid)": "fcd1d6c70faafe7c00c2db9dabbc777c",
     "commercial.work_item_line(uuid,uuid,text,uuid,text,text,text,numeric,text)": "086363b9a7c85a1f131ae7b3026f34ff"}';
-  -- The trigger sets of the six tables as Release C leaves them (name:tgtype).
+  -- The triggers Release C gives the six tables (name:tgtype); each must still be there.
   live_triggers constant jsonb := '{
     "ehr.visit_queue": "",
     "pharmacy.work_item_acceptances": "pharmacy_work_item_acceptance_validate:7,pharmacy_work_item_acceptances_immutable:27",
@@ -180,16 +185,16 @@ begin
       message = '0167: an object this file makes exists with other content: ' || coalesce(differing, 'a trigger');
   end if;
 
-  -- The six tables' own triggers exactly as Release C leaves them.
+  -- The six tables still have every trigger Release C gave them (others' triggers accepted).
   select string_agg(target.key, ', ') into differing
     from jsonb_each_text(live_triggers) target
-   where coalesce((select string_agg(trigger_row.tgname || ':' || trigger_row.tgtype, ',' order by trigger_row.tgname collate "C")
-                     from pg_trigger trigger_row
-                    where trigger_row.tgrelid = to_regclass(target.key) and not trigger_row.tgisinternal), '')
-         is distinct from target.value;
+   where exists (select 1 from regexp_split_to_table(nullif(target.value, ''), ',') wanted(entry)
+                  where not exists (select 1 from pg_trigger trigger_row
+                                     where trigger_row.tgrelid = to_regclass(target.key) and not trigger_row.tgisinternal
+                                       and trigger_row.tgname || ':' || trigger_row.tgtype = wanted.entry));
   if differing is not null then
     raise exception using errcode = '55000',
-      message = '0167: these tables'' triggers are not as Release C leaves them: ' || differing || '; nothing applied';
+      message = '0167: these tables lack a trigger Release C gives them: ' || differing || '; nothing applied';
   end if;
   if (select md5(proc.prosrc) from pg_proc proc where proc.oid = to_regprocedure('platform.current_facility_id()')) is null
      or to_regprocedure('identity.patient_record_kind(uuid)') is null

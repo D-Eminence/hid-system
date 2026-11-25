@@ -8,7 +8,9 @@ first. Undoing does not reverse what staff did with the money; it only removes t
 ```sql
 begin;
 -- Only while no membership holds cashier or billing_officer (SX-4 removes them first; the sealed QA logins are
--- ended by support). Then, with the role table's Release C md5s checked by hand against 0162's header:
+-- ended by support). Then, with the role table checked by hand: the eight roles still hold every code 0162's
+-- release_c_codes lists, and the rows of the 17 codes are the 58 0162 pins (rows_md5). Codes other release lanes
+-- added to the shared roles are not 0162's and stay.
 delete from auth.role_permissions where permission_code like 'billing.%'
    or permission_code in ('pharmacy.walk-in.create', 'pharmacy.stock.read', 'pharmacy.stock.manage');
 delete from auth.roles where code in ('cashier', 'billing_officer');

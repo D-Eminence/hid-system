@@ -14,6 +14,10 @@
 //   1. preconditions: on the live schema alone (without the earlier BILL-1 files), each
 //      of 0163-0167 refuses 55000 with a message that begins with its number,
 //      and nothing is applied;
+//   1b. other release lanes first: with another lane's code on shared roles
+//      and its trigger on ehr.visit_queue, all six apply and keep them; with
+//      a code 0001-0151 gave a role gone 0162 refuses, and with a trigger
+//      Release C gave a table gone 0167 refuses;
 //   2. locks first, NOWAIT: with a second session holding a table the file
 //      locks, the file refuses 55P03 with a message that begins with its
 //      number, and nothing is applied;
@@ -94,6 +98,63 @@ for (const file of files.slice(1)) {
   results[`${number}_precondition`] = message;
 }
 await drop('hid_bill_pre');
+
+// 1b. Other release lanes first (coordinator, #258, 25 November 2026: wave 1 releases in order of readiness). A
+// code another lane gave the shared roles and a trigger another lane put on ehr.visit_queue are accepted; a code
+// 0001-0151 gave a role, or a trigger Release C gave a table, that is gone is refused (fictional names).
+const asOwner = async (database, sql) => {
+  const connection = await client(database);
+  try {
+    await connection.query('begin');
+    await connection.query('set local session_replication_role = replica');
+    await connection.query(sql);
+    await connection.query('commit');
+  } finally { await connection.end(); }
+};
+await copy('hid_bill_lanes');
+await asOwner('hid_bill_lanes', `
+  insert into auth.permissions (code, description) values ('ehr.other-lane.read', 'Another lane''s code (fictional)');
+  insert into auth.role_permissions (role_code, permission_code) values ('receptionist', 'ehr.other-lane.read'),
+    ('doctor', 'ehr.other-lane.read'), ('admin', 'ehr.other-lane.read'), ('pharmacist', 'ehr.other-lane.read');
+  create function ehr.other_lane_mirror() returns trigger language plpgsql set search_path = pg_catalog, pg_temp
+    as $f$ begin return null; end $f$;
+  create trigger other_lane_mirror after update on ehr.visit_queue for each row
+    execute function ehr.other_lane_mirror();`);
+for (const file of files) {
+  const [status, , failure] = apply('hid_bill_lanes', file);
+  assert.equal(status, 0, `${file.slice(0, 4)} refused another lane's code or trigger: ${failure}`);
+}
+const kept = await client('hid_bill_lanes');
+assert.equal((await kept.query(`select count(*)::int as n from auth.role_permissions
+  where permission_code = 'ehr.other-lane.read'`)).rows[0].n, 4, 'another lane\'s rows are kept');
+await kept.end();
+await drop('hid_bill_lanes');
+results.other_lanes_first = 'applied with another lane\'s code on four shared roles and its trigger on ehr.visit_queue';
+await copy('hid_bill_lost');
+await asOwner('hid_bill_lost', `delete from auth.role_permissions
+  where role_code = 'receptionist' and permission_code = 'identity.registration.write'`);
+{
+  const [status, sqlstate, message] = apply('hid_bill_lost', files[0]);
+  assert.notEqual(status, 0, '0162 applied with a receptionist code of 0001-0151 gone');
+  assert.deepEqual([sqlstate, message],
+    ['55000', '0162: these roles are inactive or lack a code 0001-0151 gave them: receptionist']);
+  results.code_gone = message;
+}
+await asOwner('hid_bill_lost', `insert into auth.role_permissions (role_code, permission_code)
+  values ('receptionist', 'identity.registration.write')`);
+for (const file of files.slice(0, 5)) {
+  const [status, , failure] = apply('hid_bill_lost', file);
+  assert.equal(status, 0, `${file.slice(0, 4)} did not apply: ${failure}`);
+}
+await asOwner('hid_bill_lost', 'drop trigger lab_specimens_no_delete on lab.specimens');
+{
+  const [status, sqlstate, message] = apply('hid_bill_lost', files[5]);
+  assert.notEqual(status, 0, '0167 applied with a Release C trigger gone');
+  assert.deepEqual([sqlstate, message],
+    ['55000', '0167: these tables lack a trigger Release C gives them: lab.specimens; nothing applied']);
+  results.trigger_gone = message;
+}
+await drop('hid_bill_lost');
 
 // 2 and 3. Busy, then applied, then applied again, file by file.
 await copy('hid_bill_steps');
