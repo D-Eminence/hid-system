@@ -26,7 +26,8 @@
 --    way it sends the "records were opened" emails (0095):
 --    identity.appointment_email_claim leases rows and answers the patient's
 --    verified email by 0063's rule (active patient with notices on, active
---    account, verified email; a row without one is closed as skipped), and
+--    account, verified email; a row without one is closed as skipped and is
+--    never leased, however many wait), and
 --    identity.appointment_email_record records delivered, retry or failed,
 --    with one audit row each (notification.appointment-email.send). The email
 --    is generic ("There is an update to your appointments. Sign in to Health
@@ -45,8 +46,11 @@
 --    the next 24 hours, have no reminder yet and were booked at least 12 hours
 --    before their start; only between 07:00 and 21:00 Lagos (otherwise 0).
 --    Each gets APPOINTMENT_REMINDER (inbox, then push and email as B1-B2),
---    reminder_sent_at, an SMS outbox row only while the control below is on,
---    and one system audit row (ehr.appointment.reminder) naming the channels.
+--    reminder_sent_at, an SMS outbox row only while the control below is on
+--    (at most one unsent per appointment: a rescheduled appointment keeps its
+--    unsent one, which carries the new time; after a sent one it gets a new
+--    row), and one system audit row (ehr.appointment.reminder) naming the
+--    channels.
 -- B4 SMS, built but switched off. The control appointment_sms_reminders_enabled
 --    is added and seeded OFF (the control_settings key CHECK and
 --    platform.control_enabled carry the 11 existing keys plus this one: 0086's
@@ -314,7 +318,10 @@ begin
     constraint appointment_sms_outbox_claimed_ck check ((state = 'claimed') = (claimed_until is not null)),
     constraint appointment_sms_outbox_sent_ck check ((state = 'sent') = (sent_at is not null))
   );
-  create unique index appointment_sms_outbox_one_ux on ehr.appointment_sms_outbox (appointment_id);
+  -- At most one unsent reminder SMS per appointment. A sent or failed one stays as it was: a reschedule clears
+  -- reminder_sent_at (0160), and the moved appointment's reminder is a new row.
+  create unique index appointment_sms_outbox_open_ux on ehr.appointment_sms_outbox (appointment_id)
+    where state in ('pending', 'claimed');
   create index appointment_sms_outbox_pending_idx on ehr.appointment_sms_outbox (created_at)
     where state in ('pending', 'claimed');
   create index appointment_sms_outbox_patient_idx on ehr.appointment_sms_outbox (patient_id);
@@ -429,8 +436,13 @@ begin
          order by facility_contact.created_at desc, facility_contact.id
          limit 1;
         if contact is not null then
-          insert into ehr.appointment_sms_outbox (appointment_id, facility_id, patient_id, contact_id)
-          values (due.id, due.facility_id, due.patient_id, contact);
+          -- An unsent SMS of this appointment (queued before a reschedule) is kept, with the phone as now recorded:
+          -- the sender reads the start time when it claims, so it carries the new time. Never a second one, and
+          -- never an error that would stop the whole sweep.
+          insert into ehr.appointment_sms_outbox as sms (appointment_id, facility_id, patient_id, contact_id)
+          values (due.id, due.facility_id, due.patient_id, contact)
+          on conflict (appointment_id) where state in ('pending', 'claimed')
+          do update set contact_id = excluded.contact_id where sms.state = 'pending';
           channels := channels || array['sms'];
         end if;
       end if;
@@ -446,7 +458,7 @@ begin
   end
   $fn$;
   comment on function ehr.appointment_send_reminders(integer) is
-    '0161 (APPT-1, Q-APPT-3 A): the reminder sweep, as system:auth only, between 07:00 and 21:00 Lagos: booked appointments that start within 24 hours, without a reminder, booked at least 12 hours before their start, at most the batch (1-500). Each gets APPOINTMENT_REMINDER (inbox, push, email), an SMS outbox row only while appointment_sms_reminders_enabled is on, reminder_sent_at, and one system audit row naming the channels. Answers how many.';
+    '0161 (APPT-1, Q-APPT-3 A): the reminder sweep, as system:auth only, between 07:00 and 21:00 Lagos: booked appointments that start within 24 hours, without a reminder, booked at least 12 hours before their start, at most the batch (1-500). Each gets APPOINTMENT_REMINDER (inbox, push, email), an SMS outbox row only while appointment_sms_reminders_enabled is on (at most one unsent per appointment: a rescheduled appointment keeps its unsent one), reminder_sent_at, and one system audit row naming the channels. Answers how many.';
   revoke all on function ehr.appointment_send_reminders(integer) from public;
 
   -- B4. The SMS sender's two calls (identity-api, system:auth, only while the control is on).
@@ -565,7 +577,9 @@ begin
        or requested_lease_seconds is null or requested_lease_seconds not between 30 and 900 then
       raise exception using errcode = '22023', message = 'APPOINTMENT_INVALID';
     end if;
-    -- A row whose patient has no verified email (0063's rule) is closed as skipped, never sent.
+    -- A row whose patient has no verified email (0063's rule) is closed as skipped, never sent. This pass is
+    -- bounded; the lease below checks the same rule itself, so a row this pass leaves is never leased or sent (a
+    -- later claim closes it).
     update ehr.appointment_email_outbox email
        set state = 'skipped', finished_at = clock_timestamp(), claimed_by = null, claimed_until = null,
            last_error_code = 'no_verified_recipient'
@@ -581,29 +595,36 @@ begin
         limit requested_limit
         for update skip locked);
     return query
+      -- Only rows whose patient has a recipient by 0063's rule now (active patient with notices on, active account,
+      -- verified email) are leased, each with that recipient; a lease is always answered.
       with picked as (
-        select candidate.id from ehr.appointment_email_outbox candidate
+        select candidate.id, account_row.email as recipient
+          from ehr.appointment_email_outbox candidate
+          join identity.patients patient on patient.id = candidate.patient_id
+          join auth.accounts account_row on account_row.id = patient.account_id
          where (candidate.state = 'pending' or (candidate.state = 'claimed' and candidate.claimed_until < clock_timestamp()))
            and candidate.attempt_count < 5
+           and patient.status = 'active' and patient.notifications_enabled
+           and account_row.status = 'active' and account_row.email is not null and btrim(account_row.email) <> ''
+           and account_row.email_verified_at is not null
          order by candidate.created_at, candidate.id
          limit requested_limit
-         for update skip locked
+         for update of candidate skip locked
       ), claimed as (
         update ehr.appointment_email_outbox email
            set state = 'claimed', claimed_by = requested_worker,
                claimed_until = clock_timestamp() + make_interval(secs => requested_lease_seconds),
                attempt_count = email.attempt_count + 1
           from picked where email.id = picked.id
-        returning email.id, email.patient_id, email.notice_code, email.attempt_count
+        returning email.id, email.notice_code, email.attempt_count
       )
-      select claimed.id, account_row.email, claimed.notice_code, claimed.attempt_count
+      select claimed.id, picked.recipient, claimed.notice_code, claimed.attempt_count
         from claimed
-        join identity.patients patient on patient.id = claimed.patient_id
-        join auth.accounts account_row on account_row.id = patient.account_id;
+        join picked on picked.id = claimed.id;
   end
   $fn$;
   comment on function identity.appointment_email_claim(text, integer, integer) is
-    '0161 (APPT-1): leases up to the limit (1-50) of appointment emails for identity-api''s sender, as system:auth, with the patient''s verified email by 0063''s rule; rows without one are closed as skipped. Lapsed leases come back; at most 5 attempts.';
+    '0161 (APPT-1): leases up to the limit (1-50) of appointment emails for identity-api''s sender, as system:auth, with the patient''s verified email by 0063''s rule; rows without one are closed as skipped and are never leased. Lapsed leases come back; at most 5 attempts.';
   revoke all on function identity.appointment_email_claim(text, integer, integer) from public;
 
   create function identity.appointment_email_record(requested_email_id uuid, requested_worker text,

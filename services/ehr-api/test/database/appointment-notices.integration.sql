@@ -19,12 +19,15 @@
 --      appointments within 24 hours, without a reminder, booked at least 12
 --      hours before their start; inbox, email and audit; a second run sends
 --      nothing; no SMS row while the control is off; with it on, an SMS row
---      only for a patient with a phone this facility recorded;
+--      only for a patient with a phone this facility recorded; a reschedule
+--      with it on keeps one unsent SMS row and the sweep goes on for every
+--      facility, and after a sent one the moved appointment gets a new row;
 --   4. the SMS sender: nothing claimed while the control is off; claim and
 --      record (sent, stale) with one audit row; system:auth only;
 --   5. the email sender: a patient without a verified email is skipped;
---      claim and record (delivered, stale) with one audit row; system:auth
---      only;
+--      rows without a recipient are never leased, however many wait beyond
+--      one claim's limit (unverified email, notices turned off); claim and
+--      record (delivered, stale) with one audit row; system:auth only;
 --   6. "My appointments": only in the patient's own live session; upcoming
 --      and past; every facility; no staff id or booking basis; audited;
 --   7. the call list: the session facility's booked appointments of one day,
@@ -459,6 +462,49 @@ select pg_temp.check_case('3 the channels: p1 inbox, email and sms; p2 none',
     and resource_id = pg_temp.id('r6')::text)
   || '/' || (select details ->> 'channels' from audit.events where action = 'ehr.appointment.reminder'
     and resource_id = pg_temp.id('r7')::text));
+-- A reschedule with SMS on (rolled back after, so 4 sees the state above). r6 already has its SMS row (pending). The
+-- desk moves it within the window, and r8 (p3, Clinic A, no recorded phone) is due too: the next sweep sends both,
+-- and r6 keeps one unsent SMS row (never a second, never an error that stops the sweep for every facility). Once
+-- that SMS is sent, a second move gets a new one.
+create function pg_temp.move(n integer, label text, starts timestamptz, tag text) returns text language plpgsql as $f$
+declare
+  answer record;
+begin
+  perform pg_temp.as_member(n);
+  select * into answer from ehr.appointment_reschedule(pg_temp.id(label), pg_temp.version(label), starts, null, null,
+    false, 'The clinic moved the session', pg_temp.key(label || '-' || tag), pg_temp.sha(label || '-' || tag));
+  perform pg_temp.remember(label, null, answer.row_version);
+  return answer.outcome;
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end
+$f$;
+savepoint n161_sms_reschedule;
+set local role hid_ehr_api_runtime;
+select pg_temp.move(1, 'r6', pg_temp.slot(22 * 60), 'sms-on-1') as n161_move_1,
+       pg_temp.book(1, 'r8', 3, pg_temp.slot(60 * 24 * 11)) as n161_r8_booked \gset
+reset role;
+select pg_temp.place('r8', pg_temp.slot(23 * 60), clock_timestamp() - interval '30 hours');
+set local role hid_ehr_api_runtime;
+select pg_temp.sweep(50) as n161_sweep_moved \gset
+reset role;
+select pg_temp.sms(1) as n161_sms_moved,
+       (select (reminder_sent_at is not null)::text from ehr.appointments where id = pg_temp.id('r8')) as n161_r8_reminded \gset
+update ehr.appointment_sms_outbox set state = 'sent', sent_at = clock_timestamp()
+ where appointment_id = pg_temp.id('r6') and state = 'pending';
+set local role hid_ehr_api_runtime;
+select pg_temp.move(1, 'r6', pg_temp.slot(23 * 60 + 30), 'sms-on-2') as n161_move_2 \gset
+select pg_temp.sweep(50) as n161_sweep_moved_again \gset
+reset role;
+select pg_temp.sms(1) as n161_sms_moved_again \gset
+rollback to savepoint n161_sms_reschedule;
+select pg_temp.check_case('3 SMS on: r6 moved and r8 booked', 'updated/booked', :'n161_move_1' || '/' || :'n161_r8_booked');
+select pg_temp.check_case('3 SMS on: the sweep after the move sends r6 again and r8', '2', :'n161_sweep_moved');
+select pg_temp.check_case('3 SMS on: r6 keeps its one unsent SMS; r8''s reminder is sent', 'pending:02/true',
+  :'n161_sms_moved' || '/' || :'n161_r8_reminded');
+select pg_temp.check_case('3 SMS on: moved again after that SMS was sent', 'updated', :'n161_move_2');
+select pg_temp.check_case('3 SMS on: the next sweep queues a new SMS beside the sent one', '1/sent:02,pending:02',
+  :'n161_sweep_moved_again' || '/' || :'n161_sms_moved_again');
 \else
 select pg_temp.check_case('3 outside 07:00-21:00 Lagos the sweep sends nothing', '0', pg_temp.sweep(50));
 reset role;
@@ -544,6 +590,43 @@ exception when others then
 end
 $f$;
 alter function pg_temp.email_record(integer, text, text) security definer;
+-- More rows without a recipient than one claim's limit (rolled back after each, so the cases below see the state
+-- above): none is ever leased. A: p3's unverified rows are the oldest and outnumber the limit (2); the claim leases
+-- only p1's rows. B: p1 has turned notices off; a claim of 1 leases nothing.
+create function pg_temp.email_claim_limited(claim_limit integer) returns text language plpgsql as $f$
+declare
+  claimed text;
+begin
+  perform pg_temp.as_system();
+  with claim as (select * from identity.appointment_email_claim('reminder-suite-worker', claim_limit, 60))
+  select string_agg(claim.recipient, ',' order by claim.recipient) into claimed from claim;
+  return coalesce(claimed, '(none)');
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end
+$f$;
+savepoint n161_email_limit;
+update ehr.appointment_email_outbox set created_at = clock_timestamp() + interval '1 hour'
+ where patient_id <> pg_temp.patient(3) and state = 'pending';
+select (count(*) > 2)::text as n161_p3_waiting from ehr.appointment_email_outbox
+ where patient_id = pg_temp.patient(3) and state = 'pending' \gset
+set local role hid_identity_api_runtime;
+select pg_temp.email_claim_limited(2) as n161_claim_past_skips \gset
+reset role;
+select count(*)::text as n161_p3_leased from ehr.appointment_email_outbox
+ where patient_id = pg_temp.patient(3) and state = 'claimed' \gset
+rollback to savepoint n161_email_limit;
+savepoint n161_email_notices_off;
+update identity.patients set notifications_enabled = false where id = pg_temp.patient(1);
+set local role hid_identity_api_runtime;
+select pg_temp.email_claim_limited(1) as n161_claim_notices_off \gset
+reset role;
+rollback to savepoint n161_email_notices_off;
+select pg_temp.check_case('5 more than the limit of p3''s unverified rows wait first', 'true', :'n161_p3_waiting');
+select pg_temp.check_case('5 a claim past them leases only verified recipients',
+  'reminder-patient-1@example.invalid,reminder-patient-1@example.invalid/0',
+  :'n161_claim_past_skips' || '/' || :'n161_p3_leased');
+select pg_temp.check_case('5 notices turned off: nothing is leased, whatever the limit', '(none)', :'n161_claim_notices_off');
 select string_agg('reminder-patient-1@example.invalid:' || notice_code, ',' order by notice_code) as n161_p1_emails
   from ehr.appointment_email_outbox where patient_id = pg_temp.patient(1) \gset
 set local role hid_identity_api_runtime;

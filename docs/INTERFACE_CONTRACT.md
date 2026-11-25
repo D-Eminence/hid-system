@@ -12410,12 +12410,14 @@ own.
 `facilityName` and `startsAt` only), and the reminder sweep writes `APPOINTMENT_REMINDER` about a day before (booked,
 starting within 24 hours, booked at least 12 hours before, 07:00-21:00 Lagos, once). Web push follows by 0097's poll.
 Each inbox item also queues one email in `ehr.appointment_email_outbox`, which identity-api sends to a verified email
-only (0063's rule) with the generic text "There is an update to your appointments. Sign in to Health ID and open My
+only (0063's rule, checked when each row is leased: a row without such a recipient is never leased or sent) with the generic text "There is an update to your appointments. Sign in to Health ID and open My
 appointments to see it." through notification-api's new `POST /api/v1/notifications/appointment-notice`. No notice
 for check-in or no-show; a patient with no account gets nothing. SMS: the Platform control
 `appointment_sms_reminders_enabled` (seeded off, switchable in the Platform console) gates both the queue and the
 sender; the text is "Reminder: you have an appointment at {facility} on {day} at {time}." to the phone this facility
-recorded, never the clinic or reason.
+recorded, never the clinic or reason. At most one unsent SMS per appointment: a rescheduled appointment keeps its
+unsent one (the sender reads the new time when it claims it), and gets a new one only after the earlier one was sent
+or failed.
 
 Deviation from the planned contract, for the reviewers: the planned email path was a producer `ehr` on
 `integration.outbox_envelopes` for the event-dispatcher and notification-worker. The worker's claim functions are
