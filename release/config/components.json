@@ -716,7 +716,7 @@
       },
       {
         "name": "0160_appointments.sql",
-        "sha256": "8b553f31a2bd5f922d2d46667b3f2f083609cdc74adef1e32368389fc4ff4398"
+        "sha256": "399200223eeb2916e1e84ffe7cf8b2d81db842d882e67ab8f86290ca3cf47b0e"
       },
       {
         "name": "0161_appointment_notices_and_call_list.sql",

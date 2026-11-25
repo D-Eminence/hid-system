@@ -156,7 +156,8 @@
 -- The whole file is one statement (do $appt0160$), so whatever raises in it,
 -- however the file is run, applies nothing:
 -- 0. The locks (one attempt, made up to 50 times while a table is busy).
--- 1. Preconditions (55000, nothing applied): markers of 0145, 0149 and 0150;
+-- 1. Preconditions (55000, nothing applied): markers of 0145 and 0150 (the
+--    earlier files whose objects this file uses);
 --    "0160: already applied" when every object of this file is there with the
 --    role rows it adds, "0160: the schema is not in the reviewed state" for
 --    any half state; the bodies this file calls or reads md5-pinned; every
@@ -241,7 +242,6 @@ begin
 
   -- 1. Preconditions.
   if to_regprocedure('ehr.visit_queue_record_kinds(uuid[])') is null
-     or to_regclass('ehr.catalog_versions') is null
      or not exists (select 1 from auth.role_permissions where role_code = 'doctor' and permission_code = 'ocr.job.start')
      or to_regclass('migration.schema_migrations') is null then
     raise exception using errcode = '55000', message = '0160: 0001-0151 must be applied first';
