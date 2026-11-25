@@ -57,9 +57,16 @@ test('an unknown path under scripts/ or packages/ selects all 13 components',()=
     assert.deepEqual(selectComponents([p]),components,p);
 });
 test('a pure docs/ or scripts/tests/ change selects no component',()=>{
-  assert.deepEqual(selectComponents(['docs/INTERFACE_CONTRACT.md','docs/codes/hid-lab-codes.json']),[]);
+  assert.deepEqual(selectComponents(['docs/INTERFACE_CONTRACT.md','docs/EHR_PLANNED_CONTRACT.md']),[]);
   assert.deepEqual(selectComponents(['scripts/tests/hid-lab-codes.test.mjs','scripts/tests/fixtures/a.json']),[]);
-  assert.deepEqual(selectComponents(['docs/INTERFACE_CONTRACT.md','docs/codes/hid-lab-codes.json','scripts/tests/hid-lab-codes.test.mjs']),[]);
+  assert.deepEqual(selectComponents(['docs/INTERFACE_CONTRACT.md','scripts/tests/hid-lab-codes.test.mjs']),[]);
+});
+test('docs/codes selects the migration image, which carries it for the governed catalogue load (ORD-7)',()=>{
+  for(const p of ['docs/codes/catalog-approvals.json','docs/codes/hid-lab-codes.json','docs/codes/hid-medicines.json',
+    'docs/codes/hid-lab-tests.json'])
+    assert.deepEqual(selectComponents([p]),['database-migration'],p);
+  assert.deepEqual(selectComponents(['docs/INTERFACE_CONTRACT.md','docs/codes/hid-lab-codes.json','scripts/tests/hid-lab-codes.test.mjs']),
+    ['database-migration']);
 });
 test('scripts and packages that no image or production build uses select no component',()=>{
   for(const p of ['scripts/tuf-staging-migration-rehearsal.mjs','scripts/staging-backend-build.mjs','scripts/verify-container-platform.mjs',
@@ -211,14 +218,14 @@ test('production applicability cannot transfer between images, sources, componen
     assert.throws(()=>assertAssessmentBinding({...assessment,...change},'ehr-api',source,image,raw));
 });
 
-const gatewayPurl=n=>`pkg:apk/alpine/${n}@3.5.9-r0?arch=aarch64&distro=alpine-3.24.2&upstream=openssl`;
-const gatewayMatch=(id,n='libssl3')=>({vulnerability:{id,severity:'High'},artifact:{name:n,version:'3.5.9-r0',type:'apk',purl:gatewayPurl(n)},
+const gatewayPurl=n=>`pkg:apk/alpine/${n}@3.5.9-r1?arch=aarch64&distro=alpine-3.24.2&upstream=openssl`;
+const gatewayMatch=(id,n='libssl3')=>({vulnerability:{id,severity:'High'},artifact:{name:n,version:'3.5.9-r1',type:'apk',purl:gatewayPurl(n)},
   appliedIgnoreRules:[{namespace:'vex','vex-status':'not_affected'}]});
 test('gateway VEX edits rebuild only the gateway',()=>assert.deepEqual(selectComponents([gatewayVexPath]),['gateway']));
 test('committed gateway VEX covers only the reviewed Alpine OpenSSL findings and expires by 2026-12-01',()=>{
   const vex=JSON.parse(readFileSync(new URL('../'+gatewayVexPath,import.meta.url)));
   assert.ok(Date.parse(vex.hid_expires_at)<=Date.parse('2026-12-01T00:00:00Z'));
-  assert.deepEqual(vex.statements.map(s=>s.vulnerability.name).sort(),['CVE-2026-107493','CVE-2026-107494','CVE-2026-107496','CVE-2026-121482','CVE-2026-124709','CVE-2026-84786','CVE-2026-88823','CVE-2026-95691','CVE-2026-95692']);
+  assert.deepEqual(vex.statements.map(s=>s.vulnerability.name).sort(),['CVE-2026-107493','CVE-2026-107494','CVE-2026-121482','CVE-2026-124709','CVE-2026-84786']);
   for(const s of vex.statements){
     assert.equal(s.status,'not_affected');assert.equal(s.justification,'vulnerable_code_not_in_execute_path');
     assert.deepEqual(s.products.map(p=>p['@id']).sort(),[gatewayPurl('libcrypto3'),gatewayPurl('libssl3')]);
@@ -230,13 +237,13 @@ test('committed gateway VEX covers only the reviewed Alpine OpenSSL findings and
 });
 test('gateway VEX suppresses only exact, High, VEX-applied Alpine package matches',()=>{
   const now=Date.now(),vex={'@context':'https://openvex.dev/ns/v0.2.0',timestamp:new Date(now-86400000).toISOString(),
-    hid_expires_at:new Date(now+86400000).toISOString(),hid_bound_files:gatewayBoundFileHashes(),statements:[{vulnerability:{name:'CVE-2026-88823'},
+    hid_expires_at:new Date(now+86400000).toISOString(),hid_bound_files:gatewayBoundFileHashes(),statements:[{vulnerability:{name:'CVE-2026-84786'},
     products:[{'@id':gatewayPurl('libssl3')}],status:'not_affected',justification:'vulnerable_code_not_in_execute_path'}]};
-  const report={descriptor:{version:'test'},distro:{name:'alpine',version:'3.24.2'},matches:[],ignoredMatches:[gatewayMatch('CVE-2026-88823')]};
+  const report={descriptor:{version:'test'},distro:{name:'alpine',version:'3.24.2'},matches:[],ignoredMatches:[gatewayMatch('CVE-2026-84786')]};
   assertScan(report,null,null,vex);
   assert.throws(()=>assertScan(report),/runtime assessment required/);
   for(const alter of [x=>x.vulnerability.id='CVE-2026-95691',x=>x.vulnerability.severity='Critical',
-    x=>x.artifact.purl=gatewayPurl('libcrypto3'),x=>x.artifact.purl=x.artifact.purl.replace('3.5.9-r0','3.5.9-r1'),
+    x=>x.artifact.purl=gatewayPurl('libcrypto3'),x=>x.artifact.purl=x.artifact.purl.replace('3.5.9-r1','3.5.9-r0'),
     x=>x.artifact.purl=x.artifact.purl.replace('alpine-3.24.2','alpine-3.25.0'),x=>x.artifact.type='deb',x=>x.appliedIgnoreRules=[]]){
     const changed=structuredClone(report);alter(changed.ignoredMatches[0]);assert.throws(()=>assertScan(changed,null,null,vex),/Unassessed/);
   }
@@ -247,7 +254,7 @@ test('gateway VEX suppresses only exact, High, VEX-applied Alpine package matche
     {hid_bound_files:undefined},{hid_bound_files:{...vex.hid_bound_files,'gateway/Dockerfile':'0'.repeat(64)}},
     {hid_bound_files:{...vex.hid_bound_files,'gateway/README.md':'0'.repeat(64)}}])
     assert.throws(()=>assertScan(report,null,null,{...vex,...change}));
-  assert.throws(()=>assertScan({...report,matches:[gatewayMatch('CVE-2026-88823')]},null,null,vex),/block publication/);
+  assert.throws(()=>assertScan({...report,matches:[gatewayMatch('CVE-2026-84786')]},null,null,vex),/block publication/);
 });
 test('only the gateway scan applies the committed VEX, and it keeps --fail-on high',()=>{
   for(const workflow of ['production-backend-images.yml','staging-backend-images.yml']){
@@ -285,8 +292,8 @@ test('the gateway VEX is read only for a gateway scan with ignored High rows; a 
   const root=gatewayFixture();
   try{
     const clean={descriptor:{version:'test'},distro:{name:'alpine',version:'3.24.2'},matches:[],ignoredMatches:[]};
-    const suppressed={...clean,ignoredMatches:[gatewayMatch('CVE-2026-88823')]};
-    const lowOnly={...clean,ignoredMatches:[{...gatewayMatch('CVE-2026-88823'),vulnerability:{id:'CVE-2026-88823',severity:'Medium'}}]};
+    const suppressed={...clean,ignoredMatches:[gatewayMatch('CVE-2026-84786')]};
+    const lowOnly={...clean,ignoredMatches:[{...gatewayMatch('CVE-2026-84786'),vulnerability:{id:'CVE-2026-84786',severity:'Medium'}}]};
     assert.deepEqual(loadGatewayVex('gateway',null,suppressed,root),JSON.parse(readFileSync(join(root,gatewayVexPath))));
     assert.equal(loadGatewayVex('ehr-api',null,suppressed,root),null);
     assert.equal(loadGatewayVex('gateway',{component:'gateway'},suppressed,root),null);
@@ -419,11 +426,17 @@ test('every production Dockerfile COPY source selects the component that copies 
   for(const c of components){
     const {dockerfile,target}=componentConfig(c);
     for(const source of imageInputs(dockerfile,target)){
-      const files=trackedFiles(source);
+      // A one-name pattern ("docs/codes/hid-medicines.jso[n]", an ORD-7 seed file not yet signed) is that one path,
+      // copied once it is committed: the path selects the component whether or not it is tracked yet.
+      const name=source.replace(/\[([^\]\\])\]$/,'$1');
+      if(name!==source&&!trackedFiles(name).length){
+        assert.ok(selectComponents([name]).includes(c),`${name} is copied into ${c} once committed but does not select it`);checked++;continue;
+      }
+      const files=trackedFiles(name);
       assert.ok(files.length,`${c}: ${source} is not tracked`);
       // A directory source also stands for any file added under it later.
-      const isFile=files.length===1&&files[0]===source;
-      for(const p of [isFile?source:`${source}/new-file`,...files]){
+      const isFile=files.length===1&&files[0]===name;
+      for(const p of [isFile?name:`${name}/new-file`,...files]){
         assert.ok(selectComponents([p]).includes(c),`${p} is copied into ${c} but does not select it`);checked++;
       }
     }
@@ -434,6 +447,10 @@ test('the image input parser sees the inputs that the selector map relies on',()
   const migration=imageInputs('services/ehr-api/Dockerfile','migration');
   for(const p of ['scripts/local-environment.mjs','services/ehr-api/database','services/ehr-api/scripts','services/ehr-api/package.json',
     'packages/api-client','packages/server-telemetry/src','services/ehr-api/Dockerfile']) assert.ok(migration.has(p),p);
+  // ORD-7: exactly the four catalogue files, by name (the seed files by their one-name pattern until signed).
+  assert.deepEqual([...migration].filter(p=>p.startsWith('docs/')),['docs/codes/catalog-approvals.json','docs/codes/hid-lab-codes.json',
+    'docs/codes/hid-medicines.jso[n]','docs/codes/hid-lab-tests.jso[n]']);
+  assert.deepEqual([...imageInputs('services/ehr-api/Dockerfile','runtime')].filter(p=>p.startsWith('docs/')),[]);
   assert.ok(!migration.has('services/ehr-api/src'));
   assert.ok(imageInputs('services/ehr-api/Dockerfile','runtime').has('services/ehr-api/src'));
   assert.ok(imageInputs('services/identity-api/Dockerfile','runtime').has('services/workload-token-agent/src'));
@@ -672,4 +689,15 @@ test('the select job reads the push base from the Actions API, not from the prev
   assert.ok(/permissions:\n\s+contents: read\n\s+actions: read\n/.test(select));
   assert.ok(select.includes('BASE_SHA: ${{ github.event.pull_request.base.sha }}\n'));
   assert.ok(!select.includes('github.event.before'));
+});
+// ORD-7's catalogue phase (scripts/production_deployment.py) runs only when a dispatch chooses it: a push deploys with
+// CATALOG_LOAD 'none', and the dispatch input defaults to it.
+test('the deploy job asks for the catalogue load only when a dispatch chooses it',()=>{
+  const text=readFileSync(join(repoRoot,'.github/workflows/production-backend-images.yml'),'utf8');
+  const inputs=text.slice(text.indexOf('  workflow_dispatch:'),text.indexOf('\npermissions:'));
+  assert.ok(/catalog_load:\n[^\n]*\n\s+type: choice\n\s+default: none\n\s+options: \[none, medicine, lab_test, 'medicine,lab_test'\]/.test(inputs));
+  const deploy=text.slice(text.indexOf('\n  deploy:\n'));
+  assert.equal(deploy.match(/CATALOG_LOAD: .*/g)?.join(),
+    "CATALOG_LOAD: ${{ github.event_name == 'workflow_dispatch' && inputs.catalog_load || 'none' }}");
+  assert.ok(!text.slice(0,text.indexOf('\n  deploy:\n')).includes('CATALOG_LOAD'));
 });

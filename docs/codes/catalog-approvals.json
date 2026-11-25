@@ -1,0 +1,5 @@
+{
+  "format": "hid-catalog-approvals/1",
+  "description": "The clinical lead's sign-off of each version of the national medicine and lab-test lists (owner decision Q124 A, 19 November 2026). The governed loader (services/ehr-api/scripts/load-catalog.mjs) loads a seed file only when an entry here names its sha256, kind and version, and records this file's own sha256 with the version. A medicine entry also records the owner's licence answers under \"licences\", each a reference to where the answer is kept: \"nigeriaEml8\" (the confirmation that the Nigeria EML 8th edition may be used), always; \"whoccAtc\" (the WHOCC terms answer), before a file with ATC codes is built or loaded. Each entry is added in a reviewed PR that records the lead's sign-off; no personal names here, only the reference to that record. The migration image carries this file, and in production the loader takes no other.",
+  "approvals": []
+}

@@ -132,6 +132,8 @@ function imageComponentsForPath(p) {
   if(p.startsWith('gateway/')) return ['gateway'];
   if(noImageSecurity.some(r=>r.test(p))) return [];
   if(p.startsWith('security/')) return components;
+  // The migration image carries docs/codes for ORD-7's governed catalogue load (services/ehr-api/Dockerfile).
+  if(p.startsWith('docs/codes/')) return ['database-migration'];
   if(noImageFiles.has(p)||noImageRoots.some(r=>p.startsWith(r))) return [];
   return components;
 }

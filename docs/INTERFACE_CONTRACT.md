@@ -7452,7 +7452,101 @@ Audit: every lookup writes one row naming the patient,
 (resource `*-work-item-collection`, the facility), with `requestedCount`,
 `foundCount`, the work item ids found and `breakGlass`, in the read's
 transaction. The Lab request row `api.lab.work-item.progress.request` is
-written as for other Lab routes.
+written as for other Lab routes. lab-api also writes its own
+`identity.authorization.check` row for the patient on each lookup.
+
+### Several patients in one call (decision 4, 20 November; no migration, not yet released)
+
+`POST /api/v1/pharmacy/work-items/progress/batch` and
+`POST /api/v1/lab/work-items/progress/batch` give the same read for several
+patients in one call, for "Ordered by me" (MY-1). Internal caller `ehr-api`
+only, the clinician's own credentials, `X-Facility-Id`, the same permission,
+`ReadOnlyPost`, each patient check reported to Identity as `GET`, `200` with
+`Cache-Control: no-store`, as above. `X-Purpose-Of-Use` must be
+`direct-care` (`400 PURPOSE_OF_USE_REQUIRED`); emergency reads keep the
+one-patient routes. ehr-api always sends both `X-HID-Own-Progress: 0133` and
+`X-HID-Own-Progress-Accepted: ord4` on the pharmacy call, and pharmacy-api
+reads them exactly as on the one-patient route, with the same answers by
+header. The lab call carries neither.
+
+Request: `{ "patients": [ { "patientId", "sourceEhrPrescriptionIds" } ] }`
+(lab: `sourceEhrOrderIds`). Each entry is exactly the one-patient body; 1-50
+patients; at most 100 ids in all; each patient once and each id once in the
+call (letter case ignored). Anything else is `400 VALIDATION_FAILED`.
+
+Each patient is decided as by a call of its own: one Identity check per
+patient (at most 4 at once, all within 2 seconds; a check not done by then
+is not read, and a patient not yet checked then is not checked; see the
+exception below). Only a patient Identity allowed is read, with the unchanged
+one-patient statement bound to that patient, under the row-level security
+above, all in one transaction; a decision with break-glass is never read
+here.
+
+Answer `200`: `{ "patients": [...] }`, one entry per patient asked, in the
+order asked, with `patientId` as sent and `outcome`:
+
+- `answered`, with `items` exactly as the one-patient answer;
+- `denied`, with `code` (`PHARMACY_ACCESS_DENIED`,
+  `LAB_WORK_ITEM_ACCESS_DENIED`, or Identity's own `403` code,
+  `IDENTITY_AUTHORIZATION_DENIED` when its refusal carried none), audited
+  `denied`; no items;
+- `unavailable`, with `code`: Identity's own code;
+  `IDENTITY_SERVICE_UNAVAILABLE` (Identity could not be reached);
+  `IDENTITY_AUTHORIZATION_DENIED` (Identity's problem or decision carried
+  no usable code); `PROGRESS_CHECK_TIME_LIMIT`; `PROGRESS_CHECK_FAILED`
+  (the check failed in any other way); or `INVALID_IDENTITY_RESPONSE` (a
+  decision with break-glass). Not audited as a denial; no items.
+
+A patient that is not `answered` changes nothing in another patient's
+entry, except through the shared 2-second limit: while 4 checks are still
+running, the patients after them wait, and a patient not checked within the
+2 seconds is `unavailable` (`PROGRESS_CHECK_TIME_LIMIT`) without a check.
+
+A refusal (a `403`, or a decision with `allowed` false) that completes
+after the 2 seconds is `unavailable` (`PROGRESS_CHECK_TIME_LIMIT`), with no
+`denied` row; Identity keeps its own row of the refusal. This is the
+designed outcome of the limit: the one-patient route, which waits up to
+Identity's 5 seconds, would have written a `denied` row.
+
+The whole call is refused as the one-patient route is (`401`,
+`403 FACILITY_ACCESS_DENIED`/`PERMISSION_DENIED`, `400`,
+`503 IDENTITY_SERVICE_UNAVAILABLE`); a database failure answers `5xx` with
+no patient answered (denials already written stay). These routes never
+answer `404`.
+
+Audit, per patient, as the one-patient lookup:
+`pharmacy.work-item.progress.read` / `lab.work-item.progress.read` naming
+the patient, with that patient's `requestedCount`, `foundCount`, work item
+ids and `breakGlass`, plus `"via": "batch"`, in the read's transaction; one
+`denied` row per denied patient, written before the read; lab-api's own
+`identity.authorization.check` for each patient checked (none for a patient
+not checked within the 2 seconds; a check stopped by the limit writes its
+row when it ends, which may be after the answer: `failure` when the limit
+aborted it, or the outcome of a decision Identity was already sending);
+Identity's rows and records-opened notice for each check it receives. Lab's
+request row is `api.lab.work-item.progress.batch.request`, once per call.
+Nothing new appears in the patient's access log.
+
+Deploying: an image without these routes answers `404 NOT_FOUND` before any
+check, and ehr-api then asks that service once per patient on the
+one-patient route: at most 6 one-patient calls at once for the page, across
+both kinds, when the caller passes one `OwnProgressSlots` to both (as
+"Ordered by me" does); otherwise at most 6 at once for each call of
+`pharmacyForPatients` or `labForPatients`. An ehr-api without this change
+keeps calling the one-patient routes, which do not change. Either image may
+be deployed, or rolled back, first.
+
+`pharmacyForPatients` and `labForPatients` also tell the caller each id's
+progress as soon as it is known (`onAnswer`): a draft at once, each
+patient when its entry in the batch answer, or its own one-patient call, is
+read. "Ordered by me" keeps each one, so at its page deadline only the
+patients not answered by then are `unknown`; on the one-patient fallback,
+one slow or stalled patient leaves the others answered, as before decision
+4, and a draft stays `not_received`.
+
+Runtime proof: `verify-order-routes-runtime.mjs` step 10c;
+`verify-own-facility-work-runtime.mjs` checks the header answers on this
+form too.
 
 ### ehr-api answers
 
@@ -7473,13 +7567,15 @@ the lab fields above (`status`, `receivedAt`, `collectedAt`, `lastResultAt`).
 `ownProgress.status` is also:
 - `not_received` for a draft (never sent, so not asked about);
 - `unknown` (all times `null`) when the pharmacy or laboratory could not be
-  asked or answered something unexpected: down, slower than 3 seconds,
-  refused, or a malformed answer. The EHR answer itself never fails because
-  of it.
+  asked or answered something unexpected: down, slower than 3 seconds (the
+  several-patient form waits 3.5 seconds for the whole answer, headers and
+  body), refused, or a malformed answer. The EHR answer itself never fails
+  because of it.
 
 ehr-api asks once per page (at most 100 ids per call), after its own read
-and audit, with the clinician's own credentials. Nothing else in these
-answers changes.
+and audit, with the clinician's own credentials. "Ordered by me" (MY-1) asks
+with the several-patient form, one call per kind for its page. Nothing else
+in these answers changes.
 
 Screen change (Akos frontend branch): show `ownProgress` on each order row,
 for example "Received 10:40", "Dispensed 11:05", "Sample taken 09:30",
@@ -9248,8 +9344,8 @@ and is audited as today, refusals included.
   /identity/access-requests`, purpose `healthcare-operations`), as before
   (Q111 A); they read jobs and publish a checked reading into the chart.
 - A doctor's own orders' progress (ORD-3): `POST /lab/work-items/progress`
-  and `POST /pharmacy/work-items/progress` need `ehr.lab-request.read` /
-  `ehr.prescription.read`, which doctors keep.
+  and `POST /pharmacy/work-items/progress` (and their `/batch` forms) need
+  `ehr.lab-request.read` / `ehr.prescription.read`, which doctors keep.
 - Activating a lab request still sends it to the hospital's own laboratory:
   that hand-off needs `lab.work-item.accept`, which doctors keep. 0133's
   automatic send to the own pharmacy uses its definer function and adds no
@@ -10237,7 +10333,8 @@ header without the first changes nothing. Which status wins:
 `accepted`, with `acceptedAt` equal to `receivedAt` (before ORD-4 it read
 `received`). The progress query is unchanged: the acceptance comes from the
 steps reader, in the statement that already gave the withdrawn flag. ORD-3's
-section has the full table.
+section has the full table. The several-patient form (ORD-3, decision 4)
+reads the two headers the same way.
 
 ehr-api sends both headers on the pharmacy call only (always; not a
 setting; the lab call is unchanged), knows `accepted`, and parses
@@ -11773,9 +11870,14 @@ works), and one sent with a different `since` is 400 `INVALID_CURSOR`.
 
 - `display`: the stored test or medicine name. `priority`: the lab request's;
   a prescription's 0125 priority when set, else `null`.
-- `ownProgress`: ORD-3's shapes and statuses, asked once per patient and kind
-  on the page (audited by ORD-3 as today), at most 6 calls at once and all
-  within 4 seconds; whatever has not answered by then is `unknown`.
+- `ownProgress`: ORD-3's shapes and statuses, asked once per kind for the
+  page with ORD-3's several-patient form (both kinds at once; audited per
+  patient by ORD-3), all within 4 seconds; a patient Identity refused or
+  could not check, and whatever has not answered by then, is `unknown`.
+  Against a pharmacy-api or lab-api without that form (`404`), ehr-api asks
+  once per patient and kind, at most 6 at once across the page, within the
+  same 4 seconds; each patient that answered by then keeps its answer, so
+  one slow or stalled patient is `unknown` alone. A draft is `not_received`.
 - `orderRoute`: the order's route summary (sections 21-24), `null` when it
   was read and there is none, and left out when it could not be read.
 - `patient`: the waiting-list card (EHR-C7); never a full Health ID.
