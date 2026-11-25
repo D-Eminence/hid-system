@@ -164,7 +164,9 @@ const acceptedMigrations = new Map([
   ['0149_catalog_medicines_and_lab_tests.sql', 'a92d10f221ab1cfadc1eca18c55fc6e7ef56d79e0280fc5f0bbc29633976eac9'],
   ['0150_doctors_start_readings_again.sql', 'b8e11941ec490653cc999fb6a32a184520388b9aae65b765efead1e903ee2fd6'],
   ['0151_sealed_qa_front_desk_and_nurse_logins.sql', 'abab517679255cec2d67aadae9d44f1b629e8e3e9ee30d77cfee33817b2c75f2'],
-  // ADT-1 (Release D), numbers provisional (given at merge, after 0152-0169 and the files cut before them), unsigned.
+  ['0152_catalog_diagnoses.sql', 'abfecc3571808e4ad29fdf8c1e202f65b3cdf890e9f3106b74bd6ef1bd19f9c9'],
+  ['0153_clinician_recent_diagnoses.sql', '45faa6a739056cc07426fdb5363b58c7dda1dbcbc096fb6d1769ae746798500b'],
+  // ADT-1 (Release D), numbers provisional (given at merge, after 0154-0169 and the files cut before them), unsigned.
   ['0170_inpatient_wards_and_beds.sql', 'b5fa2ffe1f63400c95db5906b6e4b8c31cfe31fec517f4f761dd02f725a4c520'],
   ['0171_inpatient_admissions_and_discharge.sql', '2ebfa6cfe8283764c6812d7ea6fa00001611d54bef8a8ed8c2fabd50235f4e9d'],
   ['0172_inpatient_admission_charges.sql', 'cfcc828ad32296c42dbfdaa83eca07c23ce8911f74d3dd2fc24a33e2851758e1'],

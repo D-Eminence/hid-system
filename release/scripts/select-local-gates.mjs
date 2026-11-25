@@ -74,6 +74,13 @@ export const CONFIG_READERS = Object.freeze({
   'config/production-schema-compatibility.json': Object.freeze([]),
 })
 
+// The docs/codes files the EHR migration image carries, by name (services/ehr-api/Dockerfile; ORD-7's catalogue
+// load reads them there). verify-container-platform.mjs, part of npm run verify, checks the image carries exactly
+// these, so a change to one runs the build and verify gate as well as the staging preparation tests; any other
+// docs/codes file (a draft list) never ships and runs those tests only.
+export const MIGRATION_IMAGE_CODES = Object.freeze(['docs/codes/catalog-approvals.json', 'docs/codes/hid-lab-codes.json',
+  'docs/codes/hid-medicines.json', 'docs/codes/hid-lab-tests.json'])
+
 const EFFECTS = Object.freeze(['go', 'build-verify', 'test', 'staging-preparation', 'migration-rehearsal'])
 
 // Root package.json scripts that run repository scripts during the build,
@@ -137,6 +144,7 @@ export function classifyPath(path, { verifyScripts = verificationScripts() } = {
     if (REHEARSAL_SCRIPTS.includes(path)) effects.add('migration-rehearsal')
     return { rule: 'repository scripts', effects: [...effects] }
   }
+  if (MIGRATION_IMAGE_CODES.includes(path)) return { rule: 'catalogue files the EHR migration image carries', effects: ['build-verify', 'staging-preparation'] }
   if (path === 'docs/INTERFACE_CONTRACT.md' || path.startsWith('docs/codes/')) return { rule: 'documents read by the staging preparation tests', effects: ['staging-preparation'] }
   if (path.startsWith('docs/') || path === 'README.md' || path === 'CODEX.md') return { rule: 'documentation (secret scan only)', effects: [] }
   if (path === '.dockerignore') return { rule: 'container build context', effects: ['build-verify'] }

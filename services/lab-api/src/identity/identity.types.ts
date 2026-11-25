@@ -18,6 +18,8 @@ export interface AuthorizationRequest {
   scope: RecordAccessScope;
   purpose: PurposeOfUse;
   context: DataAccessContext;
+  /** Ends the check early: the batch progress read's time budget (decision 4). */
+  signal?: AbortSignal;
 }
 
 export interface AuthorizationDecision {

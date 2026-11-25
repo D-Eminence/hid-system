@@ -575,7 +575,7 @@ try {
   const notLoaded = { available: false, version: null, approvedAt: null, fileSha256: null };
   const statusBefore = await catalogGet(doctor, '/status');
   assert.deepEqual(expectStatus(statusBefore, 200, 'catalogue status before a list is loaded'), {
-    medicines: notLoaded, labTests: notLoaded, diagnoses: { available: false, release: null },
+    medicines: notLoaded, labTests: notLoaded, diagnoses: { available: false, release: null, fileSha256: null },
     labTestNameOnly: false, diagnosisNameOnly: false, classDuplicateCheck: false, attribution: [] },
   'before a signed list is loaded nothing is available');
   assert.equal(statusBefore.headers.get('cache-control'), 'private, max-age=60',
@@ -611,7 +611,7 @@ try {
     [[medicineVersion, labVersion]]);
   const loaded = seed => ({ available: true, version: '2026.1', approvedAt: '2026-12-01', fileSha256: seed.repeat(64) });
   assert.deepEqual(expectStatus(await catalogGet(ownPharmacist, '/status'), 200, 'catalogue status after a list'),
-    { medicines: loaded('a'), labTests: loaded('b'), diagnoses: { available: false, release: null }, labTestNameOnly: false,
+    { medicines: loaded('a'), labTests: loaded('b'), diagnoses: { available: false, release: null, fileSha256: null }, labTestNameOnly: false,
       diagnosisNameOnly: false, classDuplicateCheck: false, attribution: [loincNotice] },
   'a loaded list is available with its version, its sign-off day (Lagos), its seed file and its sources\' notices');
   const firstAmox = expectStatus(await catalogGet(doctor, '/medicines?q=Amox&limit=1'), 200, 'doctor searches medicines');
@@ -673,6 +673,189 @@ try {
       'dose form', 'no permission', 'patient'], auditRows: { success: 0, refusals: catalogAudit.length, searchText: 0 } };
   step('ORD-7: short text, a Health ID, a NIN, an unknown form, a missing permission and a patient are refused and '
     + 'never kept; only refusals are audited, never with the search text');
+
+  // ── ORD-9 (0152), first slice: the ICD-11 diagnosis search ──
+  // Loaded as the governed loader loads it: the release (still loading, with the approvals file's sha256), its
+  // entries, then the switch, which seals it (0149, 0152).
+  const icdNotice = 'Synthetic notice: ICD-11, World Health Organization, CC BY-ND 3.0 IGO.';
+  const diagnosisVersion = randomUUID();
+  await owner.query(`insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference,
+      approvals_sha256, approved_at, attribution) values ($1, 'diagnosis', '2026-01', repeat('d', 64),
+      'synthetic sign-off reference', repeat('1', 64), '2026-12-01T09:00:00+01:00', $2)`, [diagnosisVersion, [icdNotice]]);
+  await owner.query(`insert into ehr.catalog_diagnoses (version_id, code, title, other_names, chapter, residual) values
+    ($1, '1F40', 'Malaria due to Plasmodium falciparum', 'falciparum malaria', '01', false),
+    ($1, 'KA64.20', 'Congenital falciparum malaria', '', '19', false),
+    ($1, '1A07', 'Typhoid fever', 'enteric fever; typhoid', '01', false)`, [diagnosisVersion]);
+  await owner.query('update ehr.catalog_versions set active = true where id = $1', [diagnosisVersion]);
+  const terminologyGet = (who, path) => http(ehr, 'GET', `/ehr/terminology${path}`, { cookie: who.cookie,
+    facility: who.facilityId });
+  const falciparum = await terminologyGet(doctor, '/diagnoses?q=falciparum&limit=5');
+  assert.deepEqual(expectStatus(falciparum, 200, 'doctor searches diagnoses'), { release: 'ICD-11 MMS 2026-01',
+    more: false, typedIcd10: null, results: [
+      { codeSystem: 'ICD-11', code: '1F40', display: 'Malaria due to Plasmodium falciparum', matchedName: 'falciparum malaria' },
+      { codeSystem: 'ICD-11', code: 'KA64.20', display: 'Congenital falciparum malaria', matchedName: null }] },
+  'the doctor finds 1F40 first, named by our other name, then the shorter title');
+  assert.equal(falciparum.headers.get('cache-control'), 'private, max-age=60', 'a diagnosis answer is kept a minute');
+  assert.deepEqual(expectStatus(await terminologyGet(doctor, '/diagnoses?q=B50.9'), 200, 'an ICD-10 code typed'),
+    { release: null, more: false, results: [], typedIcd10: { codeSystem: 'ICD-10', code: 'B50.9' } },
+  'an ICD-10 code typed is named back as ICD-10, with no title');
+  const healthIdAsDiagnosis = await terminologyGet(doctor, `/diagnoses?q=${encodeURIComponent(patient.hid)}`);
+  assert.deepEqual([healthIdAsDiagnosis.status, healthIdAsDiagnosis.body?.code, healthIdAsDiagnosis.headers.get('cache-control')],
+    [400, 'CATALOG_SEARCH_TEXT_NOT_ALLOWED', 'private, no-store'], 'a Health ID as a diagnosis search is refused, never kept');
+  const noDiagnosisPermission = await terminologyGet(ownPharmacist, '/diagnoses?q=malaria');
+  assert.equal(noDiagnosisPermission.status, 403, `a pharmacist who records no diagnosis is refused: ${noDiagnosisPermission.status}`);
+  const statusWithDiagnoses = expectStatus(await catalogGet(doctor, '/status'), 200, 'status with a diagnosis release');
+  assert.deepEqual(statusWithDiagnoses.diagnoses, { available: true, release: 'ICD-11 MMS 2026-01', fileSha256: 'd'.repeat(64) },
+    'the status names the loaded ICD-11 release');
+  assert.ok(statusWithDiagnoses.attribution.includes(icdNotice), 'the ICD-11 notice is shown with the others');
+  evidence.diagnoses = { searched: ['falciparum: 1F40 first, by our other name', 'B50.9: typed ICD-10'],
+    refused: ['Health ID', 'no ehr.diagnosis.write'], status: 'ICD-11 MMS 2026-01' };
+  step('ORD-9: the doctor finds a diagnosis by a word or our other name, an ICD-10 code typed is named back, a Health ID '
+    + 'and a member without the permission are refused; the status names the release');
+
+  // ── ORD-9 (0153): the doctor's recent diagnoses ──
+  // Written by ehr-api in each diagnosis save's transaction; read with no X-Purpose-Of-Use (no patient).
+  const recentGet = (who, query = '') => terminologyGet(who, `/diagnoses/recent${query}`);
+  const recentBefore = await recentGet(doctor);
+  assert.deepEqual(expectStatus(recentBefore, 200, 'recent diagnoses before any pick'), { items: [] },
+    'before any diagnosis is saved the recent list is empty');
+  assert.equal(recentBefore.headers.get('cache-control'), 'private, no-store', 'the recent list is never kept');
+  const saveDiagnosis = (code, display, key = freshKey('diagnosis')) => ehrCall(doctor, 'POST', `${enc}/diagnoses`,
+    { codeSystem: 'ICD-11', code, display, clinicalStatus: 'active', verificationStatus: 'provisional' }, { key });
+  const malariaKey = freshKey('diagnosis');
+  expectStatus(await saveDiagnosis('1F40', 'Malaria due to Plasmodium falciparum', malariaKey), 201, 'first diagnosis');
+  expectStatus(await saveDiagnosis('1A07', 'Typhoid fever'), 201, 'second diagnosis');
+  expectStatus(await saveDiagnosis('1F40', 'Malaria due to Plasmodium falciparum'), 201, 'the first again');
+  const replay = await saveDiagnosis('1F40', 'Malaria due to Plasmodium falciparum', malariaKey);
+  assert([200, 201].includes(replay.status), `a replayed save answers from its key: ${replay.status}`);
+  const recentAfter = expectStatus(await recentGet(doctor), 200, 'recent diagnoses after three picks');
+  assert.deepEqual(recentAfter.items.map(item => [item.codeSystem, item.code, item.display, item.useCount]), [
+    ['ICD-11', '1F40', 'Malaria due to Plasmodium falciparum', 2], ['ICD-11', '1A07', 'Typhoid fever', 1]],
+  'newest first, the same pick counted twice, the replay not counted');
+  assert.ok(recentAfter.items.every(item => !Number.isNaN(Date.parse(item.lastUsedAt))), 'each pick says when');
+  assert.deepEqual(expectStatus(await recentGet(doctor, '?limit=1'), 200, 'limit 1').items.map(item => item.code),
+    ['1F40'], 'limit 1 gives the newest pick');
+  const badLimit = await recentGet(doctor, '?limit=51');
+  assert.deepEqual([badLimit.status, badLimit.body?.code], [400, 'VALIDATION_FAILED'], 'limit 51 is refused');
+  const pharmacistRecent = await recentGet(ownPharmacist);
+  assert.equal(pharmacistRecent.status, 403, `a member who records no diagnosis is refused: ${pharmacistRecent.status}`);
+  const recentRows = await all(`select membership_id::text as membership_id, code from ehr.clinician_recent_diagnoses
+    order by code`);
+  assert.deepEqual(recentRows.map(row => row.code), ['1A07', '1F40'], 'two picks are held');
+  assert.equal(new Set(recentRows.map(row => row.membership_id)).size, 1, 'all for the doctor\'s one membership');
+  const recentColumns = await all(`select column_name from information_schema.columns
+    where table_schema = 'ehr' and table_name = 'clinician_recent_diagnoses' and column_name like '%patient%'`);
+  assert.deepEqual(recentColumns, [], 'the recent list holds no patient');
+  const recentAudit = await all(`select details from audit.events where action = 'ehr.terminology.recent-read'
+    and outcome = 'success' order by occurred_at, sequence_id`);
+  assert.deepEqual(recentAudit.map(row => row.details), [{ resultCount: 0 }, { resultCount: 2 }, { resultCount: 1 }],
+    'each read is audited with the count only');
+  assert.equal(Number((await one(`select count(*) from audit.events where action = 'ehr.terminology.recent-read'
+    and (details::text like '%1F40%' or details::text like '%Malaria%')`)).count), 0, 'no audit row holds a pick');
+  evidence.recentDiagnoses = { picks: ['1F40 x2', '1A07 x1'], replayCounted: false, limitOne: '1F40',
+    refused: ['limit 51', 'no ehr.diagnosis.write'], auditRows: recentAudit.length };
+  step('ORD-9: each diagnosis the doctor saves joins their recent list (newest first, counted, a replay not), read '
+    + 'with no purpose of use and never kept; audited with the count only; a member without the permission is refused');
+
+  // ── ORD-9 (0153): the record never waits, with two sessions ──
+  // Two connections as ehr-api connects (its runtime URL and role), each with the doctor's settings as a
+  // diagnosis save sets them. Session A records 1F40, a pick the doctor already has, and keeps its transaction
+  // open. Checked: A then holds the membership's recording lock (in pg_locks) and 1F40's row (the owner's
+  // FOR UPDATE NOWAIT on that row is refused with 55P03). Session B, with lock_timeout 1500 ms, then records for
+  // the same membership, each in a transaction of its own, first the same pick, 1F40, then a different one,
+  // KA64.20, which has no row yet: each must come back in under 500 ms, record nothing and raise nothing. Once
+  // A commits, B records both in one transaction and both are kept.
+  // B recording A's pick first is what catches a record that waits on A's row: a FOR UPDATE row lock on the
+  // pick, or on all the membership's picks, taken before the try, or the try's result ignored (the upsert then
+  // waits for A's row), raises 55P03 after about 1500 ms here; so does a blocking "pg_advisory_xact_lock" on
+  // the membership's key taken before the try. KA64.20 catches a record that ignores the try's result and
+  // skips only a pick whose row is locked: it records KA64.20 while A is open.
+  const doctorMember = await one(`select account.subject, membership.id::text as membership_id
+    from auth.accounts account join identity.staff_facility_memberships membership on membership.account_id = account.id
+    where account.id = $1 and membership.facility_id = $2 and membership.active`, [doctor.accountId, hospital.facilityId]);
+  assert.equal(doctorMember?.membership_id, recentRows[0].membership_id, 'the picks are the doctor\'s membership\'s');
+  const picksHeld = async () => Object.fromEntries((await all(`select code, use_count from ehr.clinician_recent_diagnoses
+    where membership_id = $1 order by code`, [doctorMember.membership_id])).map(row => [row.code, row.use_count]));
+  const asDoctorInSave = client => client.query(`select set_config('app.actor_subject', $1, true),
+      set_config('app.facility_id', $2, true), set_config('app.correlation_id', $3, true),
+      set_config('app.membership_id', $4, true), set_config('app.purpose_of_use', 'direct-care', true)`,
+  [doctorMember.subject, hospital.facilityId, `verifier-recent-${randomUUID()}`, doctorMember.membership_id]);
+  const recordPick = (client, code, display) => client.query('select ehr.record_recent_diagnosis($1, $2, $3)',
+    ['ICD-11', code, display]);
+  const rowLockRefusal = async code => {
+    try {
+      await one(`select 1 from ehr.clinician_recent_diagnoses where membership_id = $1 and code_system = 'ICD-11'
+        and code = $2 for update nowait`, [doctorMember.membership_id, code]);
+      return 'none';
+    } catch (error) {
+      return error.code;
+    }
+  };
+  const sessionA = new Client({ connectionString: databaseUrl('hid_ehr_api_runtime'), query_timeout: 15_000 });
+  const sessionB = new Client({ connectionString: databaseUrl('hid_ehr_api_runtime'), query_timeout: 15_000 });
+  // B records one pick in a transaction of its own while A is open: at once, nothing recorded, no error.
+  const recordAsBWhileAOpen = async (code, display) => {
+    await sessionB.query('begin');
+    await asDoctorInSave(sessionB);
+    const started = performance.now();
+    let failed;
+    try {
+      await recordPick(sessionB, code, display);
+    } catch (error) {
+      failed = error;
+    }
+    const tookMs = Math.round(performance.now() - started);
+    await sessionB.query(failed ? 'rollback' : 'commit');
+    assert.equal(failed, undefined, `while A is open, B's record of ${code} raised ${failed?.code} after ${tookMs} ms `
+      + `(${failed?.message}): the record waited for A`);
+    assert(tookMs < 500, `while A is open, B's record of ${code} took ${tookMs} ms: the record waited for A`);
+    assert.deepEqual(await picksHeld(), { '1A07': 1, '1F40': 2 },
+      `B recorded nothing of ${code} while A held the lock`);
+    return { code, returnedAfterMs: tookMs, error: null, recorded: false };
+  };
+  try {
+    await sessionA.connect();
+    await sessionB.connect();
+    const roleA = (await sessionA.query('select current_user as role, pg_backend_pid() as pid')).rows[0];
+    const roleB = (await sessionB.query('select current_user as role')).rows[0];
+    assert.deepEqual([roleA.role, roleB.role], ['hid_ehr_api_runtime', 'hid_ehr_api_runtime'], 'both as the EHR runtime');
+    await sessionB.query("select set_config('lock_timeout', '1500ms', false)");
+    assert.equal((await sessionB.query('show lock_timeout')).rows[0].lock_timeout, '1500ms', 'B waits at most 1500 ms');
+    assert.deepEqual(await picksHeld(), { '1A07': 1, '1F40': 2 }, 'the picks before the two sessions');
+
+    await sessionA.query('begin');
+    await asDoctorInSave(sessionA);
+    await recordPick(sessionA, '1F40', 'Malaria due to Plasmodium falciparum');
+    const heldByA = await one(`select count(*)::int as n from pg_locks lock_row where lock_row.pid = $1
+      and lock_row.locktype = 'advisory' and lock_row.granted and lock_row.classid = 7409 and lock_row.objsubid = 2
+      and lock_row.objid::bigint = (hashtext($2)::bigint & 4294967295)`, [roleA.pid, doctorMember.membership_id]);
+    assert.equal(heldByA.n, 1, 'session A, still open, holds the membership\'s recording lock');
+    assert.equal(await rowLockRefusal('1F40'), '55P03', 'session A, still open, holds 1F40\'s row');
+
+    const samePick = await recordAsBWhileAOpen('1F40', 'Malaria due to Plasmodium falciparum');
+    const otherPick = await recordAsBWhileAOpen('KA64.20', 'Congenital falciparum malaria');
+
+    await sessionA.query('commit');
+    assert.deepEqual(await picksHeld(), { '1A07': 1, '1F40': 3 }, 'A\'s pick is kept once A commits');
+    await sessionB.query('begin');
+    await asDoctorInSave(sessionB);
+    await recordPick(sessionB, '1F40', 'Malaria due to Plasmodium falciparum');
+    await recordPick(sessionB, 'KA64.20', 'Congenital falciparum malaria');
+    await sessionB.query('commit');
+    assert.deepEqual(await picksHeld(), { '1A07': 1, '1F40': 4, 'KA64.20': 1 },
+      'after A commits, B\'s records of the same pick and the other are kept');
+    evidence.recentNeverWaits = { sessions: 'two, as hid_ehr_api_runtime', lockTimeoutMs: 1500,
+      heldByA: ['recording lock', '1F40 row'], whileAOpen: [samePick, otherPick],
+      afterACommits: { recorded: ['1F40', 'KA64.20'] } };
+  } finally {
+    await sessionA.end().catch(() => {});
+    await sessionB.end().catch(() => {});
+  }
+  const [samePickMs, otherPickMs] = evidence.recentNeverWaits.whileAOpen.map(pick => pick.returnedAfterMs);
+  step(`ORD-9: the record never waits: while one save of the doctor's holds the recording lock and the row of the `
+    + `pick it recorded, another records that same pick (${samePickMs} ms) and then a different one `
+    + `(${otherPickMs} ms) for the same membership at once (lock_timeout 1500 ms), without recording and without `
+    + 'an error; once the first commits, both are kept');
 
   evidence.elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
   evidence.status = 'passed';
