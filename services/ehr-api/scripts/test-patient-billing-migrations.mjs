@@ -2,15 +2,16 @@
 // BILL-1 (0162-0167): each migration's own mechanics, and the two things a
 // rolled-back SQL suite cannot show (two sessions at once). Runs only against
 // a disposable local PostgreSQL cluster reached by a Unix socket under /tmp or
-// /var/tmp, with fictional data, from a template database at 0151 built by
+// /var/tmp, with fictional data, from a template database at the live schema
+// (0001-0153 since backend release E; the files need 0001-0151) built by
 // the release's runner as a NOSUPERUSER NOBYPASSRLS owner:
 //
 //   HID_BILLING_MECHANICS_LOCAL_CLUSTER=socket PGHOST=/var/tmp/... PGPORT=... PGUSER=<superuser> \
-//   HID_BILLING_MECHANICS_TEMPLATE=<db at 0151> HID_BILLING_MECHANICS_OWNER=<its owner> \
+//   HID_BILLING_MECHANICS_TEMPLATE=<db at the live schema> HID_BILLING_MECHANICS_OWNER=<its owner> \
 //   node services/ehr-api/scripts/test-patient-billing-migrations.mjs
 //
 // Checked, for each of 0162-0167:
-//   1. preconditions: on 0151 alone (without the earlier BILL-1 files), each
+//   1. preconditions: on the live schema alone (without the earlier BILL-1 files), each
 //      of 0163-0167 refuses 55000 with a message that begins with its number,
 //      and nothing is applied;
 //   2. locks first, NOWAIT: with a second session holding a table the file
@@ -82,12 +83,12 @@ const applied = async (database, file) => {
   } finally { await connection.end(); }
 };
 
-// 1. Preconditions on 0151 alone.
+// 1. Preconditions on the live schema alone.
 await copy('hid_bill_pre');
 for (const file of files.slice(1)) {
   const number = file.slice(0, 4);
   const [status, sqlstate, message] = apply('hid_bill_pre', file);
-  assert.notEqual(status, 0, `${number} applied on 0151 alone`);
+  assert.notEqual(status, 0, `${number} applied on the live schema alone`);
   assert.equal(sqlstate, '55000', `${number} precondition: ${sqlstate} ${message}`);
   assert(message.startsWith(`${number}: `), `${number} precondition message: ${message}`);
   results[`${number}_precondition`] = message;
