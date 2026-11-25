@@ -98,6 +98,11 @@
 -- 55P03 beginning "0161: " and ending "run the release again at a quieter
 -- time" (the runner's dry-run retry), nothing applied.
 --
+-- Both outboxes have row-level security enabled but not forced, no policy and
+-- no privilege for any role but their owner: an explicit exception, as 0160's
+-- tables and 0135's ehr.visit_queue (only the functions below, as the owner,
+-- read or write them). The post-checks hold it.
+--
 -- Old images on this schema: nothing calls the new functions, and only the new
 -- ehr-api books (so only it makes notices). An old identity-api drains nothing
 -- (the emails wait until the new one runs); its Platform controls read the
@@ -114,11 +119,17 @@
 --    CHECK and the bodies it replaces or calls md5-pinned; exactly the 11
 --    controls.
 -- 2. B1-B6.
--- 3. Post-checks: platform.control_enabled minus its one change is the pinned
---    body, its owner, grants and settings unchanged; the control is off and
---    FORCE is as it was; exactly one audit row (platform.control.add, as the
---    system actor, naming the control key only); grants exactly as
---    runtime-grants.sql.
+-- 3. Post-checks (0148's and 0152's form): platform.control_enabled minus its
+--    one change is the pinned body, its owner, grants and settings unchanged;
+--    the control is off and FORCE is as it was; the control key CHECK it
+--    rewrote is exactly the 11 keys and this one, validated; the two outboxes
+--    are the owner's (as 0160's), row-level security enabled and not forced,
+--    no policy, no privilege for another role, and they own no sequence; the
+--    nine functions are the owner's; the notice trigger by tgtype, its WHEN
+--    condition (tgqual, compared as the whole definition), tgattr, tgnargs,
+--    tgfoid and tgenabled, with 0160's two triggers the only others on the
+--    history; exactly one audit row (platform.control.add, as the system
+--    actor, naming the control key only); grants exactly as runtime-grants.sql.
 
 do $appt0161$
 declare
@@ -870,13 +881,69 @@ begin
      is distinct from v_was_forced then
     raise exception using errcode = '55000', message = '0161: post-check failed (platform.control_settings FORCE changed)';
   end if;
+  -- The control key CHECK this file rewrote: exactly 0115's eleven keys and this one, validated.
+  if (select pg_get_constraintdef(constraint_row.oid) from pg_constraint constraint_row
+       where constraint_row.conrelid = 'platform.control_settings'::regclass
+         and constraint_row.conname = 'control_settings_control_key_check' and constraint_row.contype = 'c'
+         and constraint_row.convalidated)
+     is distinct from 'CHECK ((control_key = ANY (ARRAY[''patient_portal_enabled''::text, ''provider_portal_enabled''::text, ''outreach_portal_enabled''::text, ''maintenance_mode''::text, ''uploads_enabled''::text, ''break_glass_enabled''::text, ''provider_self_service_enabled''::text, ''staff_invitations_enabled''::text, ''cross_facility_orders_enabled''::text, ''cross_facility_route_access_enabled''::text, ''outreach_organiser_signup_enabled''::text, ''appointment_sms_reminders_enabled''::text])))'
+     or (select count(*) from pg_constraint constraint_row
+          where constraint_row.conrelid = 'platform.control_settings'::regclass
+            and constraint_row.conname = 'control_settings_control_key_check') <> 1 then
+    raise exception using errcode = '55000', message = '0161: post-check failed (the control key CHECK)';
+  end if;
+  -- The two outboxes: plain tables of the owner (v_owner, as 0160's), row-level security enabled and not forced (the
+  -- exception the header states), no policy, no privilege for any role but the owner; and they own no sequence.
   if exists (select 1 from pg_class class_row, lateral aclexplode(coalesce(class_row.relacl, acldefault('r', class_row.relowner))) acl
               where class_row.oid in ('ehr.appointment_email_outbox'::regclass, 'ehr.appointment_sms_outbox'::regclass)
                 and acl.grantee <> class_row.relowner)
      or (select count(*) from pg_class
           where oid in ('ehr.appointment_email_outbox'::regclass, 'ehr.appointment_sms_outbox'::regclass)
-            and relrowsecurity) <> 2 then
-    raise exception using errcode = '55000', message = '0161: post-check failed (a new table is granted to a role or lacks row-level security)';
+            and relkind = 'r' and relrowsecurity and not relforcerowsecurity
+            and relowner = (select role_row.oid from pg_roles role_row where role_row.rolname = v_owner)) <> 2
+     or exists (select 1 from pg_policy policy_row
+                 where policy_row.polrelid in ('ehr.appointment_email_outbox'::regclass, 'ehr.appointment_sms_outbox'::regclass))
+     or exists (select 1 from pg_depend dependency join pg_class sequence_row on sequence_row.oid = dependency.objid
+                 where dependency.classid = 'pg_class'::regclass and dependency.refclassid = 'pg_class'::regclass
+                   and dependency.refobjid in ('ehr.appointment_email_outbox'::regclass, 'ehr.appointment_sms_outbox'::regclass)
+                   and dependency.deptype in ('a', 'i') and sequence_row.relkind = 'S') then
+    raise exception using errcode = '55000',
+      message = '0161: post-check failed (a new table is granted to a role, is not the owner''s, owns a sequence, or its row-level security is not enabled and unforced without a policy)';
+  end if;
+  -- The nine functions are the owner's.
+  if (select count(*) from pg_proc proc
+       where proc.oid in (to_regprocedure('ehr.appointment_notice(uuid, text, timestamptz)'),
+                          to_regprocedure('ehr.appointment_events_notify()'),
+                          to_regprocedure('ehr.appointment_send_reminders(integer)'),
+                          to_regprocedure('ehr.appointment_my_list(uuid, text, integer, timestamptz, uuid)'),
+                          to_regprocedure('identity.appointment_call_list(date, uuid, uuid)'),
+                          to_regprocedure('identity.appointment_sms_claim(integer)'),
+                          to_regprocedure('identity.appointment_sms_record(uuid, text, text)'),
+                          to_regprocedure('identity.appointment_email_claim(text, integer, integer)'),
+                          to_regprocedure('identity.appointment_email_record(uuid, text, text, text)'))
+         and proc.proowner = (select role_row.oid from pg_roles role_row where role_row.rolname = v_owner)) <> 9 then
+    raise exception using errcode = '55000', message = '0161: post-check failed (a function is not the owner''s)';
+  end if;
+  -- The notice trigger, 0152's form (pg_trigger.tgtype 5: after insert for each row), with its WHEN condition
+  -- (tgqual: a type-only check would miss a changed or dropped WHEN, so the whole definition is compared), no column
+  -- list (tgattr), no arguments, enabled in origin mode, running this file's function; and 0160's two triggers on the
+  -- history are still the only others there.
+  if (select count(*) from pg_trigger trigger_row
+       where not trigger_row.tgisinternal and trigger_row.tgrelid = 'ehr.appointment_events'::regclass
+         and trigger_row.tgname = 'appointment_events_notify' and trigger_row.tgtype = 5
+         and trigger_row.tgqual is not null and trigger_row.tgattr = ''::int2vector and trigger_row.tgnargs = 0
+         and trigger_row.tgenabled = 'O' and trigger_row.tgfoid = 'ehr.appointment_events_notify()'::regprocedure
+         and pg_get_triggerdef(trigger_row.oid) = 'CREATE TRIGGER appointment_events_notify AFTER INSERT ON '
+           || 'ehr.appointment_events FOR EACH ROW WHEN ((new.kind = ANY (ARRAY[''booked''::text, '
+           || '''rescheduled''::text, ''cancelled''::text]))) EXECUTE FUNCTION ehr.appointment_events_notify()') <> 1
+     or (select string_agg(trigger_row.tgname || ' ' || trigger_row.tgtype, ',' order by trigger_row.tgname collate "C")
+           from pg_trigger trigger_row
+          where not trigger_row.tgisinternal and trigger_row.tgrelid = 'ehr.appointment_events'::regclass)
+        is distinct from 'appointment_events_immutable 27,appointment_events_no_truncate 34,appointment_events_notify 5'
+     or exists (select 1 from pg_trigger trigger_row
+                 where not trigger_row.tgisinternal
+                   and trigger_row.tgrelid in ('ehr.appointment_email_outbox'::regclass, 'ehr.appointment_sms_outbox'::regclass)) then
+    raise exception using errcode = '55000', message = '0161: post-check failed (the notice trigger)';
   end if;
   if exists (select 1 from pg_proc proc, lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
               where proc.oid in ('ehr.appointment_send_reminders(integer)'::regprocedure,

@@ -2109,6 +2109,12 @@ revoke all on function
   ehr.appointment_idempotency(uuid, text, text),
   ehr.appointment_events_immutable() from public;
 revoke all on ehr.appointment_settings, ehr.appointment_clinics, ehr.appointments, ehr.appointment_events from public;
+-- The history's identity sequence (sequence_no): 0160 grants nothing on it and
+-- only the history's owner uses it, but the schema-wide grants above (USAGE and
+-- SELECT on all sequences in schema ehr, to hid_ehr_runtime and to
+-- hid_schema_test_runtime) would give both its last_value, a platform-wide
+-- count of appointment events, and nextval. Taken back here, after them.
+revoke all on sequence ehr.appointment_events_sequence_no_seq from hid_ehr_runtime, hid_schema_test_runtime;
 
 -- Appointment notices, reminders, the portal list and the call list (0161,
 -- APPT-1 of Release D; built at the recommended options Q-APPT-3 A and

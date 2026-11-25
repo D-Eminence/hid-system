@@ -68,11 +68,16 @@
 --                              when, when the reminder went (0161), row version.
 -- A4 ehr.appointment_events    one row per booking, change or check-in, with
 --                              the Idempotency-Key and the request's SHA-256
---                              (unique per membership and key). A trigger
---                              refuses any update or delete.
+--                              (unique per membership and key). Triggers
+--                              refuse any update, delete or truncate, even by
+--                              the owner.
 --    All four have row-level security enabled and no policy or privilege for
 --    any runtime role: only the functions below read or write them, as their
---    owner (0135's rule).
+--    owner (0135's rule). Row-level security is enabled but not forced, an
+--    explicit exception as on 0135's ehr.visit_queue (and 0148's and 0153's
+--    tables): no role but the owner holds any privilege on them, and the owner
+--    is the role the definers run as, so forcing it would only make every
+--    definer need an owner policy. The post-checks hold all of this.
 -- A5 auth.permissions          ehr.appointment.read and ehr.appointment.write.
 --    auth.role_permissions     seven rows (Q-APPT-5 A): receptionist, doctor
 --                              and clinician read and write; nurse read. Admin
@@ -154,11 +159,18 @@
 --    code yet; the waiting-list basis CHECK as 0135 left it, or with plain
 --    values another lane added after 'search' and 'own_facility'.
 -- 2. A1-A8.
--- 3. Post-checks: the four roles hold exactly their pinned codes plus this
---    file's; every other role row is unchanged; the CHECK is the new one; the
---    tables have row-level security and no privilege; the functions are
---    SECURITY DEFINER with the fixed search_path and EXECUTE only for
---    hid_ehr_runtime; exactly seven audit rows of this file.
+-- 3. Post-checks (0148's and 0152's form): the seven appointment role rows
+--    exactly, and every other role row as it was before this file (so the
+--    four roles hold what they held plus this file's codes); the CHECK is the
+--    found one with 'appointment' after 'own_facility'; the four tables are
+--    the owner's (the owner of 0135's functions), with row-level security
+--    enabled and not forced, no policy and no privilege for another role; the
+--    one sequence they own (the history's sequence_no) is the owner's and
+--    granted to no other role; the history's two triggers by tgtype, tgqual,
+--    tgattr, tgnargs, tgfoid and tgenabled, and its trigger function's body;
+--    the 18 functions are the owner's, the 13 entry points SECURITY DEFINER
+--    with the fixed search_path and EXECUTE only for hid_ehr_runtime; exactly
+--    seven audit rows of this file.
 
 do $appt0160$
 declare
@@ -515,6 +527,11 @@ begin
   create trigger appointment_events_immutable
     before update or delete on ehr.appointment_events
     for each row execute function ehr.appointment_events_immutable();
+  -- Nor emptied: TRUNCATE fires no row trigger, so a statement trigger refuses it too, even for the owner (as 0098's
+  -- and 0152's append-only tables).
+  create trigger appointment_events_no_truncate
+    before truncate on ehr.appointment_events
+    for each statement execute function ehr.appointment_events_immutable();
 
   -- A6. The waiting-list basis: search, own_facility, appointment, then every value another lane added, in its
   -- order (so 0168 before or after this file leaves the same CHECK).
@@ -1896,6 +1913,9 @@ begin
                with ordinality as basis(value, position))) then
     raise exception using errcode = '55000', message = '0160: post-check failed (the waiting-list basis CHECK)';
   end if;
+  -- The four tables: plain tables of the owner (v_owner, the owner of 0135's functions; the migrator on production),
+  -- row-level security enabled and not forced (the exception the header states), no policy, no privilege for any
+  -- role but the owner.
   if exists (select 1 from pg_class class_row, lateral aclexplode(coalesce(class_row.relacl, acldefault('r', class_row.relowner))) acl
               where class_row.oid in ('ehr.appointment_settings'::regclass, 'ehr.appointment_clinics'::regclass,
                                       'ehr.appointments'::regclass, 'ehr.appointment_events'::regclass)
@@ -1903,8 +1923,57 @@ begin
      or (select count(*) from pg_class
           where oid in ('ehr.appointment_settings'::regclass, 'ehr.appointment_clinics'::regclass,
                         'ehr.appointments'::regclass, 'ehr.appointment_events'::regclass)
-            and relrowsecurity) <> 4 then
-    raise exception using errcode = '55000', message = '0160: post-check failed (a table is granted to a role or lacks row-level security)';
+            and relkind = 'r' and relrowsecurity and not relforcerowsecurity
+            and relowner = (select role_row.oid from pg_roles role_row where role_row.rolname = v_owner)) <> 4
+     or exists (select 1 from pg_policy policy_row
+                 where policy_row.polrelid in ('ehr.appointment_settings'::regclass, 'ehr.appointment_clinics'::regclass,
+                                               'ehr.appointments'::regclass, 'ehr.appointment_events'::regclass)) then
+    raise exception using errcode = '55000',
+      message = '0160: post-check failed (a table is granted to a role, is not the owner''s, or its row-level security is not enabled and unforced without a policy)';
+  end if;
+  -- The sequences the four tables own: exactly the history's identity sequence (sequence_no), the owner's and
+  -- granted to no other role. (runtime-grants.sql revokes it again from hid_ehr_runtime and
+  -- hid_schema_test_runtime after its schema-wide sequence grants.)
+  if (select count(*) from pg_depend dependency join pg_class sequence_row on sequence_row.oid = dependency.objid
+       where dependency.classid = 'pg_class'::regclass and dependency.refclassid = 'pg_class'::regclass
+         and dependency.refobjid in ('ehr.appointment_settings'::regclass, 'ehr.appointment_clinics'::regclass,
+                                     'ehr.appointments'::regclass, 'ehr.appointment_events'::regclass)
+         and dependency.deptype in ('a', 'i') and sequence_row.relkind = 'S') <> 1
+     or (select sequence_row.relowner from pg_class sequence_row
+          where sequence_row.oid = to_regclass('ehr.appointment_events_sequence_no_seq'))
+        is distinct from (select role_row.oid from pg_roles role_row where role_row.rolname = v_owner)
+     or to_regclass('ehr.appointment_events_sequence_no_seq')
+        is distinct from to_regclass(pg_get_serial_sequence('ehr.appointment_events', 'sequence_no'))
+     or exists (select 1 from pg_depend dependency join pg_class sequence_row on sequence_row.oid = dependency.objid,
+                       lateral aclexplode(coalesce(sequence_row.relacl, acldefault('s', sequence_row.relowner))) acl
+                 where dependency.classid = 'pg_class'::regclass and dependency.refclassid = 'pg_class'::regclass
+                   and dependency.refobjid in ('ehr.appointment_settings'::regclass, 'ehr.appointment_clinics'::regclass,
+                                               'ehr.appointments'::regclass, 'ehr.appointment_events'::regclass)
+                   and dependency.deptype in ('a', 'i') and sequence_row.relkind = 'S'
+                   and acl.grantee <> sequence_row.relowner) then
+    raise exception using errcode = '55000',
+      message = '0160: post-check failed (a sequence of the new tables is granted to a role or is not the owner''s)';
+  end if;
+  -- The history's triggers, 0152's form (pg_trigger.tgtype: 1 for each row, 2 before, 4 insert, 8 delete, 16 update,
+  -- 32 truncate): 27 before update or delete for each row, 34 before truncate; no WHEN condition (tgqual), no column
+  -- list (UPDATE OF: tgattr) and no arguments, which leave tgtype as it is; enabled in origin mode; this file's
+  -- function, with the body made here. No other trigger on the four tables.
+  if (select count(*) from pg_trigger trigger_row
+       where not trigger_row.tgisinternal
+         and trigger_row.tgrelid in ('ehr.appointment_settings'::regclass, 'ehr.appointment_clinics'::regclass,
+                                     'ehr.appointments'::regclass, 'ehr.appointment_events'::regclass)) <> 2
+     or (select count(*) from pg_trigger trigger_row
+          where not trigger_row.tgisinternal and trigger_row.tgenabled = 'O'
+            and trigger_row.tgrelid = 'ehr.appointment_events'::regclass
+            and trigger_row.tgfoid = 'ehr.appointment_events_immutable()'::regprocedure
+            and trigger_row.tgqual is null and trigger_row.tgattr = ''::int2vector and trigger_row.tgnargs = 0
+            and ((trigger_row.tgname = 'appointment_events_immutable' and trigger_row.tgtype = 27)
+                 or (trigger_row.tgname = 'appointment_events_no_truncate' and trigger_row.tgtype = 34))) <> 2
+     or not exists (select 1 from pg_proc proc
+                     where proc.oid = 'ehr.appointment_events_immutable()'::regprocedure and not proc.prosecdef
+                       and md5(proc.prosrc) = '17b882dfddbd64643dbb6cbcede398a5'
+                       and proc.proconfig = array['search_path=pg_catalog, pg_temp']) then
+    raise exception using errcode = '55000', message = '0160: post-check failed (the history''s triggers)';
   end if;
   if exists (select 1 from pg_proc proc
                join pg_namespace namespace on namespace.oid = proc.pronamespace,
@@ -1918,8 +1987,11 @@ begin
           where namespace.nspname = 'ehr' and proc.proname like 'appointment%' and proc.prosecdef
             and proc.proconfig = array['search_path=pg_catalog, pg_temp']) <> 13
      or (select count(*) from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
-          where namespace.nspname = 'ehr' and proc.proname like 'appointment%') <> 18 then
-    raise exception using errcode = '55000', message = '0160: post-check failed (the functions'' security or grants)';
+          where namespace.nspname = 'ehr' and proc.proname like 'appointment%') <> 18
+     or (select count(*) from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
+          where namespace.nspname = 'ehr' and proc.proname like 'appointment%'
+            and proc.proowner = (select role_row.oid from pg_roles role_row where role_row.rolname = v_owner)) <> 18 then
+    raise exception using errcode = '55000', message = '0160: post-check failed (the functions'' security, owner or grants)';
   end if;
 
   -- What the role rows give, at real (not sealed) facilities: the members who gain each code.

@@ -38,7 +38,10 @@
 --      bookable staff; another facility sees nothing of ours;
 --   7. who may: front desk, clinician and doctor write; the nurse reads; lab,
 --      pharmacy and administrator have no appointment code; direct care only;
---      the runtime reads no table and cannot call the helpers;
+--      the runtime reads no table, cannot call the helpers and cannot read or
+--      advance the history's sequence (no runtime role holds a privilege on
+--      it after runtime-grants.sql); the history cannot be updated or
+--      truncated, even by its owner;
 --   8. audit rows, and no name, date of birth, Health ID, reason text or
 --      clinic name in any of them.
 --
@@ -712,9 +715,23 @@ select pg_temp.check_case('7 nor the history', '42501', pg_temp.try('select coun
 select pg_temp.check_case('7 nor calls the card helper', '42501',
   pg_temp.try('select * from ehr.appointment_cards(array[]::uuid[], null, null, null)'));
 select pg_temp.check_case('7 nor the caller helper', '42501', pg_temp.try('select * from ehr.appointment_caller(null, null)'));
+select pg_temp.check_case('7 nor the history''s sequence (its last_value counts every facility''s appointment events)',
+  '42501', pg_temp.try('select last_value from ehr.appointment_events_sequence_no_seq'));
+select pg_temp.check_case('7 nor takes a number from it', '42501',
+  pg_temp.try('select nextval(''ehr.appointment_events_sequence_no_seq'')'));
 reset role;
 select pg_temp.check_case('7 the history cannot be changed', '55000',
   pg_temp.try('update ehr.appointment_events set reason = reason'));
+select pg_temp.check_case('7 nor emptied, even by its owner', '55000', pg_temp.try('truncate ehr.appointment_events'));
+select pg_temp.check_case('7 no runtime role holds any privilege on the history''s sequence (runtime-grants.sql)', '(none)',
+  (select coalesce(string_agg(role_row.rolname || ' ' || privilege.name, ', ' order by role_row.rolname, privilege.name),
+                   '(none)')
+     from pg_roles role_row
+     cross join unnest(array['USAGE', 'SELECT', 'UPDATE']) privilege(name)
+    where role_row.rolname ~ '^hid_' and not role_row.rolsuper
+      and not pg_has_role(role_row.oid, (select relowner from pg_class
+                                          where oid = 'ehr.appointment_events_sequence_no_seq'::regclass), 'MEMBER')
+      and has_sequence_privilege(role_row.oid, 'ehr.appointment_events_sequence_no_seq'::regclass, privilege.name)));
 select pg_temp.check_case('7 the role table', 'clinician:read,write/doctor:read,write/nurse:read/receptionist:read,write',
   (select string_agg(role_code || ':' || codes, '/' order by role_code)
      from (select role_code, string_agg(split_part(permission_code, '.', 3), ',' order by permission_code) as codes
