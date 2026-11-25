@@ -591,7 +591,8 @@ try {
       'services/ehr-api/scripts/verify-records-processing-runtime.mjs': [
         "assert.deepEqual([code?.active, listColumns], [true, 12], 'a database with 0104');",
         "assert.deepEqual([code?.active, listColumns], [true, 14], 'a database with 0104 and 0128');"],
-      // ADT-1 (0173, Q191 A): the governed administrator (org_admin) gains ehr.ward.manage: nine codes become ten.
+      // ADT-1 (0173, Q191 A): the governed administrator (org_admin) gains ehr.ward.manage: nine codes become ten,
+      // only once 0173 is applied (see liveGuardFrom).
       'services/identity-api/scripts/verify-provider-enrollment-runtime.mjs': [
         'assert.equal(governedView.permissions.length, 9);',
         'assert.equal(governedView.permissions.length, 10);'],
@@ -599,10 +600,12 @@ try {
         'assert.equal(registrationAudits, 3);',
         "const replays = (await pool.query(`select count(*)::integer as n from audit.events where action in ('identity.registration.without-nin', 'identity.registration.without-nin.review') and facility_id = $1 and outcome = 'success' and details ? 'replayed'`, [ids.facA])).rows[0].n; assert(replays <= 1, 'At most the one replay is audited as a replay'); assert.equal(registrationAudits - replays, 3);"],
     };
+    // A guard that holds only once a given file is applied: before that point the live verifier runs as it is.
+    const liveGuardFrom = { 'services/identity-api/scripts/verify-provider-enrollment-runtime.mjs': '0173' };
     const guardsChanged = [];
-    const liveScript = async (verifier) => {
+    const liveScript = async (verifier, last) => {
       const guard = liveGuards[verifier];
-      if (!guard) return join(live, verifier);
+      if (!guard || (liveGuardFrom[verifier] !== undefined && last < liveGuardFrom[verifier])) return join(live, verifier);
       const original = await readFile(join(live, verifier), 'utf8');
       // A live tree with 0128 (Release A and later) reads the shape itself (`has0128 ? 14 : 12`): no old line, so
       // its verifier runs as it is. The old line, where present, must be there exactly once.
@@ -617,7 +620,8 @@ try {
       const copy = join(live, verifier.replace(/[^/]+$/, (name) => `rehearsal-copy-${name}`));
       await writeFile(copy, original.replace(guard[0], guard[1]));
       if (!guardsChanged.some((entry) => entry.verifier === verifier)) {
-        guardsChanged.push({ verifier, live_sha256: sha256(original), line_before: guard[0], line_after: guard[1] });
+        guardsChanged.push({ verifier, live_sha256: sha256(original), line_before: guard[0], line_after: guard[1],
+          ...(liveGuardFrom[verifier] === undefined ? {} : { from_point: liveGuardFrom[verifier] }) });
       }
       return copy;
     };
@@ -675,7 +679,7 @@ try {
             const name = basename(verifier, '.mjs');
             try {
               verified[name] = JSON.parse(command(`live ${basename(verifier)} after ${last}`,
-                process.execPath, [await liveScript(verifier)], liveEnvironment)).status ?? 'passed';
+                process.execPath, [await liveScript(verifier, last)], liveEnvironment)).status ?? 'passed';
             } catch (error) {
               const message = String(error?.message ?? error).split('\n').find((line) => /Assertion|Error/.test(line))
                 ?? String(error?.message ?? error).slice(0, 300);

@@ -66,7 +66,7 @@ const database = {
 const inpatient = new InpatientService(database);
 const context = (who, purposeOfUse = 'direct-care') => ({ correlationId: `inpatient-runtime-${who}-${randomUUID()}`,
   facilityId: ids.facility, membershipId: ids[who], purposeOfUse, actor: { subject: subjects[who] } });
-const key = (label) => `inpatient-runtime-${run}-${label}`;
+const key = (label) => `inpatient-runtime-${run}-${label}`.replace(/[^A-Za-z0-9._:-]/g, '-');
 const refused = (code) => (error) => { assert.equal(error.code, code); return true; };
 
 try {
