@@ -2110,7 +2110,9 @@ try {
   assert.deepEqual(pendingStaff.body.administratorLicenceBodies, ['MDCN', 'NMCN']);
   assert.deepEqual(pendingStaff.body.inviteOptions.roles, [{ code: 'doctor', licenceBody: 'MDCN' },
     { code: 'nurse', licenceBody: 'NMCN' }, { code: 'lab', licenceBody: 'MLSCN' },
-    { code: 'pharmacist', licenceBody: 'PCN' }, { code: 'receptionist', licenceBody: null }]);
+    { code: 'pharmacist', licenceBody: 'PCN' }, { code: 'receptionist', licenceBody: null },
+    // BILL-5 (0162): cashier and billing officer, with no licence.
+    { code: 'cashier', licenceBody: null }, { code: 'billing_officer', licenceBody: null }]);
   assert.equal(pendingStaff.body.inviteOptions.attestation.version, 'facility-staff-attestation-v1');
   assert.deepEqual(pendingStaff.body.members.map(member => [member.accountId, member.isAdministrator, member.isSelf,
     member.roles]), [[hospital.accountId, true, true, ['org_admin_awaiting_review']]]);
@@ -2639,13 +2641,14 @@ try {
   const governedAdmin = await signedIn(governedFixture.email, invitationPassword, 'ehr', governedFixture.facilityId);
   const governedView = await facilityPermissions(governedAdmin, governedFixture.facilityId);
   assert.deepEqual(governedView.permissions, await permissionsOf('org_admin'));
-  assert.equal(governedView.permissions.length, 9);
+  // BILL-1 (0162): org_admin's nine and the ten billing codes.
+  assert.equal(governedView.permissions.length, 19);
   assert.equal(governedView.selfService, undefined, 'A governed facility carries selfService');
   expectProblem(await staffCall(governedAdmin, 'get', '/identity/facility-staff'), 403, 'STAFF_MANAGEMENT_NOT_AVAILABLE');
   expectProblem(await invite(governedAdmin, { name: 'Gov Desk', email: email('gov-desk'), role: 'receptionist' }), 403,
     'STAFF_MANAGEMENT_NOT_AVAILABLE');
   p4b.governed = { staffPage: 'STAFF_MANAGEMENT_NOT_AVAILABLE', invite: 'STAFF_MANAGEMENT_NOT_AVAILABLE',
-    selfService: 'absent', permissions: 'org_admin\'s nine' };
+    selfService: 'absent', permissions: 'org_admin\'s nineteen' };
   // The hospital invites the governed administrator's email as a nurse.
   const governedInvite = await invited(hospitalAdmin, { name: 'Gabriel Okon', email: governedFixture.email, role: 'nurse',
     licenceBody: 'NMCN', licenceNumber: 'NMCN/27182' });

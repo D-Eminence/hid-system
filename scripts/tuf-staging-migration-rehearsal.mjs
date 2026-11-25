@@ -578,29 +578,47 @@ try {
       'services/ehr-api/scripts/verify-records-processing-runtime.mjs': [
         "assert.deepEqual([code?.active, listColumns], [true, 12], 'a database with 0104');",
         "assert.deepEqual([code?.active, listColumns], [true, 14], 'a database with 0104 and 0128');"],
+      // BILL-5 (0162): a hospital's invitable roles gain cashier and billing_officer (the database's
+      // identity.staff_invitable_roles, which the live staff page answers as it is).
+      // The governed administrator's codes are org_admin's nine and 0162's ten billing codes.
+      'services/identity-api/scripts/verify-provider-enrollment-runtime.mjs': [[
+        "{ code: 'pharmacist', licenceBody: 'PCN' }, { code: 'receptionist', licenceBody: null }]);",
+        "{ code: 'pharmacist', licenceBody: 'PCN' }, { code: 'receptionist', licenceBody: null }, { code: 'cashier', licenceBody: null }, { code: 'billing_officer', licenceBody: null }]);"], [
+        'assert.equal(governedView.permissions.length, 9);',
+        'assert.equal(governedView.permissions.length, 19);']],
       'services/identity-api/scripts/verify-desk-registration-own-facility-runtime.mjs': [
         'assert.equal(registrationAudits, 3);',
         "const replays = (await pool.query(`select count(*)::integer as n from audit.events where action in ('identity.registration.without-nin', 'identity.registration.without-nin.review') and facility_id = $1 and outcome = 'success' and details ? 'replayed'`, [ids.facA])).rows[0].n; assert(replays <= 1, 'At most the one replay is audited as a replay'); assert.equal(registrationAudits - replays, 3);"],
     };
     const guardsChanged = [];
     const liveScript = async (verifier) => {
-      const guard = liveGuards[verifier];
-      if (!guard) return join(live, verifier);
+      const entry = liveGuards[verifier];
+      if (!entry) return join(live, verifier);
+      // One [before, after] pair, or a list of them (BILL-1's 0162 changes two lines of one verifier).
+      const guards = Array.isArray(entry[0]) ? entry : [entry];
       const original = await readFile(join(live, verifier), 'utf8');
       // A live tree with 0128 (Release A and later) reads the shape itself (`has0128 ? 14 : 12`): no old line, so
       // its verifier runs as it is. The old line, where present, must be there exactly once.
-      const occurrences = original.split(guard[0]).length - 1;
-      if (occurrences === 0) {
+      let changed = original;
+      const applied = [];
+      for (const guard of guards) {
+        const occurrences = changed.split(guard[0]).length - 1;
+        if (occurrences === 0) continue;
+        assert.equal(occurrences, 1, `the live ${basename(verifier)} guard is not as expected`);
+        changed = changed.replace(guard[0], guard[1]);
+        applied.push({ line_before: guard[0], line_after: guard[1] });
+      }
+      if (applied.length === 0) {
         if (!guardsChanged.some((entry) => entry.verifier === verifier)) {
           guardsChanged.push({ verifier, live_sha256: sha256(original), unchanged: 'the live verifier has no pre-0128 line' });
         }
         return join(live, verifier);
       }
-      assert.equal(occurrences, 1, `the live ${basename(verifier)} guard is not as expected`);
       const copy = join(live, verifier.replace(/[^/]+$/, (name) => `rehearsal-copy-${name}`));
-      await writeFile(copy, original.replace(guard[0], guard[1]));
+      await writeFile(copy, changed);
       if (!guardsChanged.some((entry) => entry.verifier === verifier)) {
-        guardsChanged.push({ verifier, live_sha256: sha256(original), line_before: guard[0], line_after: guard[1] });
+        guardsChanged.push(applied.length === 1 ? { verifier, live_sha256: sha256(original), ...applied[0] }
+          : { verifier, live_sha256: sha256(original), lines: applied });
       }
       return copy;
     };
