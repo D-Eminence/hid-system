@@ -5,8 +5,8 @@ import test from 'node:test'
 import { deflateRawSync } from 'node:zlib'
 import { seedProblems, seedText } from '../../services/ehr-api/scripts/catalog-seed.mjs'
 import {
-  ICD11_NOTICE, LEFT_OUT_CHAPTERS, TABULATION_MEMBER, buildIcd11Seed, otherNamesFrom, parseTabulation, plainLetters,
-  verbatimTitle, zipMember,
+  APPROVED_OTHER_NAMES, ICD11_NOTICE, LEFT_OUT_CHAPTERS, TABULATION_MEMBER, buildIcd11Seed, otherNamesFrom, parseTabulation,
+  plainLetters, verbatimTitle, zipMember,
 } from '../../services/ehr-api/scripts/icd11-seed.mjs'
 
 // ORD-9 (0152): the ICD-11 diagnosis seed from WHO's release file
@@ -170,6 +170,51 @@ export const DIAGNOSIS_SYNONYMS: Readonly<Record<string, string>> = {
   assert.deepEqual(seedProblems(seed), [])
 })
 
+// Promised on #320 (Ola, clinical owner): "Down syndrome" for LD40.0 and "gallstone", "gallstones" for DC11.
+test('the approved other names: exactly these, each with its code, WHO\'s title and the approval', () => {
+  assert.deepEqual(APPROVED_OTHER_NAMES.map((entry) => ({ ...entry, names: [...entry.names] })), [
+    { code: 'LD40.0', title: 'Complete trisomy 21', names: ['down syndrome'],
+      approval: 'approved by Ola as clinical owner, 25 Nov 2026' },
+    { code: 'DC11', title: 'Cholelithiasis', names: ['gallstone', 'gallstones'],
+      approval: 'approved by Ola as clinical owner, 25 Nov 2026' },
+  ])
+  assert.ok(Object.isFrozen(APPROVED_OTHER_NAMES) && APPROVED_OTHER_NAMES.every((entry) => Object.isFrozen(entry)
+    && Object.isFrozen(entry.names)))
+})
+
+test('the approved other names join their entry\'s other names; a code or title the release lacks stops the build', () => {
+  const tabulation = '\ufeff' + [HEADER.join('\t'),
+    line('', '- Diseases of gallbladder or biliary tract', 'block', '13'),
+    line('DC11', '- - Cholelithiasis', 'category', '13'),
+    line('DC11.Z', '- - - Cholelithiasis, unspecified', 'category', '13', { residual: 'True' }),
+    line('LD40', '- - Complete trisomies of the autosomes', 'category', '20'),
+    line('LD40.0', '- - - Complete trisomy 21', 'category', '20'),
+  ].join('\r\n') + '\r\n'
+  const rows = parseTabulation(tabulation)
+  const build = (approvedNames, otherNames = new Map()) =>
+    buildIcd11Seed(rows, { release: '2026-01', releaseFile: RELEASE_FILE, otherNames, approvedNames })
+  const seed = build(APPROVED_OTHER_NAMES, new Map([['DC11', ['cholelithiasis stones']]]))
+  assert.deepEqual(seed.items.map((item) => [item.code, item.title, item.otherNames]), [
+    ['DC11', 'Cholelithiasis', ['cholelithiasis stones', 'gallstone', 'gallstones']],
+    ['DC11.Z', 'Cholelithiasis, unspecified', []],
+    ['LD40', 'Complete trisomies of the autosomes', []],
+    ['LD40.0', 'Complete trisomy 21', ['down syndrome']],
+  ])
+  assert.deepEqual(seedProblems(seed), [])
+  // Without the list (and by default), the entries keep only what they had.
+  assert.deepEqual(build([]).items.map((item) => item.otherNames), [[], [], [], []])
+  assert.deepEqual(buildIcd11Seed(rows, { release: '2026-01', releaseFile: RELEASE_FILE }).items, build([]).items)
+  const entry = (changes) => [{ code: 'DC11', title: 'Cholelithiasis', names: ['gallstones'], approval: 'approved', ...changes }]
+  assert.throws(() => build(entry({ code: 'DC11.9' })), /approved other names: DC11\.9 is not in this release/)
+  assert.throws(() => build(entry({ code: 'LD40.0' })),
+    /approved other names: LD40\.0 is "Complete trisomy 21" in this release, not "Cholelithiasis"/)
+  assert.throws(() => build(entry({ names: [] })), /DC11's names must be trimmed, non-empty and without ";"/)
+  assert.throws(() => build(entry({ names: [' gallstones'] })), /DC11's names must be trimmed/)
+  assert.throws(() => build(entry({ names: ['gallstones; calculi'] })), /DC11's names must be trimmed/)
+  assert.throws(() => build(entry({ approval: ' ' })), /approved other names: DC11 has no approval/)
+  assert.throws(() => build([...entry(), ...entry()]), /approved other names: DC11 is listed twice/)
+})
+
 test('the seed: coded entries only, verbatim titles, code order; no extension code, block, chapter 26 or section V', () => {
   const seed = buildIcd11Seed(parseTabulation(TABULATION),
     { release: '2026-01', releaseFile: RELEASE_FILE, otherNames: otherNamesFrom(SYNONYMS_SOURCE) })
@@ -237,7 +282,15 @@ test('the draft ICD-11 MMS 2026-01 seed in docs/codes/drafts loads as it stands'
     ['5C52.03', 'Sjogren-Larsson syndrome'],
     ['8A45.42', 'Demyelination due to Sjogren disease'],
   ])
-  assert.equal(seed.items.filter((item) => item.otherNames.length > 0).length, 76)
+  // The approved other names (Ola, 25 Nov 2026), each on its entry and nowhere else.
+  assert.deepEqual(named('LD40.0'), ['down syndrome'])
+  assert.deepEqual(named('DC11'), ['gallstone', 'gallstones'])
+  for (const { code, title, names } of APPROVED_OTHER_NAMES) {
+    assert.equal(seed.items.find((item) => item.code === code).title, title)
+    assert.deepEqual(seed.items.filter((item) => item.otherNames.some((name) => names.includes(name))).map((item) => item.code),
+      [code])
+  }
+  assert.equal(seed.items.filter((item) => item.otherNames.length > 0).length, 78)
   const codes = seed.items.map((item) => item.code)
   assert.deepEqual(codes, [...codes].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)))
   assert.equal(seedText(seed), readFileSync(resolve(repository, 'docs/codes/drafts/icd11-mms-2026-01.json'), 'utf8'))

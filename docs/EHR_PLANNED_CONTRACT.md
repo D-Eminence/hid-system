@@ -2168,7 +2168,7 @@ file's seed in `docs/codes/catalog-approvals.json`.
   (2026-01, sha256 `f1356588…`). That is the file
   `ocr-worker/src/reading/diagnosis-list.ts` checked its titles against,
   and all 134 of that list's titles come out the same. The seed's sha256
-  is `3662b1d7…`.
+  is `0bac29f5…` (was `3662b1d7…` before the approved other names below).
   - It holds 17,255 entries. Extension codes and blocks are left out, and
     so are chapter 26 (traditional medicine conditions, 1,120) and section
     V (functioning, 130). Neither is a diagnosis a clinician picks here
@@ -2186,7 +2186,14 @@ file's seed in `docs/codes/catalog-approvals.json`.
     4A43.2Z Sjogren syndrome, unspecified; 4A62 Behcet disease; 5C52.03
     Sjogren-Larsson syndrome; 8A45.42 Demyelination due to Sjogren
     disease. WHO's titles are unchanged.
-  - 76 entries have an other name.
+  - A few more of our other names are listed in the builder
+    (`APPROVED_OTHER_NAMES` in `services/ehr-api/scripts/icd11-seed.mjs`),
+    each with its code, WHO's title for it and who approved it: "down
+    syndrome" for LD40.0 Complete trisomy 21, and "gallstone" and
+    "gallstones" for DC11 Cholelithiasis (Ola, clinical owner, 25 Nov
+    2026). The build stops if the release lacks the code or titles it
+    otherwise. "Down's syndrome" finds LD40.0 through the apostrophe-s rule.
+  - 78 entries have an other name.
 - **Search:** `GET /api/v1/ehr/terminology/diagnoses?q=&limit=` as above,
   with ORD-7's rules for `q` (6 words, never raw `to_tsquery`, no Health ID
   or NIN shapes, never logged) and its 429 and cache. Only the active
@@ -2209,7 +2216,11 @@ file's seed in `docs/codes/catalog-approvals.json`.
     word so shortened is a whole word of the title or of one of our other
     names. So "parkinsons" puts 8A00.0 Parkinson disease first, and "fits"
     finds nothing: fit only starts "Fitting or adjustment of ..." entries,
-    which it used to offer. "gallstones" finds what "gallstone" finds.
+    which it used to offer. With the seed of 23 Nov, "gallstones" found
+    DA91.30 Gallstone ileus of small intestine this way, as "gallstone"
+    did. Now that "gallstones" is one of our other names for DC11, it finds
+    DC11 Cholelithiasis on the first attempt, and "gallstone" offers DC11
+    first, then DA91.30.
   - The order: the entry whose code `q` is; then an entry whose title or
     one of our other names is `q` itself, as words ("ra" is FA20
     Rheumatoid arthritis, whose other name is ra, before shorter titles

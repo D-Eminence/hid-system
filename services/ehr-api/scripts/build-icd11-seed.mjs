@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // ORD-9: the ICD-11 diagnosis list's seed (icd11-seed.mjs says how), from
-// WHO's release file and ocr-worker's DIAGNOSIS_SYNONYMS. Writes <out>, or
+// WHO's release file, ocr-worker's DIAGNOSIS_SYNONYMS and the other names
+// the clinical owner approved (APPROVED_OTHER_NAMES). Writes <out>, or
 // with --check compares it with the file already there. Prints the seed's
 // sha256 (what the clinical lead signs in docs/codes/catalog-approvals.json)
 // and the release file's.
@@ -13,7 +14,9 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { seedProblems, seedText, sha256 } from './catalog-seed.mjs';
-import { buildIcd11Seed, otherNamesFrom, parseTabulation, TABULATION_MEMBER, zipMember } from './icd11-seed.mjs';
+import {
+  APPROVED_OTHER_NAMES, buildIcd11Seed, otherNamesFrom, parseTabulation, TABULATION_MEMBER, zipMember,
+} from './icd11-seed.mjs';
 
 const option = (name) => {
   const index = process.argv.indexOf(`--${name}`);
@@ -28,6 +31,7 @@ const seed = buildIcd11Seed(rows, {
   release: option('release'),
   releaseFile: { name: basename(zipPath), sha256: sha256(zipBytes) },
   otherNames: otherNamesFrom(readFileSync(option('synonyms'), 'utf8')),
+  approvedNames: APPROVED_OTHER_NAMES,
 });
 const problems = seedProblems(seed);
 if (problems.length > 0) { console.error(problems.slice(0, 20).join('\n')); process.exit(1); }

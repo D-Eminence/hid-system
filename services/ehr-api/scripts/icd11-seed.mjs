@@ -14,7 +14,8 @@
 // (LEFT_OUT_CHAPTERS); blocks and chapters have no code and are left out. Our other names are kept apart from WHO's
 // words, and only where they name a coded title. A title with accented letters also gets its plain-letter spelling
 // as one of our other names ("Sjogren syndrome" for "Sjögren syndrome"; Ola, clinical owner), so a search typed
-// without the accents finds it; the title itself is never changed.
+// without the accents finds it; the title itself is never changed. A few more of our other names are listed here,
+// each approved by the clinical owner (APPROVED_OTHER_NAMES).
 import { inflateRawSync } from 'node:zlib';
 import { SEED_FORMAT } from './catalog-seed.mjs';
 
@@ -32,6 +33,23 @@ export const LEFT_OUT_CHAPTERS = {
   26: 'Supplementary chapter: traditional medicine conditions, used beside a conventional diagnosis, never instead of one',
   V: 'Supplementary section for functioning assessment (WHODAS items), not diagnoses',
 };
+
+/**
+ * Our other names for the diagnosis search that ocr-worker's DIAGNOSIS_SYNONYMS does not hold, each with its code,
+ * WHO's title for that code (the build stops if the release lacks the code or names it otherwise), the names, and
+ * who approved them. Promised on #320: no "Down" query reached LD40.0 Complete trisomy 21, and "gallstones" reached
+ * DA91.30 Gallstone ileus of small intestine but not DC11 Cholelithiasis. As in DIAGNOSIS_SYNONYMS, a name that does
+ * not say which narrower entry is meant names the broader title true of all of them: "gallstones" says neither
+ * where the stones are nor whether there is cholecystitis or cholangitis, so it is DC11, not one of DC11.0-DC11.7.
+ * "Down's syndrome" needs no name of its own: the search drops a word-final 's from what is typed and from our
+ * names alike (0152).
+ */
+export const APPROVED_OTHER_NAMES = Object.freeze([
+  Object.freeze({ code: 'LD40.0', title: 'Complete trisomy 21', names: Object.freeze(['down syndrome']),
+    approval: 'approved by Ola as clinical owner, 25 Nov 2026' }),
+  Object.freeze({ code: 'DC11', title: 'Cholelithiasis', names: Object.freeze(['gallstone', 'gallstones']),
+    approval: 'approved by Ola as clinical owner, 25 Nov 2026' }),
+]);
 
 /** One member of a ZIP file (stored or deflated), found through the central directory. */
 export function zipMember(bytes, name) {
@@ -162,8 +180,11 @@ export function plainLetters(title) {
  * in code order, with its verbatim title, chapter, whether it is residual,
  * and our other names. `release` is the version label (2026-01);
  * `releaseFile` names the WHO file and its sha256, recorded in the seed.
+ * `approvedNames` is a list shaped as APPROVED_OTHER_NAMES (the build
+ * passes that list): each entry's names are added to its code's other names,
+ * once its code is in the seed with exactly the title it gives.
  */
-export function buildIcd11Seed(rows, { release, releaseFile, otherNames = new Map() }) {
+export function buildIcd11Seed(rows, { release, releaseFile, otherNames = new Map(), approvedNames = [] }) {
   const items = [];
   const seen = new Set();
   const leftOut = Object.fromEntries(Object.keys(LEFT_OUT_CHAPTERS).map((chapter) => [chapter, 0]));
@@ -181,6 +202,24 @@ export function buildIcd11Seed(rows, { release, releaseFile, otherNames = new Ma
   items.sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
   const unused = [...otherNames.keys()].filter((code) => !items.some((item) => item.code === code));
   if (unused.length > 0) throw new Error(`other names for codes not in this release: ${unused.join(', ')}`);
+  const approvedCodes = new Set();
+  for (const { code, title, names, approval } of approvedNames) {
+    if (approvedCodes.has(code)) throw new Error(`approved other names: ${code} is listed twice`);
+    approvedCodes.add(code);
+    if (typeof approval !== 'string' || approval.trim() === '') {
+      throw new Error(`approved other names: ${code} has no approval`);
+    }
+    if (!Array.isArray(names) || names.length === 0
+        || names.some((name) => typeof name !== 'string' || name.trim() !== name || name === '' || name.includes(';'))) {
+      throw new Error(`approved other names: ${code}'s names must be trimmed, non-empty and without ";"`);
+    }
+    const item = items.find((entry) => entry.code === code);
+    if (!item) throw new Error(`approved other names: ${code} is not in this release`);
+    if (item.title !== title) {
+      throw new Error(`approved other names: ${code} is "${item.title}" in this release, not "${title}"`);
+    }
+    item.otherNames = [...new Set([...item.otherNames, ...names])].sort();
+  }
   return {
     format: SEED_FORMAT,
     kind: 'diagnosis',
