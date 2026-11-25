@@ -44,11 +44,16 @@ What is left out of the medicine files:
 | `strength` | As the list gives it. A pack size is kept only where it defines the product. Empty for medical gases. |
 | `dose_form` | One of the contract's values: `tablet`, `capsule`, `liquid`, `injection`, `cream`, `inhaler`, `drops`, `other`. |
 | `dose_form_text` | The list's own words for the form, for example "Oral liquid". |
-| `route` | Plain words: `oral`, `intravenous`, `topical` and so on. `injection` where the list does not say which. |
+| `route` | Plain words: `oral`, `intravenous`, `topical` and so on. `injection` where the list does not say which. A row may hold two routes, separated by `; ` (two rows read `oral; injection`); the loader splits the column on `; `. |
 | `atc_code` | The WHO ATC code, **only where checked**. Every one of the 539 distinct codes in the Nigeria file (and the 83 more in the WHO gap file) was looked up on the WHOCC ATC index (atcddd.fhi.no) on 22 Nov 2026, and its substance matches the row. Blank where no code could be confirmed (118 rows). |
 | `source` | `nigeria-eml-8`. The planned contract's example says `nigeria-eml-7`; the 8th edition replaces it (see Sources). |
 | `source_section`, `source_list` | The list's section number, and `main` or `restricted`. |
 | `notes` | Short notes, for example a misprint in the source corrected to the INN spelling, or "for children". |
+
+**Four values shortened to fit the prescription fields** (planned contract, section 46: at most 80 characters). The loader holds back a row it would have to cut, so these were shortened on 24 November 2026. Three of them say the same thing in fewer characters. The fourth, `MED-01232`, is a summary. Each row's `notes` keeps the list's own words, but `notes` does not go into the seed files, so the catalogue has only the shortened value:
+- `MED-00837` and `MED-00977`, oral rehydration salts: the strength names sodium chloride and potassium chloride as `NaCl` and `KCl` (`glucose 13.5 g/L, NaCl 2.6 g/L, KCl 1.5 g/L, trisodium citrate dihydrate 2.9 g/L`).
+- `MED-01232`, multiple micronutrients: **a summary, not the same words.** The strength reads `iron 30 mg + folic acid 400 mcg + 13 other vitamins and minerals`. The 13 are vitamins A, C, D, E, B1, B2, B3, B6 and B12, and iodine, zinc, selenium and copper. Their amounts are no longer in the strength; they are only in this file's `notes`, which the catalogue does not load. The clinical lead approves this summary, or gives another value, at sign-off.
+- `MED-01011`, medroxyprogesterone 104 mg/0.65 mL: the form words drop the repeated "injection" (`Injection (subcutaneous), pre-filled syringe or single-dose delivery system`).
 
 ### Lab-test columns
 
@@ -61,6 +66,8 @@ What is left out of the medicine files:
 | `notes` | Short notes, including "HID-LAB code exists" where the local list already has the test. |
 
 13 tests have no code: no LOINC code clearly matched, and none is in `hid-lab-codes.json`. The reviewer decides whether each needs a new HID-LAB code.
+
+**No other name of one letter:** the pickers' search needs at least 2 characters, so a one-letter name could never be found. On 24 November 2026 potassium's (`LAB-0008`) "K" became "K+", and electrolytes' (`LAB-0060`) "E" was dropped, since "Serum electrolytes" is already among its other names.
 
 ## Sources
 
@@ -77,7 +84,7 @@ What is left out of the medicine files:
 
 ## What the reviewer should check
 
-1. Every strength and dose form against the printed list, especially rows whose notes mention a correction.
+1. Every strength and dose form against the printed list, especially rows whose notes mention a correction, and the four shortened values above, including whether the `MED-01232` summary is acceptable.
 2. The routes the list leaves unstated (`injection`).
 3. The 118 medicine rows and 13 tests with no code.
 4. Whether any medicines common in Nigerian practice are missing from the 8th edition and should come from another source.
