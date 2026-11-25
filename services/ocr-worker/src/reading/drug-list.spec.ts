@@ -1,6 +1,8 @@
 import { BRAND_ROWS, COORDINATOR_SOURCE, isActiveBrandRow, NAFDAC_SOURCE } from './brand-names';
-import { BRAND_NAMES, drugLookalike, editDistance, LOOKALIKE_DISTANCE, matchDrugName, MAX_EDIT_DISTANCE, MIN_FUZZY_LETTERS,
-  MIN_SIMILARITY, NEML_GENERICS, normaliseDrugName, SYNONYMS, UNLISTED_LOOKALIKES } from './drug-list';
+import { BRAND_NAMES, BRANDS_WITH_UNLISTED_GENERIC, CHART_NAMES, DRUG_ENTRIES, drugLookalike, editDistance,
+  LOOKALIKE_DISTANCE, LOOKALIKES_WITHOUT_OPTION, matchDrugName, MAX_EDIT_DISTANCE, MIN_FUZZY_LETTERS, MIN_SIMILARITY, NEML_GENERICS,
+  normaliseDrugName, SALT_OPEN_NAMES, SYNONYMS, UNLISTED_LOOKALIKES } from './drug-list';
+import { SEVENTH_EDITION_NAMES } from './drug-list-7th-edition-fixtures';
 
 describe('drug list (hard pages only)', () => {
   it('shows a listed generic in its list spelling, marked as a guess', () => {
@@ -28,6 +30,17 @@ describe('drug list (hard pages only)', () => {
     expect(matchDrugName('Co-trimoxazole')?.generic).toBe('sulfamethoxazole + trimethoprim');
     expect(matchDrugName('Phenobarbitone')?.display).toBe('Phenobarbital?');
     expect(matchDrugName('Glyburide')?.generic).toBe('glibenclamide');
+    // The 7th edition list's names that the new list spells differently are still recognised.
+    expect(matchDrugName('Chlorpheniramine')?.display).toBe('Chlorphenamine?');
+    expect(matchDrugName('Benzhexol')?.generic).toBe('trihexyphenidyl');
+    expect(matchDrugName('Sodium valproate')?.generic).toBe('valproic acid');
+    expect(matchDrugName('Desferrioxamine')?.generic).toBe('deferoxamine');
+    expect(matchDrugName('Ferrous sulphate')?.generic).toBe('ferrous sulfate');
+    // Left unmapped on purpose (see the header): mapping would name a form the prescriber never wrote.
+    for (const name of ['Fluticasone', 'Vitamin B12', 'Cyanocobalamin', 'Multivitamin', 'Vitamin E', 'Zinc']) {
+      expect([name, matchDrugName(name)]).toEqual([name, null]);
+    }
+    expect(matchDrugName('Seretide')?.generic).toBe('salmeterol + fluticasone');
   });
 
   it('corrects one slip within the thresholds, and no further', () => {
@@ -41,9 +54,9 @@ describe('drug list (hard pages only)', () => {
     expect(matchDrugName('Metrnidzol')).toBeNull();
     // A slip at the first letter: no match.
     expect(matchDrugName('Netronidazole')).toBeNull();
-    // Under MIN_FUZZY_LETTERS letters: exact only ("zinc", "urea" are listed).
-    expect(matchDrugName('Zinc')?.generic).toBe('zinc');
-    expect(matchDrugName('Zink')).toBeNull();
+    // Under MIN_FUZZY_LETTERS letters: exact only ("urea" is listed).
+    expect(matchDrugName('Urea')?.generic).toBe('urea');
+    expect(matchDrugName('Urca')).toBeNull();
     // Ratio: a 6-letter name one letter changed is 0.83 similar, below MIN_SIMILARITY; one letter short of 7 passes.
     expect(matchDrugName('Quinin')?.generic).toBe('quinine');
     expect(matchDrugName('Flagyi')).toBeNull();
@@ -65,15 +78,15 @@ describe('drug list (hard pages only)', () => {
 
   it('never respells a real medicine that is not on the list into a listed one', () => {
     // Each of these is a different real medicine, one or two letters from a listed one.
-    for (const name of ['Ganciclovir', 'Lorazepam', 'Esomeprazole', 'Felodipine', 'Prednisone', 'Norfloxacin',
+    for (const name of ['Ganciclovir', 'Esomeprazole', 'Felodipine', 'Prednisone', 'Norfloxacin',
       'Pefloxacin', 'Gemifloxacin', 'Dicloxacillin', 'Arteether', 'Dihydralazine', 'Ornidazole', 'Econazole',
-      'Bifonazole', 'Tioconazole', 'Methsuximide', 'Clobetasone', 'Valaciclovir', 'Oxazepam', 'Quinidine']) {
+      'Bifonazole', 'Tioconazole', 'Methsuximide', 'Clobetasone', 'Oxazepam', 'Quinidine']) {
       expect([name, matchDrugName(name)]).toEqual([name, null]);
     }
     // The listed ones themselves still match exactly.
     for (const name of ['Aciclovir', 'Clonazepam', 'Omeprazole', 'Amlodipine', 'Prednisolone', 'Ofloxacin',
-      'Gatifloxacin', 'Cloxacillin', 'Artemether', 'Hydralazine', 'Tinidazole', 'Miconazole', 'Ethosuximide',
-      'Clobetasol']) {
+      'Cloxacillin', 'Artemether', 'Hydralazine', 'Tinidazole', 'Miconazole', 'Ethosuximide', 'Clobetasol',
+      'Lorazepam', 'Valaciclovir', 'Folinic acid']) {
       expect(matchDrugName(name)?.exact).toBe(true);
     }
     // The look-alike pairs on the list stay apart.
@@ -83,10 +96,93 @@ describe('drug list (hard pages only)', () => {
     expect(matchDrugName('Metformin')?.generic).toBe('metformin');
     expect(matchDrugName('Chlorpropamide')).toBeNull();
     // Every unlisted look-alike is really off the list and within LOOKALIKE_DISTANCE of a listed name.
-    const keys = [...NEML_GENERICS, ...Object.keys(SYNONYMS), ...Object.keys(BRAND_NAMES)].map(normaliseDrugName);
+    const keys = DRUG_ENTRIES.map((entry) => entry.key);
     for (const name of UNLISTED_LOOKALIKES) {
       expect(keys).not.toContain(name);
       expect([name, Math.min(...keys.map((key) => editDistance(name, key))) <= LOOKALIKE_DISTANCE]).toEqual([name, true]);
+    }
+  });
+
+  it('keeps each name the 7th edition list recognised: still recognised, or apart from the listed name it is near', () => {
+    const keys = DRUG_ENTRIES.map((entry) => entry.key);
+    const lookalikes = UNLISTED_LOOKALIKES.map(normaliseDrugName);
+    for (const name of SEVENTH_EDITION_NAMES) {
+      if (matchDrugName(name) !== null) continue;
+      const key = normaliseDrugName(name);
+      const near = keys.some((listed) => editDistance(key, listed) <= LOOKALIKE_DISTANCE);
+      expect([name, near && !lookalikes.includes(key)]).toEqual([name, false]);
+    }
+    // Neomycin left the list and is two letters from bleomycin, a cytotoxic: a misreading of it is never bleomycin.
+    for (const name of ['Beomycin', 'Bneomycin', 'Neomycin', 'Neomicin']) {
+      expect([name, matchDrugName(name)]).toEqual([name, null]);
+    }
+    expect(drugLookalike('Beomycin')?.generic).toBe('bleomycin');
+    expect(matchDrugName('Bleomycin')?.exact).toBe(true);
+    for (const name of ['Vitamin B12', 'Vitamin E', 'Vitamin B 12']) {
+      expect([name, matchDrugName(name)]).toEqual([name, null]);
+    }
+    expect(matchDrugName('Vitamin B1')?.generic).toBe('thiamine');
+  });
+
+  it('leaves "calium" unresolved, with no other option: it may be kalium (potassium) or calcium', () => {
+    for (const name of ['Calium', 'Kalium', 'Kalcium']) {
+      expect([name, matchDrugName(name), drugLookalike(name)]).toEqual([name, null, null]);
+    }
+    expect(matchDrugName('Calcium')?.exact).toBe(true);
+    expect(matchDrugName('Calcium gluconate')?.exact).toBe(true);
+    // Arteether still offers its listed neighbour: only the dangerous pairs lose the other option.
+    expect(drugLookalike('Arteether')?.generic).toBe('artemether');
+    for (const name of LOOKALIKES_WITHOUT_OPTION) expect(UNLISTED_LOOKALIKES).toContain(name);
+  });
+
+  it('keeps iodine and fluoride salts as written, and potassium iodine as potassium iodide (Ola, 25 Nov)', () => {
+    expect(matchDrugName('Potassium iodine')?.display).toBe('Potassium iodide?');
+    expect(matchDrugName('Sodium fluoride')?.display).toBe('Sodium fluoride?');
+    for (const name of ['Sodium iodine', 'Iodine potassium', 'Fluoride sodium', 'Potassium fluoride']) {
+      expect([name, matchDrugName(name)]).toEqual([name, null]);
+    }
+    // The listed names themselves are unchanged.
+    expect(matchDrugName('Iodine')?.display).toBe('Iodine?');
+    expect(matchDrugName('Iodine tabs')?.display).toBe('Iodine?');
+    expect(matchDrugName('Fluoride')?.display).toBe('Fluoride?');
+    expect(matchDrugName('Potassium iodide')?.exact).toBe(true);
+    // The same substance under the list's chemical name.
+    expect(matchDrugName('Prussian blue')?.display).toBe('Potassium ferric hexacyanoferrate?');
+  });
+
+  it('never makes a salt or product written on the chart less specific than the chart', () => {
+    // Recognised as written, never as the list's broader name (lithium, calcium, ferrous salt,
+    // intermediate-acting insulin).
+    expect(matchDrugName('Lithium carbonate')?.display).toBe('Lithium carbonate?');
+    expect(matchDrugName('Lithium citrate')?.display).toBe('Lithium citrate?');
+    expect(matchDrugName('Ferrous sulfate')?.display).toBe('Ferrous sulfate?');
+    expect(matchDrugName('Ferrous sulphate')?.display).toBe('Ferrous sulfate?');
+    expect(matchDrugName('Calcium lactate')?.display).toBe('Calcium lactate?');
+    expect(matchDrugName('Isophane insulin')?.display).toBe('Isophane insulin?');
+    expect(matchDrugName('Lithum carbonate')?.display).toBe('Lithium carbonate?');
+    // Another salt of a medicine the list leaves salt-open is shown as read, not as the bare name.
+    for (const name of ['Lithium sulfate', 'Calcium phosphate', 'Calcium citrate', 'Calcium acetate', 'Lithium HCl']) {
+      expect([name, matchDrugName(name), drugLookalike(name)]).toEqual([name, null, null]);
+    }
+    // The bare name, as written or with only form words, is still the listed one.
+    expect(matchDrugName('Lithium')?.display).toBe('Lithium?');
+    expect(matchDrugName('Lithium tabs')?.display).toBe('Lithium?');
+    expect(matchDrugName('Calcium')?.display).toBe('Calcium?');
+    // A salt word after any other medicine is still taken off, as before.
+    expect(matchDrugName('Metformin hydrochloride')?.display).toBe('Metformin?');
+    // Every salt word after a salt-open name: never the bare name.
+    for (const listed of SALT_OPEN_NAMES) {
+      expect(NEML_GENERICS).toContain(listed);
+      for (const salt of ['hydrochloride', 'hcl', 'sodium', 'potassium', 'sulfate', 'sulphate', 'maleate', 'phosphate',
+        'acetate', 'citrate']) {
+        const found = matchDrugName(`${listed} ${salt}`);
+        expect([listed, salt, found === null || CHART_NAMES.includes(found.generic)]).toEqual([listed, salt, true]);
+      }
+    }
+    // Each chart name is its own name: not on the list, and no synonym or brand points at the broader name for it.
+    for (const name of CHART_NAMES) {
+      expect(NEML_GENERICS).not.toContain(name);
+      expect(SYNONYMS[name]).toBeUndefined();
     }
   });
 
@@ -114,7 +210,9 @@ describe('drug list (hard pages only)', () => {
     const generics = new Set(NEML_GENERICS);
     expect(generics.size).toBe(NEML_GENERICS.length);
     for (const name of NEML_GENERICS) expect(normaliseDrugName(name)).toBe(name);
-    for (const generic of Object.values(SYNONYMS)) expect(generics.has(generic)).toBe(true);
+    for (const generic of Object.values(SYNONYMS)) {
+      expect(generics.has(generic) || CHART_NAMES.includes(generic)).toBe(true);
+    }
     for (const generic of Object.values(BRAND_NAMES)) {
       for (const part of generic.split(' + ')) expect(generics.has(part) || generics.has(generic)).toBe(true);
     }
@@ -134,7 +232,10 @@ describe('drug list (hard pages only)', () => {
     const curated = BRAND_ROWS.filter((row) => row.reviewed_by === 'coordinator-curated');
     expect(curated).toHaveLength(23);
     expect(new Set(BRAND_ROWS.map((row) => row.brand)).size).toBe(BRAND_ROWS.length);
-    expect(Object.keys(BRAND_NAMES)).toHaveLength(BRAND_ROWS.length);
+    // A row whose generic is not on the list is kept but not used.
+    expect(BRANDS_WITH_UNLISTED_GENERIC).toEqual(['humulin']);
+    expect(Object.keys(BRAND_NAMES)).toHaveLength(BRAND_ROWS.length - BRANDS_WITH_UNLISTED_GENERIC.length);
+    expect(matchDrugName('Humulin')).toBeNull();
     // An unsourced new row, or a NAFDAC-looking source without a listing address, is not used.
     expect(isActiveBrandRow({ brand: 'fictionalbrand', generic: 'paracetamol', strength_forms: '', source: 'recalled',
       reviewed_by: 'pending-pharmacist' })).toBe(false);
@@ -149,7 +250,9 @@ describe('drug list (hard pages only)', () => {
       display: 'Lonart? (artemether + lumefantrine)', exact: true });
     expect(matchDrugName('P-Alaxin')?.display).toBe('P-alaxin? (dihydroartemisinin + piperaquine)');
     expect(matchDrugName('Camosunate')?.generic).toBe('artesunate + amodiaquine');
-    expect(matchDrugName('Mixtard')?.generic).toBe('soluble insulin + isophane insulin');
+    expect(matchDrugName('Mixtard')?.generic).toBe('biphasic isophane insulin');
+    expect(matchDrugName('Piriton')?.display).toBe('Piriton? (chlorphenamine)');
+    expect(matchDrugName('Epilim')?.generic).toBe('valproic acid');
     expect(matchDrugName('Tegretol')?.display).toBe('Tegretol? (carbamazepine)');
     expect(matchDrugName('Lpitr')).toBeNull();
     expect(matchDrugName('Lipittor')?.display).toBe('Lipitor? (atorvastatin)');

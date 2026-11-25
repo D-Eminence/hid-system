@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { BRAND_ROWS } from './brand-names';
 import { DIAGNOSIS_SYNONYMS, ICD11_TITLES, UNGROUNDED_ABBREVIATIONS, UNLISTED_DIAGNOSIS_LOOKALIKES } from './diagnosis-list';
-import { NEML_GENERICS, SYNONYMS, UNLISTED_LOOKALIKES } from './drug-list';
+import { CHART_NAMES, LOOKALIKES_WITHOUT_OPTION, NEML_GENERICS, SALT_OPEN_NAMES, SYNONYMS, UNLISTED_LOOKALIKES } from './drug-list';
 import { FREQUENCY_WORDS } from './hard-page';
 import { LAB_TESTS, UNLISTED_LAB_LOOKALIKES } from './lab-list';
 import { ABBREVIATION_TABLE, SIGN_TABLE } from './signs';
@@ -29,6 +29,9 @@ export const READER_LISTS = {
   drugGenerics: NEML_GENERICS,
   drugSynonyms: SYNONYMS,
   drugUnlistedLookalikes: UNLISTED_LOOKALIKES,
+  drugChartNames: CHART_NAMES,
+  drugSaltOpenNames: SALT_OPEN_NAMES,
+  drugLookalikesWithoutOption: LOOKALIKES_WITHOUT_OPTION,
   diagnosisTitles: ICD11_TITLES,
   diagnosisSynonyms: DIAGNOSIS_SYNONYMS,
   diagnosisUngroundedAbbreviations: UNGROUNDED_ABBREVIATIONS,

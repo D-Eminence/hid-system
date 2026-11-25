@@ -6,7 +6,11 @@
  * Columns:
  * - brand: the brand name, lower case, as written on prescriptions.
  * - generic: what it stands for, as on NEML_GENERICS (drug-list.ts), or for a combination brand the listed generics
- *   it combines, joined by " + ", each of which is on the list.
+ *   it combines, joined by " + ", each of which is on the list. A row whose generic is not on the list is kept here
+ *   but not used (drug-list.ts BRANDS_WITH_UNLISTED_GENERIC). When the list moved to the 8th edition (2024) on
+ *   2026-11-23, piriton (chlorpheniramine), epilim (sodium valproate) and mixtard (soluble insulin + isophane
+ *   insulin) were pointed at the new list's names for the same medicines: chlorphenamine, valproic acid and
+ *   biphasic isophane insulin (the list's 30% soluble + 70% isophane insulin, which Mixtard 30 is).
  * - strength_forms: the strength and form of the listing that was checked (one example, not every strength sold).
  * - source: where the row comes from. A row is ACTIVE (used) only when its source cites a public NAFDAC listing:
  *   "NAFDAC Greenbook, NRN <registration number>, https://greenbook.nafdac.gov.ng/products/details/<id> (...)",
@@ -104,7 +108,7 @@ export const BRAND_ROWS: readonly BrandRow[] = [
   { brand: 'phenergan', generic: 'promethazine', strength_forms: '',
     source: 'coordinator-curated 2026-11',
     reviewed_by: 'coordinator-curated' },
-  { brand: 'piriton', generic: 'chlorpheniramine', strength_forms: '4 mg tablet',
+  { brand: 'piriton', generic: 'chlorphenamine', strength_forms: '4 mg tablet',
     source: 'NAFDAC Greenbook, NRN 04-0252, https://greenbook.nafdac.gov.ng/products/details/5817 ("Piriton Tablet"; Chlorphenamine Maleate; listing status Active), retrieved 2026-11-05',
     reviewed_by: 'coordinator-curated' },
   { brand: 'ventolin', generic: 'salbutamol', strength_forms: '100 mcg/Metered-Dose aerosol, metered-dose',
@@ -143,7 +147,7 @@ export const BRAND_ROWS: readonly BrandRow[] = [
   { brand: 'meronem', generic: 'meropenem', strength_forms: '500 mg powder for solution for injection/infusion',
     source: 'NAFDAC Greenbook, NRN A4-6947, https://greenbook.nafdac.gov.ng/products/details/5217 ("Meronem 500 mg IV Powder for Injection"; Meropenem (Meropenem Trihydrate); listing status Active), retrieved 2026-11-05',
     reviewed_by: 'pending-pharmacist' },
-  { brand: 'mixtard', generic: 'soluble insulin + isophane insulin', strength_forms: '300 units/3 mL suspension for injection',
+  { brand: 'mixtard', generic: 'biphasic isophane insulin', strength_forms: '300 units/3 mL suspension for injection',
     source: 'NAFDAC Greenbook, NRN A6-0448, https://greenbook.nafdac.gov.ng/products/details/8820 ("Mixtard 30 FlexPen 100IU"; Insulin regular (Human); Isophane insulin; listing status Active), retrieved 2026-11-05',
     reviewed_by: 'pending-pharmacist' },
   { brand: 'actrapid', generic: 'soluble insulin', strength_forms: '300 units/3 mL solution for injection',
@@ -197,7 +201,7 @@ export const BRAND_ROWS: readonly BrandRow[] = [
   { brand: 'tegretol', generic: 'carbamazepine', strength_forms: '200 mg tablet',
     source: 'NAFDAC Greenbook, NRN 04-0024, https://greenbook.nafdac.gov.ng/products/details/5775 ("Tegretol Tablets 200mg"; Carbamazepine; listing status Active), retrieved 2026-11-05',
     reviewed_by: 'pending-pharmacist' },
-  { brand: 'epilim', generic: 'sodium valproate', strength_forms: '200 mg tablet',
+  { brand: 'epilim', generic: 'valproic acid', strength_forms: '200 mg tablet',
     source: 'NAFDAC Greenbook, NRN 04-1834, https://greenbook.nafdac.gov.ng/products/details/3434 ("Epilim 200 Tablet"; Sodium Valproate; listing status Inactive), retrieved 2026-11-05',
     reviewed_by: 'pending-pharmacist' },
   { brand: 'lyrica', generic: 'pregabalin', strength_forms: '25 mg capsule',
