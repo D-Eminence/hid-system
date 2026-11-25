@@ -3116,7 +3116,7 @@ Decisions in Release D sections are marked **(recommended option, not yet answer
 
 Department: Appointments, with Patient visits (the journey) folded in. Gap map item F1 (health `docs/HEALTH_ID_COMPLETE_FRONTEND_GAP_MAP.md:67`).
 
-Status: planned, not live.
+Status: backend built on `claude/sprint-appointments-backend` (0160 and 0161, unsigned), not live. The served contract is `docs/INTERFACE_CONTRACT.md` APPT-1. Three differences from this plan, each explained there: the settings write is `PATCH /ehr/appointment-settings` (ehr-api's CORS allows GET, POST and PATCH only); the generic email goes through 0161's own outbox drained by identity-api, not a producer `ehr` on the event pipeline (the worker's claim functions belong to the private command owner, which the migrator cannot replace); the database suites are in `services/ehr-api/test/database/` (appointments, appointment-notices, appointments-migrations), where ported suites live.
 
 ### What staff get
 
