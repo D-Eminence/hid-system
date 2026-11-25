@@ -1,10 +1,16 @@
-import { Injectable, type PipeTransform } from '@nestjs/common';
+import { Injectable, Optional, type PipeTransform } from '@nestjs/common';
 import { DomainProblem } from '../../common/problem';
 import { createValidationPipe } from '../../common/validation-pipe';
-import { CreatePrescriptionDto, CreatePrescriptionWithDetailsDto } from '../shared/clinical.dto';
+import { CreatePrescriptionDto, CreatePrescriptionWithDetailsAndRefillsDto, CreatePrescriptionWithDetailsDto,
+  CreatePrescriptionWithRefillsDto } from '../shared/clinical.dto';
+import { PRESCRIPTION_REFILLS_OFF, PrescriptionRefills } from './prescription-refills';
 
-/** The body a prescription create carries: today's, or with the details while they are on. */
-export type CreatePrescriptionInput = CreatePrescriptionDto | CreatePrescriptionWithDetailsDto;
+/**
+ * The body a prescription create carries: today's, or with the details while they are on, or with
+ * `refillsAllowed` while refills are on (ORD-12), or both.
+ */
+export type CreatePrescriptionInput = CreatePrescriptionDto | CreatePrescriptionWithDetailsDto
+  | CreatePrescriptionWithRefillsDto | CreatePrescriptionWithDetailsAndRefillsDto;
 
 /** The seven optional, create-only fields (0125), by their request and answer names. */
 export const DISPENSING_DETAIL_FIELDS = ['priority', 'strength', 'doseForm', 'durationValue', 'durationUnit',
@@ -135,20 +141,26 @@ export class PrescriptionDispensingDetails {
 export const PRESCRIPTION_DISPENSING_DETAILS_OFF = new PrescriptionDispensingDetails(false);
 
 /**
- * Validates a prescription create body with the class the setting picks:
- * CreatePrescriptionDto while off (today's checks and refusals, word for
- * word), CreatePrescriptionWithDetailsDto while on, through the same
+ * Validates a prescription create body with the class the settings pick:
+ * CreatePrescriptionDto while both are off (today's checks and refusals, word
+ * for word), CreatePrescriptionWithDetailsDto while only the details (0125) are
+ * on, CreatePrescriptionWithRefillsDto while only refills (ORD-12) are on, and
+ * CreatePrescriptionWithDetailsAndRefillsDto while both are, through the same
  * validation the app installs globally. The controller's body type is a
- * union, so the global pipe leaves the body to this one.
+ * union, so the global pipe leaves the body to this one. Refills are optional
+ * for Nest (a module built before ORD-12 gives none: off).
  */
 @Injectable()
 export class CreatePrescriptionBodyPipe implements PipeTransform<unknown, Promise<CreatePrescriptionInput>> {
   private readonly validation = createValidationPipe();
 
-  constructor(private readonly details: PrescriptionDispensingDetails) {}
+  constructor(private readonly details: PrescriptionDispensingDetails,
+    @Optional() private readonly refills: PrescriptionRefills = PRESCRIPTION_REFILLS_OFF) {}
 
   transform(value: unknown): Promise<CreatePrescriptionInput> {
-    return this.validation.transform(value, { type: 'body', data: undefined,
-      metatype: this.details.enabled ? CreatePrescriptionWithDetailsDto : CreatePrescriptionDto });
+    const metatype = this.details.enabled
+      ? (this.refills.enabled ? CreatePrescriptionWithDetailsAndRefillsDto : CreatePrescriptionWithDetailsDto)
+      : (this.refills.enabled ? CreatePrescriptionWithRefillsDto : CreatePrescriptionDto);
+    return this.validation.transform(value, { type: 'body', data: undefined, metatype });
   }
 }

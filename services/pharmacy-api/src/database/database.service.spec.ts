@@ -2,7 +2,7 @@ import type { PoolClient } from 'pg';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import {
-  DatabaseService, isRetryableConflict, OWN_FACILITY_WORK, retryDelayMs, SERIALIZABLE_ATTEMPTS,
+  DatabaseService, isRetryableConflict, OWN_FACILITY_WORK, REQUIRED_SCHEMA_QUERY, retryDelayMs, SERIALIZABLE_ATTEMPTS,
 } from './database.service';
 
 const context = { actor: { subject: 'synthetic:pharmacist' }, facilityId: 'facility', correlationId: 'correlation',
@@ -165,5 +165,29 @@ describe('Pharmacy DatabaseService staff session (0133 D13, owner\'s Q120 B)', (
       expect(parameter).not.toBeNull();
       expect(settings.values[Number(parameter![1]) - 1]).toBe('0133');
     }
+  });
+});
+
+describe('ORD-12: the schema this image needs (readiness)', () => {
+  const withPool = (rows: unknown[]) => {
+    const query = jest.fn().mockResolvedValue({ rows });
+    const database = Object.create(DatabaseService.prototype) as DatabaseService;
+    Object.assign(database, { pool: { query } });
+    return { database, query };
+  };
+
+  it('reads the catalog for 0154\'s pharmacy.dispensings.fill_number, opening no table', async () => {
+    const { database, query } = withPool([{ present: true }]);
+    await expect(database.requiredSchemaPresent()).resolves.toBe(true);
+    expect(query).toHaveBeenCalledWith(REQUIRED_SCHEMA_QUERY);
+    const flat = REQUIRED_SCHEMA_QUERY.replace(/\s+/g, ' ');
+    expect(flat).toContain("pg_catalog.to_regclass('pharmacy.dispensings')");
+    expect(flat).toContain("attribute.attname = 'fill_number' and not attribute.attisdropped");
+    expect(flat).not.toMatch(/from pharmacy\./);
+  });
+
+  it('is false on a database without the column (a schema before 0154)', async () => {
+    await expect(withPool([{ present: false }]).database.requiredSchemaPresent()).resolves.toBe(false);
+    await expect(withPool([]).database.requiredSchemaPresent()).resolves.toBe(false);
   });
 });

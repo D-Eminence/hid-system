@@ -1804,6 +1804,9 @@ begin
     raise exception 'Explicit dispensing did not preserve accepted work separately';
   end if;
 
+  -- One dispensing per fill number (0154, ORD-12): an INSERT that names no
+  -- fill number (today's pharmacy-api) is fill 1 again and meets the key on
+  -- (work_item_id, fill_number)...
   begin
     insert into pharmacy.dispensings (
       work_item_id, work_item_version, patient_id, facility_id,
@@ -1822,6 +1825,28 @@ begin
     );
     raise exception 'Second/partial dispensing was silently created';
   exception when unique_violation then null;
+  end;
+  -- ...and a refill (fill 2) of this item, whose prescription allows none
+  -- (refills_allowed null), is refused by the dispensing check.
+  begin
+    insert into pharmacy.dispensings (
+      work_item_id, work_item_version, patient_id, facility_id,
+      medication_code_system, medication_code, medication_display,
+      quantity_dispensed, quantity_unit,
+      dispensed_by, dispensed_by_membership_id, reason,
+      idempotency_key, request_sha256, correlation_id, fill_number
+    ) values (
+      work_id, 1, '50000000-0000-4000-8000-000000000001',
+      '10000000-0000-4000-8000-000000000002',
+      'urn:hid:test-medication', 'amoxicillin-500mg', 'Amoxicillin 500 mg',
+      1, 'tablet', '20000000-0000-4000-8000-000000000001',
+      '40000000-0000-4000-8000-000000000001', 'Refill without refills',
+      'schema-pharmacy-dispense-0003', repeat('a', 64),
+      'schema-test-pharmacy-dispense-3', 2
+    );
+    raise exception 'A refill was recorded on a prescription that allows none';
+  exception when check_violation then
+    if sqlerrm <> 'NO_REFILLS_LEFT' then raise; end if;
   end;
 
   insert into pharmacy.dispensing_reversals (
@@ -1990,6 +2015,82 @@ begin
   end if;
   perform set_config('app.facility_id', '10000000-0000-4000-8000-000000000002', true);
   perform set_config('app.membership_id', '40000000-0000-4000-8000-000000000001', true);
+end
+$$;
+
+-- Refills (0154, ORD-12): a prescription written with one refill allowed
+-- (and a duration, which a refill needs: 30 days) takes two fills on its
+-- one work item, the second numbered 2, and refuses a third. Fill 1 is
+-- recorded as of 40 days ago, so the refill interval (3/4 of the duration
+-- after the latest fill, 23 days) has passed when fill 2 is recorded.
+insert into ehr.prescriptions (
+  id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  medication_code_system, medication_code, medication_display, dose_quantity,
+  dose_unit, route_code, frequency, instructions, starts_on, status, refills_allowed,
+  duration_value, duration_unit
+) values (
+  'f3000000-0000-4000-8000-000000000011',
+  '80000000-0000-4000-8000-000000000001',
+  '50000000-0000-4000-8000-000000000001',
+  '10000000-0000-4000-8000-000000000002',
+  '20000000-0000-4000-8000-000000000001',
+  '40000000-0000-4000-8000-000000000001',
+  'urn:hid:test-medication', 'metformin-500mg', 'Metformin 500 mg',
+  1, 'tablet', 'oral', 'Twice daily', 'Take with meals', current_date, 'active', 1,
+  30, 'day'
+);
+do $$
+declare
+  work_id uuid := 'f3000000-0000-4000-8000-000000000012';
+  fill integer;
+begin
+  insert into pharmacy.work_items (
+    id, patient_id, facility_id, ordering_facility_id,
+    source_ehr_prescription_id, source_ehr_prescription_version,
+    source_encounter_id, source_status, medication_code_system, medication_code,
+    medication_display, dose_quantity, dose_unit, route_code, frequency,
+    instructions, starts_on, prescribed_by, prescribed_at, accepted_by,
+    accepted_by_membership_id, acceptance_reason, idempotency_key,
+    request_sha256, correlation_id
+  ) select
+    work_id, patient_id, facility_id, facility_id, id, row_version,
+    encounter_id, status, medication_code_system, medication_code,
+    medication_display, dose_quantity, dose_unit, route_code, frequency,
+    instructions, starts_on, created_by, created_at,
+    '20000000-0000-4000-8000-000000000001',
+    '40000000-0000-4000-8000-000000000001',
+    'Prescription accepted for dispensing', 'schema-pharmacy-accept-0011',
+    repeat('6', 64), 'schema-test-pharmacy-0011'
+  from ehr.prescriptions where id = 'f3000000-0000-4000-8000-000000000011';
+  foreach fill in array array[1, 2, 3] loop
+    begin
+      insert into pharmacy.dispensings (
+        work_item_id, work_item_version, patient_id, facility_id,
+        medication_code_system, medication_code, medication_display,
+        quantity_dispensed, quantity_unit,
+        dispensed_by, dispensed_by_membership_id, reason,
+        idempotency_key, request_sha256, correlation_id, fill_number, dispensed_at
+      ) values (
+        work_id, 1, '50000000-0000-4000-8000-000000000001',
+        '10000000-0000-4000-8000-000000000002',
+        'urn:hid:test-medication', 'metformin-500mg', 'Metformin 500 mg',
+        60, 'tablet', '20000000-0000-4000-8000-000000000001',
+        '40000000-0000-4000-8000-000000000001', 'Medication supplied to patient',
+        'schema-pharmacy-refill-000' || fill, repeat('9', 64),
+        'schema-test-pharmacy-refill-' || fill, fill,
+        clock_timestamp() - make_interval(days => case when fill = 1 then 40 else 0 end)
+      );
+      if fill = 3 then
+        raise exception 'A third fill was recorded on a prescription that allows one refill';
+      end if;
+    exception when check_violation then
+      if fill <> 3 or sqlerrm <> 'NO_REFILLS_LEFT' then raise; end if;
+    end;
+  end loop;
+  if (select string_agg(fill_number::text, ',' order by fill_number) from pharmacy.dispensings
+       where work_item_id = work_id) is distinct from '1,2' then
+    raise exception 'A prescription with one refill did not take exactly two fills';
+  end if;
 end
 $$;
 

@@ -17,6 +17,12 @@ const LAGOS_DATE = new Intl.DateTimeFormat('en-CA', {
   day: '2-digit',
 });
 
+/** The Lagos day (YYYY-MM-DD) at `now`. */
+export function lagosDayAt(now: Date = new Date()): string {
+  const parts = Object.fromEntries(LAGOS_DATE.formatToParts(now).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
 /** The first Lagos day (YYYY-MM-DD) whose done work the list shows, at `now`. */
 export function workListSince(now: Date = new Date()): string {
   const parts = Object.fromEntries(LAGOS_DATE.formatToParts(now).map((part) => [part.type, part.value]));

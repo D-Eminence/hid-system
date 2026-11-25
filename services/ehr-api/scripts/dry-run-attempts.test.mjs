@@ -206,3 +206,28 @@ test('the runner retries only its dry run; --plan and the apply are as before', 
   assert.doesNotMatch(applyBlock, /withDryRunAttempts|MigrationFileError/);
   assert.match(applyBlock, /await client\.query\('begin'\);\n\s+await client\.query\("set local lock_timeout = '5s'"\);/);
 });
+
+test('0154\'s two busy refusals, read from the file, are ones the dry run retries', async () => {
+  const file = '0154_prescription_refills.sql';
+  const sql = await readFile(path.join(scripts, '../database/migrations', file), 'utf8');
+  // Each 55P03 the file raises: the SQL string literals joined by || after "message =".
+  const messages = [];
+  for (const raised of sql.split("errcode = '55P03',").slice(1)) {
+    const literals = /^\s*message\s*=\s*((?:'(?:[^']|'')*'\s*(?:\|\|\s*)?)+)/.exec(raised);
+    assert.ok(literals, `a 55P03 in ${file} has no literal message`);
+    messages.push([...literals[1].matchAll(/'((?:[^']|'')*)'/g)].map((part) => part[1].replaceAll("''", "'")).join(''));
+  }
+  const tables = 'pharmacy.dispensings, ehr.prescriptions or a table 0154 reads (the Pharmacy work items, the order '
+    + 'routes or 0133\'s claims)';
+  assert.deepEqual(messages, [
+    `0154: ${tables} is busy, and this transaction already holds an earlier migration's locks, so it does not wait; `
+      + `nothing applied; ${tail}`,
+    `0154: ${tables} stayed busy for 5 seconds; nothing applied; ${tail}`,
+  ]);
+  for (const message of messages) {
+    assert.equal(isBusyRefusal(new MigrationFileError(file, databaseError('55P03', message))), true, message);
+    // Under another file's name, or another SQLSTATE, it is not this file's busy refusal.
+    assert.equal(isBusyRefusal(new MigrationFileError('0153_clinician_recent_diagnoses.sql', databaseError('55P03', message))), false);
+    assert.equal(isBusyRefusal(new MigrationFileError(file, databaseError('57014', message))), false);
+  }
+});

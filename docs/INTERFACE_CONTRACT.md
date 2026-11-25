@@ -1644,8 +1644,11 @@ most 200 items: open work first, oldest first, then done work, newest first.
 Lab work is open while any test it asks for has no released result at its
 current version (or that result is marked entered in error); a work item with
 no requested test is open. Pharmacy work is open while it has no dispensing;
-a reversed dispensing counts as done, because a work item takes one dispensing
-only and cannot be dispensed again. Earlier backends answered the 200 oldest items
+a reversed dispensing counts as done, because a reversed fill still counts and
+the item cannot be dispensed again, unless a refill is open (ORD-12: while
+pharmacy-api's `PRESCRIPTION_REFILLS_ENABLED` is on, an own item with a refill
+open is open work too, after the items waiting for their first fill; one row
+per item whatever its fills; see "ORD-12. Prescription refills"). Earlier backends answered the 200 oldest items
 the member could read whatever their state, so a busy facility stopped seeing
 new work. The open-first order changed no field of the answer and no audit row.
 
@@ -9887,9 +9890,11 @@ hospital's item in the same transaction ("sent elsewhere"):
 - A prescription has one item of this hospital's own and at most one
   route-backed item. Once it is sent elsewhere, only the route-backed item
   can be dispensed.
-- The database allows at most one dispensing across the two pharmacies,
-  whichever image asks. It refuses to dispense an item sent elsewhere with
-  23514 `PRESCRIPTION_SOURCE_NOT_DISPENSABLE`, DETAIL `sent_elsewhere`.
+- The database allows dispensing at one of the two pharmacies only,
+  whichever image asks (with ORD-12, 0154, the hospital's own item may take
+  refills after its first fill; a route-backed item takes one fill). It
+  refuses to dispense an item sent elsewhere with 23514
+  `PRESCRIPTION_SOURCE_NOT_DISPENSABLE`, DETAIL `sent_elsewhere`.
 - The item stays withdrawn whatever happens to the route. If the outside
   pharmacy declines it, the route lapses, or the clinician or the patient
   withdraws it, the prescription does not come back to this hospital's
@@ -10672,19 +10677,20 @@ change after 0148 (no backfill).
   seen. No audit or outbox row, and no change to the progress call.
 - `pharmacyStep` (ORD-4) stays `dispensed` or `dispensing_reversed`;
   `status`, `acceptedAt`, `version` and `dispensing` keep their meaning.
-- With ORD-12 (refills, 0152, provisional) "after dispensing" means after
+- With ORD-12 (refills, 0154, provisional) "after dispensing" means after
   the first fill, and `resumed` compares with the first fill's content. 0148
   pins `pharmacy.claim_prescription_dispensing()` (md5
   2c7f20d7c0df7c582bccc0291f452fdd), which sets `dispensed_at` only while it
-  is null and today refuses a second fill (23514
-  `PRESCRIPTION_SOURCE_NOT_DISPENSABLE`, DETAIL `not_claimed`), so ORD-12
-  replaces it, keeps `dispensed_at` as the first fill's and never clears it.
-  0148 merges before 0152, or is pinned again if ORD-12 lands first. Its
-  refills column follows the fingerprint's rule (below): a NOT NULL or
-  defaulted refills column must be left out; a nullable one needs nothing.
-  ORD-12 adds `refills_allowed` as a nullable column, so the trigger
-  function stays as it is. After any change, 0101's version check refuses
-  the next refill; ORD-12 decides what a refill after a change means.
+  is null and refuses a second fill (23514
+  `PRESCRIPTION_SOURCE_NOT_DISPENSABLE`, DETAIL `not_claimed`), so 0148 runs
+  before 0154, which replaces it and keeps `dispensed_at` as the first
+  fill's, never cleared. A refills column follows the fingerprint's rule
+  (below): a NOT NULL or defaulted one must be left out; a nullable one
+  needs nothing. 0154's `refills_allowed` is nullable, so it changes no
+  fingerprint and the trigger function is not replaced (an owner's repair
+  of the value after dispensing shows as `edited`). After any change, 0101's
+  version check refuses the next refill ("ORD-12. Prescription refills"
+  below).
 
 ### Work item answers
 
@@ -12157,9 +12163,20 @@ stored and no audit field changes.
   sees nothing. Each policy asks the marker once per statement, and is named
   to sort after the tables' other read policies, which PostgreSQL asks in
   reverse name order: inside the function, 0005's consent test is never
-  asked per row (a post-check holds the order). No `hid_` role but the owner
-  is a member of either table's owner (a post-check). The runtime roles' own
-  reads of these tables are unchanged.
+  asked per row (0143's post-check held the order when 0143 was applied).
+  Since 0154 (ORD-12, below), `prescriptions_scan_refills` sorts after
+  `prescriptions_scan_my_orders` on `ehr.prescriptions`, so it is asked
+  first there and 0143's policy second: outside 0154's two refill readers
+  it is one InitPlan per statement that answers false, so inside this
+  function the consent test is still never asked per row (measured on the
+  refills suite's fixture under a NOSUPERUSER NOBYPASSRLS owner, in another
+  facility's pharmacist's session with 0143's marker held: all 262
+  prescriptions read, the consent test asked 0 times, each marker's test
+  once). 0154's post-check and the refills
+  suite (case 1l) hold that no other read policy of `ehr.prescriptions`
+  sorts between the two. No `hid_` role but the owner is a member of either
+  table's owner (a post-check). The runtime roles' own reads of these tables
+  are unchanged.
 
 ### Screen notes
 
@@ -12423,3 +12440,1023 @@ when `dateOfBirthEstimated`, and "NIN Not Verified". On `sent_for_review`
 show the message and nobody else's details. After `identified`, offer
 "Verify NIN" (ID-6). Never show `firstName`/`lastName` of a record whose
 `recordKind` is `unknown`.
+
+## ORD-12. Prescription refills (migration 0154, provisional; not live until signed)
+
+Owner decision Q131 A of 19 November 2026 ("yes to refills"), built to the
+clinical owner's design note on hid-system#258 (Ola, 23 November 2026),
+Rahman's review of it and Ola's answers (both 23 November 2026; the answers
+win where they differ from the note), and to the clinical owner's decisions
+of 24 November 2026: D8 (the two refill readers read the prescriptions under
+a scan marker, "The refill scan marker" below), D9 (an expiry for refills:
+their last day, `ehr.prescription_refills_end_on` below) and D10
+(confirmations: with refills the duration is how long one fill lasts;
+refills need 0125's setting on; the open refills' 3-second limit stays as a
+guard). The planned contract's ORD-12 section is the spec. Migration 0154
+needs 0001-0146 and 0148 applied and checks that in its section 0; its
+number is provisional (the next after 0148-0153), and nothing here is live
+until the owner signs the declaration that names it. The services' part
+(ehr-api's `refillsAllowed`, pharmacy-api's fill number, refusals, refills
+and one row per item, the event-dispatcher's `fillNumber`,
+`@hid/api-client`) is "The services" below. Recording a fill above 1 sits
+behind `PRESCRIPTION_REFILLS_ENABLED`, off by default and separate from
+0125's setting; with it off no refill is recorded.
+
+Release order: 0147, 0148, 0149-0153, then 0154; then the event-dispatcher
+that accepts `fillNumber` on `MedicationDispensed` (an older one fails such
+an event for good); then pharmacy-api; then ehr-api and the staff front
+ends; the setting on last (pharmacy-api's, then ehr-api's, never ehr-api's
+first, so no prescriber sets refills the pharmacy cannot record), and only
+once both staff front ends (health and `apps/pharmacy`) handle more than one
+fill per item. The first
+refills-aware pharmacy-api gives one row per item whatever the setting (the
+latest fill, its fill number, and 0154's readers), so it needs 0154: on a
+database without 0154's `pharmacy.dispensings.fill_number` it answers
+`GET /api/v1/health/ready` 503 `PHARMACY_SCHEMA_NOT_READY` (still live), so a
+deploy that reaches such a database fails its health check and the running
+tasks stay, instead of every work-item request answering 500. This
+pharmacy-api, and any pharmacy-api built from a staging commit that contains
+it, ships only after 0154 is applied.
+Rollback floor: once any refill is recorded, pharmacy-api must not roll
+back below that image (an older one joins dispensings one row per fill and
+shows the item twice, with an arbitrary fill's ids). Turning the setting
+off again stops new refills; recorded fills stay.
+
+What staff get: the prescriber sets refills 0-11 when writing the
+prescription (left out: none) and never edits it afterwards; this
+hospital's own pharmacy records up to 1 + refills fills on the one work item,
+and a reversed fill still counts; a refill needs the prescription still
+active, unchanged since the item was accepted, and the refills' last day
+(the Lagos day) not past: the earliest of the prescription's end date, the
+Lagos day it was written plus (refills + 2) times one fill's duration (one
+fill's length after the course should have finished), and that day plus 365
+(the clinical owner's decision D9, 24 November 2026; "Refills until <date>"),
+and opens on the Lagos day of the item's latest fill not
+reversed plus 3/4 of the prescription's duration in days, rounded up (the
+refill interval: a new safety rule set by the clinical owner on 24 November
+2026, with no override; for an earlier supply a clinician writes a new
+prescription), so a prescription with refills needs a duration, and with
+refills that duration is how long one fill lasts (one supply, not the whole
+course: a 30-day supply is refilled from day 23; a 90-day course entered
+there would hold each refill back until day 68), which the prescribe form
+and the refusal say ("Duration of each fill"; confirmed by the clinical
+owner, D10, 24 November 2026: decision 1 meant exactly that); a
+prescription sent to another facility's pharmacy gets one fill, as today. Any change after the first fill, a hold then resume
+included, ends the remaining refills (0101's version check, the owner
+decision at 0101:48-54). The prescriber sees the refills allowed; the
+prescriber is not told that a change ended the remaining refills (0154
+leaves `ehr.withdraw_own_pharmacy_send` and 0133's and 0144's states and
+steps as they are: a change after the first fill is the prescriber's own);
+the pharmacy sees 0148's notice and the reader's closed reason, and a
+refused refill with its reason. An owner's repair made in replica mode
+writes no version, so it records nothing and ends no refill.
+
+### The database (0154)
+
+- `ehr.prescriptions.refills_allowed smallint`, nullable, no default, with
+  the CHECK `prescriptions_refills_allowed_ck`: null, or 0-11, and 1-11 only
+  with 0125's `duration_value` and `duration_unit` (the refill interval comes
+  from the duration). A CHECK on the table, not a test in the dispensing
+  check, because it fits 0125's model (the duration, like this column, is
+  fixed at creation), so the prescription is refused when it is written,
+  not at the pharmacy counter; ehr-api refuses it first (400
+  `REFILLS_NEED_DURATION`). The coupling this brings (refills above 0 need
+  0125's duration, so `PRESCRIPTION_REFILLS_ENABLED` needs
+  `PRESCRIPTION_DISPENSING_DETAILS_ENABLED` on) is accepted by the clinical
+  owner (D10). Null means none: every row written
+  before 0154 and every row an image without ORD-12 writes (they name their
+  columns). ehr-api sets it at creation only; its PATCH never names it. It is
+  nullable so that 0148's fingerprint (`jsonb_strip_nulls`, "The database
+  (0148)" above) changes for no existing prescription: a resume of an item
+  whose hold 0148 recorded before 0154 still reads `resumed` (proved on a
+  database taken from 0148 to 0154 by the runner), 0148's trigger function
+  is not replaced (its md5 f61173d77be391a9e9c96db494827e82 is checked
+  unchanged), and an owner's repair that sets the value after dispensing,
+  in origin mode, shows as a change (`edited`). The EHR runtime's
+  table-wide SELECT, INSERT and UPDATE cover the column.
+- `pharmacy.dispensings.fill_number smallint not null default 1`, with the
+  CHECK `dispensings_fill_number_ck` (1-12): 1 is the first fill, 2 and above
+  refills. Every row recorded before 0154 reads 1 (0023's key allowed one
+  per item, and the rows are immutable); an INSERT that names no fill number
+  (Release A and B pharmacy-api, 0102's demo install) records fill 1, as
+  today. The Pharmacy runtime's table-wide SELECT and INSERT cover it.
+- `UNIQUE (work_item_id, fill_number)`, `dispensings_work_item_fill_number_key`,
+  replaces 0023's unnamed `UNIQUE (work_item_id)`. One row per fill number:
+  a second fill 1 (today's INSERT again) or two refills of one item with the
+  same number recorded at once meet it. Two refills at once both pass the
+  dispensing check (each holds the prescription FOR SHARE, which does not
+  wait for the other); the second waits on the key and, once the first
+  commits, fails 23505 under READ COMMITTED and 40001 under SERIALIZABLE
+  (pharmacy-api's isolation, after its read of the item's dispensings);
+  either way one fill is recorded. Fill numbers need not be contiguous in
+  the database; the bound is on how many rows an item can have.
+- `pharmacy.validate_dispensing()` (BEFORE INSERT, origin mode) is 0101's
+  text with one block before its RETURN (md5
+  06be902c41bcd4ee65f7f840c120db8f; the body without the block is 0101's
+  17f7e8897bd2ab240332e4d2c9f757b7). The order-route branch, 0077's actor
+  and work-item check and 0101's prescription check answer first, as
+  before. Then, for `fill_number > 1` only: a route-backed item, or an own
+  item past `1 + coalesce(refills_allowed, 0)` fills, is refused 23514
+  `NO_REFILLS_LEFT`; an own item whose refills' last day,
+  `ehr.prescription_refills_end_on` (the earliest of `ends_on`, the Lagos
+  day written plus `(refills_allowed + 2)` fills' durations, and that day
+  plus 365; the clinical owner's D9, 24 November 2026), is before today in
+  Lagos (`(clock_timestamp() at time zone 'Africa/Lagos')::date`, whatever
+  the session's time zone; the last day itself counts) is refused 23514
+  `REFILL_PRESCRIPTION_ENDED`, DETAIL that day (`YYYY-MM-DD`); then the
+  refill interval: a refill before the Lagos day of the item's latest fill
+  not reversed plus
+  `ceil(0.75 × the duration in days)` (a day 1, a week 7, a month 30; at
+  least 1) is refused 23514 `REFILL_TOO_SOON`, DETAIL that day
+  (`YYYY-MM-DD`); with every fill reversed there is no wait. A refill whose
+  day would come after the refills' last day (a late fill: the interval
+  from the latest fill runs past the last day) can never be recorded, so it
+  is refused `REFILL_PRESCRIPTION_ENDED` at once, DETAIL the last day (today
+  or later), never `REFILL_TOO_SOON` with a day on which it would be
+  refused. The fills and
+  their reversals are read as the owner, matched on the item. A first fill
+  is not checked against `ends_on`, the refills' last day or the interval
+  (unchanged). The values are those of the prescription
+  row 0101 reads FOR SHARE, which must be active at the version the item
+  was accepted at, so a refill after any change is refused 23514
+  `PRESCRIPTION_SOURCE_NOT_DISPENSABLE`, as a first fill is. On a
+  route-backed item, a fill after the first is refused `ORDER_ROUTE_CLOSED`
+  first (the first fill completed the route).
+- `pharmacy.claim_prescription_dispensing()` (0133 D14, AFTER INSERT,
+  enabled always; md5 1a50612f5330a36c9b64d0d831c77812): fill 1 exactly as
+  0133 made it (the item's live, undispensed claim is marked dispensed);
+  fill 2 and above need the item's claim live, dispensed and its own (no
+  order route) and change nothing; else 23514
+  `PRESCRIPTION_SOURCE_NOT_DISPENSABLE` with DETAIL `sent_elsewhere` (the
+  claim was released by a send elsewhere) or `not_claimed`. `dispensed_at`
+  stays the first fill's for good, so 0133's and 0144's readers and 0148's
+  "after dispensing" mean after the first fill; an acceptance (0144) after
+  any fill is still refused `not_claimed` (refills need none). It reads only
+  the claims, never `ehr.prescriptions`.
+- `pharmacy.work_item_refills(uuid[])`, new (plpgsql, VOLATILE: it writes
+  0154's refill scan marker, D8; SECURITY DEFINER, the owner's,
+  `search_path` `pg_catalog, pg_temp`, every name schema-qualified; md5
+  1563ae61481d70df74c493a497260d44). EXECUTE to `hid_pharmacy_runtime` and
+  `hid_schema_test_runtime` only, here and in `runtime-grants.sql` (0154's
+  block); PUBLIC has none. 0125's reader is not replaced. For at most 200
+  requested work items (201, or a null array: 22023
+  `WORK_ITEM_REFILLS_INVALID`), one row per own item (no order route) the
+  session may read:
+
+  | Column | Meaning |
+  |---|---|
+  | `work_item_id` | the item |
+  | `refills_allowed` | the prescription's refills, null read as 0 |
+  | `fills_recorded` | every fill row of the item, a reversed fill included |
+  | `refill_open` | a fill is recorded, fewer than `1 + refills_allowed`, the prescription active at the version the item was accepted at (and for its encounter), `refills_end_on` not before today in Lagos, and `next_fill_on` today or past |
+  | `closed_reason` | null while open and before the first fill; else the first that holds: `none_left`, `stopped` (on hold, completed, cancelled or entered in error), `changed` (active again but not at the accepted version: an edit, or a hold then resume), `ended` (no refill can be collected any more: the refills' last day has passed, or the next refill would open only after it, a late fill), `not_yet` (the refill interval is running; it opens on or before the last day) |
+  | `next_fill_on` | the Lagos day the next fill may be recorded (the dispensing check's interval; with every fill reversed, the latest reversal's day): a later day while `not_yet`, today or earlier while open; null before the first fill and once closed for another reason |
+  | `refills_end_on` | the refills' last day, the last Lagos day a refill can be collected (`ehr.prescription_refills_end_on`, below), whatever the item's state; null when the prescription allows no refill |
+
+  A refill whose day would come after the last day (a late fill) can never
+  be collected: it reads `ended` at once, with `next_fill_on` null and
+  `refills_end_on` still ahead, as the dispensing check refuses it and the
+  open refills leave it out; a refill whose day is the last day itself
+  reads `not_yet` until that day and then opens (refills suite, case 17g:
+  both, at the Lagos boundary, under far session time zones).
+
+  A stop comes before a change because every status change is a new
+  version too. `refill_open` is exactly what the dispensing check and the
+  claim function ask of the next fill (the suite tries each item's next
+  fill); it knows nothing of `PRESCRIPTION_REFILLS_ENABLED`, which
+  pharmacy-api adds. "May read" is 0148's rule: the session's facility,
+  `pharmacy.work-item.read`, and `pharmacy.work_items`' two read policies
+  repeated as conditions (0133's own-work half first, about 0.1 ms a call,
+  then the consent test, about 2 ms, so a pharmacist on the own-work basis
+  never runs the consent test). It
+  reads in three steps: the items, under the work items' own row-level
+  security; their prescriptions, by id, in its one statement that reads
+  `ehr.prescriptions`, under the refill scan marker (below: the owner then
+  reads every row, so the function's own conditions decide, as they do
+  under a superuser owner, who bypasses row-level security); and the answer,
+  from those rows and the items' fills and reversals (whose own policies let
+  the owner read them for an own item the session may read). Each
+  prescription, fill and reversal is matched on the item's patient and
+  facility, so a superuser owner and a NOSUPERUSER NOBYPASSRLS owner answer
+  alike. A route-backed item, another facility's item, an item read without
+  `pharmacy.work-item.read`, and a session without a facility give no row.
+  Its text names `ehr.prescriptions`, so it joins 0133 D5's list of
+  owner-run definer functions that read prescriptions (0133's suite's S7
+  list, eleven with it); the suites that pin that list name it. VOLATILE,
+  because it writes the marker: a READ ONLY transaction is refused (25006);
+  pharmacy-api calls it only in its work list and its single read, both
+  READ COMMITTED and read-write (no caller is read-only), and under READ
+  COMMITTED each of its steps reads the latest committed rows, as each
+  statement of pharmacy-api's request does. Cost, the 200 own rows a list
+  shows, read by a pharmacist on the own-work basis (20,000 items in the
+  facility, each filled once; 200 to 10,000 of them allowing 2 refills of
+  30 days with a refill open), 3 calls in each of six runs, as the Pharmacy
+  runtime: 0.053-0.072 seconds under the NOSUPERUSER NOBYPASSRLS owner and
+  0.016-0.023 seconds under a superuser owner. Before the marker it took
+  2.2-2.5 s under the NOSUPERUSER NOBYPASSRLS owner (the row-level security
+  of `ehr.prescriptions` on those rows: 0133 D5's source read and 0005's
+  consent test, per row); with the marker and the consent test asked first
+  in its own conditions, 0.37-0.42 s (that test, about 2 ms a row, was
+  nearly all of it); with the own-work half first, as now, the figures
+  above. pharmacy-api asks it only for the own rows a list or a read shows
+  (once per list, at most 200 ids); the list finds the items with a refill
+  open through the next reader.
+- `pharmacy.open_refill_work_items()`, new (plpgsql, VOLATILE, as the
+  reader; SECURITY DEFINER, the owner's, `search_path` `pg_catalog,
+  pg_temp`, every name schema-qualified; md5
+  928d4e14fe8d7bff9ce717ef757a6974; EXECUTE as the reader's, here and in
+  `runtime-grants.sql`), with its index
+  `ehr.prescriptions_refills_facility_idx` on `ehr.prescriptions
+  (facility_id, created_at, ehr.prescription_refills_end_on(created_at,
+  refills_allowed, duration_value, duration_unit, ends_on)) WHERE
+  refills_allowed > 0` (built empty under the file's
+  lock: the column is new). No ids: the ids (`work_item_id`) of the
+  session's own items whose refill is open now, by the reader's rule exactly
+  (the same session tests and read policies; `refill_open` as above, the
+  refill interval included), the refill that opened first first (by its
+  day, then the item id), at most 200. Its one statement that reads
+  `ehr.prescriptions` runs under the refill scan marker (below) and keeps
+  the session facility's active prescriptions that allow refills, written
+  in the last 365 Lagos days, whose refills have not ended: it
+  range-scans the index by facility and by the time written, from the Lagos
+  day 365 days ago (the last day's rule (c), stated as a range every
+  condition of which is leakproof), and keeps those whose last day is today
+  or later. PostgreSQL applies a table's row-level security before any
+  condition that is not leakproof, and only a superuser can mark a function
+  leakproof, so under a NOSUPERUSER NOBYPASSRLS owner (production's kind)
+  the last-day function cannot bound the index scan: there the read is
+  every prescription of the facility that allows refills and was written in
+  the last 365 days, ended or not, the last day checked on each under the
+  marker (about 10 microseconds a row: with 19,800 such prescriptions, all
+  ended, and 200 live, the open refills took 0.18-0.21 s in all; when they
+  are most of the table the planner reads the table instead, at the same
+  cost); under an owner that bypasses row-level security the index's third
+  column leaves the ended ones out inside the index as well (the same
+  facility: 0.016-0.029 s). This is narrower than the clinical owner's D9
+  asked ("only the facility's prescriptions whose refills have not ended
+  are read"), and the clinical owner accepted it (24 November 2026), with
+  no stored column: a stored column for the last day would make the bound
+  exact under production's owner kind, but adding one rewrites
+  `ehr.prescriptions` under its lock. Either way a prescription
+  leaves the set on its refills' last day at the latest (one fill's length
+  after its course should have finished, or a year), however its refills
+  ended (used up, changed, never collected), so the read no longer grows
+  with the facility's history. It then finds their own items by the list
+  of what the step before found, and each item's fills and reversals by the
+  item (an index probe, so the work grows with the items, not with their
+  square), each step materialized, and keeps the items with a fill left
+  whose day has come, in its order; only then does it ask the work items'
+  two read policies (the own-work half first), one item at a time in that
+  order, until 200 pass (the sort is a fence, `OFFSET 0`, so the policies
+  are asked of the items it answers and of those refused before them, not
+  of every due item; the answer is the one a filter before the sort would
+  give). So its cost grows with the live prescriptions that allow refills,
+  never with the facility's work items or with how many refills are open at
+  once, and no plan the planner picks from stale statistics multiplies the
+  policy work (a first version that joined without the lists ran a suite
+  step for minutes on a fresh database). A session without a facility or
+  without `pharmacy.work-item.read`, another facility, and a pharmacist
+  neither read policy lets read get no row; a route-backed item is never
+  named. Its text names `ehr.prescriptions`, so
+  0133's S7 list is twelve with the two readers. A session without a
+  facility or without `pharmacy.work-item.read` writes no marker. Cost, a
+  pharmacist on the own-work basis, 20,000 own items in the facility (each
+  filled once), K of them allowing 2 refills of 30 days, written 24 to 60
+  days ago and filled once, so all K have a refill open at once, 3 calls at
+  each K as the Pharmacy runtime, under the NOSUPERUSER NOBYPASSRLS owner:
+  0.057-0.109 s at 200, 0.095-0.123 s at 500, 0.17-0.20 s at 1,000,
+  0.30-0.40 s at 2,000, 0.78-0.82 s at 5,000 and 1.44-1.51 s at 10,000:
+  about 0.15 ms for each live refill prescription (the work items' and the
+  fills' own row-level security on them; as the clinical owner decided, D8,
+  no marker is added on those tables), so pharmacy-api's 3-second limit for
+  it would be reached at about 20,000 at once. Under a superuser owner:
+  0.014-0.030 s at 200, 0.031-0.051 s at 2,000, 0.085-0.110 s at 10,000.
+  Those figures hold for sessions on the own-work basis only (a pharmacist:
+  each table's own-work policy holds before the consent test is asked). A
+  session that may read only on consent (a clinician or a nurse: it holds
+  `pharmacy.work-item.read`, which lets it list `GET /pharmacy/work-items`,
+  but not `pharmacy.order-route.receive`, so it has no own-work
+  membership) pays the consent test, about 1.5-2 ms a call, instead: under
+  the NOSUPERUSER NOBYPASSRLS owner the work items' own policy asks it of
+  every live refill prescription's item and the fills' asks it again of
+  each item the session may read; under a superuser owner only R7's own
+  check asks it, of the due items until 200 pass. Measured the same way as
+  a clinician (the review of 24 November 2026, fifth round), under the
+  NOSUPERUSER NOBYPASSRLS owner: with no consent grant (it may read none;
+  no row) 0.29-0.31 s at 200, 0.75-0.78 s at 500, 1.41-1.51 s at 1,000 and
+  3.12-3.67 s at 2,000, about 1.5-1.9 ms for each live refill prescription;
+  with a read grant for every patient (it may read them all; 200 rows)
+  0.89-0.94 s, 1.85-1.92 s, 3.45-3.94 s and 6.79-6.88 s, about 3.4-3.9 ms
+  for each. So such a session's open refills reach the 3-second limit at about
+  1,800 live refill prescriptions it may not read, or about 800 it may, and
+  from then on its list says `refillsUnavailable` (the answer stays
+  correct). Under a superuser owner: 0.29-0.37 s, 0.71-0.85 s, 1.41-1.59 s
+  and 3.23-3.47 s with no grant, 0.33-0.51 s at each K with grants for all.
+  Before this (the review of 24 November 2026), it asked the read
+  policies of every due item before the sort, with the consent test (about
+  2 ms a call) first: about 2 ms for each refill open at once, 0.38-0.43 s
+  at 200, 1.95-2.36 s at 1,000 and 3.81-4.32 s at 2,000 under the
+  NOSUPERUSER NOBYPASSRLS owner (1.81-1.85 s and 3.63-3.76 s at 1,000 and
+  2,000 under a superuser owner), so the 3-second limit was reached at
+  about 1,400-1,500 open at once and from then on every list load would
+  have said `refillsUnavailable`: refills left uncollected (open until
+  their last day, up to a year) were enough to reach it.
+- `ehr.prescription_refills_end_on(written_at timestamptz, refills_allowed
+  smallint, duration_value integer, duration_unit text, ends_on date)`, new
+  (SQL, IMMUTABLE, PARALLEL SAFE, not SECURITY DEFINER, `search_path`
+  `pg_catalog, pg_temp`, the owner's; md5
+  90de746d4d8377b6dfecabb5d323dc31): the refills' last day, the last Lagos
+  day a refill can be collected (the clinical owner's decision D9, 24
+  November 2026), the earliest of (a) the prescription's `ends_on`; (b) the
+  Lagos day it was written plus `(refills_allowed + 2)` times one fill's
+  duration in days (a day 1, a week 7, a month 30): one fill's length after
+  the course should have finished; (c) that day plus 365. Null when it
+  allows no refill (null or 0). "Written" is `created_at`:
+  `ehr.prescriptions` has no column that records when a prescription was
+  issued (`starts_on` is the course's start as the prescriber enters it,
+  optional, and may lie ahead), and `created_at` is set at creation (its
+  default) and never named by ehr-api's update; any change bumps the
+  version, which ends the refills anyway (0101's check). A draft activated
+  later counts from when it was written. After that day the refills are
+  closed: the dispensing check refuses `REFILL_PRESCRIPTION_ENDED` with the
+  day as DETAIL, the reader says `ended`, and the open refills leave the
+  item out. The day is computed in this one place: the dispensing check,
+  both readers and the open refills' index call it. It is IMMUTABLE because
+  it reads no table and `timezone(text, timestamptz)` and `timestamp::date`
+  are immutable in PostgreSQL 16 (Africa/Lagos has had one offset since
+  1919; a change of that zone's rules would need the index rebuilt).
+  EXECUTE: the owner, `hid_ehr_runtime` and `hid_schema_test_runtime`
+  (here and in `runtime-grants.sql`), because PostgreSQL evaluates an index
+  expression as the role that writes the row (without it, writing a
+  prescription with refills is refused, 42501); nothing to PUBLIC.
+- The refill scan marker (the clinical owner's decision D8, 24 November
+  2026; 0143's form for "Ordered by me", above, and 0133's THE COST). Under
+  the production owner kind (NOSUPERUSER NOBYPASSRLS) every
+  `ehr.prescriptions` row the two readers read paid the table's OR'd read
+  policies (0005's consent test, about 0.6 ms; 0133 D5's
+  `prescriptions_own_pharmacy_source_read`, `pharmacy.own_work_source_prescription`,
+  most of the rest): about 10 ms a row. Now:
+  - `pharmacy.refill_scans (backend_pid integer, transaction_started_at
+    timestamptz, primary key both)`, the owner's only (no grant, no
+    row-level security);
+  - `pharmacy.refill_scan_open()` (SQL, STABLE, SECURITY DEFINER, cost 1,
+    `search_path` `pg_catalog, pg_temp`, the owner's; md5
+    c06a06f770a690e456409803cc51b309; EXECUTE to PUBLIC, because PostgreSQL
+    checks EXECUTE on every function of a plan when it starts it, and every
+    role that reads `ehr.prescriptions` plans the policy below): whether
+    this backend's own transaction holds a marker, and nothing else;
+  - the policy `prescriptions_scan_refills` on `ehr.prescriptions`
+    (permissive, SELECT, PUBLIC), `((select case when pg_has_role(<the
+    table's owner, looked up in pg_class>, 'USAGE') then
+    pharmacy.refill_scan_open() else false end))` (md5 of its printed
+    expression 98487317d1007ee3de2a0b8b5055f317): one scalar subquery, so
+    one InitPlan, run once per statement, the owner's membership tested
+    first, so a runtime role's read never depends on the marker. PostgreSQL
+    joins a table's permissive policies with OR in reverse order of their
+    names and stops at the first that holds, so its name sorts after every
+    other read policy of the table (after 0143's
+    `prescriptions_scan_my_orders`) and it is asked first.
+
+  The two readers write the marker just before their one statement that
+  reads `ehr.prescriptions` and delete it just after, keeping what they need
+  from it in local arrays; that statement calls only the last-day function,
+  which reads no table, so nothing else runs while the marker is held and
+  nothing reads `ehr.prescriptions` under it for another purpose. Their own
+  conditions (the session's facility, `pharmacy.work-item.read`, the work
+  items' two read policies repeated, the patient and facility matched) stay
+  the access rule, as a superuser owner runs them, and both answer exactly
+  as before under both owner kinds. Every other owner-run reader of
+  `ehr.prescriptions` (the dispensing check, 0100's and 0144's checks,
+  0133's sends, 0143's list, the rest of the S7 list) sees what it saw
+  before (one more InitPlan, false), and so does a later statement of the
+  same transaction; the owner without a session still sees nothing. The
+  marker is transactional: an error in that statement rolls it back with
+  the statement's transaction or savepoint, so no row survives a return or
+  an error. No `hid_` role but the owner is a member of the table's owner (a
+  post-check in 0133's form), so no runtime can pass the policy's first
+  test, write a marker or read under one; the runtimes can neither read nor
+  write `pharmacy.refill_scans`.
+
+  Serializable transactions: every owner-run read of `ehr.prescriptions`
+  now reads `pharmacy.refill_scans` in the policy, the dispensing check in
+  pharmacy-api's SERIALIZABLE dispensings and 0144's acceptance among them,
+  while the marker's only writers, the two readers, run in pharmacy-api's
+  READ COMMITTED work list and single read; PostgreSQL's serializable checks
+  track serializable transactions only. Measured on real PostgreSQL 16, on
+  the cost fixture's facility with 400 more prescriptions allowing 11
+  one-day refills, 60 seconds, twice each way: 8 sessions running the work
+  list's two readers as pharmacy-api does (READ COMMITTED, read-write) and 4
+  each recording a refill of its own items and then reversing it as
+  pharmacy-api's `dispense()` and `reverse()` do (SERIALIZABLE, each 40001
+  or 40P01 run again as `DatabaseService` does). Under the NOSUPERUSER
+  NOBYPASSRLS owner, 452 and 488 serialization failures (40001) for 394 and
+  397 refills recorded and reversed with the marker, against 476 and 494 for
+  393 and 403 without it; under a superuser owner, 699 and 700 for 585 and
+  645 with it, against 641 and 663 for 521 and 576 without. No 40P01 in any
+  run, no list load failed and no marker row was left: the failures are the
+  dispensings' and reversals' own, as many with the marker as without it.
+  Run once more on the readers as they now are (the read policies asked
+  only of the items answered), 60 seconds each way: under the NOSUPERUSER
+  NOBYPASSRLS owner 311 for 126 refills with the marker (2.47 a refill)
+  against 338 for 136 without it (2.49); under a superuser owner 495 for
+  242 (2.05) against 525 for 235 (2.23); no 40P01, no marker row left.
+- Replica mode skips the dispensing check (origin mode), so the refill
+  count, the end date and the refill interval are not enforced there (the
+  clinical owner's call: no replica-mode writer records refills). What holds
+  in every mode: the claim
+  function (no refill of an item never dispensed, sent elsewhere or
+  route-backed), the CHECK (at most 12 fills) and the key.
+- A reversal is unchanged (one per dispensing, by its id); the reversed fill
+  keeps its number, so it still counts.
+- Nothing else changes: no trigger, row-level security setting or other
+  function, and no policy but the marker's. The readers 0133 and 0144 give
+  pharmacy-api test whether a dispensing exists, so they answer one row per
+  item after refills.
+- Before anything is applied, section 0 reads the catalog only (55000;
+  42501 for the owner and the applier): 0001-0148 applied; not applied yet
+  ("0154: already applied" when the six bodies (the four, the last-day
+  function and the marker's test), both columns, the new key, the
+  open-refills index and the marker's table and policy are there; a run of
+  the file on such a database changes nothing); no column, constraint,
+  index or function of its names; the columns the bodies read,
+  by name and type; the md5, attributes and ACL of the two bodies it
+  replaces (0101's 17f7e8897bd2ab240332e4d2c9f757b7 and 0133's
+  2c7f20d7c0df7c582bccc0291f452fdd), 0133's work-item claim and 0148's
+  recorder (f61173d77be391a9e9c96db494827e82); by md5, every function the
+  new bodies call and every function the policies of `ehr.prescriptions`,
+  `pharmacy.dispensings`, `pharmacy.dispensing_reversals` (the interval reads
+  it) and `pharmacy.work_items` call (the five session
+  readers, the consent tests and the consent grant, 0133 D5's source read,
+  the own-work halves, the patient's own read, 0143's and 0145's scans, the
+  route tests, the permission test), as 0101 pinned what its FOR SHARE
+  relies on; exactly one key on `pharmacy.dispensings` over `work_item_id`
+  alone; the five triggers on `pharmacy.dispensings` with their modes
+  (origin: the dispensing check, the immutability guard, 0086's route
+  return; always: 0133's claim and key guard); 0148's owner checks for a
+  NOSUPERUSER NOBYPASSRLS owner (one owner of the four tables, the claims,
+  the replaced functions, the policy functions the reader repeats and 0133
+  D5's source read, who owns or may execute every other function above;
+  the applier is that owner, or inherits it and may SET ROLE to it; the
+  schemas); row-level security as 0133 left it; 0133 D5's premise (no
+  `hid_` role a member of the owner; the marker rests on it too). Then,
+  under the locks (printing a key, a CHECK or a policy opens its table):
+  0023's key by its definition; 0133 D14's claims CHECK (a dispensed claim
+  is never released); every policy of the four tables, exactly (by md5 of
+  its command, roles and printed expressions: none restrictive, no other);
+  0148's order of the AFTER UPDATE triggers on `ehr.prescriptions`. Each
+  of 27 tamperings of a copy of Release B + 0148 (a pinned function's body,
+  a policy changed, dropped or added, the claims CHECK dropped, a second key,
+  a trigger's mode, an owner, an applier without SET, a forced flag, a hid_
+  role made a member of the owner, a function of the reader's name) stops
+  the file with its own message, nothing applied, with either applier (the
+  owner's EXECUTE check bites only for a NOSUPERUSER owner, as it should).
+  Post-checks pin the four bodies (md5, owner, attributes, result, ACL;
+  the two readers' EXECUTE exactly), that the claim function names no
+  prescriptions and the two readers do, that no other owner-run definer
+  function changed, both columns, both CHECKs (validated), the keys, the
+  open-refills index (the only index calling the last-day function), the
+  last-day function exactly (md5, owner, SQL, IMMUTABLE, PARALLEL SAFE, not
+  a definer, `search_path`, EXECUTE for the owner and the two runtimes
+  only), the marker as 0143's post-checks pin theirs (the table's columns,
+  key, owner, no row-level security and no grant; the test's md5, owner,
+  SQL, STABLE, definer, cost 1, `search_path`, EXECUTE for PUBLIC only; the
+  policy's exact expression by md5, permissive, SELECT, PUBLIC; no
+  permissive read policy of `ehr.prescriptions` sorting after it; no `hid_`
+  role but the owner a member of the table's owner), the five triggers,
+  0148's order of the AFTER UPDATE triggers, and the two tables' owner,
+  row-level security and ACL; the reader refuses 201 ids and a null array
+  (a probe that opens no table and writes no marker); and no marker row is
+  left.
+- Locks: one attempt takes ACCESS SHARE NOWAIT on `pharmacy.work_items`,
+  `ehr.order_routes` and 0133's claims (compiling the dispensing check
+  resolves the first two's row types; the checks under the locks print the
+  claims' CHECK and the work items' policies), then ACCESS EXCLUSIVE NOWAIT
+  on `pharmacy.dispensings` and `ehr.prescriptions`; a busy table fails the
+  attempt at once, tried again every 100 ms for 5 seconds, then 55P03 "0154:
+  pharmacy.dispensings, ehr.prescriptions or a table 0154 reads (the
+  Pharmacy work items, the order routes or 0133's claims) stayed busy for 5
+  seconds; nothing applied; run the release again at a quieter time"; one
+  attempt only, with "... is busy, and this transaction already holds an
+  earlier migration's locks, so it does not wait; nothing applied; ...",
+  when the transaction already holds an earlier migration's locks (the
+  runner's dry run). Both are texts the runner's dry run retries
+  (`dry-run-attempts.test.mjs` feeds it the file's own). While held, the two
+  ACCESS EXCLUSIVE locks make every reader and writer of `ehr.prescriptions`
+  and `pharmacy.dispensings` wait: prescription reads, creates and changes
+  (ehr-api, the chart, "Ordered by me", the sends and the route sync), the
+  FOR SHARE reads of 0100's and 0144's acceptances and of the dispensing
+  check, every pharmacy-api read that joins dispensings, every dispensing
+  and reversal, and the Pharmacy runtime's own-work outbox inserts, whose
+  `staff_own_work_insert` policy on `pharmacy.outbox_events` reads
+  dispensings (proved: with 0154's transaction held open, each of those
+  waits, while reads of the work items, the routes and the claims and writes
+  of the work items and the claims run). Nothing fails unless its own
+  timeout is shorter than the hold. Measured on 20,000 prescriptions, own
+  work items and dispensings, ten runs with a superuser applier and ten
+  with a NOSUPERUSER NOBYPASSRLS one (the file with the marker and the
+  last-day function): the file takes 69-116 ms to commit and the hold
+  48-74 ms (the checks under the locks 3.1-4.9 ms; the last-day function,
+  the dispensing check and the claim function 2.0-3.4 ms; the
+  prescriptions' column, CHECK and scan 4.7-6.7 ms; the open-refills index
+  5.4-22.1 ms; on `pharmacy.dispensings` the column 0.7-1.2 ms, its CHECK's
+  scan 4.0-7.2 ms, the new key's index build 9.2-16.5 ms and 0023's key
+  dropped 0.4-0.7 ms; the marker's table, test and policy 1.6-3.5 ms; the
+  two readers and their grants 1.6-4.6 ms; the post-checks 12.7-32.3 ms);
+  behind an open reader, a writer, a SHARE UPDATE EXCLUSIVE holder or DDL
+  on either altered table, or DDL on the work items, the routes or the
+  claims, it stops after 4.99-5.03 seconds (22 runs, both appliers),
+  nothing applied, and blocks nobody; through the runner,
+  a dry run refused that way passed on its next attempt, and an apply
+  refused that way recorded nothing and applied once the table was free.
+- Undo is by hand only, in 0154's header's order: the setting off; then,
+  to stop refills in the database for every image, 0101's and 0133's bodies
+  put back (0133's claim function refuses any dispensing of an item already
+  dispensed; recorded fills stay; the reader stays, so the setting stays
+  off); 0023's one-fill key comes back only when no row has
+  `fill_number > 1` (counted with FORCE ROW LEVEL SECURITY lifted for that
+  transaction); the two readers are dropped only when no running
+  pharmacy-api calls them; then, in a quiet window, the marker's policy and
+  the open-refills index (each takes ACCESS EXCLUSIVE on
+  `ehr.prescriptions`), then the marker's test and table and the last-day
+  function, with their lines in `runtime-grants.sql` (every other
+  owner-run reader of `ehr.prescriptions` then plans one InitPlan fewer and
+  sees what it sees now); `refills_allowed` can stay. The database suite
+  shows the first step: refills refused, first fills recorded, nothing
+  lost.
+
+### The services
+
+Each of ehr-api and pharmacy-api reads its own `PRESCRIPTION_REFILLS_ENABLED`
+(`true` or `false`, default `false`; any other value stops the service at
+start), as each reads 0125's setting, and separately from it. The
+event-dispatcher and `@hid/api-client` have no setting. Neither setting is
+wired into `infra/aws` yet (0125's is, as
+`HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED`): until that is added, with the
+switch-on, both stay at their default, off.
+
+**pharmacy-api, whatever the setting** (from its first refills-aware image,
+which needs 0154's `fill_number`):
+
+- One row per work item, whatever its number of fills: on the work list, a
+  single read, the hand-off replay (accept-ehr-prescription), the accept route
+  and the dispensing route's read of the item. `dispensing` is the item's
+  latest fill (the highest fill number) and `reversed` that fill's, so
+  `pharmacyStep` keeps its meaning (`dispensed`, or `dispensing_reversed` when
+  the latest fill is reversed; the same row carries `refills.recorded` and
+  `dispensing.fillNumber`, so the pharmacy reads it as the latest fill's).
+  The progress calls ehr-api makes (ORD-3, for one patient and for several)
+  also read each item once: `dispensedAt` is the first fill's time (0133's
+  claim time, unchanged); the status is `dispensed` while any fill of the
+  item stands (is not reversed), and `dispensing_reversed`, with
+  `reversedAt` (the latest fill's reversal), only once every fill is
+  reversed. So the prescriber never reads "reversed" for an item whose
+  earlier fill still stands (a reversed refill), and an item filled again
+  after a reversed fill reads `dispensed`. Each item's fills and their
+  reversals are read once, in one lateral, so the several-patient call costs
+  what it did before 0154: at 50 patients and 100 dispensed items, as the
+  Pharmacy runtime on a clinician's consent under the NOSUPERUSER
+  NOBYPASSRLS owner, its 50 statements took 0.57 s (median of 21) with one
+  fill an item, as Release E's statement did, and 0.66 s with 40 items
+  filled three times; reading the fills once for each of the four answers
+  had taken 1.05-1.15 s.
+- `GET /api/v1/health/ready` is 503 `PHARMACY_SCHEMA_NOT_READY` on a database
+  without 0154's `pharmacy.dispensings.fill_number` (a catalog read; `live`
+  stays 200), since every work-item statement names it.
+- A dispensing replays by this member's Idempotency-Key, or by the work item
+  and the fill asked for, against the request's digest: the same request
+  answers the recorded fill (201) and writes nothing, whatever the key. A
+  first fill's digest is today's, with or without `fillNumber: 1`, so a fill
+  recorded by an older image replays. Another request is 409: for a first fill
+  `PHARMACY_WORK_ITEM_ALREADY_DISPENSED` (as today), for a refill
+  `PHARMACY_FILL_NUMBER_CHANGED` (the fill) or `IDEMPOTENCY_CONFLICT` (this
+  member's key used for another request).
+- Only an item's latest fill can be reversed; a reversal of an earlier one is
+  409 `PHARMACY_DISPENSING_NOT_LATEST_FILL` (after its own replay, which is
+  unchanged). A reversal and a refill of one item at once make one of the two
+  SERIALIZABLE transactions fail, and it runs again.
+- 0154's refusals answer plain 409s, never a 500: `NO_REFILLS_LEFT` as
+  `PHARMACY_NO_REFILLS_LEFT`, `REFILL_PRESCRIPTION_ENDED` as
+  `PHARMACY_REFILL_PRESCRIPTION_ENDED` with `refillsEndedOn` (the refills'
+  last day, the refusal's DETAIL, `YYYY-MM-DD`; left out if the DETAIL is
+  not a day; "The refills on this prescription ended on <date>. Ask the
+  prescriber for a new one.", or, when that day is today or later in Lagos
+  (a late fill: the refill would open only after it), "The refills on this
+  prescription end on <date>, before this refill would be due. Ask the
+  prescriber for a new one."), `REFILL_TOO_SOON` as
+  `PHARMACY_REFILL_TOO_SOON` with `refillOpensOn` (the refusal's day,
+  `YYYY-MM-DD`; left out if the DETAIL is not a day) (and 0101's and 0133's
+  as before). Two
+  requests for one fill at once: the loser meets 0154's key or a
+  serialization failure, runs again, and is answered by the replay rule; a
+  second 23505 on either key (the winner hidden from this member) is the 409
+  the replay would give.
+- Off, that is all: the answers carry today's fields only, a dispensing body
+  carrying `fillNumber` is refused 400 `VALIDATION_FAILED` ("property
+  fillNumber should not exist", as today), no fill above the first is
+  recorded, and nothing reads 0154's readers. An item whose refills were
+  recorded while the setting was on stays one row.
+
+**pharmacy-api, setting on:**
+
+| Where | What |
+|---|---|
+| Dispensing body | optional `fillNumber`, a whole number 1-12 (null refused); left out, fill 1. It must be the fills recorded plus one, else 409 `PHARMACY_FILL_NUMBER_CHANGED` with `fillsRecorded`. A refill of an item from another facility's order route is 409 `PHARMACY_NO_REFILLS_LEFT` before the insert. Only a first fill accepts a received item (ORD-4). |
+| Dispensing answer (create, replay, read) | `fillNumber` |
+| Work item (list, read; hand-off answers) | `dispensing.fillNumber`; `lastFilledAt` (the latest fill's time) once dispensed; on the list and a read, `refills: { allowed, recorded, open, closedReason, nextFillOn, endsOn }` after the other fields and before `changedAfterDispensing` |
+| Work list (the answer itself) | `refillsUnavailable: true` when the open refills or the per-item reader could not be read (left out otherwise) |
+| Progress (ehr-api's ORD-3 calls: one patient, and each item of an answered entry of the several-patient call, alike) | `lastFilledAt` after the other fields (today's ehr-api drops it) |
+| `MedicationDispensed` | written for every fill; its payload names `fillNumber` on a refill only (a first fill's is today's) |
+| Audit `pharmacy.dispensing.create` | `fillNumber` on a refill |
+
+`refills` on an own item is 0154's reader's answer for it (`allowed` the
+refills allowed, null as 0; `recorded` every fill, a reversed one included;
+`open` and `closedReason`: `none_left`, `stopped`, `changed`, `ended`,
+`not_yet`, null while open and before the first fill; a reason the image
+does not know is null; `nextFillOn`, the Lagos day the next fill may be
+recorded, `YYYY-MM-DD`, a later day while `not_yet`, null before the first
+fill and once closed for another reason; `endsOn`, the refills' last day,
+the last Lagos day a refill can be collected, `YYYY-MM-DD` (the reader's
+`refills_end_on`), whatever the item's state, null when the prescription
+allows no refill: "Refills until <date>" while refills remain; once
+`closedReason` is `ended`, "Refills ended on <date>" when that day has passed
+and "Refills end on <date>, before the next one is due" when it has not (a
+late fill: the next refill would open only after the last day)). A
+route-backed item answers
+`allowed: 0`, `recorded` 0 or 1, `open: false`, `none_left` once filled,
+`nextFillOn: null` and `endsOn: null`, without asking the reader (its
+prescription is the other facility's). When the reader cannot be read (a
+schema without it, a refusal, a timeout) `refills` is left out, no item is
+kept open for a refill, a warning is logged, and the answer is otherwise
+whole, as with 0125's details; on the work list the answer then also says
+`refillsUnavailable: true` (below). Both readers write 0154's refill scan
+marker, so pharmacy-api asks them only in read-write transactions: its work
+list and its single read, both READ COMMITTED (`DatabaseService`'s default;
+neither passes `readOnly`, and a READ ONLY transaction would refuse them,
+25006). No other pharmacy-api call asks them: the progress calls ehr-api
+makes (one patient and several), a dispensing, a reversal and an acceptance
+read the fills themselves.
+
+The work list's open rule: an own item is open while it has no fill, or while
+a refill is open. Before the list chooses its 200 rows it asks 0154's open
+refills (`pharmacy.open_refill_work_items()`, one statement, no ids) which own
+items have a refill open now: at most 200, the refill that opened first first,
+found from the facility's prescriptions that allow refills, so an item whose
+refill is open is found however many items were filled after it. Those are
+open work of any age; among the open work, items waiting for their first fill
+come first (oldest received first), then items with a refill open (in the
+open-refills reader's order: the refill that opened first first), then done
+work (newest first, the 90-day window of Q123 A). A refill not yet due
+(`not_yet`) is done work until its day, and open work from it. So open items
+are always listed (the clinical owner's answer of 23 November 2026), up to
+the list's 200 rows, and done items keep the 90-day window; only beyond 200
+items with a refill open at once does the open-refills reader leave the
+latest opened out. That holds only while the open refills can be read within
+their limit (below): past it the list says so instead. With the scan marker,
+the refills' last day (D8 and D9) and the read policies asked only of the
+items answered, their cost grows with the facility's live prescriptions that
+allow refills (under production's owner kind, every one written in the last
+365 days is read and its last day checked), not with its history or with how
+many refills are open at once (the cost paragraphs below). An item whose
+refills ended is done work. The list
+then asks the per-item reader once, for the own rows it shows,
+so each own row carries `refills`. The open refills run under their own
+time limit, 3 seconds (`OPEN_REFILLS_TIMEOUT_MS`, set with `set_config(...,
+true)` inside their savepoint and undone by rolling back to it, so no other
+statement of the request runs under it; the reader's scan marker is deleted
+before it returns, and a failure's is undone with the savepoint), below the
+pool's 15-second `statement_timeout`, kept as a guard (the clinical owner's
+D10): past the limit the list answers without them instead of holding every
+row past the staff client's 10-second timeout. A
+failure of either reader (that limit included) opens no item for a refill and
+leaves `refills` out; the list still answers, and says
+`refillsUnavailable: true` at its top level (after the other fields), so the
+front ends say "Refills could not be loaded" instead of showing a due refill
+as done work without a word. The open refills' failure is logged as an
+error, the per-item reader's as a warning. Off, the list never carries the
+field. The single read asks the per-item reader for its one item (no flag:
+`refills` is simply left out).
+
+Cost of one list load with the setting on, measured on 20,000 own items in
+the facility, each filled once, K of them allowing 2 refills of 30 days,
+written 24 to 60 days ago and filled once, so all K have a refill open at
+once and the list shows 200 of them as open work, as a pharmacist on the
+own-work basis (PostgreSQL 16 on a shared machine; fictional data).
+
+The whole request, measured with pharmacy-api's own list code
+(`PharmacyService.listWorkItems` with every reader on: 0124's patient cards,
+0125's details, 0133's states, 0148's changes and both refill readers, the
+audit rows, through the Pharmacy API's runtime and the pool's 15-second
+`statement_timeout`), with 0154 as built (the scan marker, the refills' last
+day, and the read policies asked only of the items answered), 11 loads at
+each K, under a NOSUPERUSER NOBYPASSRLS owner (production's kind):
+
+| Refills open at once (K) | Whole request | Open refills | Per-item reader (200 rows) |
+|---|---|---|---|
+| 200 | 3.7-4.3 s (median 4.0 s) | 0.07-0.10 s | 0.06-0.08 s |
+| 2,000 | 3.9-4.3 s (median 4.0 s) | 0.32-0.37 s | 0.06-0.08 s |
+| 10,000 | 5.0-5.5 s (median 5.3 s) | 1.49-1.67 s | 0.06-0.08 s |
+
+Of the rest, the list statement takes 2.8-3.4 s, 0133's states 0.37-0.51 s,
+the audit rows 0.11-0.20 s, 0124's cards 0.03-0.05 s, 0125's details and
+0148's changes under 0.02 s each. Under a superuser owner: 3.0-3.4 s, 2.9-3.4
+s and 3.0-3.3 s, the open refills 0.02-0.04 s, 0.03-0.05 s and 0.08-0.11 s.
+Before the scan marker the request took 8.2-9.8 s at 200; with the marker
+but the read policies asked of every due item (this section's earlier text),
+4.1-4.9 s at 200, and at 2,000 open at once the open refills stopped at
+their 3-second limit on every load and the request took 7.0-7.7 s with
+`refillsUnavailable`. This fixture understates two readers: its pharmacist
+works on the own-work basis with no consent grant, and it holds no 0125
+prescription snapshots, so 0124's cards and 0125's details had almost
+nothing to answer; at a hospital where they do, section 46's figures apply
+(0.6-1.0 s and 1.0-1.7 s for 200 own rows under a NOBYPASSRLS owner), which
+at these numbers would add about 1.6-2.7 s.
+
+The open refills' share grows with the facility's live prescriptions that
+allow refills (each with an own item accepted at its version), about 0.15
+ms each under the NOSUPERUSER NOBYPASSRLS owner for a pharmacist on the
+own-work basis (the work items' and the fills' own row-level security; no
+marker on those tables, as the clinical owner decided), so their 3-second
+limit would be reached at about 20,000 at once. A session that may read
+only on consent (a clinician or a nurse) pays the consent test there
+instead: about 1.5-1.9 ms for each live refill prescription it may not
+read and about 3.4-3.9 ms for each it may, so its open refills reach the
+limit at about 1,800 or about 800 of them (see R7 above). The share no longer grows
+with how many refills are open at once (the read policies are asked only of
+the items answered, at most 200 passing), nor with the
+facility's history: a prescription leaves the set on its refills' last day
+at the latest. Under production's owner kind the open refills also read
+every prescription that allows refills written in the last 365 days, ended
+or not, about 10 microseconds each (19,800 ended and 200 live: 0.18-0.21 s
+in all). Before the review of 24 November 2026 the open refills
+grew about 2 ms for each refill open at once (the consent test, about 2 ms,
+asked of every due item before the sort): 1.95-2.36 s at 1,000 and
+3.81-4.32 s at 2,000, so at about 1,400-1,500 refills left uncollected at
+once (each open until its last day, up to a year) every list load would
+have said `refillsUnavailable`. The per-item reader's share grows with the
+own rows shown (at most 200), and with nothing else. Off, the list asks
+neither reader. The setting goes on only after the whole list request has
+been measured this way at the hospital's expected numbers and the cost
+accepted in writing (see "Before the setting goes on").
+
+**ehr-api, setting on:** a prescription create may carry `refillsAllowed`, a
+whole number 0-11 (null, fractions and anything else refused 400 naming it),
+stored in `refills_allowed` (left out: null, none). Above 0 it needs a
+duration (0125's `durationValue` and `durationUnit`), else 400
+`REFILLS_NEED_DURATION` before anything is written (0154's CHECK refuses it
+too), whose words say what the duration means with refills: "A prescription
+with refills needs the duration of each fill: how long one supply lasts, not
+the whole course. Add it, or set refills to 0."; a create carries a duration only while 0125's
+`PRESCRIPTION_DISPENSING_DETAILS_ENABLED` is on as well, so with that off
+only 0 refills can be written. Every answer of the
+prescriptions routes (list, read, create, its replay, update) carries
+`refillsAllowed` (null as 0) after the other fields (after 0125's details when
+they are on); the list says `refills: true`; the update body never takes it.
+The create's Idempotency-Key digest of a body without it is today's. Off,
+everything is as before: `refillsAllowed` is refused 400 as any unknown field,
+and no statement names the column. `ownProgress` is unchanged. ehr-api
+answers no field for the refills' last day and checks nothing more for it
+(no new validation is needed: the day follows from what the create already
+checks). The prescribe form works the day out from what it sends and says
+"Refills can be collected until <date>": the earliest of the end date
+entered, today's Lagos date plus (refills + 2) times the duration of each
+fill in days (a week 7, a month 30), and today plus 365 (0154's
+`ehr.prescription_refills_end_on` on the stored row, the one place the
+database computes it, gives the same day; pharmacy-api answers it as
+`refills.endsOn`). The EHR runtime may execute that function, which the
+open refills' index needs when it writes a prescription with refills. The
+prescriber sees the refills allowed; nothing tells the prescriber that a change after
+the first fill ended the remaining refills (0154 leaves
+`ehr.withdraw_own_pharmacy_send` and 0133's and 0144's steps as they are,
+and the change is the prescriber's own); the pharmacy sees 0148's notice,
+`refills.closedReason` and a refused refill's reason. An owner's repair in
+replica mode records nothing and ends no refill. The pharmacist hand-off
+(accept-ehr-prescription) sends no refills: pharmacy-api reads them from 0154.
+
+**event-dispatcher:** `MedicationDispensed` may carry `fillNumber`, a whole
+number 1-12, on that event only; any other value, or the key on any other
+event, is terminal (`EVENT_PAYLOAD_POLICY_REJECTED` or
+`INVALID_EVENT_ENVELOPE`), as before. Released before pharmacy-api: an older
+dispatcher fails a refill's event for good.
+
+**notification-worker** (unchanged): it claims each event by its id and sends
+one notice per event (the inbox key and Novu's idempotency key are the event
+id, the workflow `patient-update-v1`), and never groups by work item, so each
+fill sends one notice and none is dropped or doubled.
+
+**`@hid/api-client`:** `PharmacyWorkItem.dispensing.fillNumber`,
+`lastFilledAt` and `refills` (`PharmacyWorkItemRefills` with `nextFillOn` and
+`endsOn`, `PharmacyRefillsClosedReason` with `not_yet` and `ended`),
+`PharmacyDispensing.fillNumber` and `CreatePharmacyDispensingInput.fillNumber`
+(its refusals documented, `PHARMACY_REFILL_TOO_SOON` with `refillOpensOn` and
+`PHARMACY_REFILL_PRESCRIPTION_ENDED` with `refillsEndedOn` among them), and
+`listWorkQueue()`, which answers `PharmacyWorkQueue` (`items`, as
+`listWorkItems()` answers them, and `refillsUnavailable`, true only when the
+list says exactly true). The parsers are
+lenient: absent or malformed, each is left out and the item reads as before
+(never a 502); an unknown closed reason reads as null, and a `nextFillOn` or
+`endsOn` that is not a day, or absent (an older pharmacy-api), as null.
+
+**Front ends:** pharmacy-api's setting goes on only once both staff front ends
+(health and `apps/pharmacy`) take the latest fill as `dispensing`, offer
+Dispense again only while `refills.open` (sending `fillNumber:
+refills.recorded + 1`), show "Refill from <date>" (`nextFillOn`) while
+`closedReason` is `not_yet` (never after `endsOn`), show "Refills until
+<date>" (`endsOn`) while refills remain and, once `closedReason` is `ended`,
+"Refills ended on <date>" when that day has passed or "Refills end on <date>,
+before the next one is due" when it has not (a late fill; the reading and
+the words confirmed by the clinical owner, 24 November 2026),
+offer Reverse on the latest fill only, say "Fill
+2 of 3" (`fillNumber` of `allowed + 1`), word each new 409 by its code
+(`PHARMACY_REFILL_TOO_SOON` and `PHARMACY_REFILL_PRESCRIPTION_ENDED` with
+their days), and read the list through
+`listWorkQueue()` and, while it says `refillsUnavailable`, show above it
+"Refills could not be loaded. Some refills that are due may not be listed.
+Reload the list; if this keeps happening, tell your administrator."; once the
+prescribe form in health labels the duration "Duration of each fill" when
+refills are above 0, with "Each refill can be collected from <3/4 of it>
+after the last one" and "Refills can be collected until <date>" (the
+refills' last day, worked out as in "ehr-api, setting on" above); and
+once the prescriber's edit dialog in health (a prescription with
+`refillsAllowed` above 0 whose `ownProgress` is dispensed) says, before the
+change is saved: "Changing this prescription ends its remaining refills. To
+extend a course, write a new prescription." The same sentence goes in the
+screen notes. A change after the first fill (an end date moved later
+included) ends the remaining refills (0101's version check), and nothing
+else tells the prescriber so: the prescription still answers
+`refillsAllowed`, and ehr-api has no refill state to show. The website also
+shows the refills as closed ("Refills ended" in place of "N refills
+allowed") once the pharmacy's item is closed by what the prescriber's page
+already knows: the prescription held, stopped, past its end date or past
+the refills' last day, or changed after the first fill. That is the
+website slice's; no backend change in this one (the clinical owner's decision, 24 November 2026).
+
+**Before the setting goes on** (pharmacy-api's `PRESCRIPTION_REFILLS_ENABLED`):
+1. **Both staff front ends are ready** (health and `apps/pharmacy`, everything
+   in "Front ends" above).
+2. **The whole list request is measured at the hospital's numbers and the
+   cost accepted in writing**, against the two limits it runs under: the
+   staff client's 10-second timeout (`@hid/api-client`'s default, which
+   `apps/pharmacy` uses) for the whole request, and pharmacy-api's
+   15-second `statement_timeout` for each statement (3 seconds for the open
+   refills). Measured as above, every reader on, at the hospital's expected
+   numbers of own items, of prescriptions that allow refills written in the
+   last 365 days, and of refills open at once (due and not yet collected,
+   each open until its last day, up to a year), with the hospital's 0124
+   and 0125 settings and data (the fixture above had almost nothing for
+   those two readers): at 20,000 items, 3.7-4.3 s a load with 200 refills
+   open at once, 3.9-4.3 s with 2,000 and 5.0-5.5 s with 10,000 under a
+   NOSUPERUSER NOBYPASSRLS owner (2.9-3.4 s under a superuser owner); the
+   open refills grow about 0.15 ms for each live prescription with refills
+   and would reach their 3-second limit at about 20,000. Those are a
+   pharmacist's figures, on the own-work basis; a clinician or a nurse who
+   opens the work list on consent alone pays about 1.5-3.9 ms for each live
+   prescription with refills, so its open refills reach the limit at about
+   800-1,800 (its list then says `refillsUnavailable`; see R7). If the measured
+   request does not fit, the owner chooses between a longer client timeout
+   for the work list, fewer readers on it, or cheaper readers.
+
+Accepted by the clinical owner (D10, 24 November 2026) and stated here:
+refills above 0 need 0125's duration, which a create carries only while
+0125's `PRESCRIPTION_DISPENSING_DETAILS_ENABLED` is on, so ehr-api's
+`PRESCRIPTION_REFILLS_ENABLED` needs that setting on (with it off only 0
+refills can be written); and `OPEN_REFILLS_TIMEOUT_MS` stays 3 seconds, as a
+guard. Decided and built (24 November 2026): the refill interval, and the
+expiry for refills (D9, the refills' last day), which was a condition here
+before.
+
+**Rollback floor and undo:** once any refill is recorded, pharmacy-api must
+not roll back below its first refills-aware image (an older one joins
+dispensings one row per fill: the item twice, with an arbitrary fill's ids),
+and the event-dispatcher must not roll back below its image while a refill's
+event may be undelivered. Turning pharmacy-api's setting off stops new
+refills; recorded fills stay, one row per item. ehr-api may roll back: its
+older image names no `refills_allowed`, and the stored values stay.
+
+### Runtime proof
+
+The database suite `prescription-refills` holds the cases, through the EHR
+and Pharmacy runtimes with their exact statements and settings, under a
+superuser owner and a NOSUPERUSER NOBYPASSRLS one: the structure (the
+reader's md5, attributes, result and EXECUTE among it, and the open
+refills' comment giving their cost for own-work sessions and for sessions
+on consent alone); fills 1 to 1 + N for
+N = 0, 1, 2 and 11 and the next refused; null as one fill; `dispensed_at` the
+first fill's; the end date on its last day and the day after (a first fill
+after it still recorded), under far time zones; a route-backed item's one
+fill and its released own item; a refill after an edit, a hold then
+resume, and a completion; the key and the CHECKs; replica mode; a reversed
+fill; 0148's fingerprint before and after 0154 and an owner's repair;
+0144's acceptance and 0133's and 0144's readers after refills; the undo's
+first step; the reader (case 13): every item of the cases before it,
+each closed reason, one item from no fill to none left, open then held
+(stopped) then resumed (changed), a cancel, the Lagos day under far time
+zones, `refill_open` against each item's next fill, own items only, the
+session's facility, `pharmacy.work-item.read`, each of the work items' two
+read policies alone (the reader answering exactly the items and fills the
+Pharmacy runtime itself may select), 200 ids, and ids that are not work
+items; and the open refills (case 14): exactly the items the reader calls
+open, an item filled 29 days ago with a refill open answered though 210
+items were filled after it (the earlier candidates statement, run in the
+suite, missed it), an ended prescription and an item with none left not
+answered, the refill that opened first first and 200 at most, and the
+same session and policy rules as the reader; and the refill interval (case
+15): days, weeks and months, the Lagos day at its boundaries (23:59 on one
+day and 00:01 on the next, under far time zones), the validator and the
+reader agreeing on each item's next fill, `REFILL_TOO_SOON` with its day,
+the open refills leaving out a refill not yet due, a reversed latest fill
+(the wait runs from the latest fill standing), every fill reversed (no
+wait), and the CHECK refusing refills without a duration; and (case 1j)
+the comments on `refills_allowed` and its CHECK saying that with refills the
+duration is how long one fill lasts; and the scan marker (cases 1l and 16):
+the table, its test and the policy exactly; the runtimes can neither read
+nor write the table; the owner with a session but no marker, and the EHR
+runtime, read what they read before; no marker row after either reader
+returns or fails; both readers answer exactly as they did without the
+marker, under both owner kinds; a later statement of the same transaction
+reads `ehr.prescriptions` as before; and EXPLAIN shows the policy asked once
+per statement, first (an InitPlan); and the refills' last day (cases 1k and
+17): the function exactly, with EXECUTE for the runtimes that may write
+prescriptions only; the boundaries of rules (a), (b) and (c) at Lagos
+midnight (written at 00:00 Lagos and one microsecond before; ends_on today
+and yesterday; days, weeks and months; 11 monthly refills, so rule (c))
+under far time zones (UTC+14 and UTC-12); the per-item reader open on the
+last day and `ended` the day after with `refills_end_on`, the dispensing
+check passing on the last day and refusing `REFILL_PRESCRIPTION_ENDED`
+(DETAIL the day) after it, and the open refills listing exactly those whose
+last day is today or later (the three agree); an edit, a hold and resume and
+a later end date leaving the day unmoved; and the open refills' statement
+range-scanning its index by facility and time written (EXPLAIN). Each
+clause of the functions and each constraint is shown to matter:
+a copy without it, applied after the suite's structure case, fails a named
+case (the clauses that restate what others enforce are listed in the
+commit messages). The suites that pin the old bodies, the old key or 0133's
+S7 list (`pharmacy-dispensing-source`, `prescription-dispensing-details`,
+`own-facility-pharmacy-lab-work`, `prescription-changes-after-dispensing`
+and the schema suite) pin 0154's; `own-facility-pharmacy-lab-work`'s case 8
+shows the EHR runtime may run neither reader and that the reader answers
+nothing for prescription ids.
+
+The services' unit tests: pharmacy-api's `prescription-refills.spec.ts` (one
+row per item with several fills, setting off and on; today's fields only
+while off; the refills field, own and route-backed, and a failing reader; the
+open rule on the list beyond 90 days and through the open refills (a refill
+open 30 days after its fill listed first among 251 filled items; the
+per-item reader asked once, for the rows shown; a refill not yet due as done
+work with `not_yet` and `nextFillOn`; the open refills after the first fills,
+in the reader's order; the open refills under their own 3-second limit,
+set inside their savepoint and undone with it; either reader failing, a
+timeout included: the list whole and `refillsUnavailable: true`, the open
+refills' failure logged as an error; the flag absent off, on success and on
+a single read; `endsOn` from the reader as the Lagos day whatever the
+state, null when it is not a day and on a route-backed item; an item whose
+refills ended read `ended` with `endsOn` and listed as done work, and one on
+its last day still open; both readers asked only in a read-write READ
+COMMITTED transaction); recording, numbering,
+replaying and refusing fills (`PHARMACY_REFILL_TOO_SOON` with
+`refillOpensOn` and `PHARMACY_REFILL_PRESCRIPTION_ENDED` with
+`refillsEndedOn` among them), the races and a second 23505; every fill's
+event; the latest-fill reversal; the body pipe; the setting's wiring),
+`work-item-progress.spec.ts` (ORD-12 block: a reversed refill with an
+earlier fill standing reads dispensed), `work-item-progress-batch.spec.ts`
+(A18: with refills on, each answered entry of the several-patient call is
+exactly the one-patient answer, `lastFilledAt` included; off, neither
+carries it), `health.controller.spec.ts` and
+`database.service.spec.ts` (not ready without 0154's column), and
+`pharmacy-client-refills.contract.spec.ts` (`@hid/api-client`'s types and
+parsers, `not_yet`, `nextFillOn` and `endsOn` among them, and
+`listWorkQueue`'s `refillsUnavailable`); ehr-api's
+`prescription-refills.spec.ts` (`REFILLS_NEED_DURATION` and its words); the event-dispatcher's
+`event-contracts.spec.ts`. pharmacy-api's statements were also run against
+PostgreSQL 16 with 0154 (both owners) through the Pharmacy runtime, and the
+runtime verifiers that dispense (own-facility work, order routes, own-work
+patient cards, prescription details) pass against such a database. The
+own-facility work verifier runs twice: with `PRESCRIPTION_REFILLS_ENABLED`
+on in ehr-api and pharmacy-api (its ORD-12 steps: refills need a duration,
+each refill refused before its day with `PHARMACY_REFILL_TOO_SOON` and
+recorded on it, the clock moved on by moving the fill back as the owner, in
+replica mode; pharmacy-api's progress after fill 3 and after its reversal,
+for one patient and in the several-patient form alike: `dispensed` at the
+first fill's time, `lastFilledAt` the latest, no `reversedAt`; every item's
+`refills.endsOn`; the expiry: a prescription with
+1 refill and a 1-day duration, filled once, reads `endsOn` 3 days after it
+was written, and once that day has passed (the clock moved on by moving its
+writing and its fill back 4 days as the owner, in replica mode, which writes
+no version and records no change) reads `ended` with that day, lists as done
+work, and its refill is refused 409 `PHARMACY_REFILL_PRESCRIPTION_ENDED` with
+`refillsEndedOn`, the database's own day, in the words "...ended on
+<date>..."; a late fill: a prescription with 1 refill of 10-day fills,
+filled once, its writing moved back 25 days and its fill 3, so its refill
+opens on its last day, reads `not_yet` with `nextFillOn` equal to `endsOn`
+and is refused `PHARMACY_REFILL_TOO_SOON` with that day; its writing moved
+back one more day, so its refill would open the day after its last day,
+it reads `ended` with `nextFillOn` null and `endsOn` today + 4, lists as
+done work, and its refill is refused 409
+`PHARMACY_REFILL_PRESCRIPTION_ENDED` with `refillsEndedOn` that day, in the
+words "...end on <date>, before this refill would be due..." (the words
+of both refusals checked), no fill recorded; then the restart with the
+setting off (the progress, one patient and several alike, without
+`lastFilledAt`); no list it reads says `refillsUnavailable`), and with it off in
+both from the start (every step before ORD-12's unchanged; nothing of
+refills shown; `fillNumber` and `refillsAllowed` unknown fields). pharmacy-api
+booted from source against a database without 0154 answers `live` 200 and
+`ready` 503 `PHARMACY_SCHEMA_NOT_READY`, and `ready` 200 once 0154 is applied.

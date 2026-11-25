@@ -87,6 +87,78 @@
 // without a grant and then cancelled reads cancelled, 1, and is never
 // flagged withdrawn; a PATCH racing a dispensing in flight is recorded
 // once, after the dispensing.
+// ORD-12 (refills, 0154; owner decision Q131 A, with the clinical owner's
+// answers to Rahman's review on #258 and her decisions of 24 November 2026):
+// ehr-api and pharmacy-api, the two services that read
+// PRESCRIPTION_REFILLS_ENABLED, boot with it on, so every step above also runs
+// with refills on; pharmacy-api answers ready (GET /health/ready, which needs
+// 0154's fill_number). The doctor writes active prescriptions with refills
+// (0-11: 12 is refused, and a PATCH cannot set them); refills need a duration
+// (400 REFILLS_NEED_DURATION without one), which a create carries only with
+// 0125's details on, so ehr-api is booted again with those on. The
+// pharmacist without a grant records fills 1, 2 and 3 of the one with 2
+// refills and 10 days, each naming its fillNumber, on the one work item, each
+// refill from its day: the Lagos day of the latest fill not reversed plus 8
+// (3/4 of 10, rounded up). Before that day the item reads refills not_yet
+// with nextFillOn, lists as done work, and a refill is refused (409
+// PHARMACY_REFILL_TOO_SOON with refillOpensOn); the clock is moved on as the
+// owner moves the fill back 8 days (replica mode; a fixture), and on its day
+// the refill is open and open work. A 4th is refused (409
+// PHARMACY_NO_REFILLS_LEFT, 0154's NO_REFILLS_LEFT mapped); a fill number
+// already recorded, asked again with a new key and another body, is refused
+// (409 PHARMACY_FILL_NUMBER_CHANGED), as is a skipped number, and a key used
+// for another fill (409 IDEMPOTENCY_CONFLICT); the same key and body replays
+// (201, nothing written), and so does a new key with the same body (the
+// replay is on the item, the fill number and the request); two presses of
+// one fill at once record it once. The item reads refills { allowed 2,
+// recorded 3, open false, closedReason none_left } and is one row on the list
+// (with a refill open it lists after the items waiting for a first fill);
+// every fill writes MedicationDispensed (fillNumber on refills only) and only
+// the first accepts the item; the prescriber's ownProgress keeps the first
+// fill's time. Reversing fill 2 is refused (409
+// PHARMACY_DISPENSING_NOT_LATEST_FILL); fill 3 is reversed, and the
+// prescriber still reads dispensed (fills 1 and 2 stand). pharmacy-api's
+// progress answer, for one patient and in the several-patient form
+// (progress/batch) alike, reads dispensed at the first fill's time with
+// lastFilledAt the latest fill's, after fill 3 and after its reversal (no
+// reversedAt). An edit after
+// fill 1 of another prescription closes its refills (changed) and shows
+// 0148's notice (edited, 1); a hold closes them (stopped; on_hold, 1); each
+// refused refill is 409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE. Every item's
+// refills carry endsOn, the refills' last day (0154's
+// ehr.prescription_refills_end_on, the clinical owner's decision D9 of 24
+// November 2026: the earliest of the end date, the Lagos day written plus
+// (refills + 2) fills' durations, and that day plus 365), whatever its state.
+// The expiry: a prescription with 1 refill and a 1-day duration, filled once,
+// reads endsOn 3 days after the day it was written; once that day has passed
+// (the clock moved on as the owner moves its writing and its fill back 4
+// days, in replica mode, a fixture, which records no version and no change),
+// it reads closed ended with that day, lists as done work (0154's open
+// refills leave it out), and its refill is refused (409
+// PHARMACY_REFILL_PRESCRIPTION_ENDED with refillsEndedOn, the same day,
+// which is the database's own day for it, in the words "...ended on
+// <day>..."). A late fill: a prescription with 1 refill of 10-day fills,
+// filled once, its writing moved back 25 days and its fill 3, so its refill
+// opens on its last day: it reads not_yet with nextFillOn equal to endsOn,
+// and its refill is refused too soon (PHARMACY_REFILL_TOO_SOON, that day);
+// its writing moved back one more day, so its refill would open only the day
+// after its last day: it reads closed ended (nextFillOn null, endsOn today +
+// 4), lists as done work, and its refill is refused (409
+// PHARMACY_REFILL_PRESCRIPTION_ENDED with refillsEndedOn, in the words
+// "...end on <day>, before this refill would be due..."), no fill recorded.
+// Then both
+// services restart with the setting off (and ehr-api's details off again):
+// the item with three fills is still one row (its latest fill); a second
+// dispensing of an item with a refill open is refused exactly as before
+// (409 PHARMACY_WORK_ITEM_ALREADY_DISPENSED, and fillNumber 400 as an
+// unknown field), the same request replays as before, and the item lists as
+// done work; no answer carries refills, fillNumber, lastFilledAt or
+// refillsAllowed, and refillsAllowed is refused on create.
+// With PRESCRIPTION_REFILLS_ENABLED=false in the verifier's environment,
+// both services boot with it off from the start: every step before ORD-12's
+// runs unchanged, and ORD-12's steps check that no answer carries anything
+// of refills, that fillNumber and refillsAllowed are unknown fields and that
+// a second dispensing is refused as before.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -123,6 +195,12 @@ const databaseUrl = role => {
 };
 // 0124's setting, left at its default (off): 0133's audit rows do not depend on it.
 const OWN_WORK_PATIENT_CARD_ENABLED = 'false';
+// ORD-12's setting (0154), on in ehr-api and pharmacy-api, the two services that read it; the last steps restart both
+// with it off. PRESCRIPTION_REFILLS_ENABLED=false in the verifier's own environment boots both with it off from the
+// start: every step before ORD-12's must then pass unchanged, and ORD-12's steps check that nothing of refills shows.
+assert([undefined, 'true', 'false'].includes(process.env.PRESCRIPTION_REFILLS_ENABLED),
+  'PRESCRIPTION_REFILLS_ENABLED, when set, is true or false');
+const PRESCRIPTION_REFILLS_ENABLED = process.env.PRESCRIPTION_REFILLS_ENABLED ?? 'true';
 
 const appOrigin = 'https://app.healthidentitydirectory.com';
 const ehrOrigin = 'https://ehr.healthidentitydirectory.com';
@@ -207,6 +285,7 @@ globalThis.fetch = (input, init) => {
 
 const children = [];
 const childLogs = new Map();
+const childByName = new Map();
 async function boot(name, directory, environment, listenPort) {
   const child = spawn(process.execPath,
     ['-r', join(directory, 'node_modules/ts-node/register/transpile-only'), '-r', environment.HID_VERIFIER_PRELOAD,
@@ -215,6 +294,7 @@ async function boot(name, directory, environment, listenPort) {
       TS_NODE_PROJECT: join(directory, 'tsconfig.json'), DATABASE_SSL: 'false', DATABASE_POOL_MAX: '4', ...environment },
     stdio: ['ignore', 'pipe', 'pipe'] });
   children.push(child);
+  childByName.set(name, child);
   const log = [];
   childLogs.set(name, log);
   const keep = chunk => { log.push(String(chunk)); if (log.length > 400) log.shift(); };
@@ -231,6 +311,17 @@ async function boot(name, directory, environment, listenPort) {
     await new Promise(done => setTimeout(done, 250));
   }
   return base;
+}
+// Stops a booted service and waits until its process has exited (its port is free again).
+async function stopService(name) {
+  const child = childByName.get(name);
+  assert(child, `no service ${name}`);
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise(done => child.once('exit', done));
+  child.kill('SIGTERM');
+  const timer = setTimeout(() => child.kill('SIGKILL'), 10_000);
+  await exited;
+  clearTimeout(timer);
 }
 
 // ── HTTP ──
@@ -281,7 +372,7 @@ const signupCollectedFields = (label) => ({
 });
 const collectedFieldsKey = randomBytes(32).toString('base64');
 const temporary = await mkdtemp(join(tmpdir(), 'hid-own-facility-work-'));
-const evidence = { migration: '0133', setting: { OWN_WORK_PATIENT_CARD_ENABLED }, steps };
+const evidence = { migration: '0133', setting: { OWN_WORK_PATIENT_CARD_ENABLED, PRESCRIPTION_REFILLS_ENABLED }, steps };
 const startedAt = Date.now();
 let failure;
 try {
@@ -315,6 +406,20 @@ try {
     recorder: 'pharmacy.prescription_change_after_dispensing()',
     reader: 'pharmacy.work_item_changes_after_dispensing(uuid[])' }, `a database with Q132 A: ${JSON.stringify(q132)}`);
   evidence.database.q132 = Object.values(q132);
+  // ORD-12: 0154's two columns, its key on (work item, fill number) in place of 0023's, and the two refills readers
+  // pharmacy-api asks (an image on a database without them could not record a refill or say one is open).
+  const ord12 = await one(`select to_regprocedure('pharmacy.work_item_refills(uuid[])')::text as reader,
+      to_regprocedure('pharmacy.open_refill_work_items()')::text as open_reader,
+      (select count(*)::int from pg_attribute where not attisdropped and (attrelid, attname) in
+        (('ehr.prescriptions'::regclass, 'refills_allowed'), ('pharmacy.dispensings'::regclass, 'fill_number'))) as columns,
+      (select string_agg(pg_get_constraintdef(oid), '; ' order by conname) from pg_constraint
+        where conrelid = 'pharmacy.dispensings'::regclass and contype = 'u') as keys`);
+  assert.deepEqual(ord12, { reader: 'pharmacy.work_item_refills(uuid[])', open_reader: 'pharmacy.open_refill_work_items()',
+    columns: 2,
+    keys: 'UNIQUE (facility_id, dispensed_by, idempotency_key); UNIQUE (work_item_id, fill_number)' },
+  `a database with ORD-12 (0154): ${JSON.stringify(ord12)}`);
+  evidence.database.ord12 = [ord12.reader, ord12.open_reader, 'ehr.prescriptions.refills_allowed',
+    'pharmacy.dispensings.fill_number', 'UNIQUE (work_item_id, fill_number)'];
   await new Promise(done => stub.listen(0, '127.0.0.1', done));
   const stubUrl = `http://127.0.0.1:${stub.address().port}`;
   const preload = join(temporary, 'loopback-only.cjs');
@@ -337,6 +442,14 @@ try {
   const common = { HID_VERIFIER_PRELOAD: preload, HID_VERIFIER_STUB_URL: stubUrl, CORS_ORIGINS: CORS,
     TRUST_PROXY_CIDRS: '127.0.0.1/32,::1/128' };
   const local = value => `http://127.0.0.1:${value}`;
+  // ehr-api's and pharmacy-api's settings, kept so that the last steps can boot them again with refills off.
+  const ehrEnvironment = { ...common, DATABASE_URL: databaseUrl('hid_ehr_api_runtime'),
+    STORAGE_MODE: 'disabled', IDENTITY_API_URL: local(identityPort), IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: tokens.identityEhr,
+    LAB_API_URL: local(labPort), LAB_INTERNAL_SERVICE_TOKEN: tokens.lab, PHARMACY_API_URL: local(pharmacyPort),
+    PHARMACY_INTERNAL_SERVICE_TOKEN: tokens.pharmacy, EHR_INTERNAL_SERVICE_TOKEN: tokens.ehr, PRESCRIPTION_REFILLS_ENABLED };
+  const pharmacyEnvironment = { ...common, DATABASE_URL: databaseUrl('hid_pharmacy_api_runtime'),
+    IDENTITY_API_URL: local(identityPort), IDENTITY_PHARMACY_INTERNAL_SERVICE_TOKEN: tokens.identityPharmacy,
+    PHARMACY_INTERNAL_SERVICE_TOKEN: tokens.pharmacy, OWN_WORK_PATIENT_CARD_ENABLED, PRESCRIPTION_REFILLS_ENABLED };
   const [identity, ehr, lab, pharmacy] = await Promise.all([
     boot('identity-api', join(services, 'identity-api'), { ...common, DATABASE_URL: databaseUrl('hid_identity_api_runtime'),
       AUTH_MODE: 'local', AUTH_SIGNING_SECRET: process.env.AUTH_SIGNING_SECRET, AUTH_LOGIN_PEPPER: process.env.AUTH_LOGIN_PEPPER,
@@ -348,18 +461,16 @@ try {
       IDENTITY_LAB_INTERNAL_SERVICE_TOKEN: tokens.identityLab, IDENTITY_PHARMACY_INTERNAL_SERVICE_TOKEN: tokens.identityPharmacy,
       NOTIFICATION_API_URL: stubUrl, NOTIFICATION_SERVICE_IDENTITY_MODE: 'local-secret',
       NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN: tokens.notification, PATIENT_LIFECYCLE_SWEEP_SECONDS: '0' }, identityPort),
-    boot('ehr-api', join(services, 'ehr-api'), { ...common, DATABASE_URL: databaseUrl('hid_ehr_api_runtime'),
-      STORAGE_MODE: 'disabled', IDENTITY_API_URL: local(identityPort), IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: tokens.identityEhr,
-      LAB_API_URL: local(labPort), LAB_INTERNAL_SERVICE_TOKEN: tokens.lab, PHARMACY_API_URL: local(pharmacyPort),
-      PHARMACY_INTERNAL_SERVICE_TOKEN: tokens.pharmacy, EHR_INTERNAL_SERVICE_TOKEN: tokens.ehr }, ehrPort),
+    boot('ehr-api', join(services, 'ehr-api'), ehrEnvironment, ehrPort),
     boot('lab-api', join(services, 'lab-api'), { ...common, DATABASE_URL: databaseUrl('hid_lab_api_runtime'),
       IDENTITY_API_URL: local(identityPort), IDENTITY_LAB_INTERNAL_SERVICE_TOKEN: tokens.identityLab,
       LAB_INTERNAL_SERVICE_TOKEN: tokens.lab, OWN_WORK_PATIENT_CARD_ENABLED }, labPort),
-    boot('pharmacy-api', join(services, 'pharmacy-api'), { ...common, DATABASE_URL: databaseUrl('hid_pharmacy_api_runtime'),
-      IDENTITY_API_URL: local(identityPort), IDENTITY_PHARMACY_INTERNAL_SERVICE_TOKEN: tokens.identityPharmacy,
-      PHARMACY_INTERNAL_SERVICE_TOKEN: tokens.pharmacy, OWN_WORK_PATIENT_CARD_ENABLED }, pharmacyPort),
+    boot('pharmacy-api', join(services, 'pharmacy-api'), pharmacyEnvironment, pharmacyPort),
   ]);
-  step(`four services booted from their own code; lab-api and pharmacy-api with OWN_WORK_PATIENT_CARD_ENABLED=${OWN_WORK_PATIENT_CARD_ENABLED}`);
+  // ORD-12: pharmacy-api is ready only on a database with 0154's pharmacy.dispensings.fill_number (GET /health/ready).
+  expectStatus(await http(pharmacy, 'GET', '/health/ready'), 200, 'pharmacy-api ready on a database with 0154');
+  step(`four services booted from their own code; lab-api and pharmacy-api with OWN_WORK_PATIENT_CARD_ENABLED=${OWN_WORK_PATIENT_CARD_ENABLED}; `
+    + `ehr-api and pharmacy-api with PRESCRIPTION_REFILLS_ENABLED=${PRESCRIPTION_REFILLS_ENABLED}; pharmacy-api ready`);
 
   // ── Support, the hospital (P4 sign-up, P4b review) and its own pharmacist and lab scientist (P4b) ──
   const password = 'Synthetic-Own-Facility-Work-Password-2026';
@@ -492,10 +603,12 @@ try {
     status: 'in_progress', startedAt: new Date().toISOString(), chiefComplaint: 'Synthetic chief complaint' },
   { key: freshKey('encounter') }), 201, 'encounter');
   const enc = `/encounters/${encounter.id}`;
-  const newPrescription = async (status, display) => expectStatus(await ehrCall(doctor, 'POST', `${enc}/prescriptions`,
-    { medicationCodeSystem: 'http://snomed.info/sct', medicationCode: '325072002', medicationDisplay: display,
-      doseQuantity: 1, doseUnit: 'tablet', routeCode: 'oral', frequency: 'twice daily',
-      instructions: 'Synthetic instructions: take with food', status }, { key: freshKey('prescription') }), 201,
+  // `extra`: fields beyond these (ORD-12's refillsAllowed).
+  const prescriptionBody = (status, display, extra = {}) => ({ medicationCodeSystem: 'http://snomed.info/sct',
+    medicationCode: '325072002', medicationDisplay: display, doseQuantity: 1, doseUnit: 'tablet', routeCode: 'oral',
+    frequency: 'twice daily', instructions: 'Synthetic instructions: take with food', status, ...extra });
+  const newPrescription = async (status, display, extra = {}) => expectStatus(await ehrCall(doctor, 'POST',
+    `${enc}/prescriptions`, prescriptionBody(status, display, extra), { key: freshKey('prescription') }), 201,
   `prescription ${display}`);
   const SENT = { status: 'sent', message: 'Sent to this hospital\'s pharmacy.' };
   const ALREADY = { status: 'sent', message: 'This hospital\'s pharmacy already has this prescription.' };
@@ -772,8 +885,10 @@ try {
     body: { patientId: patient.id, sourceEhrPrescriptionIds: [rx4.id] },
     headers: { 'x-hid-internal-caller': 'ehr-api', 'x-hid-service-token': tokens.pharmacy, ...versionHeaders } }), 200,
   `pharmacy progress ${label}`).items;
+  // ORD-12: with refills on, pharmacy-api's answer also carries lastFilledAt, null while nothing is dispensed (ehr-api
+  // reads only the fields it knows, so ownProgress is unchanged); with them off, today's fields only.
   const asReceived = [{ sourceEhrPrescriptionId: rx4.id, status: 'received', receivedAt: item4.acceptedAt,
-    dispensedAt: null, reversedAt: null }];
+    dispensedAt: null, reversedAt: null, ...(PRESCRIPTION_REFILLS_ENABLED === 'true' ? { lastFilledAt: null } : {}) }];
   const headerMatrix = {
     releaseA: await progressAsEhr('with only the 0133 header', { 'x-hid-own-progress': '0133' }),
     ord4Only: await progressAsEhr('with only the ORD-4 header', { 'x-hid-own-progress-accepted': 'ord4' }),
@@ -1135,6 +1250,577 @@ try {
   evidence.chart = { pharmacist: 'CONSENT_REQUIRED (encounter, prescriptions, a prescription)',
     labScientist: 'CONSENT_REQUIRED (encounter, the lab request)', patientAccessLog: 'both shown as views' };
   step('neither reads the chart; the patient\'s access log shows both as views');
+
+  // ── ORD-12: refills (0154) ──
+  // Helpers for both settings. The pharmacist's list and items; a fill and a reversal through pharmacy-api.
+  // Each of these lists must have read its refills: pharmacy-api says refillsUnavailable only when the open refills or
+  // the per-item reader could not be read (never while off).
+  const ownList = async label => {
+    const page = expectStatus(await pharmacyCall(ownPharmacist, 'GET', '/work-items'), 200, label);
+    assert.equal(page.refillsUnavailable, undefined, `${label}: the list says refillsUnavailable`);
+    return page.items;
+  };
+  const onlyRow = (items, rx, label) => {
+    const rows = items.filter(item => item.sourceEhrPrescriptionId === rx.id);
+    assert.equal(rows.length, 1, `${label}: one row for prescription ${rx.id}, not ${rows.length}`);
+    return rows[0];
+  };
+  const oneRowEach = (items, label) => assert.equal(new Set(items.map(item => item.id)).size, items.length,
+    `${label}: an item listed twice: ${JSON.stringify(items.map(item => item.id))}`);
+  // The list's order (ORD-12): open work first, the items waiting for a first fill before those with a refill open,
+  // then the done work (a refill not yet due is done work).
+  const listClass = item => (item.dispensing === null && !item.withdrawn ? 0 : item.refills?.open === true ? 1 : 2);
+  const assertListOrder = (items, label) => {
+    const own = items.filter(item => item.orderRoute === undefined);
+    const classes = own.map(listClass);
+    assert(classes.every((value, index) => index === 0 || classes[index - 1] <= value),
+      `${label}: first fills, then refills open, then done work: ${JSON.stringify(own.map((item, index) =>
+        [item.id, classes[index]]))}`);
+  };
+  const fillsOf = async item => all(`select id::text as id, fill_number from pharmacy.dispensings where work_item_id = $1
+    order by fill_number`, [item.id]);
+  const fillBody = { quantityDispensed: 30, quantityUnit: 'tablet', reason: 'Synthetic own-work fill' };
+  const dispenseFill = (item, extra = {}, key = freshKey('fill')) => pharmacyCall(ownPharmacist, 'POST',
+    `/work-items/${item.id}/dispensings`, { expectedWorkItemVersion: Number(item.version), ...fillBody, ...extra }, { key });
+  const readItem = async (item, label) => expectStatus(await pharmacyCall(ownPharmacist, 'GET', `/work-items/${item.id}`),
+    200, label);
+  const refusedWith = (response, status, code, label) => {
+    assert.deepEqual([response.status, response.body?.code], [status, code],
+      `${label}: ${response.status} ${JSON.stringify(response.body)}`);
+    return response.body;
+  };
+  const fieldsRefused = (response, field, label) => assert.deepEqual([response.status, response.body?.code,
+    response.body?.errors?.map(error => error.field)], [400, 'VALIDATION_FAILED', [field]],
+  `${label}: ${response.status} ${JSON.stringify(response.body)}`);
+  // pharmacy-api's progress answer, as ehr-api asks it (ORD-3 with 0133's and ORD-4's headers).
+  const pharmacyProgress = async (ids, label) => expectStatus(await http(pharmacy, 'POST', '/pharmacy/work-items/progress',
+    { cookie: doctor.cookie, facility: hospital.facilityId, purpose: 'direct-care',
+      body: { patientId: patient.id, sourceEhrPrescriptionIds: ids },
+      headers: { 'x-hid-internal-caller': 'ehr-api', 'x-hid-service-token': tokens.pharmacy, 'x-hid-own-progress': '0133',
+        'x-hid-own-progress-accepted': 'ord4' } }), 200, label).items;
+  // The same ask in the several-patient form (decision 4, progress/batch): the patient's entry, answered; its items.
+  const pharmacyBatchProgress = async (ids, label) => {
+    const { patients } = expectStatus(await http(pharmacy, 'POST', '/pharmacy/work-items/progress/batch',
+      { cookie: doctor.cookie, facility: hospital.facilityId, purpose: 'direct-care',
+        body: { patients: [{ patientId: patient.id, sourceEhrPrescriptionIds: ids }] },
+        headers: { 'x-hid-internal-caller': 'ehr-api', 'x-hid-service-token': tokens.pharmacy, 'x-hid-own-progress': '0133',
+          'x-hid-own-progress-accepted': 'ord4' } }), 200, label);
+    assert.deepEqual(patients?.map(entry => [entry.patientId, entry.outcome]), [[patient.id, 'answered']],
+      `${label}: ${JSON.stringify(patients)}`);
+    return patients[0].items;
+  };
+  // The Lagos day `offset` days from now (Africa/Lagos is UTC+1, no daylight saving), YYYY-MM-DD.
+  const lagosDay = (offset = 0) => new Date(Date.now() + 3_600_000 + offset * 86_400_000).toISOString().slice(0, 10);
+  // A day (YYYY-MM-DD) plus `days`.
+  const plusDay = (day, days) => new Date(Date.parse(`${day}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
+  // A fixture for the clinical owner's refill interval (24 November 2026: a refill opens on the Lagos day of the
+  // latest fill not reversed plus 3/4 of the duration): the clock moved on, as the owner moves a fill `days` back.
+  // Replica mode skips 0023's immutability guard (origin mode only); 0133's key guard fires only when the work item
+  // changes. A first fill's claim moves with it (0133 D14 copies its time). Answers the fill's new time (ISO).
+  const fillRecordedEarlier = async (fill, days) => {
+    const client = await owner.connect();
+    try {
+      await client.query('begin');
+      await client.query('set local session_replication_role = replica');
+      const moved = (await client.query(`update pharmacy.dispensings set dispensed_at = dispensed_at - make_interval(days => $2)
+        where id = $1 returning dispensed_at, work_item_id, fill_number`, [fill.id, days])).rows[0];
+      assert(moved, `the fill ${fill.id} to move`);
+      if (moved.fill_number === 1) {
+        await client.query(`update pharmacy.prescription_item_claims set dispensed_at = $2
+          where work_item_id = $1 and dispensed_at is not null`, [moved.work_item_id, moved.dispensed_at]);
+      }
+      await client.query('commit');
+      return moved.dispensed_at.toISOString();
+    } catch (error) {
+      await client.query('rollback');
+      throw error;
+    } finally {
+      client.release();
+    }
+  };
+
+  // A fixture for the refills' last day (D9: counted from the Lagos day the prescription was written, created_at):
+  // the clock moved on, as the owner moves the prescription's writing `days` back. Replica mode: no version is
+  // written (0004's versioning is origin mode only), so the item's accepted version still matches and 0148 records no
+  // change; R7's index is kept by PostgreSQL. Answers the new Lagos day written and the row version.
+  const prescriptionWrittenEarlier = async (rx, days) => {
+    const client = await owner.connect();
+    try {
+      await client.query('begin');
+      await client.query('set local session_replication_role = replica');
+      const moved = (await client.query(`update ehr.prescriptions set created_at = created_at - make_interval(days => $2)
+        where id = $1 returning to_char(created_at at time zone 'Africa/Lagos', 'YYYY-MM-DD') as written,
+        row_version::text as version`, [rx.id, days])).rows[0];
+      assert(moved, `the prescription ${rx.id} to move`);
+      await client.query('commit');
+      return moved;
+    } catch (error) {
+      await client.query('rollback');
+      throw error;
+    } finally {
+      client.release();
+    }
+  };
+
+  if (PRESCRIPTION_REFILLS_ENABLED === 'true') {
+    // The prescriber: refillsAllowed (0-11) on create, answered on every read (none as 0); 12 is refused, and a PATCH
+    // cannot set it. Refills above 0 need a duration (the clinical owner's rule, 24 November 2026): ehr-api refuses
+    // them without one (400 REFILLS_NEED_DURATION), and a create carries a duration only with 0125's
+    // PRESCRIPTION_DISPENSING_DETAILS_ENABLED on as well, so ehr-api is booted again with both on. Four active
+    // prescriptions, each sent to the hospital's own pharmacy by itself: rxRefills (2 refills, 10 days: a refill
+    // opens 8 days after the latest fill; fills 1-3 below), rxChanged (2: edited after fill 1), rxStopped (1: held
+    // after fill 1) and rxOpen (1: a refill left open for the steps with the setting off).
+    assert.equal(await grantsOf(ownPharmacist), 0, 'the pharmacist still holds no grant for the patient (refills)');
+    const needsDuration = response => assert.deepEqual([response.status, response.body?.code],
+      [400, 'REFILLS_NEED_DURATION'], `refills without a duration: ${response.status} ${JSON.stringify(response.body)}`);
+    needsDuration(await ehrCall(doctor, 'POST', `${enc}/prescriptions`, prescriptionBody('active',
+      'Synthetic amlodipine 5 mg tablet', { refillsAllowed: 2 }), { key: freshKey('prescription') }));
+    await stopService('ehr-api');
+    await boot('ehr-api (details on)', join(services, 'ehr-api'),
+      { ...ehrEnvironment, PRESCRIPTION_DISPENSING_DETAILS_ENABLED: 'true' }, ehrPort);
+    needsDuration(await ehrCall(doctor, 'POST', `${enc}/prescriptions`, prescriptionBody('active',
+      'Synthetic amlodipine 5 mg tablet', { refillsAllowed: 2, strength: '5 mg' }), { key: freshKey('prescription') }));
+    const tenDays = { durationValue: 10, durationUnit: 'day' };
+    const rxRefills = await newPrescription('active', 'Synthetic amlodipine 10 mg tablet', { refillsAllowed: 2, ...tenDays });
+    const rxChanged = await newPrescription('active', 'Synthetic losartan 50 mg tablet', { refillsAllowed: 2, ...tenDays });
+    const rxStopped = await newPrescription('active', 'Synthetic simvastatin 20 mg tablet', { refillsAllowed: 1, ...tenDays });
+    const rxOpen = await newPrescription('active', 'Synthetic metformin 850 mg tablet', { refillsAllowed: 1, ...tenDays });
+    // The refills' last day (0154's ehr.prescription_refills_end_on, D9): with no end date and a 10-day fill, the
+    // Lagos day written plus (refills + 2) x 10 days: 40 days with 2 refills, 30 with 1 (each under 365).
+    const written = lagosDay(0);
+    const endsOnFor = allowed => plusDay(written, (allowed + 2) * 10);
+    assert.deepEqual([rxRefills, rxChanged, rxStopped, rxOpen].map(rx => [rx.refillsAllowed, rx.durationValue,
+      rx.durationUnit, rx.pharmacyHandoff]), [[2, 10, 'day', SENT], [2, 10, 'day', SENT], [1, 10, 'day', SENT],
+      [1, 10, 'day', SENT]], 'the prescriptions with refills are answered with them and their duration, and sent');
+    fieldsRefused(await ehrCall(doctor, 'POST', `${enc}/prescriptions`, prescriptionBody('active',
+      'Synthetic amlodipine 5 mg tablet', { refillsAllowed: 12, ...tenDays }), { key: freshKey('prescription') }),
+    'refillsAllowed', '12 refills');
+    fieldsRefused(await ehrCall(doctor, 'PATCH', `${enc}/prescriptions/${rxOpen.id}`, { expectedRowVersion:
+      Number(rxOpen.rowVersion), refillsAllowed: 3, changeReason: 'Synthetic attempt to add refills' }), 'refillsAllowed',
+    'refills on a PATCH');
+    const storedRefills = await all(`select id::text as id, refills_allowed, row_version::text as version
+      from ehr.prescriptions where id = any($1::uuid[])`, [[rxRefills.id, rxChanged.id, rxStopped.id, rxOpen.id, rx4.id]]);
+    const storedOf = rx => storedRefills.find(row => row.id === rx.id);
+    assert.deepEqual([rxRefills, rxChanged, rxStopped, rxOpen, rx4].map(rx => storedOf(rx)?.refills_allowed),
+      [2, 2, 1, 1, null], `refills stored as written, none given stored as null: ${JSON.stringify(storedRefills)}`);
+    assert.equal(storedOf(rxOpen).version, String(rxOpen.rowVersion), 'the refused PATCH changed nothing');
+    const doctorRefillList = expectStatus(await ehrCall(doctor, 'GET', `${enc}/prescriptions`), 200,
+      'the doctor\'s prescriptions with refills on');
+    assert.deepEqual([doctorRefillList.refills, ...[rxRefills, rxOpen, rx4].map(rx => doctorRefillList.items
+      .find(item => item.id === rx.id)?.refillsAllowed)], [true, 2, 1, 0],
+    'the list says refills are taken, and carries refillsAllowed (none as 0)');
+    assert.equal(expectStatus(await ehrCall(doctor, 'GET', `${enc}/prescriptions/${rxRefills.id}`), 200,
+      'the doctor reads rxRefills').refillsAllowed, 2, 'a read carries refillsAllowed');
+    step('ORD-12: the doctor writes prescriptions with refills (0-11, with a duration: without one 400 '
+      + 'REFILLS_NEED_DURATION; 12 refused; a PATCH cannot set them), each answer carrying refillsAllowed (none as 0), '
+      + 'and each is sent to the hospital\'s own pharmacy by itself');
+
+    // The pharmacist without a grant: fills 1, 2 and 3 of rxRefills's one work item, each refill once its day comes.
+    let refillList = await ownList('the list before any fill');
+    oneRowEach(refillList, 'the list before any fill');
+    const [itemR, itemChanged, itemStopped, itemOpen] = [rxRefills, rxChanged, rxStopped, rxOpen]
+      .map(rx => onlyRow(refillList, rx, 'the list before any fill'));
+    assert.deepEqual([itemR, itemChanged, itemStopped, itemOpen].map(item => [item.refills, item.dispensing,
+      item.pharmacyStep]), [2, 2, 1, 1].map(allowed => [{ allowed, recorded: 0, open: false, closedReason: null,
+      nextFillOn: null, endsOn: endsOnFor(allowed) }, null, 'received']),
+    `the items before any fill: ${JSON.stringify([itemR, itemChanged, itemStopped, itemOpen])}`);
+    assert.deepEqual(onlyRow(refillList, rx4, 'the list before any fill').refills,
+      { allowed: 0, recorded: 1, open: false, closedReason: 'none_left', nextFillOn: null, endsOn: null },
+      'a prescription without refills: one fill, no last day for refills');
+
+    const key1 = freshKey('fill');
+    const fill1 = expectStatus(await dispenseFill(itemR, { fillNumber: 1 }, key1), 201, 'fill 1 of 3');
+    assert.equal(fill1.fillNumber, 1);
+    let readR = await readItem(itemR, 'rxRefills\'s item after fill 1');
+    assert.deepEqual([readR.refills, readR.dispensing, readR.lastFilledAt, readR.pharmacyStep],
+      [{ allowed: 2, recorded: 1, open: false, closedReason: 'not_yet', nextFillOn: lagosDay(8), endsOn: endsOnFor(2) },
+        { id: fill1.id, status: 'dispensed', reversed: false, fillNumber: 1 }, fill1.dispensedAt, 'dispensed'],
+    `rxRefills's item after fill 1: the refill opens in 8 days: ${JSON.stringify(readR)}`);
+    refillList = await ownList('the list after fill 1');
+    oneRowEach(refillList, 'the list after fill 1');
+    assert.equal(listClass(onlyRow(refillList, rxRefills, 'the list after fill 1')), 2, 'a refill not yet due is done work');
+    const tooSoon = refusedWith(await dispenseFill(itemR, { fillNumber: 2 }), 409, 'PHARMACY_REFILL_TOO_SOON',
+      'fill 2 on the day of fill 1');
+    assert.equal(tooSoon.refillOpensOn, lagosDay(8), `the refusal says the day it opens: ${JSON.stringify(tooSoon)}`);
+    assert.deepEqual((await fillsOf(itemR)).map(row => row.fill_number), [1], 'no refill recorded too soon');
+    // Eight days on: fill 1 recorded 8 days earlier, so its refill opens today.
+    const fill1At = await fillRecordedEarlier(fill1, 8);
+    readR = await readItem(itemR, 'rxRefills\'s item 8 days after fill 1');
+    assert.deepEqual(readR.refills, { allowed: 2, recorded: 1, open: true, closedReason: null, nextFillOn: lagosDay(0),
+      endsOn: endsOnFor(2) }, `the refill opens on its day: ${JSON.stringify(readR.refills)}`);
+    refillList = await ownList('the list on the day the refill opens');
+    oneRowEach(refillList, 'the list on the day the refill opens');
+    assert.equal(listClass(onlyRow(refillList, rxRefills, 'the list on the day the refill opens')), 1,
+      'a refill open is open work');
+    assertListOrder(refillList, 'the list on the day the refill opens');
+
+    const key2 = freshKey('fill');
+    const fill2 = expectStatus(await dispenseFill(itemR, { fillNumber: 2 }, key2), 201, 'fill 2 of 3');
+    assert.deepEqual([fill2.fillNumber, fill2.id === fill1.id], [2, false]);
+    assert.equal(expectStatus(await dispenseFill(itemR, { fillNumber: 2 }, key2), 201, 'fill 2 again, the same key and body')
+      .id, fill2.id, 'the same key and body replay fill 2');
+    assert.equal(expectStatus(await dispenseFill(itemR, { fillNumber: 2 }), 201, 'fill 2 again, a new key and the same body')
+      .id, fill2.id, 'a new key with the same body replays fill 2 (the item, the fill number and the request)');
+    const sameFillOtherBody = refusedWith(await dispenseFill(itemR, { fillNumber: 2, quantityDispensed: 28 }), 409,
+      'PHARMACY_FILL_NUMBER_CHANGED', 'fill 2 again, a new key and another body');
+    assert.equal(sameFillOtherBody.fillsRecorded, 2, 'the refusal says how many fills are recorded');
+    refusedWith(await dispenseFill(itemR, { fillNumber: 4 }), 409, 'PHARMACY_FILL_NUMBER_CHANGED', 'fill 4 before fill 3');
+    refusedWith(await dispenseFill(itemR, { fillNumber: 3 }, key2), 409, 'IDEMPOTENCY_CONFLICT', 'fill 3 under fill 2\'s key');
+    // Fill 3 the same day as fill 2: too soon, it opens 8 days after fill 2.
+    assert.equal(refusedWith(await dispenseFill(itemR, { fillNumber: 3 }), 409, 'PHARMACY_REFILL_TOO_SOON',
+      'fill 3 on the day of fill 2').refillOpensOn, lagosDay(8), 'fill 3 opens 8 days after fill 2');
+    assert.deepEqual((await fillsOf(itemR)).map(row => row.fill_number), [1, 2], 'two fills recorded, nothing more');
+    await fillRecordedEarlier(fill2, 8);
+    // Fill 3: two presses at once, each under its own key, with the same body. One records it; the other meets 0154's
+    // key or a serialization failure, runs again and replays it (never a 500, never a second row).
+    const presses = await Promise.all([dispenseFill(itemR, { fillNumber: 3 }), dispenseFill(itemR, { fillNumber: 3 })]);
+    const [fill3, fill3Again] = presses.map((press, index) => expectStatus(press, 201,
+      `fill 3, press ${index + 1} of 2 at once`));
+    assert.deepEqual([fill3.fillNumber, fill3Again.id], [3, fill3.id], 'two presses of fill 3 at once record it once');
+    refusedWith(await dispenseFill(itemR, { fillNumber: 4 }), 409, 'PHARMACY_NO_REFILLS_LEFT', 'fill 4 of 3');
+    assert.deepEqual((await fillsOf(itemR)).map(row => [row.id, row.fill_number]),
+      [[fill1.id, 1], [fill2.id, 2], [fill3.id, 3]], 'three fills on the one item');
+    readR = await readItem(itemR, 'rxRefills\'s item after fill 3');
+    assert.deepEqual([readR.refills, readR.dispensing, readR.lastFilledAt, readR.pharmacyStep],
+      [{ allowed: 2, recorded: 3, open: false, closedReason: 'none_left', nextFillOn: null, endsOn: endsOnFor(2) },
+        { id: fill3.id, status: 'dispensed', reversed: false, fillNumber: 3 }, fill3.dispensedAt, 'dispensed'],
+    `rxRefills's item after fill 3: ${JSON.stringify(readR)}`);
+    refillList = await ownList('the list after fill 3');
+    oneRowEach(refillList, 'the list after fill 3');
+    const listedR = onlyRow(refillList, rxRefills, 'the list after fill 3');
+    assert.deepEqual([listedR.refills, listedR.dispensing, listedR.lastFilledAt, listClass(listedR)],
+      [readR.refills, readR.dispensing, fill3.dispensedAt, 2], `rxRefills's row after fill 3: ${JSON.stringify(listedR)}`);
+    assertListOrder(refillList, 'the list after fill 3');
+    // Every fill wrote MedicationDispensed; only a refill names its number (a first fill's payload is today's).
+    const dispensedEvents = await all(`select payload from pharmacy.outbox_events where event_type = 'MedicationDispensed'
+      and payload->>'workItemId' = $1 order by occurred_at, id`, [itemR.id]);
+    assert.deepEqual(dispensedEvents.map(row => [row.payload.dispensingId, row.payload.fillNumber ?? null,
+      Object.keys(row.payload).sort().join()]), [[fill1.id, null, 'dispensingId,status,workItemId'],
+      [fill2.id, 2, 'dispensingId,fillNumber,status,workItemId'], [fill3.id, 3, 'dispensingId,fillNumber,status,workItemId']],
+    `the MedicationDispensed events: ${JSON.stringify(dispensedEvents)}`);
+    const fillAudit = (await auditRows(ownPharmacist, 'pharmacy.dispensing.create'))
+      .filter(row => row.details.workItemId === itemR.id)
+      .map(row => [row.resource_id, row.details.fillNumber ?? null, row.details.acceptedWithDispensing ?? null,
+        row.details.basis]);
+    assert.deepEqual(fillAudit, [[fill1.id, null, true, 'own-work'], [fill2.id, 2, null, 'own-work'],
+      [fill3.id, 3, null, 'own-work']], `one audit row per fill: ${JSON.stringify(fillAudit)}`);
+    const acceptedR = (await acceptancesOf()).filter(row => row.work_item_id === itemR.id);
+    assert.deepEqual(acceptedR.map(row => [row.accepted_with, row.idempotency_key]), [['dispensing', key1]],
+      'fill 1 accepted the received item; no refill accepts it again');
+    // The prescriber's ownProgress (through ehr-api) keeps the first fill's time (as moved above); pharmacy-api's own
+    // answer adds the latest.
+    const dispensedR = { status: 'dispensed', receivedAt: itemR.acceptedAt, acceptedAt: acceptedR[0].accepted_at,
+      dispensedAt: fill1At, reversedAt: null };
+    assert.deepEqual(await ownProgressOf(rxRefills), dispensedR, 'the prescriber reads dispensed, at the first fill\'s time');
+    const progressR = [{ sourceEhrPrescriptionId: rxRefills.id, ...dispensedR, lastFilledAt: fill3.dispensedAt }];
+    assert.deepEqual(await pharmacyProgress([rxRefills.id], 'progress after fill 3'), progressR,
+      'one progress row: the first fill\'s time, and the latest');
+    // The several-patient form answers the patient's entry exactly so (lastFilledAt the latest fill's, not the first's).
+    assert.deepEqual(await pharmacyBatchProgress([rxRefills.id], 'batch progress after fill 3'), progressR,
+      'the batch entry after fill 3, as the one-patient answer: the first fill\'s time, and the latest');
+    step('ORD-12: the pharmacist without a grant records fills 1-3 of a prescription with 2 refills on its one work item '
+      + '(fillNumber each), each refill from its day (the latest fill\'s Lagos day + 8 for 10 days; before it 409 '
+      + 'PHARMACY_REFILL_TOO_SOON with the day, and the item not_yet, done work); a 4th is refused '
+      + '(PHARMACY_NO_REFILLS_LEFT), so are fill 2 again with another body, a skipped number and a key used for another '
+      + 'fill; the same request replays, two presses at once record one fill; one row, refills {2, 3, closed none_left}; '
+      + 'one MedicationDispensed per fill; ownProgress keeps the first fill\'s time');
+
+    // Only the latest fill can be reversed.
+    const reverseFill = (fill, key = freshKey('reverse')) => pharmacyCall(ownPharmacist, 'POST',
+      `/dispensings/${fill.id}/reversals`, { expectedDispensingVersion: Number(fill.version),
+        reason: 'Synthetic: returned unopened' }, { key });
+    refusedWith(await reverseFill(fill2), 409, 'PHARMACY_DISPENSING_NOT_LATEST_FILL', 'reversing fill 2 of 3');
+    expectStatus(await reverseFill(fill3), 201, 'reversing fill 3 of 3');
+    assert.deepEqual((await all(`select dispensing_id::text as dispensing_id from pharmacy.dispensing_reversals
+      where work_item_id = $1`, [itemR.id])).map(row => row.dispensing_id), [fill3.id], 'only fill 3 is reversed');
+    readR = await readItem(itemR, 'rxRefills\'s item after fill 3 was reversed');
+    assert.deepEqual([readR.dispensing, readR.pharmacyStep, readR.refills],
+      [{ id: fill3.id, status: 'dispensed', reversed: true, fillNumber: 3 }, 'dispensing_reversed',
+        { allowed: 2, recorded: 3, open: false, closedReason: 'none_left', nextFillOn: null, endsOn: endsOnFor(2) }],
+    `rxRefills's item after the reversal: ${JSON.stringify(readR)}`);
+    // Fills 1 and 2 stand, so the prescriber still reads dispensed, at the first fill's time, with no reversal (only an
+    // item whose every fill is reversed reads dispensing_reversed); pharmacy-api's own answer says the same.
+    assert.deepEqual(await ownProgressOf(rxRefills), dispensedR,
+      'a reversed refill, earlier fills standing: the prescriber reads dispensed, the first fill\'s time');
+    assert.deepEqual(await pharmacyProgress([rxRefills.id], 'progress after fill 3 was reversed'), progressR,
+      'pharmacy-api\'s progress after the reversal of fill 3: dispensed, no reversedAt');
+    assert.deepEqual(await pharmacyBatchProgress([rxRefills.id], 'batch progress after fill 3 was reversed'), progressR,
+      'the batch entry after the reversal of fill 3, as the one-patient answer: dispensed, no reversedAt');
+    step('ORD-12: reversing fill 2 of 3 is refused (PHARMACY_DISPENSING_NOT_LATEST_FILL); fill 3 is reversed, and the '
+      + 'prescriber still reads dispensed (fills 1 and 2 stand); pharmacy-api\'s progress, for one patient and in the '
+      + 'several-patient form alike, dispensed at the first fill\'s time, lastFilledAt the latest, no reversedAt');
+
+    // An edit after fill 1 ends the refills (changed) and shows 0148's notice; so does a hold (stopped).
+    const changedFill = expectStatus(await dispenseFill(itemChanged), 201, 'fill 1 of rxChanged, without fillNumber');
+    assert.equal(changedFill.fillNumber, 1, 'a dispensing without fillNumber is fill 1');
+    assert.deepEqual((await readItem(itemChanged, 'rxChanged\'s item after fill 1')).refills,
+      { allowed: 2, recorded: 1, open: false, closedReason: 'not_yet', nextFillOn: lagosDay(8), endsOn: endsOnFor(2) },
+      'a refill after fill 1, from its day');
+    await fillRecordedEarlier(changedFill, 8);
+    assert.deepEqual((await readItem(itemChanged, 'rxChanged\'s item 8 days after fill 1')).refills,
+      { allowed: 2, recorded: 1, open: true, closedReason: null, nextFillOn: lagosDay(0), endsOn: endsOnFor(2) },
+      'a refill open on its day');
+    const editedAfterFill = expectStatus(await ehrCall(doctor, 'PATCH', `${enc}/prescriptions/${rxChanged.id}`,
+      { expectedRowVersion: Number(rxChanged.rowVersion), frequency: 'once daily',
+        changeReason: 'Synthetic change after the first fill' }), 200, 'edit rxChanged after fill 1');
+    assert.equal(editedAfterFill.pharmacyHandoff, undefined, 'an edit after the first fill answers no hand-off');
+    const changedRead = await readItem(itemChanged, 'rxChanged\'s item after the edit');
+    assert.deepEqual(changedRead.refills, { allowed: 2, recorded: 1, open: false, closedReason: 'changed', nextFillOn: null,
+      endsOn: endsOnFor(2) }, `the edit closes the refills (the day they would have ended unmoved): `
+      + JSON.stringify(changedRead));
+    changeShown(changedRead, { change: 'edited', changeCount: 1 });
+    refusedWith(await dispenseFill(itemChanged, { fillNumber: 2 }), 409, 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE',
+      'a refill after the edit');
+    const stoppedFill = expectStatus(await dispenseFill(itemStopped, { fillNumber: 1 }), 201, 'fill 1 of rxStopped');
+    await fillRecordedEarlier(stoppedFill, 8);
+    expectStatus(await ehrCall(doctor, 'PATCH', `${enc}/prescriptions/${rxStopped.id}`,
+      { expectedRowVersion: Number(rxStopped.rowVersion), status: 'on_hold',
+        changeReason: 'Synthetic hold after the first fill' }), 200, 'hold rxStopped after fill 1');
+    const stoppedRead = await readItem(itemStopped, 'rxStopped\'s item after the hold');
+    assert.deepEqual(stoppedRead.refills, { allowed: 1, recorded: 1, open: false, closedReason: 'stopped', nextFillOn: null,
+      endsOn: endsOnFor(1) }, `the hold closes the refills: ${JSON.stringify(stoppedRead)}`);
+    changeShown(stoppedRead, { change: 'on_hold', changeCount: 1 });
+    refusedWith(await dispenseFill(itemStopped, { fillNumber: 2 }), 409, 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE',
+      'a refill after the hold');
+    assert.deepEqual([(await fillsOf(itemChanged)).length, (await fillsOf(itemStopped)).length], [1, 1],
+      'no refill recorded after the change or the hold');
+    const openFill = expectStatus(await dispenseFill(itemOpen), 201, 'fill 1 of rxOpen');
+    const openFillAt = await fillRecordedEarlier(openFill, 8);
+    refillList = await ownList('the list with a refill open');
+    oneRowEach(refillList, 'the list with a refill open');
+    assert.deepEqual([rxOpen, rxChanged, rxStopped].map(rx => {
+      const row = onlyRow(refillList, rx, 'the list with a refill open');
+      return [row.refills, listClass(row)];
+    }), [[{ allowed: 1, recorded: 1, open: true, closedReason: null, nextFillOn: lagosDay(0), endsOn: endsOnFor(1) }, 1],
+      [{ allowed: 2, recorded: 1, open: false, closedReason: 'changed', nextFillOn: null, endsOn: endsOnFor(2) }, 2],
+      [{ allowed: 1, recorded: 1, open: false, closedReason: 'stopped', nextFillOn: null, endsOn: endsOnFor(1) }, 2]],
+    'on the list: the refill open is open work; the changed and the held prescriptions\' items are done');
+    assertListOrder(refillList, 'the list with a refill open');
+    evidence.ord12 = { prescriber: { refillsAllowed: '0-11 on create, answered on reads (none as 0)', twelve: 400,
+      patch: '400 (create only)', withoutDuration: '400 REFILLS_NEED_DURATION (details off, and on without a unit)' },
+    interval: { rule: 'the latest fill not reversed, Lagos day, + ceil(3/4 x 10 days) = 8', beforeItsDay:
+      'PHARMACY_REFILL_TOO_SOON with refillOpensOn; refills not_yet with nextFillOn; done work',
+    onItsDay: 'open, open work (0154\'s open refills)' },
+    fills: { recorded: 3, fillNumbers: [1, 2, 3], fourth: 'PHARMACY_NO_REFILLS_LEFT',
+      sameFillNewKeyOtherBody: 'PHARMACY_FILL_NUMBER_CHANGED', skipped: 'PHARMACY_FILL_NUMBER_CHANGED',
+      keyOfAnotherFill: 'IDEMPOTENCY_CONFLICT', sameKeySameBody: '201 replay', newKeySameBody: '201 replay',
+      twoPressesAtOnce: 'one fill, both 201', events: 'MedicationDispensed per fill, fillNumber on refills only',
+      acceptance: 'by fill 1 only' },
+    item: { rows: 1, refills: { allowed: 2, recorded: 3, open: false, closedReason: 'none_left', nextFillOn: null,
+      endsOn: 'the Lagos day written + 40 (2 refills of 10 days)' },
+    dispensing: 'the latest fill', listOrder: 'first fills, then refills open, then done' },
+    progress: { ownProgress: 'the first fill\'s time', pharmacy: 'lastFilledAt the latest',
+      pharmacyBatch: 'the patient\'s entry equals the one-patient answer, after fill 3 and after its reversal' },
+    reversal: { fill2: 'PHARMACY_DISPENSING_NOT_LATEST_FILL', fill3: 201,
+      ownProgressAfter: 'dispensed (fills 1 and 2 stand), reversedAt null' },
+    changedAfterFill1: { closedReason: 'changed', notice: 'edited (1)', refill: 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE' },
+    heldAfterFill1: { closedReason: 'stopped', notice: 'on_hold (1)', refill: 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE' } };
+    step('ORD-12: an edit after fill 1 closes the refills (changed) and shows 0148\'s notice (edited, 1); a hold closes '
+      + 'them (stopped; on_hold, 1); a refill of either is refused; a refill open lists after the first fills');
+
+    // The expiry (the clinical owner's D9, 24 November 2026): the refills end on the earliest of the end date, the
+    // Lagos day written plus (refills + 2) x one fill's duration, and that day plus 365. rxEnds: 1 refill, a 1-day
+    // duration, no end date, so its refills end 3 days after the day it was written (and a refill opens 1 day after
+    // the latest fill). The clock is moved on 4 days as the owner moves its writing (created_at) and its fill back, in
+    // replica mode (a fixture: it writes no version, so 0101's check still finds the prescription unchanged, and 0148
+    // records no change).
+    const rxEnds = await newPrescription('active', 'Synthetic amoxicillin 500 mg capsule',
+      { refillsAllowed: 1, durationValue: 1, durationUnit: 'day' });
+    assert.deepEqual(rxEnds.pharmacyHandoff, SENT, 'rxEnds is sent to the hospital\'s own pharmacy');
+    const endsWritten = lagosDay(0);
+    const itemEnds = onlyRow(await ownList('the list with rxEnds'), rxEnds, 'the list with rxEnds');
+    assert.deepEqual(itemEnds.refills, { allowed: 1, recorded: 0, open: false, closedReason: null, nextFillOn: null,
+      endsOn: plusDay(endsWritten, 3) }, `rxEnds before its first fill: ${JSON.stringify(itemEnds.refills)}`);
+    const endsFill = expectStatus(await dispenseFill(itemEnds, { fillNumber: 1 }), 201, 'fill 1 of rxEnds');
+    assert.deepEqual((await readItem(itemEnds, 'rxEnds\'s item after fill 1')).refills, { allowed: 1, recorded: 1,
+      open: false, closedReason: 'not_yet', nextFillOn: lagosDay(1), endsOn: plusDay(endsWritten, 3) },
+    'rxEnds after fill 1: its refill opens tomorrow and can be collected until 3 days after it was written');
+    const movedBack = await prescriptionWrittenEarlier(rxEnds, 4);
+    assert.deepEqual(movedBack, { written: plusDay(endsWritten, -4), version: String(rxEnds.rowVersion) },
+      `rxEnds written 4 days earlier, its version unchanged: ${JSON.stringify(movedBack)}`);
+    await fillRecordedEarlier(endsFill, 4);
+    const endedOn = plusDay(endsWritten, -1);
+    const dbDay = await one(`select to_char(ehr.prescription_refills_end_on(created_at, refills_allowed, duration_value,
+        duration_unit, ends_on), 'YYYY-MM-DD') as day from ehr.prescriptions where id = $1`, [rxEnds.id]);
+    assert.deepEqual([dbDay.day, endedOn], [lagosDay(-1), lagosDay(-1)], `the refills' last day was yesterday: ${dbDay.day}`);
+    const endedRead = await readItem(itemEnds, 'rxEnds\'s item after its refills\' last day');
+    assert.deepEqual(endedRead.refills, { allowed: 1, recorded: 1, open: false, closedReason: 'ended', nextFillOn: null,
+      endsOn: endedOn }, `the refills ended: ${JSON.stringify(endedRead.refills)}`);
+    assert.equal(endedRead.changedAfterDispensing, undefined, 'the fixture recorded no change after dispensing');
+    const endedList = await ownList('the list after rxEnds\'s refills ended');
+    oneRowEach(endedList, 'the list after rxEnds\'s refills ended');
+    const endedRow = onlyRow(endedList, rxEnds, 'the list after rxEnds\'s refills ended');
+    assert.deepEqual([endedRow.refills, listClass(endedRow)], [endedRead.refills, 2],
+      'an item whose refills ended is done work (0154\'s open refills leave it out)');
+    assertListOrder(endedList, 'the list after rxEnds\'s refills ended');
+    const endedRefusal = refusedWith(await dispenseFill(itemEnds, { fillNumber: 2 }), 409,
+      'PHARMACY_REFILL_PRESCRIPTION_ENDED', 'a refill after the refills\' last day');
+    assert.equal(endedRefusal.refillsEndedOn, endedOn, `the refusal says the day they ended: ${JSON.stringify(endedRefusal)}`);
+    assert.deepEqual((await fillsOf(itemEnds)).map(row => row.fill_number), [1], 'no refill recorded after the last day');
+    evidence.ord12.expiry = { rule: 'the earliest of the end date, the Lagos day written + (refills + 2) x one fill, and + 365',
+      oneRefillOneDay: 'endsOn = the day written + 3 (before and after fill 1)', afterTheLastDay: 'closed ended with endsOn; '
+        + 'done work; refill 409 PHARMACY_REFILL_PRESCRIPTION_ENDED with refillsEndedOn (the database\'s own day)',
+      fixture: 'created_at and fill 1 moved back 4 days as the owner in replica mode; version unchanged, no change recorded' };
+    step('ORD-12: the refills\' last day (D9): every item\'s refills carry endsOn (the day written + (refills + 2) fills\' '
+      + 'durations here); with 1 refill and a 1-day duration, once 3 days after the day written have passed, the item reads '
+      + 'closed ended with endsOn, is done work, and its refill is refused (409 PHARMACY_REFILL_PRESCRIPTION_ENDED with '
+      + 'refillsEndedOn, the database\'s own day)');
+
+    // A late fill (D9, the review of 24 November 2026): the next refill's day falls after the refills' last day, so no
+    // refill can be collected again and the refills end at once, though their last day has not come. pharmacy-api's
+    // words for the refusal depend on the day (the Lagos day, as the database's): past, "ended on"; today or later,
+    // "end on <day>, before this refill would be due". rxLate: 1 refill, 10-day fills, so its refills end 30 days
+    // after the day it was written and a refill opens 8 days after the latest fill. Written 25 days back and filled 3
+    // days back, its refill opens on its last day (today + 5): not yet, and too soon until then. Written one more day
+    // back, its last day is today + 4 and its refill would open on today + 5: ended now, done work, and refused with
+    // the day they end. The same fixture as rxEnds (the owner, replica mode, no version written).
+    assert.equal(endedRefusal.detail, `The refills on this prescription ended on ${endedOn}. Ask the prescriber for a new `
+      + 'one.', `the words after the last day: ${JSON.stringify(endedRefusal)}`);
+    const rxLate = await newPrescription('active', 'Synthetic amoxicillin 500 mg capsule',
+      { refillsAllowed: 1, durationValue: 10, durationUnit: 'day' });
+    assert.deepEqual(rxLate.pharmacyHandoff, SENT, 'rxLate is sent to the hospital\'s own pharmacy');
+    const lateWritten = lagosDay(0);
+    const itemLate = onlyRow(await ownList('the list with rxLate'), rxLate, 'the list with rxLate');
+    const lateFill = expectStatus(await dispenseFill(itemLate, { fillNumber: 1 }), 201, 'fill 1 of rxLate');
+    assert.deepEqual(await prescriptionWrittenEarlier(rxLate, 25), { written: plusDay(lateWritten, -25),
+      version: String(rxLate.rowVersion) }, 'rxLate written 25 days earlier, its version unchanged');
+    await fillRecordedEarlier(lateFill, 3);
+    const onLastDay = (await readItem(itemLate, 'rxLate\'s item, its refill opening on its last day')).refills;
+    assert.deepEqual(onLastDay, { allowed: 1, recorded: 1, open: false, closedReason: 'not_yet', nextFillOn: lagosDay(5),
+      endsOn: lagosDay(5) }, `a refill that opens on the last day is not yet, not ended: ${JSON.stringify(onLastDay)}`);
+    const lastDayTooSoon = refusedWith(await dispenseFill(itemLate, { fillNumber: 2 }), 409, 'PHARMACY_REFILL_TOO_SOON',
+      'a refill that opens on the last day, before that day');
+    assert.deepEqual([lastDayTooSoon.refillOpensOn, lastDayTooSoon.detail],
+      [lagosDay(5), `This refill is too early. It can be dispensed from ${lagosDay(5)}.`],
+      `too soon, with the day it opens: ${JSON.stringify(lastDayTooSoon)}`);
+    assert.deepEqual(await prescriptionWrittenEarlier(rxLate, 1), { written: plusDay(lateWritten, -26),
+      version: String(rxLate.rowVersion) }, 'rxLate written one more day earlier, its version unchanged');
+    const lateDb = await one(`select to_char(ehr.prescription_refills_end_on(created_at, refills_allowed, duration_value,
+        duration_unit, ends_on), 'YYYY-MM-DD') as day from ehr.prescriptions where id = $1`, [rxLate.id]);
+    assert.equal(lateDb.day, lagosDay(4), `rxLate's refills end in 4 days (the database's day): ${lateDb.day}`);
+    const lateRead = (await readItem(itemLate, 'rxLate\'s item after a late fill')).refills;
+    assert.deepEqual(lateRead, { allowed: 1, recorded: 1, open: false, closedReason: 'ended', nextFillOn: null,
+      endsOn: lagosDay(4) }, `a late fill ends the refills before their last day: ${JSON.stringify(lateRead)}`);
+    const lateList = await ownList('the list after rxLate\'s late fill');
+    oneRowEach(lateList, 'the list after rxLate\'s late fill');
+    const lateRow = onlyRow(lateList, rxLate, 'the list after rxLate\'s late fill');
+    assert.deepEqual([lateRow.refills, listClass(lateRow)], [lateRead, 2],
+      'an item after a late fill is done work (0154\'s open refills leave it out)');
+    assertListOrder(lateList, 'the list after rxLate\'s late fill');
+    const lateRefusal = refusedWith(await dispenseFill(itemLate, { fillNumber: 2 }), 409,
+      'PHARMACY_REFILL_PRESCRIPTION_ENDED', 'a refill after a late fill');
+    assert.deepEqual([lateRefusal.refillsEndedOn, lateRefusal.detail], [lagosDay(4), `The refills on this prescription `
+      + `end on ${lagosDay(4)}, before this refill would be due. Ask the prescriber for a new one.`],
+    `the refusal says the day they end and that the refill would come after it: ${JSON.stringify(lateRefusal)}`);
+    assert.deepEqual((await fillsOf(itemLate)).map(row => row.fill_number), [1], 'no refill recorded after a late fill');
+    evidence.ord12.lateFill = { rule: 'the next refill\'s day after the refills\' last day: ended at once (D9)',
+      onTheLastDay: 'not_yet with nextFillOn = endsOn; 409 PHARMACY_REFILL_TOO_SOON with refillOpensOn',
+      dayAfterTheLastDay: 'closed ended, nextFillOn null, endsOn today + 4; done work; refill 409 '
+        + 'PHARMACY_REFILL_PRESCRIPTION_ENDED with refillsEndedOn',
+      words: { past: endedRefusal.detail, late: lateRefusal.detail },
+      fixture: 'created_at moved back 25 then 1 more day, fill 1 back 3 days, as the owner in replica mode' };
+    step('ORD-12: a late fill (D9): a refill that opens on the refills\' last day is not yet (refused too soon, with the '
+      + 'day it opens); once the next refill would open only after the last day, the item reads closed ended with '
+      + 'endsOn (today or later), is done work, and its refill is refused (409 PHARMACY_REFILL_PRESCRIPTION_ENDED, '
+      + 'refillsEndedOn); the refusal\'s words say "end on <day>, before this refill would be due", and after the last '
+      + 'day "ended on <day>"');
+
+    // ── ORD-12 with the setting off: ehr-api and pharmacy-api booted again, PRESCRIPTION_REFILLS_ENABLED=false (and
+    // ehr-api with 0125's details off again, as before this section) ──
+    // The fills recorded while it was on stay. pharmacy-api still answers one row per item (the collapse does not
+    // depend on the setting), with today's fields only; a second dispensing is refused as before.
+    await Promise.all([stopService('ehr-api (details on)'), stopService('pharmacy-api')]);
+    await Promise.all([
+      boot('ehr-api (refills off)', join(services, 'ehr-api'), { ...ehrEnvironment, PRESCRIPTION_REFILLS_ENABLED: 'false' },
+        ehrPort),
+      boot('pharmacy-api (refills off)', join(services, 'pharmacy-api'),
+        { ...pharmacyEnvironment, PRESCRIPTION_REFILLS_ENABLED: 'false' }, pharmacyPort)]);
+    const offList = await ownList('the list with refills off');
+    oneRowEach(offList, 'the list with refills off');
+    assert.deepEqual(onlyRow(offList, rxRefills, 'the list with refills off').dispensing,
+      { id: fill3.id, status: 'dispensed', reversed: true }, 'the item with three fills is one row: its latest fill');
+    const ord12Keys = offList.filter(item => 'refills' in item || 'lastFilledAt' in item
+      || (item.dispensing && 'fillNumber' in item.dispensing)).map(item => item.id);
+    assert.deepEqual(ord12Keys, [], 'with refills off no item carries refills, lastFilledAt or a fill number');
+    assert.equal(listClass(onlyRow(offList, rxOpen, 'the list with refills off')), 2,
+      'with refills off an item with a refill left is done work, as before');
+    assertListOrder(offList, 'the list with refills off');
+    const offRead = await readItem(itemR, 'rxRefills\'s item with refills off');
+    assert.deepEqual([offRead.dispensing, offRead.pharmacyStep, 'refills' in offRead, 'lastFilledAt' in offRead],
+      [{ id: fill3.id, status: 'dispensed', reversed: true }, 'dispensing_reversed', false, false],
+    `a read with refills off: ${JSON.stringify(offRead)}`);
+    // A second dispensing, as Release B answers it: another request is 409 PHARMACY_WORK_ITEM_ALREADY_DISPENSED with
+    // the same words (on the item with a refill left, and on the one with three fills); the first fill's request
+    // replays it (201); fillNumber is an unknown field (400).
+    const alreadyDispensed = [409, 'PHARMACY_WORK_ITEM_ALREADY_DISPENSED',
+      'A full dispensing is already recorded for this work item; partial dispensing is not supported', undefined];
+    for (const [item, label] of [[itemOpen, 'rxOpen\'s item (a refill left)'], [itemR, 'rxRefills\'s item (three fills)']]) {
+      const second = await dispenseFill(item, { quantityDispensed: 28 });
+      assert.deepEqual([second.status, second.body?.code, second.body?.detail, second.body?.fillsRecorded], alreadyDispensed,
+        `a second dispensing of ${label} with refills off: ${second.status} ${JSON.stringify(second.body)}`);
+    }
+    const offReplay = expectStatus(await dispenseFill(itemOpen), 201, 'rxOpen\'s first request again, a new key, refills off');
+    assert.deepEqual([offReplay.id, 'fillNumber' in offReplay], [openFill.id, false], 'the first fill replayed, as before');
+    fieldsRefused(await dispenseFill(itemOpen, { fillNumber: 2 }), 'fillNumber', 'fillNumber with refills off');
+    assert.equal((await fillsOf(itemOpen)).length, 1, 'with refills off no refill is recorded');
+    // ehr-api: refillsAllowed is an unknown field again, and no answer carries it; the progress is one row per item,
+    // dispensed while any fill stands (that does not depend on the setting either).
+    fieldsRefused(await ehrCall(doctor, 'POST', `${enc}/prescriptions`, prescriptionBody('active',
+      'Synthetic amlodipine 5 mg tablet', { refillsAllowed: 1 }), { key: freshKey('prescription') }), 'refillsAllowed',
+    'refills on create with refills off');
+    const offDoctorList = expectStatus(await ehrCall(doctor, 'GET', `${enc}/prescriptions`), 200,
+      'the doctor\'s prescriptions with refills off');
+    assert.deepEqual(['refills' in offDoctorList, offDoctorList.items.filter(item => 'refillsAllowed' in item).length],
+      [false, 0], 'with refills off the prescriptions carry no refills');
+    assert.deepEqual(await ownProgressOf(rxRefills), dispensedR, 'with refills off the prescriber reads the same progress');
+    const offProgress = await pharmacyProgress([rxRefills.id, rxOpen.id], 'progress with refills off');
+    assert.deepEqual(offProgress.map(item => [item.sourceEhrPrescriptionId, item.status, item.dispensedAt,
+      item.reversedAt, 'lastFilledAt' in item]), [[rxRefills.id, 'dispensed', fill1At, null, false],
+      [rxOpen.id, 'dispensed', openFillAt, null, false]], `the progress with refills off: ${JSON.stringify(offProgress)}`);
+    assert.deepEqual(await pharmacyBatchProgress([rxRefills.id, rxOpen.id], 'batch progress with refills off'),
+      offProgress, 'with refills off the batch entry is the one-patient answer, with no lastFilledAt');
+    evidence.ord12.off = { list: 'one row per item, the latest fill, today\'s fields only',
+      refillLeft: 'done work, as before', secondDispensing: 'PHARMACY_WORK_ITEM_ALREADY_DISPENSED, as before',
+      sameRequest: '201 replay of fill 1', fillNumber: 400, refillsAllowedOnCreate: 400,
+      progress: 'one row per item, the first fill\'s time, dispensed while a fill stands; the batch entry the same' };
+    step('ORD-12 with PRESCRIPTION_REFILLS_ENABLED off (both services booted again): one row per item (the latest fill), '
+      + 'today\'s fields only; a second dispensing is refused as before (PHARMACY_WORK_ITEM_ALREADY_DISPENSED), fillNumber '
+      + 'and refillsAllowed are unknown fields');
+  } else {
+    // ── ORD-12 with PRESCRIPTION_REFILLS_ENABLED off in every service from the start (the clinical owner's decision,
+    // 24 November 2026): every step above ran with it off and passed unchanged. Here: on a database with 0154, no
+    // answer carries refills, lastFilledAt, a fill number or refillsAllowed; refillsAllowed and fillNumber are unknown
+    // fields (400); a second dispensing of a dispensed item is refused as Release B refuses it; one row per item. ──
+    const offList = await ownList('the list with refills off from the start');
+    oneRowEach(offList, 'the list with refills off from the start');
+    const ord12Keys = offList.filter(item => 'refills' in item || 'lastFilledAt' in item
+      || (item.dispensing && 'fillNumber' in item.dispensing)).map(item => item.id);
+    assert.deepEqual(ord12Keys, [], 'with refills off no item carries refills, lastFilledAt or a fill number');
+    assertListOrder(offList, 'the list with refills off from the start');
+    const item4Off = onlyRow(offList, rx4, 'the list with refills off from the start');
+    assert.notEqual(item4Off.dispensing, null, 'rx4\'s item was dispensed above');
+    const second = await dispenseFill(item4Off, { quantityDispensed: 28 });
+    assert.deepEqual([second.status, second.body?.code, second.body?.detail], [409, 'PHARMACY_WORK_ITEM_ALREADY_DISPENSED',
+      'A full dispensing is already recorded for this work item; partial dispensing is not supported'],
+    `a second dispensing with refills off: ${second.status} ${JSON.stringify(second.body)}`);
+    fieldsRefused(await dispenseFill(item4Off, { fillNumber: 2 }), 'fillNumber', 'fillNumber with refills off');
+    assert.equal((await fillsOf(item4Off)).length, 1, 'with refills off no second fill is recorded');
+    fieldsRefused(await ehrCall(doctor, 'POST', `${enc}/prescriptions`, prescriptionBody('active',
+      'Synthetic amlodipine 5 mg tablet', { refillsAllowed: 1 }), { key: freshKey('prescription') }), 'refillsAllowed',
+    'refills on create with refills off');
+    const offDoctorList = expectStatus(await ehrCall(doctor, 'GET', `${enc}/prescriptions`), 200,
+      'the doctor\'s prescriptions with refills off');
+    assert.deepEqual(['refills' in offDoctorList, offDoctorList.items.filter(item => 'refillsAllowed' in item).length],
+      [false, 0], 'with refills off the prescriptions carry no refills');
+    const offProgress = await pharmacyProgress([rx4.id], 'progress with refills off');
+    assert.deepEqual(offProgress.map(item => [item.sourceEhrPrescriptionId, 'lastFilledAt' in item]), [[rx4.id, false]],
+      `the progress with refills off carries no lastFilledAt: ${JSON.stringify(offProgress)}`);
+    evidence.ord12 = { offFromTheStart: { earlierSteps: 'passed unchanged', list: 'one row per item, today\'s fields only',
+      secondDispensing: 'PHARMACY_WORK_ITEM_ALREADY_DISPENSED, as before', fillNumber: 400, refillsAllowedOnCreate: 400 } };
+    step('ORD-12 with PRESCRIPTION_REFILLS_ENABLED off in ehr-api and pharmacy-api from the start: every step above '
+      + 'passed unchanged; no answer carries refills, lastFilledAt, a fill number or refillsAllowed; fillNumber and '
+      + 'refillsAllowed are unknown fields; a second dispensing is refused as before');
+  }
 
   evidence.elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
   evidence.status = 'passed';

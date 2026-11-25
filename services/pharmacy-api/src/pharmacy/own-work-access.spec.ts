@@ -370,8 +370,9 @@ describe('own pharmacy work (0133)', () => {
     expect(page.items.map((item) => item.id)).toEqual([id(1), id(2), id(3)]);
     expect(statements.filter((sql) => /from pharmacy\.work_items w|savepoint pharmacy_work_list/.test(sql))).toEqual([
       'savepoint pharmacy_work_list', WORK_LIST_QUERY_0133, 'rollback to savepoint pharmacy_work_list', WORK_LIST_QUERY]);
-    // Both queries reach back to the same day (Q123 A), and the answer says which.
-    expect(listValues).toEqual([[page.since], [page.since]]);
+    // Both queries reach back to the same day (Q123 A), and the answer says which; with refills off (ORD-12) no
+    // item has a refill open.
+    expect(listValues).toEqual([[page.since, []], [page.since, []]]);
     expect(page.since).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
@@ -380,7 +381,7 @@ describe('own pharmacy work (0133)', () => {
     const before = workListSince();
     const page = await service.listWorkItems(pharmacist);
     expect([before, workListSince()]).toContain(page.since);
-    expect(listValues).toEqual([[page.since]]);
+    expect(listValues).toEqual([[page.since, []]]);
   });
 
   it.each(['40001', '40P01', '42501', '57014'])('passes a %s of 0133\'s list query on: no fallback, no list', async (code) => {
@@ -397,7 +398,7 @@ describe('own pharmacy work (0133)', () => {
     const page = await service.listWorkItems(pharmacist);
     expect(statements.filter((sql) => /from pharmacy\.work_items w|savepoint pharmacy_work_list/.test(sql)))
       .toEqual([WORK_LIST_QUERY]);
-    expect(listValues).toEqual([[page.since]]);
+    expect(listValues).toEqual([[page.since, []]]);
   });
 
   it('reads and reverses an own dispensing on the own-work basis, asking about the dispensing', async () => {
