@@ -465,16 +465,18 @@ describe('ORD-12: refills in the prescriber\'s progress', () => {
     return { ...built, service };
   };
 
-  it('PR1 reads each item once: the first fill, the latest fill and the latest fill\'s reversal, by fill number', () => {
+  it('PR1 reads each item\'s fills once, in one lateral: the first fill, the latest fill and the latest fill\'s '
+    + 'reversal, by fill number, and whether a fill stands', () => {
     const flat = WORK_ITEM_PROGRESS_QUERY.replace(/\s+/g, ' ');
-    expect(flat).toContain('left join lateral (select df.dispensed_at from pharmacy.dispensings df where '
-      + 'df.work_item_id=w.id order by df.fill_number asc limit 1) f on true');
-    expect(flat).toContain('left join lateral (select df.id, df.dispensed_at from pharmacy.dispensings df where '
-      + 'df.work_item_id=w.id order by df.fill_number desc limit 1) l on true');
-    expect(flat).toContain('left join pharmacy.dispensing_reversals r on r.dispensing_id=l.id');
-    expect(flat).toContain('f.dispensed_at, l.dispensed_at as last_filled_at, r.reversed_at, exists (select 1 from '
-      + 'pharmacy.dispensings ds where ds.work_item_id=w.id and not exists (select 1 from pharmacy.dispensing_reversals '
-      + 'rs where rs.dispensing_id=ds.id)) as fill_standing');
+    expect(flat).toContain('f.dispensed_at, f.last_filled_at, f.reversed_at, f.fill_standing from pharmacy.work_items w '
+      + 'left join lateral (select (array_agg(df.dispensed_at order by df.fill_number asc))[1] as dispensed_at, '
+      + '(array_agg(df.dispensed_at order by df.fill_number desc))[1] as last_filled_at, '
+      + '(array_agg(rs.reversed_at order by df.fill_number desc))[1] as reversed_at, '
+      + 'coalesce(bool_or(rs.id is null), false) as fill_standing from pharmacy.dispensings df '
+      + 'left join pharmacy.dispensing_reversals rs on rs.dispensing_id=df.id where df.work_item_id=w.id) f on true');
+    // The fills and their reversals once each: every row read runs the clinician's read policies.
+    expect(flat.match(/pharmacy\.dispensings\b/g)).toHaveLength(1);
+    expect(flat.match(/pharmacy\.dispensing_reversals\b/g)).toHaveLength(1);
     expect(flat).not.toMatch(/left join pharmacy\.dispensings d on/);
   });
 

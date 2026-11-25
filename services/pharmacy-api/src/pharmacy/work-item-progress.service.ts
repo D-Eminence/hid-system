@@ -100,20 +100,24 @@ interface ProgressRow extends QueryResultRow {
  * (`last_filled_at`) and the latest fill's reversal (one per dispensing,
  * 0023), each by fill number, and whether any fill of the item stands (has no
  * reversal), so that a refill reversed after an earlier fill that stands
- * still reads dispensed. It needs 0154's `fill_number`. Exported for the
- * tests.
+ * still reads dispensed (false when none is recorded). Each item's fills and
+ * their reversals are read once, in one lateral: every row read runs the
+ * clinician's read policies (the consent test), and reading the fills once
+ * for each of those four answers doubled the several-patient call's statement
+ * time at 100 items, setting on or off. It needs 0154's `fill_number`.
+ * Exported for the tests.
  */
 export const WORK_ITEM_PROGRESS_QUERY = `select w.id::text as work_item_id,
   w.source_ehr_prescription_id::text as source_ehr_prescription_id, w.accepted_at,
-  f.dispensed_at, l.dispensed_at as last_filled_at, r.reversed_at,
-  exists (select 1 from pharmacy.dispensings ds where ds.work_item_id=w.id
-    and not exists (select 1 from pharmacy.dispensing_reversals rs where rs.dispensing_id=ds.id)) as fill_standing
+  f.dispensed_at, f.last_filled_at, f.reversed_at, f.fill_standing
   from pharmacy.work_items w
-  left join lateral (select df.dispensed_at from pharmacy.dispensings df where df.work_item_id=w.id
-    order by df.fill_number asc limit 1) f on true
-  left join lateral (select df.id, df.dispensed_at from pharmacy.dispensings df where df.work_item_id=w.id
-    order by df.fill_number desc limit 1) l on true
-  left join pharmacy.dispensing_reversals r on r.dispensing_id=l.id
+  left join lateral (select (array_agg(df.dispensed_at order by df.fill_number asc))[1] as dispensed_at,
+      (array_agg(df.dispensed_at order by df.fill_number desc))[1] as last_filled_at,
+      (array_agg(rs.reversed_at order by df.fill_number desc))[1] as reversed_at,
+      coalesce(bool_or(rs.id is null), false) as fill_standing
+    from pharmacy.dispensings df
+    left join pharmacy.dispensing_reversals rs on rs.dispensing_id=df.id
+    where df.work_item_id=w.id) f on true
   where w.patient_id=$1::uuid and w.facility_id=$2::uuid and w.order_route_id is null
     and w.source_ehr_prescription_id=any($3::uuid[])`;
 

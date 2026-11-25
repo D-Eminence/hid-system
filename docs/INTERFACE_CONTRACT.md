@@ -13011,7 +13011,14 @@ which needs 0154's `fill_number`):
   `reversedAt` (the latest fill's reversal), only once every fill is
   reversed. So the prescriber never reads "reversed" for an item whose
   earlier fill still stands (a reversed refill), and an item filled again
-  after a reversed fill reads `dispensed`.
+  after a reversed fill reads `dispensed`. Each item's fills and their
+  reversals are read once, in one lateral, so the several-patient call costs
+  what it did before 0154: at 50 patients and 100 dispensed items, as the
+  Pharmacy runtime on a clinician's consent under the NOSUPERUSER
+  NOBYPASSRLS owner, its 50 statements took 0.57 s (median of 21) with one
+  fill an item, as Release E's statement did, and 0.66 s with 40 items
+  filled three times; reading the fills once for each of the four answers
+  had taken 1.05-1.15 s.
 - `GET /api/v1/health/ready` is 503 `PHARMACY_SCHEMA_NOT_READY` on a database
   without 0154's `pharmacy.dispensings.fill_number` (a catalog read; `live`
   stays 200), since every work-item statement names it.
