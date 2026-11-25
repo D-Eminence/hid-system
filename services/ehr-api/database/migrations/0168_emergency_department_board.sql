@@ -905,7 +905,7 @@ begin
     stage_before := entry_row.stage;
     -- Triage on arrival (nurses, clinicians and doctors): the level on the waiting-list row, ready to be seen.
     if requested_triage_level is not null then
-      perform set_config('hid.ed_board_write', entry_row.id::text, true);
+      perform set_config('hid.ed_board_closing', entry_row.id::text, true);
       update ehr.visit_queue entry
          set triage_level = requested_triage_level,
              stage = case when entry.stage in ('waiting', 'triage') then 'ready' else entry.stage end,
@@ -915,7 +915,7 @@ begin
              row_version = entry.row_version + 1
        where entry.id = entry_row.id
       returning * into entry_row;
-      perform set_config('hid.ed_board_write', '', true);
+      perform set_config('hid.ed_board_closing', '', true);
     end if;
 
     insert into ehr.ed_attendances (facility_id, organization_id, patient_id, visit_queue_entry_id, arrival_basis,
@@ -1170,14 +1170,14 @@ begin
     end if;
 
     stage_after := case when entry_row.stage in ('waiting', 'triage') then 'ready' else entry_row.stage end;
-    perform set_config('hid.ed_board_write', entry_row.id::text, true);
+    perform set_config('hid.ed_board_closing', entry_row.id::text, true);
     update ehr.visit_queue entry
        set triage_level = requested_triage_level, stage = stage_after,
            stage_changed_at = case when stage_after <> entry.stage then now_value else entry.stage_changed_at end,
            updated_by_membership_id = caller.actor_membership, updated_at = now_value,
            row_version = entry.row_version + 1
      where entry.id = entry_row.id;
-    perform set_config('hid.ed_board_write', '', true);
+    perform set_config('hid.ed_board_closing', '', true);
     update ehr.ed_attendances attendance
        set presenting_complaint = case when coalesce(requested_set_complaint, false) then complaint_value
                                        else attendance.presenting_complaint end,
@@ -1303,7 +1303,7 @@ begin
       return;
     end if;
 
-    perform set_config('hid.ed_board_write', entry_row.id::text, true);
+    perform set_config('hid.ed_board_closing', entry_row.id::text, true);
     update ehr.visit_queue entry
        set stage = coalesce(requested_stage, entry.stage),
            stage_changed_at = case when requested_stage is not null and requested_stage <> entry.stage then now_value
@@ -1313,7 +1313,7 @@ begin
            updated_by_membership_id = caller.actor_membership, updated_at = now_value,
            row_version = entry.row_version + 1
      where entry.id = entry_row.id;
-    perform set_config('hid.ed_board_write', '', true);
+    perform set_config('hid.ed_board_closing', '', true);
     update ehr.ed_attendances attendance
        set updated_by_membership_id = caller.actor_membership, updated_at = now_value,
            row_version = attendance.row_version + 1
@@ -1583,7 +1583,7 @@ begin
     -- clinician has handed over); otherwise unchanged.
     queue_stage := case requested_outcome when 'left_before_seen' then 'left' when 'left_against_advice' then 'left'
                                           when 'died' then 'finished' when 'sent_to_outpatients' then 'waiting' end;
-    perform set_config('hid.ed_board_write', entry_row.id::text, true);
+    perform set_config('hid.ed_board_closing', entry_row.id::text, true);
     update ehr.visit_queue entry
        set stage = coalesce(queue_stage, entry.stage),
            stage_changed_at = case when queue_stage is not null and queue_stage <> entry.stage then now_value
@@ -1594,7 +1594,7 @@ begin
            updated_by_membership_id = caller.actor_membership, updated_at = now_value,
            row_version = entry.row_version + 1
      where entry.id = entry_row.id;
-    perform set_config('hid.ed_board_write', '', true);
+    perform set_config('hid.ed_board_closing', '', true);
     update ehr.ed_attendances attendance
        set status = case when closes then 'closed' else 'decided' end,
            disposition_outcome = requested_outcome,
@@ -1703,14 +1703,14 @@ begin
       return;
     end if;
 
-    perform set_config('hid.ed_board_write', entry_row.id::text, true);
+    perform set_config('hid.ed_board_closing', entry_row.id::text, true);
     update ehr.visit_queue entry
        set stage = 'finished', stage_changed_at = case when entry.stage <> 'finished' then now_value
                                                        else entry.stage_changed_at end,
            closed_at = now_value, updated_by_membership_id = caller.actor_membership, updated_at = now_value,
            row_version = entry.row_version + 1
      where entry.id = entry_row.id;
-    perform set_config('hid.ed_board_write', '', true);
+    perform set_config('hid.ed_board_closing', '', true);
     update ehr.ed_attendances attendance
        set status = 'closed', left_at = now_value, closed_via = 'board',
            updated_by_membership_id = caller.actor_membership, updated_at = now_value,
@@ -1815,7 +1815,7 @@ begin
     -- The row the arrival made closes as cancelled; a row moved from the outpatient waiting list stays open and is
     -- put back as it was before the move (its stage, triage level, assignee and stage time), so nothing the
     -- mistaken arrival or the board wrote stays on another patient's outpatient row.
-    perform set_config('hid.ed_board_write', entry_row.id::text, true);
+    perform set_config('hid.ed_board_closing', entry_row.id::text, true);
     if not current_row.moved_from_waiting_list then
       update ehr.visit_queue entry
          set stage = 'cancelled', stage_changed_at = now_value, closed_at = now_value,
@@ -1831,7 +1831,7 @@ begin
              row_version = entry.row_version + 1
        where entry.id = entry_row.id;
     end if;
-    perform set_config('hid.ed_board_write', '', true);
+    perform set_config('hid.ed_board_closing', '', true);
     update ehr.ed_attendances attendance
        set status = 'closed', left_at = now_value, closed_via = 'cancel',
            updated_by_membership_id = caller.actor_membership, updated_at = now_value,
@@ -1907,7 +1907,7 @@ begin
     now_value timestamptz := clock_timestamp();
   begin
     if new.closed_at is null or old.closed_at is not null
-       or coalesce(current_setting('hid.ed_board_write', true), '') = new.id::text then
+       or coalesce(current_setting('hid.ed_board_closing', true), '') = new.id::text then
       return null;
     end if;
     select attendance.* into attendance_row from ehr.ed_attendances attendance
@@ -1966,6 +1966,8 @@ begin
   -- The guard: while a waiting-list row has an open or decided ED record, its stage, triage level, assignee and close
   -- belong to the board. Only the ED functions change them (their transaction-local marker names the row); 0135's
   -- ehr.visit_queue_update (the waiting list's next-step button and Change form) is refused for it, whoever calls it.
+  -- The marker is hid.ed_board_closing (its name from when only the ED closes set it): every ED function's write to
+  -- the row sets it, and so may a later file that closes an ED record itself (ADT-1's admission).
   -- So the ED record's row version covers every field the board writes, the triage on the board is the only triage
   -- (with its history and who did it), and the board's roles, reasons and cancel rule cannot be gone around on the
   -- waiting list. One exception: a row of a patient whose record is no longer active (0145's cancel of an unknown
@@ -1977,7 +1979,7 @@ begin
   set search_path = pg_catalog, pg_temp
   as $fn$
   begin
-    if coalesce(current_setting('hid.ed_board_write', true), '') = old.id::text then
+    if coalesce(current_setting('hid.ed_board_closing', true), '') = old.id::text then
       return new;
     end if;
     if not exists (select 1 from ehr.ed_attendances attendance

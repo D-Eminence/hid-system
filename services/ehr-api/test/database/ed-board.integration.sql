@@ -796,8 +796,8 @@ select pg_temp.check_case('8 a doctor takes the patient on the waiting list: ref
   pg_temp.queue_update(3, 15, null, assignee => 3));
 select pg_temp.check_case('8 another row''s marker does not open the guard', '55000 VISIT_QUEUE_ON_ED_BOARD',
   (select pg_temp.queue_update(2, 15, null, 1::smallint)
-     from (select set_config('hid.ed_board_write', pg_temp.queue_entry(16)::text, true)) marker));
-select set_config('hid.ed_board_write', '', true);
+     from (select set_config('hid.ed_board_closing', pg_temp.queue_entry(16)::text, true)) marker));
+select set_config('hid.ed_board_closing', '', true);
 select pg_temp.check_case('8 p15''s row unchanged: still the board''s level, and the ED record''s version still current',
   'ready/false/4/own_facility/-/t', pg_temp.queue_of(15) || '/' || pg_temp.queue_assignee(15) || '/'
     || (pg_temp.ver(15) = :p15_version)::text::char(1));
