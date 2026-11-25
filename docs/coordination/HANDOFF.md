@@ -2,7 +2,7 @@
 
 This file is for a coordinator session that takes over: a new cloud session, or the owner's local Claude Code in VS Code. It is not product documentation. The clinical lead's and DPO's names stay out of the repository and GitHub. The owner knows them.
 
-**ACTIVE COORDINATOR: the cloud session, since 25 Nov ~17:45 UTC (owner: "you're active"). The local VS Code coordinator must not merge, release or push until the owner hands over again.** Website run 45661915015 was confirmed green (live 17:20 UTC, all pins on 0cfddcc9).
+**ACTIVE COORDINATOR: the local VS Code session, since 25 Nov ~21:00 UTC (the owner chose "Hand over to this session" in the local chat). The cloud session must not merge, release or push until the owner hands over again.** Website release F (health#334, `b44b0d56`, run 45670779345) is live; the cloud coordinator shipped it at 18:01 UTC.
 
 ## Only one coordinator acts at a time
 - Before acting, the owner tells this session it is the active coordinator.
@@ -28,7 +28,7 @@ This file is for a coordinator session that takes over: a new cloud session, or 
 ## Live in production
 - **Backend:** Release E, `backend-45657497614-1-9ad293c7963d6f06`, hid-system `0cfddcc9` (staging `staging-novu-ci-20261005`), migrations 0001–0153. It went live 25 Nov 17:04 UTC; 0152 and 0153 applied with no stop, and the fallback declaration was not used. All 13 components were rebuilt from `0cfddcc9`.
   - Before it: #339 gateway pins, `backend-45649090315-1-03d2b78867300345` (`557cddb5`), live 16:06 UTC, no migration.
-- **Website:** re-pin health#333 merged as `42c548d0`, with all nine pins on `0cfddcc9`. **Its release, run 45661915015 (push), was still deploying at handback. The incoming coordinator must confirm it succeeded** (if it failed, read the error before re-running; `workflow_dispatch` on main is allowed).
+- **Website:** re-pin health#333 merged as `42c548d0`, with all nine pins on `0cfddcc9`. Its release, run 45661915015, succeeded (`frontend-45661915015-1-121b98b576f44645`). Release F (Lekan's batch #313, #314, #234, #331) followed at 18:01 UTC (`b44b0d56`, run 45670779345, success).
   - Last confirmed live: `frontend-45654205866-1-68900f164538dd64` (`59cc1b04`, pins on `557cddb5`) at about 16:50 UTC.
 - **GitHub flakiness on 25 Nov afternoon:** merge and comment calls returned 500/502/504 or empty bodies, but often succeeded anyway. Always re-read state before retrying, and guard merges with `sha=`. Once, a push to health main started no release run; the coordinator dispatched `production-frontends.yml` on main.
 

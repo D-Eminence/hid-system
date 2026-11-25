@@ -80,3 +80,4 @@
 - 25 Nov ~17:00 UTC: Coordinator numbering decision (#258 7168672285): ORD-10 ph2 gives 0180 back (next free when WHOCC answers); Ola's self-check/Discussed/ORD-8 = 0178/0179/0180; markers only for files whose objects are used; numbers final at integration in release order.
 - 25 Nov 17:04 UTC: RELEASE E LIVE (backend-45657497614-1-9ad293c7963d6f06, 0cfddcc9; 2 migrations 0152-0153 applied, no stop; deploy 16:51-17:04, success). Website re-pin health#333 (all pins -> 0cfddcc9).
 - 25 Nov ~17:20 UTC: Owner (verbatim): "update the handoff and stop". Local coordinator hands back. Website re-pin health#333 merged 42c548d0; release run 45661915015 still deploying at handback.
+- 25 Nov ~21:00 UTC: Owner answered in the local chat: "Hand over to this session" (local coordinator active; the cloud session to be told to stop by the owner). Cloud had shipped website release F (health#334, b44b0d56) at 18:01 UTC.
