@@ -169,9 +169,10 @@ export interface RegistrationCaseListItem extends RegistrationCaseResult {
   createdByMembershipId: string;
   /**
    * The name of the member who started the case, by SX-9's rule (the login's
-   * display name, else the staff record's full name; null once the login is
-   * deleted or when neither is set), so "All registrations" can say who
-   * started it. A name only: no contact, account, role or licence.
+   * display name, else the staff record's full name, trimmed, blank counting
+   * as unset; null once the login is deleted or when neither is set, while a
+   * disabled or locked login is still named), so "All registrations" can say
+   * who started it. A name only: no contact, account, role or licence.
    */
   createdByName: string | null;
 }
@@ -619,7 +620,7 @@ export class NinRegistrationService {
          left join identity.staff starter
            on starter.id = starter_membership.staff_id
           and starter.account_id = starter_membership.account_id
-         left join auth.accounts starter_account on starter_account.id = starter_membership.account_id
+         left join auth.accounts starter_account on starter_account.id = starter.account_id
         where registration.facility_id = platform.current_facility_id()
           and ($1::text = 'facility' or registration.created_by_account_id = $2::uuid)
           and ($3::text is null or registration.status = $3::text)

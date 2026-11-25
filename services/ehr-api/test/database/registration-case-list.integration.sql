@@ -18,7 +18,8 @@
 --      NIN was revoked, or who has none, is not;
 --   5. who started each case (createdByName, SX-9's name rule): the login's
 --      display name, else the staff record's full name (blank counts as
---      unset), and no name once the login is deleted or neither is set.
+--      unset), and no name once the login is deleted or neither is set; a
+--      disabled or locked login is still named, as SX-9 names past staff.
 --
 -- Each case records its outcome and the suite fails at the end listing every
 -- case whose outcome differs.
@@ -163,7 +164,7 @@ language sql stable as $$
            left join identity.staff starter
              on starter.id = starter_membership.staff_id
             and starter.account_id = starter_membership.account_id
-           left join auth.accounts starter_account on starter_account.id = starter_membership.account_id
+           left join auth.accounts starter_account on starter_account.id = starter.account_id
           where registration.facility_id = platform.current_facility_id()
             and ($1::text = 'facility' or registration.created_by_account_id = $2::uuid)
             and ($3::text is null or registration.status = $3::text)
@@ -365,13 +366,20 @@ begin
   set local session_replication_role = origin;
   perform pg_temp.list_case('5c a deleted login: no name, though both names are set',
     'c2:Ada at the Desk,c1:Ada at the Desk,c3:-,c4:Ada at the Desk', pg_temp.names_as_approver());
+  set local session_replication_role = replica;
+  update auth.accounts set status = 'disabled' where id = 'a5100100-0000-4000-8000-000000000002';
+  update auth.accounts set status = 'locked' where id = 'a5100100-0000-4000-8000-000000000001';
+  set local session_replication_role = origin;
+  perform pg_temp.list_case('5d a disabled or locked login is still named',
+    'c2:Ada at the Desk,c1:Ada at the Desk,c3:Bola Desk,c4:Ada at the Desk', pg_temp.names_as_approver());
   -- Put the fixtures back.
   set local session_replication_role = replica;
   update auth.accounts set display_name = 'Ada Desk' where id = 'a5100100-0000-4000-8000-000000000001';
   update identity.staff set full_name = 'Ada Desk' where id = 'a5100200-0000-4000-8000-000000000001';
-  update auth.accounts set status = 'active' where id = 'a5100100-0000-4000-8000-000000000002';
+  update auth.accounts set status = 'active'
+   where id in ('a5100100-0000-4000-8000-000000000001', 'a5100100-0000-4000-8000-000000000002');
   set local session_replication_role = origin;
-  perform pg_temp.list_case('5d fixtures put back', 'c2:Ada Desk,c1:Ada Desk,c3:Bola Desk,c4:Ada Desk',
+  perform pg_temp.list_case('5e fixtures put back', 'c2:Ada Desk,c1:Ada Desk,c3:Bola Desk,c4:Ada Desk',
     pg_temp.names_as_approver());
 end $$;
 
