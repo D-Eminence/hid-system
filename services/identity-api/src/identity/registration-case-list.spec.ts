@@ -20,6 +20,8 @@ const patientId = '6b1f0d2e-3c4a-4b5d-8e6f-7a8b9c0d1e2f';
 const membershipOf = (account: string, facility: string) => (account === deskAccount
   ? (facility === facilityA ? 'c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f' : 'd4e5f6a7-b8c9-4d0e-8f1a-2b3c4d5e6f70')
   : 'e5f6a7b8-c9d0-4e1f-8a2b-3c4d5e6f7081');
+/** The name the read gives each fictional account's membership (SX-9's rule). */
+const nameOf = (account: string) => (account === deskAccount ? 'Ada Desk' : 'Bola Desk');
 
 function contextFor(facilityId: string, permissions: string[]): DataAccessContext {
   return {
@@ -52,6 +54,7 @@ function stored(facility: string, createdBy: string, index: number, extra: Recor
       created_at_cursor: `2026-11-18 10:00:${second}.123456+00`,
       created_by_me: createdBy === deskAccount,
       created_by_membership_id: membershipOf(createdBy, facility),
+      created_by_name: nameOf(createdBy),
       // Present in the fake table only, to prove it is never projected.
       nin_last4: '8901',
       ...extra,
@@ -114,7 +117,7 @@ describe('SX-10 registration-case list', () => {
       candidateCount: 0, contactRecorded: true, ninStatus: 'verified', identityEvidence: 'nin',
       fullName: 'Ada Fictional1',
       dateOfBirth: '1991-04-05', createdAt: '2026-11-18T10:00:58.000Z', updatedAt: '2026-11-18T10:05:58.000Z',
-      createdByMe: true, createdByMembershipId: 'c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f',
+      createdByMe: true, createdByMembershipId: 'c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f', createdByName: 'Ada Desk',
     });
     expect(answer.cases[1]).toMatchObject({ status: 'approved_new_identity',
       patient: { patientId, hid: 'HID-QX7K2M' } });
@@ -123,6 +126,8 @@ describe('SX-10 registration-case list', () => {
     expect(body).not.toMatch(/nin_|last4|unverified/i);
     const [{ sql, values }] = statements as [{ sql: string; values: unknown[] }];
     expect(sql).not.toMatch(/nin_last4|nin_ciphertext|nin_lookup_hmac|verification_reference/);
+    // The starter's name only: no contact, licence or role of theirs is read.
+    expect(sql).not.toMatch(/email|phone|licen[cs]e|role_code|membership_role|app_role/);
     expect(sql).toContain('order by registration.created_at desc, registration.id desc');
     expect(values).toEqual(['mine', deskAccount, null, null, null, 51, null]);
   });
@@ -146,6 +151,16 @@ describe('SX-10 registration-case list', () => {
     expect(answer.cases.map((item) => item.createdByMembershipId)).toEqual([
       'c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f', 'e5f6a7b8-c9d0-4e1f-8a2b-3c4d5e6f7081',
       'c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f']);
+    // ...and by name (SX-10 createdByName).
+    expect(answer.cases.map((item) => item.createdByName)).toEqual(['Ada Desk', 'Bola Desk', 'Ada Desk']);
+  });
+
+  it('answers no name when the read gives none (a deleted login, or no name set)', async () => {
+    const { service } = fakeDatabase([stored(facilityA, otherAccount, 1, { created_by_name: null })]);
+    const answer = await service.listCases(query({ view: 'facility' }), approver);
+    expect(answer.cases).toHaveLength(1);
+    expect(answer.cases[0]).toMatchObject({ createdByMe: false, createdByName: null,
+      createdByMembershipId: 'e5f6a7b8-c9d0-4e1f-8a2b-3c4d5e6f7081' });
   });
 
   it('refuses view=facility to a member who does not approve registrations, and audits it', async () => {

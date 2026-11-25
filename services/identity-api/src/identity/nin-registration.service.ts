@@ -152,6 +152,7 @@ interface CaseListRow extends RegistrationCaseRow {
   created_at_cursor: string;
   created_by_me: boolean;
   created_by_membership_id: string;
+  created_by_name: string | null;
 }
 
 export interface RegistrationCaseListItem extends RegistrationCaseResult {
@@ -164,9 +165,15 @@ export interface RegistrationCaseListItem extends RegistrationCaseResult {
   /**
    * The membership that started the case (identity.registration_cases, 0011:
    * always a membership at this facility), so a screen can say who started it.
-   * An id only: no name, contact or account is returned.
    */
   createdByMembershipId: string;
+  /**
+   * The name of the member who started the case, by SX-9's rule (the login's
+   * display name, else the staff record's full name; null once the login is
+   * deleted or when neither is set), so "All registrations" can say who
+   * started it. A name only: no contact, account, role or licence.
+   */
+  createdByName: string | null;
 }
 
 /** ID-6 (0138): what the desk's check of a NIN for a registered patient found. */
@@ -600,9 +607,19 @@ export class NinRegistrationService {
            registration.updated_at,
            registration.created_at::text as created_at_cursor,
            (registration.created_by_account_id = $2::uuid) as created_by_me,
-           registration.created_by_membership_id::text as created_by_membership_id
+           registration.created_by_membership_id::text as created_by_membership_id,
+           case when starter_account.status = 'deleted' then null
+                else coalesce(nullif(btrim(starter_account.display_name), ''),
+                              nullif(btrim(starter.full_name), '')) end as created_by_name
          from identity.registration_cases registration
          left join identity.patients patient on patient.id = registration.resolved_patient_id
+         left join identity.staff_facility_memberships starter_membership
+           on starter_membership.id = registration.created_by_membership_id
+          and starter_membership.facility_id = registration.facility_id
+         left join identity.staff starter
+           on starter.id = starter_membership.staff_id
+          and starter.account_id = starter_membership.account_id
+         left join auth.accounts starter_account on starter_account.id = starter_membership.account_id
         where registration.facility_id = platform.current_facility_id()
           and ($1::text = 'facility' or registration.created_by_account_id = $2::uuid)
           and ($3::text is null or registration.status = $3::text)
@@ -624,6 +641,7 @@ export class NinRegistrationService {
         updatedAt: new Date(row.updated_at).toISOString(),
         createdByMe: row.created_by_me === true,
         createdByMembershipId: row.created_by_membership_id,
+        createdByName: row.created_by_name ?? null,
       }));
       await this.audit.recordWithClient(client, {
         ...auditBase,
