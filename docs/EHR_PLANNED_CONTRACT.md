@@ -1,4 +1,4 @@
-# HID planned contract for the rest of Akos's EHR list (Release B and C, not live)
+# HID planned contract for the rest of Akos's EHR list (Release B, C and D, not live)
 
 This file lists the API that Akos's EHR frontend will need but that is not built yet. With it, he can build each screen once: the shape now, and the fallback he shows until the route ships.
 
@@ -44,6 +44,7 @@ Rules that hold in every section:
 | [ORD-6: Several tests in one lab request](#ord-6-several-tests-in-one-lab-request-planned-release-c-needs-a-migration-yes) | N-7 | C | yes | M |
 | [ORD-8: Order sets, favourites, and note and visit templates](#ord-8-order-sets-favourites-and-note-and-visit-templates-planned-release-c-needs-a-migration-yes) | P0-5, P1-13, P1-12 | C | yes | L |
 | [ORD-11: Result and dispensed notices to the ordering doctor](#ord-11-result-and-dispensed-notices-to-the-ordering-doctor-planned-release-c-needs-a-migration-yes) | P1-6 | C | yes | L |
+| [REF-1: Referrals between facilities](#ref-1-referrals-between-facilities-planned-release-d-needs-a-migration-yes) | department Referrals between facilities (gap F1) | D | yes (0191-0193, provisional) | L |
 | [ORD-13: No drug-interaction checks](#ord-13-no-drug-interaction-checks-not-planned-no-release-needs-a-migration-no) | P0-5, N-9 (interactions) | not planned | no | — |
 | [P2-1: National ID type per country and a neutral company number](#p2-1-national-id-type-per-country-and-a-neutral-company-number-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-1 | after C | yes, when designed | M |
 | [P2-2: Interface translations and language](#p2-2-interface-translations-and-language-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-2, P1-8 (language) | after C | yes, when designed | L |
@@ -51,7 +52,7 @@ Rules that hold in every section:
 | [P2-4: Time zone, date and phone formats](#p2-4-time-zone-date-and-phone-formats-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-4 | after C | yes, when designed | M |
 | [QA-2: Migrate account test pass and one real save of every drawer form](#qa-2-migrate-account-test-pass-and-one-real-save-of-every-drawer-form-planned-before-the-release-a-go-live-needs-a-migration-no) | R-4, QA question | before A go-live | no | S |
 
-Owner answers of 19 Nov 2026, and the sections that rest on them: Q124 A (ORD-7, ORD-8, ORD-9, ORD-10 phase 2, ORD-6, VIT-1), Q125 B (ORD-4, now planned for Release B), Q126 A (EHR-C6, ORD-8), Q127 A (ID-8, ORD-11), Q128 A (ORD-11, SX-7), Q129 A (SX-4, CHW-1), Q130 A (CHW-1), Q131 A (ORD-12, ORD-13, ORD-10 phase 2, P2-1 to P2-4), Q132 A (Q132 A, now planned for Release B; ORD-4 refers to it). No owner question for these sections is waiting for an answer.
+Owner answers of 19 Nov 2026, and the sections that rest on them: Q124 A (ORD-7, ORD-8, ORD-9, ORD-10 phase 2, ORD-6, VIT-1), Q125 B (ORD-4, now planned for Release B), Q126 A (EHR-C6, ORD-8), Q127 A (ID-8, ORD-11), Q128 A (ORD-11, SX-7), Q129 A (SX-4, CHW-1), Q130 A (CHW-1), Q131 A (ORD-12, ORD-13, ORD-10 phase 2, P2-1 to P2-4), Q132 A (Q132 A, now planned for Release B; ORD-4 refers to it). No owner question for the Release B and C sections is waiting for an answer. Release D sections rest on the owner's approval of the sprint decision sheet on 25 Nov 2026 (Q147 to Q290 at the recommended options; REF-1: Q149, Q151, Q154, Q155, Q157-Q162, Q168, Q181-Q183 and Q261-Q266), and mark any smaller choice built at its recommended option (REF-1: Q-REF-7 to Q-REF-15).
 
 Open points with no decision yet, each to be decided before that section is built:
 
@@ -3712,6 +3713,523 @@ Release C (lane D). Size **L**:
 - four routes;
 - audit;
 - a runtime check across Lab, Pharmacy and EHR.
+
+# Release D
+
+Release D holds the department first versions of the two-week sprint the owner approved on 25 Nov 2026: every department ships a first working version on Akos's blue design, anything that needs outside approval is built but switched off, every change gets an independent agent review and Rahman's final database check, and real patients use it only after the clinical lead's checklist and the owner's go-live.
+
+This Release D holds the roadmap's department releases, whichever phase they come from (REF-1 below is the Phase 5 referrals department, built early in sprint wave 3). It is not the separate release the ID-8 section mentions for ID-8b, which would take another name if it is needed.
+
+Decisions in Release D sections are marked **(recommended option, not yet answered by the owner)**. The section is built with that option. The owner can still choose the other option; the PR that builds it says which lines change.
+
+On 25 Nov 2026 the owner approved the whole decision sheet (hid-system#332), verbatim: "I approve Q147–Q290 at the recommended options". A line that rests on one of those answers is marked **(owner decision Qnnn A, 25 Nov 2026)**. The owner can still change any of them; the PR that rebuilds it says which lines change.
+
+## REF-1: Referrals between facilities (planned, Release D, needs a migration: yes)
+
+Department: Referrals between facilities (gap map item F1 "cross-facility referrals", health `docs/HEALTH_ID_COMPLETE_FRONTEND_GAP_MAP.md:77`). Roadmap Phase 5, built in sprint wave 3; the printed letter moves to Phase 2 (owner decision Q162 A, 25 Nov 2026), which the switches below allow.
+
+Status: planned, not live. To be built on `claude/sprint-referrals-backend` (migrations 0191-0193, provisional, unsigned; routes in ehr-api and identity-api; `docs/INTERFACE_CONTRACT.md` REF-1). Not live until signed and switched on.
+
+Surveyed before writing (health origin/main b44b0d56; hid-system staging 0cfddcc9, migrations 0001-0153):
+- The design is a sample only: the "Referral Network" workspace, `clinical/sample/definitions.ts:233-245` and `frame/sample/catalog.ts:950-990`. Fields Destination facility, Referral reason, Urgency, Selected clinical summary and Consent scope. Statuses draft -> "Send simulated referral" -> sent -> "Simulate recipient acceptance" (Recipient response) -> accepted -> "Complete referral" (Outcome) -> completed. One fictional seed row (`clinical/sample/seed.ts:261-264`, "Fictional Partner Clinic", scope "This summary only").
+- Navigation and roles: `frame/pages.ts:103`, `clinical/pages.ts:42` (group "Network & Services", icon "share"), `frame/TopBarParts.tsx:163`, `frame/sampleAccess.ts:43` and `onboarding/roleTemplates.ts:38` (a Medical Director "approve" grant).
+- Entry from a visit: `clinical/consult/orders/index.tsx:125,157-163` ("New referral", demo facilities only) and `clinical/consult/EncounterPage.tsx:708`. `docs/BLUE_EHR_PARITY_2026-11-01.md:527` warns that a real doctor can still type the sample's address.
+- Live parts to reuse: the cross-facility sending UI `clinical/consult/orders/Routing.tsx` (destination search, attestation, status, withdraw) and `staff/components/OrderDestinationPicker`.
+- Backend today: no referral table, route or access code. The nearest working pattern is orders between facilities (P4c, 0086 sections 6.1-6.7 and 0088-0091; `docs/INTERFACE_CONTRACT.md` sections 21-24). The encounter type list has no `referral` value, and none is added. Outreach screening records "Referred" and "Referred to" as free text (0118); that stays as it is and is not part of REF-1.
+
+### What staff get
+
+- **Send a referral from a signed visit.** A doctor or clinician refers the patient from a visit whose note is signed. The referral goes either:
+  - to a **facility on Health ID** that is listed to receive referrals, found with the same directory search as orders between facilities; or
+  - as a **printed letter** for a facility that is not on Health ID. It is recorded as "Printed, outside Health ID" and nothing is sent anywhere (owner decision Q263 A, 25 Nov 2026).
+- **What a referral says.** Required: the reason, the urgency (routine or urgent only, owner decision Q266 A, 25 Nov 2026), the department wanted (one of the 15 facility department codes), and the letter text. Optional: the service or clinic wanted, in the clinician's words.
+- **The package.** The clinician ticks which current diagnoses, current medicines, recorded allergies, recent vital signs and released lab results go with it. The server copies what was ticked when the referral is sent, and the copy never changes afterwards (the frozen package).
+- **Patient agreement.** The clinician confirms that the patient agreed, with a versioned agreement text, as for orders between facilities (owner decision Q262 A, 25 Nov 2026). There is no approval step before sending (owner decision Q264 A, 25 Nov 2026).
+- **Withdraw.** The referring facility can withdraw a referral until it is accepted. A printed letter can be withdrawn too (the record says the letter should not be used).
+- **Incoming referrals** (the receiving facility's doctors and clinicians). A list of referrals waiting for an answer, with enough to decide but no name or chart content. **Accept** (with an optional note to the referrer) or **Decline** with a reason and a note.
+- **Accepting gives read access to the frozen package only**, until 14 days after completion (owner decision Q261 A, 25 Nov 2026). It never opens the chart.
+- **Expected arrivals** (the receiving facility's front desk, clinicians and doctors). Accepted referrals not yet arrived. **Patient arrived** checks the patient into the waiting list (EHR-C7, 0135), after a fresh patient search.
+- **Complete with outcome.** The receiving clinician records the outcome and a short feedback note, which goes back to the referring facility (the counter-referral).
+- **Status and outcome at the referring facility,** on the visit, on the patient page and in a "Sent referrals" list.
+- **Printable letter,** for a printed referral and as a patient copy of any referral.
+- **Support lookup** by reference, like support's lookup of orders between facilities, and support's switch to list or unlist a facility for referrals.
+
+Not in this release: emergency transfers with an ambulance (they wait for the Emergency and Ambulance departments, owner decision Q266 A), booking the appointment at the receiving facility (Appointments, a follow-up), access to the full chart for the receiver (owner decision Q261 A), referrals to a named consultant, a Medical Director approval step (owner decision Q264 A; there is no such role, owner decision Q155 A), recording a paper reply to a printed letter (it can be scanned in as a document as today), linking ED-1's and ADT-1's "referred out" to a referral record (a follow-up), support closing an accepted referral early (the control below is the lever until then), staff notices (they come with ORD-11's staff inbox, owner decision Q151 A, 25 Nov 2026), shared or dependant records in the portal, and offline use (online only, with today's paper referral letter as the back-up, owner decision Q161 A, 25 Nov 2026).
+
+### Decisions this section is built on
+
+The owner's answers (25 Nov 2026), each at the recommended option:
+
+| Question | Built as |
+|---|---|
+| Q261 What the receiving facility reads (Q-REF-1) | **A:** only the package the clinician selected, until completion plus a fixed window. No chart grant |
+| Q262 Patient agreement (Q-REF-2) | **A:** the clinician records that the patient agreed; the patient is told in the portal and can withdraw before acceptance |
+| Q263 Destinations (Q-REF-3) | **A:** Health ID facilities listed for referrals, plus a printed letter for any other facility |
+| Q264 Approval before sending (Q-REF-4) | **A:** none; the treating doctor or clinician sends |
+| Q265 On/off switch (Q-REF-5) | **A:** its own control, `cross_facility_referrals_enabled`, seeded off. Lab and pharmacy orders between facilities are untouched |
+| Q266 Urgency (Q-REF-6) | **A:** routine and urgent only |
+| Q149 Department switch | **A:** when facility setup (gap map F2) ships, the facility's own `referrals` switch must also be on |
+| Q151 Staff notices | **A:** none in this release; referrals join ORD-11's staff inbox when it ships |
+| Q154 Contract first | **A:** this section, before the build PR |
+| Q155 Roles | **A:** no new role; no Medical Director |
+| Q157, Q158 Clinical review | **A:** the clinical lead signs the clinical content below; Ola's medicine item is countersigned by the clinical lead |
+| Q159 DPO review | **A:** the DPO pack below goes out this week |
+| Q160 Go-live gate | **A:** see "Go-live gate" below |
+| Q161 Offline | **A:** online only; the paper letter is the back-up |
+| Q162 Build order | **A:** the printed letter can go live in Phase 2, before referrals between Health ID facilities |
+| Q168 Check-in from a booking | **A:** the same principle for arrivals: a fresh, audited search; the referral never grants access (Q-REF-9) |
+| Q181, Q182, Q183 Time, dates, phones | **Q181 A, Q182 A, Q183 B** (Q183's recommended option is B): Lagos time on every screen; "18 Nov 2026" and the 24-hour clock; Nigerian numbers as 0803 123 4567, foreign ones international |
+
+Smaller choices made while writing this section:
+
+| Question | Built with | The other option |
+|---|---|---|
+| Q-REF-7 A patient with no Health ID app account | **A:** a referral to a Health ID facility needs the patient's active account, as orders between facilities do (0086 V12), so the patient is told and can withdraw. Otherwise the clinician prints a letter **(recommended option, not yet answered by the owner)** | B: allow it on the clinician's attestation alone; the patient cannot see or withdraw it |
+| Q-REF-8 What the receiver sees before accepting | **A:** the reason, department and service wanted, urgency, the referring facility and clinician, and the patient's sex and age in whole years. No name, date of birth, Health ID, letter or package **(recommended option, not yet answered by the owner)** | B: nothing about the patient, as the order-route preview |
+| Q-REF-9 Arrival check-in | **A:** a fresh direct-care staff search (0132) that names the referral's patient, or a patient who is already this facility's own (0131), then 0135's own check-in. The referral is never a check-in basis and never opens the chart (as Q168 A) **(recommended option, not yet answered by the owner)** | B: the accepted referral is a check-in-only basis, as APPT-1's Q-APPT-6 A |
+| Q-REF-10 Time windows | **A:** answer by 7 days (routine) or 24 hours (urgent); arrival within 90 days of acceptance; the package can be read until 14 days after completion, and never more than 120 days after acceptance. Drafts for the clinical lead and the DPO **(recommended option, not yet answered by the owner)** | B: the order-route windows (7 days to answer, 30 to work, 14 after completion, 45 at most) |
+| Q-REF-11 Department wanted | **A:** one of the 15 facility department codes (0114, section 43.6) plus an optional free-text service (2-120 characters). No new specialty list **(recommended option, not yet answered by the owner)** | B: a new specialty list, drafted for the clinical lead's sign-off |
+| Q-REF-12 What the patient sees | **A:** destination, status and dates, urgency, department and service, the reason, the agreement text, and which kinds of details were shared, with counts. Not the letter or the items **(recommended option, not yet answered by the owner)** | B: also the letter text and the items |
+| Q-REF-13 The Health ID on a printed letter | **A:** not printed. The letter carries the name, sex, date of birth and the referral reference **(recommended option, not yet answered by the owner)** | B: the full Health ID |
+| Q-REF-14 The receiving front desk | **A:** the front desk sees expected arrivals (name, sex, date of birth, last 4 characters of the Health ID, referring facility, department, urgency), never the reason, letter or package **(recommended option, not yet answered by the owner)** | B: no list; the desk searches and the server finds the referral |
+| Q-REF-15 What the control stops | **A:** with `cross_facility_referrals_enabled` off: no new referral to a Health ID facility, no acceptance, no arrival, and no package read by the receiver. Decline, withdraw and complete still work, so nothing is stuck. Printed letters need only the service flag, so they can go live first (Q162 A) **(recommended option, not yet answered by the owner)** | B: the control also stops printed letters |
+
+### How a referral moves
+
+| State | Meaning | Next |
+|---|---|---|
+| `printed` | a printed letter for a facility outside Health ID | `withdrawn` (by the referring facility) |
+| `sent` | waiting for the receiving facility's answer, until `respondBy` | `accepted`, `declined`, `withdrawn` (referring facility or patient) |
+| `accepted` | the receiver reads the package; the patient is expected by `arriveBy` | `arrived`, `completed` (outcome "did not attend" only) |
+| `arrived` | on the receiving facility's waiting list | `completed` |
+| `completed` | outcome and feedback note recorded | none |
+| `declined`, `withdrawn` | closed | none |
+
+`effectiveState` adds two states that are computed when read and never stored:
+- `expired`: a `sent` referral past `respondBy` (`endedKind` `not_answered`), or an `accepted` referral past `arriveBy` (`endedKind` `not_arrived`). The receiver's read ends.
+- `withdrawn` with `endedKind` `visit_entered_in_error`: the referral's visit was marked entered in error (EHR-C8a) after sending. The receiver's read ends at once. The patient's portal keeps the record of the disclosure but shows no content, as order routes do for an order entered in error.
+
+An item of the package whose source was marked entered in error after sending (a diagnosis, allergy, vital-sign reading or lab result) is answered as `enteredInErrorSinceSent: true` with no content.
+
+### Routes
+
+All routes are under `/api/v1`. Staff routes need `X-Facility-Id` and `X-Purpose-Of-Use: direct-care` (anything else: 403 `REFERRAL_NOT_ALLOWED`). Every staff write needs an `Idempotency-Key`; a replay with the same body answers the first answer with `"replayed": true`, another body 409 `IDEMPOTENCY_KEY_REUSED`.
+
+No Health ID or NIN appears in any path or query. Patients are named by UUID, referrals by UUID and by an 8-character `reference` (from the referral's id, as order routes), new arrivals by a search card's `matchRef`. Support's lookup by Health ID is a POST body.
+
+**Switches, all off in production until the go-live gate:**
+- The service flag `REFERRALS_ENABLED` (ehr-api and identity-api). Off: every route below answers 503 `REFERRALS_NOT_AVAILABLE` (support's routes 18-20 excepted). A database without 0191 (or, for routes 7-17, without 0192) answers the same.
+- The database control `cross_facility_referrals_enabled` (owner decision Q265 A), seeded off, switched by support's audited control command as the other controls. Off: routes 2 (to a Health ID facility), 6, 11 and 14 answer 423 `CROSS_FACILITY_REFERRALS_UNAVAILABLE`, and route 7 answers the receiving side at view level `metadata` (Q-REF-15 A).
+- When facility setup (Q149, gap map F2) ships, the facility's own `referrals` switch must also be on.
+- Both are on in staging and at the sealed demo and QA facilities.
+
+**The referral card** (every staff answer):
+
+```json
+{ "referralId": "uuid", "reference": "3F2A9C1B", "side": "sent", "viewLevel": "full",
+  "patient": { "patientId": "uuid", "fullName": "Ngozi Referone", "sex": "female", "dateOfBirth": "1979-04-02",
+               "dateOfBirthEstimated": false, "healthIdLast4": "RF21", "sexAtSend": "female", "ageYearsAtSend": 47 },
+  "destinationKind": "health_id",
+  "referringFacility": { "facilityId": "uuid", "name": "Fictional General Hospital" },
+  "receivingFacility": { "facilityId": "uuid", "name": "Fictional Teaching Hospital" },
+  "printedFacility": null,
+  "encounterId": "uuid", "departmentCode": "cardiology", "serviceWanted": "Cardiology clinic",
+  "urgency": "routine", "reason": "New heart murmur with breathlessness on exertion",
+  "referrer": { "name": "Dr Ada Example", "licence": { "body": "MDCN", "number": "MDCN/12345" }, "membershipId": "uuid" },
+  "state": "accepted", "effectiveState": "accepted", "endedKind": null,
+  "sentAt": "2026-12-03T09:10:00.000Z", "respondBy": "2026-12-10T09:10:00.000Z",
+  "acceptedAt": "2026-12-04T08:00:00.000Z", "acceptNote": "Please come to the Tuesday clinic.",
+  "arriveBy": "2027-03-04T08:00:00.000Z", "arrivedAt": null, "visitQueueEntryId": null,
+  "decline": null, "withdrawal": null, "outcome": null, "completedAt": null, "endedAt": null,
+  "accessEndsAt": "2027-04-03T08:00:00.000Z",
+  "packageSummary": [{ "kind": "diagnoses", "count": 2 }, { "kind": "medicines", "count": 3 }],
+  "rowVersion": 2 }
+```
+
+- `side`: `sent` (this facility referred) or `received` (this facility was asked).
+- `viewLevel`, for `received` only (`sent` is always `full`):
+  - `preview`: `sent`, before `respondBy`, control on. `patient` holds only `sexAtSend` and `ageYearsAtSend` (Q-REF-8 A). `encounterId`, `referrer.membershipId` and `packageSummary` are `null`.
+  - `full`: effective state `accepted`, `arrived` or `completed`, before `accessEndsAt`, control on. The patient card as above, with `encounterId` and `referrer.membershipId` `null` (another facility's ids).
+  - `metadata`: anything else. Reference, both facilities, department, urgency, states and dates only; `patient`, `reason`, `acceptNote`, `decline.note` and `outcome.feedbackNote` are `null`.
+- `destinationKind`: `health_id` or `printed`. For `printed`, `receivingFacility` is `null` and `printedFacility` is `{ "name", "town" }`.
+- `departmentCode`: section 43.6 codes. `urgency`: `routine` or `urgent`.
+- `referrer`: the sending clinician as frozen at sending. `licence` is the newest MDCN licence attestation of the sender's doctor role at that facility (as order routes), or `null` ("Licence not on record").
+- `decline`: `null` or `{ "reasonCode", "note", "declinedAt" }`. `reasonCode`: `service_not_offered`, `no_capacity`, `more_information_needed`, `better_elsewhere` or `other`.
+- `withdrawal`: `null` or `{ "by": "referring_facility" | "patient", "reasonCode", "note", "withdrawnAt" }`. `reasonCode`: `patient_changed_mind`, `no_longer_needed`, `sent_in_error` or `other` (`null` for the patient).
+- `outcome`: `null` or `{ "code", "feedbackNote", "completedAt" }`. `code`: `seen_care_returned` (seen; care goes back to the referring clinician), `seen_care_continues` (seen; care continues here), `admitted`, `referred_onward` or `did_not_attend`.
+- `endedKind`: `null`, `not_answered`, `not_arrived` or `visit_entered_in_error`.
+- `accessEndsAt`: when the receiver's read of the package ends; `null` before acceptance and for `printed`.
+- `packageSummary`: the kinds sent and how many of each (`diagnoses`, `medicines`, `allergies`, `vitals`, `labResults`).
+- Staff names of this facility come from the staff names list (SX-9), as on the waiting list. The other facility's clinician is named only by the frozen `referrer.name`.
+
+**The package** (routes 2, 5 and 7, when answered):
+
+```json
+{ "frozenAt": "2026-12-03T09:10:00.000Z", "letterText": "Dear colleague, …",
+  "sections": {
+    "diagnoses": [{ "itemId": "uuid", "enteredInErrorSinceSent": false,
+      "content": { "codeSystem": "ICD-11", "code": "MC81", "display": "…", "clinicalStatus": "active",
+                   "verificationStatus": "provisional", "onsetAt": null, "recordedAt": "…" } }],
+    "medicines": [{ "itemId": "uuid", "enteredInErrorSinceSent": false,
+      "content": { "medicationDisplay": "…", "medicationCodeSystem": null, "medicationCode": null, "doseQuantity": "5",
+                   "doseUnit": "mg", "routeCode": "oral", "frequency": "…", "instructions": "…", "startsOn": "2026-11-20",
+                   "endsOn": null, "status": "active", "prescribedAt": "…" } }],
+    "allergies": [{ "itemId": "uuid", "enteredInErrorSinceSent": false,
+      "content": { "substance": "…", "reaction": "…", "severity": "severe", "recordedOn": "…", "recordedAtReferringFacility": true } }],
+    "vitals": [{ "itemId": "uuid", "enteredInErrorSinceSent": false,
+      "content": { "recordedAt": "…", "measures": { "pulseBpm": 96, "systolicMmhg": 150, "diastolicMmhg": 95 } } }],
+    "labResults": [{ "itemId": "uuid", "enteredInErrorSinceSent": false,
+      "content": { "testName": "…", "testCodeSystem": "HID-LAB", "testCode": "…", "resultType": "numeric",
+                   "value": "13.2", "unit": "g/dL", "referenceRange": "12-16", "abnormalFlag": "normal", "releasedAt": "…" } }] } }
+```
+
+The content is built by the server from the source rows when the referral is sent, never from the request body. Medicines carry no dispensing progress; lab results carry the released version only.
+
+#### The referring facility
+
+**1. `GET /ehr/referral-attestation?destinationKind=health_id|printed`**: the current agreement text to confirm. `ehr.referral.send`. Answer `{ "version": "referral-health-id-attestation-v1", "text": "I confirm that {patient} agreed …" }`. The screen fills `{patient}`, `{referringFacility}` and `{receivingFacility}` (for a printed letter, the typed facility name).
+
+**2. `POST /ehr/patients/:patientId/encounters/:encounterId/referrals`**: send. `ehr.referral.send` and `ehr.encounter.write`, and the patient's write access as for any visit change (`ehr.context_allows(patient, facility, 'write_records')`: a PIN, an approval or 0131's own-facility opening).
+
+```json
+{ "destination": { "kind": "health_id", "facilityId": "uuid" },
+  "departmentCode": "cardiology", "serviceWanted": "Cardiology clinic", "urgency": "routine",
+  "reason": "New heart murmur with breathlessness on exertion", "letterText": "Dear colleague, …",
+  "package": { "diagnosisIds": ["uuid"], "prescriptionIds": ["uuid"], "allergyIds": [], "vitalIds": ["uuid"],
+               "labResultIds": ["uuid"] },
+  "attestationTextVersion": "referral-health-id-attestation-v1", "patientAgreed": true }
+```
+
+| Field | Rule |
+|---|---|
+| `destination` | `{ "kind": "health_id", "facilityId" }`: a facility the directory finds now (route 6: active, verified, reviewed or governed, a hospital or clinic, listed for referrals, with a member who may receive them, same seal as this facility, not this facility). Or `{ "kind": "printed", "facilityName": 2-120, "town": 0-120 }` |
+| `departmentCode` | required, one of the 15 section 43.6 codes |
+| `serviceWanted` | optional, 2-120 characters, trimmed, no control characters |
+| `urgency` | required, `routine` or `urgent` |
+| `reason` | required, 8-300 characters, trimmed, no control characters. The screen says: "A short reason the receiving facility sees before accepting. Do not write the patient's name." |
+| `letterText` | required, 20-8000 characters; line breaks allowed, no other control characters |
+| `package` | each list optional, unique ids. At most 30 diagnoses, 30 medicines, 30 allergies, 10 vital-sign readings and 20 lab results |
+| `attestationTextVersion` | the current version for the destination kind (route 1). An older one: 409 `REFERRAL_ATTESTATION_OUTDATED` |
+| `patientAgreed` | must be `true` (400 `REFERRAL_ATTESTATION_REQUIRED`) |
+
+Checks, in this order: the caller; the flag, and for `health_id` also the control; the visit (this patient's, at this facility, `in_progress` or `completed`, not imported paper records, with at least one signed or amended note; 409 `REFERRAL_VISIT_NOT_SIGNED` otherwise); the patient (active, not merged, not an unknown record (ID-7), the facility's seal allows them; 409 `REFERRAL_PATIENT_NOT_IDENTIFIED` for an unknown record); for `health_id` also the patient's active account (Q-REF-7 A, 409 `REFERRAL_PATIENT_APP_REQUIRED`), no deny directive of the patient covering the destination (0086's `identity.patient_denies_order_route`, 409 `REFERRAL_PATIENT_DENIED`), the destination (409 `REFERRAL_DESTINATION_UNAVAILABLE`) and its open-referral limit (409 `REFERRAL_DESTINATION_BUSY`); the limits (50 sends per member per Lagos day, 429 `REFERRAL_SEND_LIMITED`; 5 referrals per visit, 409 `REFERRAL_VISIT_LIMIT`); then each package item.
+
+Package items the server accepts (anything else: 400 `REFERRAL_PACKAGE_INVALID`, the same for every reason):
+- **diagnoses**: this patient's, recorded at this facility, `active`, `recurrence` or `relapse`, not `refuted` or `entered_in_error`, in a visit not entered in error (the chart summary's `problems` rule, EHR-C4);
+- **medicines**: this patient's prescriptions at this facility, `active` or `on_hold`, not ended before today (Lagos), not in a visit entered in error (the chart summary's `medications` rule);
+- **allergies**: this patient's recorded allergies (0117), `active`, from any facility, as the chart shows them;
+- **vital signs**: this patient's readings at this facility in the last 30 days, `recorded` (not entered in error, 0142), with their current corrected values;
+- **lab results**: released results of lab requests made at this facility for this patient (this facility's own laboratory, or another one through an order route), the newest released version, not entered in error.
+
+Answer `201 { "referral": card, "package": package, "replayed": false }`. A `health_id` referral is `sent` with `respondBy` = sent + 168 hours (routine) or + 24 hours (urgent). A `printed` one is `printed` with no `respondBy`. The patient's inbox gets `REFERRAL_SENT`.
+
+**3. `GET /ehr/referrals/sent[?state=sent,printed,accepted,arrived,completed,declined,withdrawn,expired][&limit=1..200][&cursor=]`**: this facility's sent referrals, sent in the last 90 days, newest first. `ehr.referral.read`. Answer `{ "items": [card], "nextCursor": null }`. Cards here leave out `reason`, `acceptNote`, `decline.note` and `outcome.feedbackNote`; route 7 answers them (to the sender, or a member with the patient's read access).
+
+**4. `POST /ehr/referrals/:referralId/withdraw`**: `{ "expectedRowVersion", "reasonCode", "note"? }`. `ehr.referral.send`, at the referring facility. Only while `sent` (before `respondBy`) or `printed`. `note` 8-500 characters, required for `sent_in_error` and `other`. Answer `{ "referral": card, "replayed": false }`. The patient's inbox gets `REFERRAL_WITHDRAWN`.
+
+**5. `GET /ehr/referrals/:referralId/letter`**: the printable letter. `ehr.referral.send`, at the referring facility, by the sender or a member with the patient's read access. Any state but `withdrawn`. Answer `{ "referral": card, "package": package, "letter": { "referringFacilityAddress", "printedAt" } }`. Each call is one print (audited). The letter shows the patient's name, sex and date of birth and the reference, never the Health ID (Q-REF-13 A). For a `health_id` referral it is headed "Patient copy".
+
+**6. `GET /identity/order-destinations?kind=referral&query=`** (identity-api): the directory search, extended with the kind `referral`. `ehr.referral.send`; the control on (423 otherwise). The same answer as for laboratories and pharmacies, at most 10 facilities, plus `departments` (the facility profile's department codes, informational, possibly empty): `{ "items": [{ "facilityId", "facilityName", "organizationName", "registeredAddress", "newOnHealthId", "departments": ["cardiology"] }] }`. Searches count against the same 60 an hour as the other kinds (429 `ORDER_DESTINATION_SEARCH_LIMITED`).
+
+#### Both facilities
+
+**7. `GET /ehr/referrals/:referralId`**: one referral. `ehr.referral.read` (referring side) or `ehr.referral.receive` (receiving side). Answer `{ "referral": card, "package": package | null, "packageHidden": null | "chart_access_needed" | "not_accepted" | "access_ended", "history": [{ "kind", "at", "side", "byMembershipId", "reasonCode" }] }`.
+- Referring side: the package to the sender, or to a member with the patient's read access; otherwise `null` with `chart_access_needed`.
+- Receiving side: the package only at view level `full`; otherwise `null` with `not_accepted` or `access_ended`.
+- `history` `kind`: `sent`, `printed`, `withdrawn`, `patient_withdrew`, `accepted`, `declined`, `arrived`, `completed`. `byMembershipId` only for this facility's own members. Each answer that holds the package writes `ehr.referral.package-read`.
+
+**8. `GET /ehr/patients/:patientId/referrals[?encounterId=]`**: this patient's referrals sent from or received at this facility, newest first, at most 100: the visit page (with `encounterId`) and the patient page. `ehr.referral.read`, and the patient's read access (`ehr.context_allows(patient, facility, 'read_records')`; 403 `CONSENT_REQUIRED` otherwise). Received ones are listed only once accepted. Answer `{ "items": [card] }`, no package.
+
+#### The receiving facility
+
+**9. `GET /ehr/referrals/incoming`**: referrals sent here and waiting for an answer (before `respondBy`), urgent first, then oldest first, at most 200. `ehr.referral.receive`. Cards at view level `preview` (control on) or `metadata` (control off). Answer `{ "items": [card], "counts": { "waiting": 4, "urgent": 1 }, "hasMore": false, "limit": 200 }`.
+
+**10. `GET /ehr/referrals/received[?state=accepted,arrived,completed,declined,withdrawn,expired][&limit=1..200][&cursor=]`**: referrals this facility answered in the last 90 days, newest first. `ehr.referral.receive`. Answer `{ "items": [card], "nextCursor": null }`.
+
+**11. `POST /ehr/referrals/:referralId/accept`**: `{ "expectedRowVersion", "note"? (0-500) }`. `ehr.referral.receive`. Only while `sent`, before `respondBy`; the control on; the patient's deny directives checked again (409 `REFERRAL_PATIENT_DENIED`); the referring facility still active and verified. Sets `arriveBy` = acceptance + 90 days and `accessEndsAt` = acceptance + 120 days. Answer `{ "referral": card, "package": package, "replayed": false }`. The patient's inbox gets `REFERRAL_ACCEPTED`.
+
+**12. `POST /ehr/referrals/:referralId/decline`**: `{ "expectedRowVersion", "reasonCode", "note": 8-500 }`. `ehr.referral.receive`. Only while `sent` (also after `respondBy`, so a late answer still reaches the referrer). Works with the control off. Answer `{ "referral": card, "replayed": false }`. The patient's inbox gets `REFERRAL_DECLINED`.
+
+**13. `GET /ehr/referrals/expected`**: accepted referrals not yet arrived, before `arriveBy`, urgent first, then by acceptance. `ehr.referral.arrive`. Items `{ "referralId", "reference", "patient": { "patientId", "fullName", "sex", "dateOfBirth", "dateOfBirthEstimated", "healthIdLast4" }, "referringFacilityName", "departmentCode", "serviceWanted", "urgency", "acceptedAt", "arriveBy", "rowVersion" }`. No reason, letter or package (Q-REF-14 A). Answer `{ "items": [...], "hasMore": false, "limit": 200 }`.
+
+**14. `POST /ehr/referrals/:referralId/arrive`**: `{ "expectedRowVersion", "matchRef"? , "patientId"? }`, exactly one (400 `REFERRAL_ARRIVAL_NEEDS_ONE_PATIENT`). `ehr.referral.arrive` and 0135's pair `ehr.encounter.read` and `ehr.encounter.write`. Only while `accepted`, before `arriveBy`; the control on.
+- `matchRef`: this member's own direct-care staff search here in the last 10 minutes (0132), which must name the referral's patient. `patientId`: the referral's patient, and already this facility's own (0131). Anything else: 403 `REFERRAL_ARRIVAL_NEEDS_SEARCH`, the same for every reason (Q-REF-9 A).
+- The server then calls 0135's own `ehr.visit_queue_check_in` with the same `matchRef` or `patientId`, so the waiting-list row's basis is 0135's (`search` or `own-facility`).
+- Answer `200 { "outcome": "checked_in" | "already_on_list", "referral": card, "entry": waiting-list card (EHR-C7), "replayed": false }`. The referral is `arrived` and keeps the waiting-list row's id.
+- The arrival never opens the chart. The receiving clinician opens it as today (the patient's PIN or approval, or 0131 once the patient is this facility's own).
+
+**15. `POST /ehr/referrals/:referralId/complete`**: `{ "expectedRowVersion", "outcome", "feedbackNote": 8-2000 }`. `ehr.referral.receive`. From `arrived` with any outcome but `did_not_attend`; from `accepted` (also past `arriveBy`) with `did_not_attend` only (400 `REFERRAL_OUTCOME_INVALID` otherwise). Works with the control off. Sets `accessEndsAt` to the earlier of completion + 14 days and acceptance + 120 days. Answer `{ "referral": card, "replayed": false }`. The feedback note is the counter-referral: the referring facility reads it on routes 7 and 8.
+
+#### The patient (portal)
+
+**16. `GET /ehr/me/referrals`**: the signed-in patient's own referrals from every facility, newest first, at most 100 (a patient session, authorised by Identity as `GET /ehr/me/order-routes`). Items:
+
+```json
+{ "referralId": "uuid", "reference": "3F2A9C1B", "referringFacilityName": "Fictional General Hospital",
+  "destinationKind": "health_id", "destinationName": "Fictional Teaching Hospital",
+  "departmentCode": "cardiology", "serviceWanted": "Cardiology clinic", "urgency": "routine",
+  "reason": "New heart murmur with breathlessness on exertion",
+  "state": "sent", "effectiveState": "sent", "endedKind": null,
+  "sentAt": "…", "respondBy": "…", "acceptedAt": null, "arrivedAt": null, "completedAt": null, "endedAt": null,
+  "sharedSections": [{ "kind": "diagnoses", "count": 2 }], "attestation": { "version": "…", "text": "…" },
+  "canWithdraw": true, "rowVersion": 1, "enteredInError": false }
+```
+
+No staff ids, no letter, no items and no outcome note (Q-REF-12 A). `enteredInError: true` (the visit was entered in error) keeps reference, facilities, states and dates, and answers `null` for the department, service, reason, sections and attestation. A staff session answers 403 `PATIENT_SESSION_REQUIRED`. A shared or dependant record is not shown in this release.
+
+**17. `POST /ehr/me/referrals/:referralId/withdraw`**: `{ "expectedRowVersion" }`. Only while `sent` and before `respondBy` (409 `REFERRAL_NOT_PENDING` otherwise, also for a printed letter). Works with the control off. Answer `{ "rowVersion", "state", "effectiveState" }`. The referring and receiving facilities see "Withdrawn by the patient".
+
+#### Support (identity-api, platform administrators)
+
+**18. `GET /admin/referrals?reference=` and `POST /admin/referrals/search` `{ "reference"? , "healthId"? }`**: `platform.admin.access` and `platform.principal.read`, as support's lookup of orders between facilities (a Health ID only in the POST body). Items `{ "referralId", "reference", "destinationKind", "referringFacility", "receivingFacility", "state", "effectiveState", "urgency", "sentAt", "respondBy", "acceptedAt", "arrivedAt", "completedAt", "endedAt", "endedKind", "accessEndsAt" }`, at most 50. No patient name, reason, letter, package or note.
+
+**19. `GET /admin/facilities/:facilityId/referral-destination`**: `platform.admin.access` and `platform.facility.read`. Answer `{ "facilityId", "listed": { "value", "byDefault", "reason", "setAt" }, "eligibleNow": true }`. `eligibleNow` says whether the directory would find it now.
+
+**20. `POST /admin/facilities/:facilityId/referral-destination`**: `{ "listed": true | false, "reason": 8-500 }`. `platform.admin.access`, `platform.facility.manage` and `platform.facility.unlock`, as the order-destination lever. Answer as route 19. Unlisting stops new referrals to the facility; referrals already sent there can still be answered until `respondBy`.
+
+### Errors
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | "Check the highlighted fields." (unknown field, length outside the rules, unknown code) |
+| 400 | `REFERRAL_DESTINATION_REQUIRED` | "Choose a facility on Health ID, or print a letter for a facility that is not on Health ID." |
+| 400 | `REFERRAL_PACKAGE_INVALID` | "Some of the details you ticked can no longer be sent. Reload the visit and tick them again." |
+| 400 | `REFERRAL_ATTESTATION_REQUIRED` | "Confirm that the patient agreed before sending." |
+| 400 | `REFERRAL_REASON_REQUIRED` | "Say why in at least 8 characters." (decline; withdraw sent in error or other) |
+| 400 | `REFERRAL_OUTCOME_INVALID` | "Choose 'Did not attend' only before the patient arrives, and another outcome only after." |
+| 400 | `REFERRAL_ARRIVAL_NEEDS_ONE_PATIENT` | "Choose one patient: from a search result or from this facility's patients." |
+| 400 | `REFERRAL_VISIT_INVALID` | "Choose a visit of this patient at this facility." |
+| 400 | `PURPOSE_OF_USE_REQUIRED`, `IDEMPOTENCY_KEY_REQUIRED` | as EHR-C7 and ID-6 |
+| 403 | `REFERRAL_NOT_ALLOWED` | "Only doctors and clinicians can send, answer or read referrals." |
+| 403 | `REFERRAL_ARRIVAL_NOT_ALLOWED` | "Only the front desk, clinicians and doctors of this facility can mark a referred patient as arrived." |
+| 403 | `REFERRAL_ARRIVAL_NEEDS_SEARCH` | "Search for the patient named on the referral, then mark them arrived. A search result can be used for 10 minutes." |
+| 403 | `CONSENT_REQUIRED` | as today (routes 2 and 8: no access to this patient's record) |
+| 403 | `PATIENT_SESSION_REQUIRED` | as today (routes 16 and 17) |
+| 404 | `REFERRAL_NOT_FOUND` | "No such referral." (also another facility's, and a received one a member may not see) |
+| 409 | `REFERRAL_VISIT_NOT_SIGNED` | "Sign the visit's note first, then send the referral." |
+| 409 | `REFERRAL_PATIENT_NOT_IDENTIFIED` | "Identify the patient first (verify the NIN or merge the record), then refer them." |
+| 409 | `REFERRAL_PATIENT_APP_REQUIRED` | "This patient has no Health ID app account, so they could not see or withdraw the referral. Print a referral letter instead." |
+| 409 | `REFERRAL_PATIENT_DENIED` | "The patient has asked that their records are not shared with this facility." |
+| 409 | `REFERRAL_DESTINATION_UNAVAILABLE` | "This facility is not taking referrals on Health ID now. Choose another, or print a letter." |
+| 409 | `REFERRAL_DESTINATION_BUSY` | "This facility has too many referrals waiting for an answer. Try again later, or choose another." |
+| 409 | `REFERRAL_VISIT_LIMIT` | "This visit already has 5 referrals." |
+| 409 | `REFERRAL_ATTESTATION_OUTDATED` | "The agreement wording has changed. Read it again and confirm." |
+| 409 | `REFERRAL_NOT_PENDING` | "This referral was already answered or withdrawn. Reload it." |
+| 409 | `REFERRAL_EXPIRED` | "The time for this step has passed. The referring facility can send a new referral." |
+| 409 | `REFERRAL_NOT_ACCEPTED` | "This referral has not been accepted yet. Ask a doctor or clinician to accept it first." |
+| 409 | `REFERRAL_NOT_ARRIVED` | "Mark the patient as arrived first, or record 'Did not attend'." |
+| 409 | `REFERRAL_CLOSED` | "This referral is closed." |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | as ID-6 |
+| 412 | `REFERRAL_VERSION_CONFLICT` | "Someone else changed this referral. Reload it and try again." |
+| 423 | `CROSS_FACILITY_REFERRALS_UNAVAILABLE` | "Referrals between facilities on Health ID are switched off for now. You can print a referral letter instead." |
+| 429 | `REFERRAL_SEND_LIMITED` | "You have sent the most referrals allowed today. Try again tomorrow." |
+| 429 | `ORDER_DESTINATION_SEARCH_LIMITED` | as today (route 6) |
+| 503 | `REFERRALS_NOT_AVAILABLE` | "Referrals are not available yet." (flag off, or a database without the file) |
+
+Staff screens show the message and never the word "permission".
+
+### Roles and access codes
+
+Four new codes (0193). Every route also needs what it names above (`ehr.encounter.write` to send; 0135's pair to mark arrival).
+
+| Backend role | `ehr.referral.read` | `ehr.referral.send` | `ehr.referral.receive` | `ehr.referral.arrive` | Design role it stands for |
+|---|---|---|---|---|---|
+| `doctor` | yes | yes | yes | yes | Doctor, Consultant, Medical Director (the design's "approve" is dropped, Q264 A) |
+| `clinician` | yes | yes | yes | yes | Doctor's clinical grant |
+| `receptionist` | no | no | no | yes | Receptionist (arrival only, as the survey) |
+| `nurse` | no | no | no | no | Nurse (checks walk-ins in on the waiting list as today) |
+| `admin`, `org_admin`, `lab`, `pharmacist`, others | no | no | no | no | — |
+
+Nine role rows. SX-1 (`services/identity-api/src/auth/facility-modules.ts`) gains the area `referrals`, "Referrals between facilities": shown with `ehr.referral.arrive`, used in full with `ehr.referral.read`, `ehr.referral.send` and `ehr.referral.receive` (front desk: view; clinicians and doctors: full). `services/identity-api/test/role-matrix.json` changes in the same pull request.
+
+### Database design
+
+Three migrations, **0191, 0192 and 0193, provisional** (sprint wave 3's booking; numbers are given at merge in release order). Each needs the owner's verbatim signature, Rahman's final database check and an independent agent review.
+
+Every file follows 0147, 0150, 0151 and the wave 1 review:
+- the whole file is one `do` block, so nothing applies if any part raises;
+- every table it locks is locked first, NOWAIT, tried 50 times 100 ms apart, including tables that functions called during the file read (for example `identity.sealed_demo_members` and `identity.sealed_qa_members` for 0193's post-check counts). If this transaction already holds an earlier file's blocking locks, one try and no sleep. A busy refusal raises 55P03 beginning "0191: " (or "0192: ", "0193: ") and ending "nothing was applied; run the release again at a quieter time";
+- preconditions are catalog reads that raise 55000 and apply nothing. They need markers only of the earlier files whose objects the file uses, and the md5 of each function body it calls or replaces. They tolerate other lanes' additions: an access code, a role row, a control key or a CHECK value another lane added is kept, so the file applies in any release order with APPT-1, BILL-1, ED-1, ADT-1, NUR-1 and the other wave 3 departments;
+- running the file again where it is applied raises "0191: already applied" (exact detection: every object this file makes, as made) and changes nothing; any half state raises "0191: the schema is not in the reviewed state";
+- post-checks in 0148's and 0152's form: table and function owners; grants (no grantee but the owner and the named runtime); each function's SECURITY DEFINER, volatility, owner and exact `search_path`; pinned bodies by md5; every trigger by `tgtype`, `tgqual`, `tgattr`, `tgnargs`, `tgfoid` and `tgenabled`; every CHECK by its definition;
+- audit rows the file writes are written as the system actor;
+- each file adds its block to `services/ehr-api/database/runtime-grants.sql` (the staging file followed by the REF-1 block) and its entry to the unsigned declaration in `config/production-schema-compatibility.json`.
+
+Rules for every new object (the wave 1 review):
+- New tables have row-level security **enabled and forced**, with four permissive policies for the table owner only, so the guard and append-only triggers run for every role; no policy and no privilege for any runtime role. Only the functions read or write them.
+- Every SECURITY DEFINER function has `SET search_path = pg_catalog, pg_temp`, names every table and function with its schema, and creates and reads no temporary table, so nothing a runtime role makes in `pg_temp` can stand in for an object the owner uses.
+- Functions are owned like 0135's (the owner of `identity.has_active_consent_grant`). EXECUTE: `hid_ehr_runtime` for the ehr functions of the routes, `hid_identity_runtime` for routes 6 and 18-20; helpers are executable by no role. The lab helper below is owned by the owner of `lab.results`.
+- No sequence: every key is a UUID, so there is no identity sequence and no sequence grant.
+- Append-only tables have a BEFORE UPDATE OR DELETE row trigger and a BEFORE TRUNCATE statement trigger, both `platform.reject_mutation()`. `ehr.referrals` has its own guard trigger and refuses DELETE and TRUNCATE.
+- Each function checks the caller: an active membership not held by the cutover at the session facility, the referral code, the purpose (direct care), and the facility's seal (a sealed demo or QA facility refers only its own sealed patients, only to a facility of the same seal; a real facility never finds a sealed one).
+- Without 0193 no role holds a referral code, so every staff function refuses. With the control off, nothing crosses to another facility. That is the database half of "built but switched off".
+
+**0191 Referrals: the record, the frozen package, the control and the referring facility's steps.** Needs 0086 (order-route helpers), 0114 (department codes), 0117 (recorded allergies), 0131, 0135 (`ehr.visit_queue`, for the foreign key), 0142 (vital status), 0145 (unknown records) and 0021 (lab result releases).
+- `ehr.referral_attestation_texts`: `version` (`referral-health-id-attestation-vN` or `referral-printed-attestation-vN`), `destination_kind`, `text` (20-1500, must hold `{patient}` and `{receivingFacility}`), `created_at`. Append-only. Seeded with v1 of each kind (drafts for the DPO):
+  - Health ID: "I confirm that {patient} agreed that {referringFacility} refers them to {receivingFacility}. I told them that {receivingFacility} sees the reason, the urgency, the service asked for and their sex and age to decide whether to accept; that once it accepts, it sees their name, sex, date of birth, the last characters of their Health ID, this letter and the details I selected, until 14 days after the referral is completed; and that the Health ID app shows them where they were referred and lets them withdraw it until {receivingFacility} accepts it."
+  - Printed: "I confirm that {patient} agreed to take a printed referral letter to {receivingFacility}, which is not on Health ID, with the details I selected. I told them that the letter is theirs to carry and that it cannot be called back once printed."
+- `ehr.referrals`, one row per referral:
+  - who and where: `patient_id`, `referring_organization_id`, `referring_facility_id`, `source_encounter_id` (foreign key to `ehr.encounters (id, patient_id, facility_id)`), `sent_by_membership_id` and `sent_by_account_id` (foreign key to the membership's `(id, facility_id, account_id)`; no foreign key to `auth.accounts`, so no lock on it), `referrer_name`, `referrer_licence_body` (`MDCN` or null), `referrer_licence_number`;
+  - destination: `destination_kind` (`health_id`, `printed`); `receiving_organization_id` and `receiving_facility_id` (for `health_id`; CHECK not the referring facility); `printed_facility_name` (2-120) and `printed_facility_town` (0-120) (for `printed`);
+  - content: `department_code` (checked by `identity.facility_department_codes()`), `service_wanted` (2-120), `urgency` (`routine`, `urgent`), `reason` (8-300), `letter_text` (20-8000), `patient_sex_at_send`, `patient_age_years_at_send` (0-130), `package_item_count`;
+  - agreement: `patient_agreement` (= `clinician_attested`), `attestation_text_version` (foreign key with the kind), `attested_receiving_facility_name`;
+  - progress: `state` (`printed`, `sent`, `accepted`, `arrived`, `completed`, `declined`, `withdrawn`), `sent_at`, `respond_by`; `accepted_at`, `accepted_by_membership_id`, `accept_note` (0-500), `arrive_by`; `arrived_at`, `arrived_by_membership_id`, `visit_queue_entry_id` (foreign key to `ehr.visit_queue`), `arrival_basis` (`search`, `own_facility`); `completed_at`, `completed_by_membership_id`, `outcome_code`, `feedback_note` (8-2000); `declined_at`, `declined_by_membership_id`, `decline_reason_code`, `decline_note` (8-500); `withdrawn_at`, `withdrawn_by` (`referring_facility`, `patient`), `withdrawn_by_membership_id`, `withdraw_reason_code`, `withdraw_note`; `access_ends_at`; `updated_at`, `row_version`;
+  - receiving members by foreign key to the membership's `(id, facility_id, account_id)` with `receiving_facility_id`;
+  - CHECKs: the destination shape per kind; `respond_by` = `sent_at` + 168 hours (routine) or + 24 hours (urgent) for `health_id`, null for `printed`; each state's columns set exactly when reached (as order routes' CHECKs); `arrive_by` = `accepted_at` + 90 days; `access_ends_at` within `accepted_at` + 120 days; `did_not_attend` only without `arrived_at`;
+  - `reference` char(8), generated from the id as order routes;
+  - indexes: (receiving_facility_id, respond_by) where `sent`; (receiving_facility_id, arrive_by) where `accepted`; (receiving_facility_id, state, accepted_at) where accepted, arrived or completed; (referring_facility_id, sent_at desc); (patient_id, sent_at desc); (source_encounter_id); (reference); (sent_by_membership_id, sent_at).
+  - The guard trigger `ehr.referral_guard()` (BEFORE UPDATE): no frozen column changes (patient, facilities, visit, sender, destination, content, agreement, `sent_at`, `respond_by`); the state moves only along "How a referral moves"; each step's columns are set once; `row_version` goes up by one. BEFORE DELETE and BEFORE TRUNCATE refuse.
+- `ehr.referral_events`: one row per step (`sent`, `printed`, `withdrawn`, `patient_withdrew`, `accepted`, `declined`, `arrived`, `completed`), with `event_version` (unique per referral), `side` (`referring`, `receiving`, `patient`), the actor's membership (or the patient's account), `reason_code`, `state_after`, the `Idempotency-Key` with the request's SHA-256 (unique per membership and key), the correlation id and when. Append-only.
+- `ehr.referral_package_items`: `referral_id`, `position`, `item_kind` (`diagnosis`, `medicine`, `allergy`, `vital`, `lab_result`), `source_id`, `source_version`, `content` (a JSON object built by the server, at most 4 KB), `created_at`. Unique (referral, kind, source). Append-only; an insert trigger refuses any item beyond the referral's `package_item_count`, so nothing can be added after sending.
+- `identity.referral_destination_settings`: support's listing lever (as 0086's T7): `facility_id`, `organization_id`, `listed`, `reason` (8-500), `set_by_account_id`, `set_at`, `correlation_id`. Append-only; the newest row decides. With no row, the default is 0086 H3's: a governed facility is listed, a self-signed-up one only when support's review recorded a real check.
+- The control `cross_facility_referrals_enabled`, seeded **off**:
+  - The `platform.control_settings` key CHECK and `platform.control_enabled` carry every key they hold now plus this one (0086's rule). The precondition reads the CHECK's keys, which must include 0115's eleven, and requires `platform.control_enabled`'s body to be 0115's body over exactly those keys. So a key another lane added first (for example APPT-1's `appointment_sms_reminders_enabled`) is kept, and nothing else is accepted.
+  - The post-check compares the CHECK and the body with the same template over the keys found plus the new one, and that the new row is off.
+  - identity-api's control command (`admin-command.dto.ts`) gains the key so support can switch it, audited, as the others.
+- Functions (EXECUTE `hid_ehr_runtime`): `ehr.referral_attestation_text`, `ehr.referral_send`, `ehr.referral_sent_list`, `ehr.referral_withdraw`, `ehr.referral_letter`.
+- Functions (EXECUTE `hid_identity_runtime`): `identity.search_referral_destinations` (0086's `identity.search_order_destinations` is not replaced; identity-api calls this one for `kind=referral`), `identity.admin_find_referrals`, `identity.admin_referral_destination`, `identity.admin_set_referral_destination`.
+- Helpers (no role may execute them): `ehr.referral_limits()` (immutable: 50 sends per member per day, 5 per visit, 500 waiting per destination, 168 and 24 hours to answer, 90 days to arrive, 14 days after completion, 120 days at most), `ehr.referral_caller`, `ehr.referral_effective_state`, `ehr.referral_freeze_package`, `ehr.referral_cards`, `ehr.referral_audit`, `ehr.referral_idempotency`, `ehr.referral_notify_patient`, `identity.referral_destination_listed`, `identity.referral_destination_eligible` (0086 H4's rules for a hospital or clinic, holding `ehr.referral.receive`), and `lab.referral_result_snapshots(patient, facility, result ids)`, owned by the owner of `lab.results`, which answers the released, not entered-in-error versions of results of lab requests made at that facility.
+- Calls, md5-pinned: 0086's `ehr.order_route_staff_actor`, `identity.patient_denies_order_route`, `identity.order_route_registered_address`, `identity.lock_self_service_application`, `identity.self_service_on_probation` and `identity.organization_self_service_state`; 0005's `ehr.context_allows`; 0131 and 0145's `identity.own_facility_basis`; 0037's `notification.enqueue_patient_inbox_item`; the sealed tenant functions of 0098 and 0123.
+- Locks (expected; measured with `pg_locks` before commit and pinned when the file is written): SHARE ROW EXCLUSIVE on `identity.patients`, `identity.facilities`, `identity.staff_facility_memberships`, `ehr.encounters` and `ehr.visit_queue` (foreign keys of new, empty tables); ACCESS EXCLUSIVE on `platform.control_settings` (the CHECK swap and the seed row); ACCESS SHARE on `auth.permissions` and `auth.role_permissions` (read by the preconditions). This file writes no audit row.
+- Old images on this schema: nothing calls the new functions. `platform.control_enabled` answers exactly as before for every existing key. Today's identity-api refuses `kind=referral` (400), and its control command does not know the new key, which is seeded off anyway.
+
+**0192 Referrals: the receiving facility, the time-limited read, arrival, the counter-referral and the patient's view.** Needs 0191, 0132 (`identity.resolve_patient_search_ref`), 0131/0145 (`identity.own_facility_basis`) and 0135 (`ehr.visit_queue_check_in`, md5-pinned, called and not replaced).
+- Functions (EXECUTE `hid_ehr_runtime`): `ehr.referral_read` (both sides, by view level), `ehr.referral_patient_list` (route 8), `ehr.referral_incoming_list`, `ehr.referral_received_list`, `ehr.referral_accept`, `ehr.referral_decline`, `ehr.referral_expected_list`, `ehr.referral_arrive`, `ehr.referral_complete`, `ehr.referral_my_list` and `ehr.referral_my_withdraw` (patient session, 0086's `ehr.order_route_patient()`).
+- The receiver's read: `ehr.referral_read` answers the package to the receiving facility only when the referral's effective state is `accepted`, `arrived` or `completed`, `clock_timestamp()` is before `access_ends_at`, the control is on, and the caller holds `ehr.referral.receive` there; and never when the visit was entered in error. No policy on a clinical table changes: the receiver reads the frozen copy only, never `ehr.diagnoses`, `ehr.prescriptions` or any other chart table (Q261 A).
+- `ehr.referral_arrive` locks the referral `FOR UPDATE`, resolves the patient (0132 with purpose `direct-care`, or 0131), compares it with the referral's patient, then calls `ehr.visit_queue_check_in` under 0135's own advisory lock and one-open-row index, and stores the row's id and basis.
+- Every write locks the referral row `FOR UPDATE`, checks `row_version`, writes the event, then the row; a replay is found by the event's idempotency key first.
+- Locks (expected): ACCESS SHARE on `ehr.referrals`, `ehr.referral_events`, `ehr.referral_package_items` and `ehr.visit_queue` (so no DDL can change them while the file applies; reads and writes go on); no other table. This file writes no audit row.
+- Old images: nothing calls the new functions.
+
+**0193 Referrals: access codes.**
+- `auth.permissions` gains `ehr.referral.read`, `ehr.referral.send`, `ehr.referral.receive` and `ehr.referral.arrive`.
+- `auth.role_permissions` gains nine rows (the role table above). One audit row per row added (`auth.role-permission.add`, reason "REF-1 Referrals between facilities (Release D, owner decisions Q261-Q266 A)").
+- Preconditions: the roles `doctor`, `clinician` and `receptionist` exist, and the role table holds the codes this file relies on (`ehr.encounter.read`, `ehr.encounter.write`), whatever other codes other lanes added. Already applied: exactly these four codes and nine rows. A half state (some of them) is refused.
+- The post-check prints how many real (not sealed) staff gain each code.
+- Kept as its own file so Rahman can review who gets referrals apart from the tables, as 0169. It can be signed after 0191 and 0192 if the role table changes.
+- Locks: SHARE ROW EXCLUSIVE on `auth.role_permissions`; ROW EXCLUSIVE on `auth.permissions` and `audit.events`; ROW SHARE on `auth.roles`, `auth.accounts`, `identity.staff_facility_memberships`, `identity.organizations`, `identity.facilities` and `identity.patients` (the audit rows' foreign keys); ACCESS SHARE on `auth.account_roles`, `identity.sealed_demo_members` and `identity.sealed_qa_members` (the post-check counts).
+
+### Audit
+
+Every route writes its rows in the request's transaction, refusals included, as 0135 does.
+
+- **Referring facility:** `ehr.referral.send` (destination kind, urgency, department, the count per package kind, outcome or refusal kind), `ehr.referral.withdraw` (reason code), `ehr.referral.letter-print` (one per print), `ehr.referral.sent-list` (+ one `ehr.referral.sent-list.shown` row per patient shown).
+- **Both sides:** `ehr.referral.read` (side, view level) and `ehr.referral.package-read` (each answer that holds the package, with the count per kind), `ehr.referral.patient-list` (the patient page and the visit).
+- **Receiving facility:** `ehr.referral.incoming-list` (+ `.shown` per referral, naming the patient for the patient's access history although the screen shows no name), `ehr.referral.received-list` (+ `.shown`), `ehr.referral.accept`, `ehr.referral.decline` (reason code), `ehr.referral.expected-list` (+ `.shown`), `ehr.referral.arrive` (basis, outcome; plus 0135's own `ehr.visit-queue.check-in`), `ehr.referral.complete` (outcome code).
+- **Patient:** `ehr.referral.patient-read` (route 16) and `ehr.referral.patient-withdraw`.
+- **Support:** `admin.referrals.find`, `admin.referral-destination.read` and `admin.referral-destination.set` (the platform audit row of the command).
+- **Directory:** identity-api's `identity.order-destinations.search` row, as today (the route, never the query).
+- Rows hold ids, the kind of step, the outcome or refusal kind, codes and counts. **No row ever holds a name, date of birth, Health ID, reason, letter text, note, package content or a typed facility name.**
+
+### Notifications
+
+| Code | When | Push | Email | SMS |
+|---|---|---|---|---|
+| `REFERRAL_SENT` | a referral to a Health ID facility is sent, or a letter is printed | yes (0097's poll) | no | no |
+| `REFERRAL_ACCEPTED` | the receiving facility accepts | yes | no | no |
+| `REFERRAL_DECLINED` | the receiving facility declines | yes | no | no |
+| `REFERRAL_WITHDRAWN` | the referring facility or the patient withdraws | yes | no | no |
+
+- The inbox item (0037) has `resourceType` `referral`, the referral's id, and metadata `{ "referralId", "referringFacilityName", "destinationName", "printed" }` only: no department, reason or urgency.
+- A patient with no account gets nothing, as 0037 already does (only printed letters reach such a patient, Q-REF-7 A).
+- No staff notices in this release (owner decision Q151 A): the Incoming tab shows the waiting count, and the referring facility sees answers in "Sent referrals". Referrals join ORD-11's staff inbox when it ships.
+
+### What patients see
+
+- The portal's referral list (route 16): where they were referred and from where, the department and service, urgency, the reason, the status and dates, the agreement text the clinician confirmed, and which kinds of details were shared with how many of each (Q-REF-12 A). "Withdraw" while the referral waits for an answer (route 17).
+- The four inbox notices above.
+- Their access history (today's audit-based list) shows the referral's reads by the receiving facility.
+- A printed letter is in the patient's hands. It names no Health ID (Q-REF-13 A).
+- Nothing of the receiver's feedback note or the letter text is in the portal in this release.
+
+### Website screens (Lekan; mapped to Akos's existing sample screens)
+
+| Akos sample (health `apps/patient-web/src/ehr-blue/`) | Live screen | Calls |
+|---|---|---|
+| `clinical/sample/SampleList.tsx` with `definitions.ts:233-245` (Referral Network list) | "Referrals" page with tabs: Sent, Incoming (count badge), Received, Expected arrivals; each tab only for the codes it needs | routes 3, 9, 10, 13 |
+| `clinical/sample/SampleCreate.tsx` (Destination facility, Referral reason, Urgency, Selected clinical summary, Consent scope) | "New referral" from the visit: destination (`DestinationPicker` with kind `referral`, showing each facility's departments) or "Facility not on Health ID: print a letter" (name, town); Department wanted; Service wanted; Urgency (Routine, Urgent); Reason; Letter; the tick list built from the chart summary (EHR-C4) under "Current diagnoses", "Current medicines", "Allergies", "Vital signs (last 30 days)", "Released lab results"; the agreement checkbox. "Consent scope" becomes the fixed sentence "Only the details ticked here are shared" (Q261 A) | routes 1, 2, 6; EHR-C4 |
+| `definitions.ts:240` ("Send simulated referral") | "Send referral" or "Save and print letter" | route 2, then 5 |
+| `definitions.ts:241` ("Simulate recipient acceptance", Recipient response) | Incoming referral page: the preview, then "Accept" (optional note) or "Decline" (reason and note) | routes 7, 11, 12 |
+| `definitions.ts:242` ("Complete referral", Outcome) | "Complete referral": outcome and feedback note; "Did not attend" before arrival | route 15 |
+| `clinical/sample/SampleDetail.tsx` | Referral page with the card, the package (by view level), history, Withdraw and Print | routes 4, 5, 7 |
+| (no sample) | Expected arrivals and "Patient arrived" (search first, then confirm) | routes 13, 14; 0132 search |
+| `clinical/consult/orders/index.tsx:157-163` ("New referral", demo only) | Offered at every facility to holders of `ehr.referral.send` while the flag is on | route 2 |
+| `clinical/consult/EncounterPage.tsx:708` | The visit's referrals with status and outcome | route 8 with `encounterId` |
+| patient page | "Referrals" card | route 8 |
+| (no sample) | Printable letter page (A4, the facility's name and address, the reference, Lagos dates) | route 5 |
+| portal `routes/Portal` (AccessPage, beside orders sent to other facilities) and NotificationsPage | "Referrals" list with Withdraw; text for the four notice codes | routes 16, 17 |
+| admin console `src/admin/OrderRoutes.tsx` | Referral lookup and the listing lever | routes 18-20 |
+| `frame/pages.ts:103`, `clinical/pages.ts:42`, `frame/TopBarParts.tsx:163` | Navigation status `sample` becomes live, shown with `ehr.referral.arrive` or `ehr.referral.read` | — |
+| `frame/sampleAccess.ts:43`, `onboarding/roleTemplates.ts:38` | Live grants from the role table above; the Medical Director "approve" grant goes (Q264 A) | — |
+| `clinical/sample/seed.ts:261-264` | Removed from the live page; demo facilities show their sealed demo patients | — |
+
+Rules for the screens:
+- Every date, time and phone through `@hid/ui/display` (Lagos time, "18 Nov 2026", 24-hour clock). "NIN Verified" / "NIN Not Verified" where a patient card shows NIN status.
+- Never put a Health ID in a URL. Referral pages carry the referral's UUID only.
+- No "permission" in staff text. Urgent referrals use the critical tone; no timers until the clinical lead names targets.
+- `packages/contracts/src/registry.ts` entries go from `proposed` to `served` only when this ships. The public website's partner referral programme (`apps/public-web` "referral") is unrelated; the new client names use "facility referral" to keep them apart.
+- **Before this ships:** keep the sample at demo facilities only, with its banner, and send nothing.
+
+### Tests
+
+- **Database** (throwaway local PostgreSQL, fictional patients only, migrations run as a NOSUPERUSER NOBYPASSRLS migrator), in `services/ehr-api/test/database/referrals.integration.sql` and `referrals-migrations.integration.sql`:
+  - send to each destination kind; every refusal in route 2's order; each package kind's eligibility (another patient's, another facility's diagnosis or medicine, a refuted diagnosis, an ended medicine, a vital reading entered in error, an unreleased or entered-in-error lab result, all `REFERRAL_PACKAGE_INVALID`); the package frozen (a later change or entered-in-error of a source shows `enteredInErrorSinceSent`, never new values);
+  - the guard: no frozen column changes, no step out of order, no package item added after sending, no delete or truncate of any REF-1 table;
+  - the receiver's view levels: preview without name or chart content; full only while accepted and before `access_ends_at` with the control on; metadata after; and the visit entered in error ending the read at once;
+  - accept, decline, expiry (`not_answered`, `not_arrived`), withdraw by the referring facility and by the patient, the patient's withdraw racing an acceptance (one wins);
+  - arrival: a `matchRef` for another patient, another member's or an old one, an emergency search's, all `REFERRAL_ARRIVAL_NEEDS_SEARCH`; a patient already on the waiting list (`already_on_list`); the waiting-list row's basis is 0135's;
+  - complete: each outcome from the right state; access ends at completion + 14 days, capped at 120 days;
+  - deny directives at send and at acceptance; unknown records refused; a patient with no account refused for `health_id` and allowed for `printed`;
+  - sealed demo and QA isolation in both directions; a member of a third facility sees nothing;
+  - version conflicts, idempotent replays, every refusal's audit row, and no name, Health ID, reason, letter, note or content in any audit row or notice metadata;
+  - the control off: route 2 to a Health ID facility, accept, arrive and the package read refused; decline, withdraw and complete still work; printed letters unaffected.
+- **Migration:** each file with a lock held by another session gives its "busy" refusal and nothing applied; a second run gives "already applied"; a half state is refused; 0191 with a control key another lane added first (kept) and with an unknown control body (refused); 0193 with extra codes and role rows from another lane (kept); post-checks pass; a changed pinned body is refused.
+- **Live verifiers:** `scripts/tuf-staging-migration-rehearsal.mjs` with `HID_REHEARSAL_LIVE_TREE` and `HID_REHEARSAL_LIVE_POINTS` at the three files' numbers. All live runtime verifiers pass after each file.
+- **New runtime verifier:** `services/ehr-api/scripts/verify-referrals-runtime.mjs` (send each kind, withdraw, accept, decline, read at each level, arrive, complete, the patient's list and withdraw), added to the rehearsal.
+- **Services:** ehr-api controller and service specs (flag off: `REFERRALS_NOT_AVAILABLE`; control off: 423), identity-api specs for `kind=referral`, support's routes and the control command; `role-matrix.json`; the SX-1 area spec.
+- **Release tests:** on the sprint branch, release tests 45, 53 and 99 (and similar) fail with "missing migration prefix" because of the numbering gap before 0191. That is expected and reported, not worked around.
+- **Website:** new referral (both kinds), incoming, accept, decline, arrival, complete, letter and portal tests with the device zone set away from Lagos; no Health ID in any URL; no "permission" in staff text.
+
+### Depends on
+
+- Orders between facilities: 0086's helpers and directory, and support's admin console patterns (sections 21-24). 0088-0091's wrong-patient, late-correction and cannot-complete machinery is not used: a referral carries no work item or result. Its safeguards are the fresh search at arrival, decline, "Did not attend" and the visit-entered-in-error ending.
+- EHR-C4 (the chart summary the tick list is built from), EHR-C5 (signed notes), EHR-C7 / 0135 (waiting list), 0131 and 0132 (own facility, staff search), ID-7 / 0145 (unknown records refused), EHR-C8a (visit entered in error) and EHR-C8b / 0142, 0117 (allergies), 0021 (lab result releases), 0037 and 0097 (inbox and push), SX-9 (names), 0114 (department codes and facility profiles).
+- ID-8 (merge), when built, must move referrals with the patient record.
+- Q149 facility setup (gap map F2): when it ships, the facility's `referrals` switch must be on as well as the flag and the control.
+- It unblocks: ORD-11's staff inbox entries for referrals (Q151 A), Appointments booking at the receiving facility, and linking ED-1's and ADT-1's "referred out" to a referral.
+
+### Go-live gate (owner decision Q160 A, 25 Nov 2026)
+
+Real patients use referrals only after: the clinical lead's checklist below; the DPO's review below; a hazard log; a test with real clinicians at Demo Hospital (send, receive, arrive and complete between two demo facilities); a short staff guide; a written paper back-up (today's paper referral letter); and the switches turned on with the owner's AWS access. The printed letter can pass the gate first (Q162 A): flag on, control off.
+
+### Clinical lead checklist (before real patients)
+
+All of these ship as drafts awaiting sign-off (owner decision Q124 A; Q157 A):
+- **The minimum content of a referral letter:** reason, urgency, department and service wanted, letter text, the referring clinician's name and licence, the package sections, and the printed layout.
+- **Urgency definitions and respond-by times:** what "routine" and "urgent" mean, 7 days and 24 hours to answer, 90 days to arrive, and that emergencies are not referrals here (they go through the Emergency department and a phone call).
+- **What goes in the package:** the five kinds, their rules (current diagnoses, current medicines, recorded allergies from any facility, vital signs from the last 30 days, released lab results) and the per-kind limits.
+- **Medicines in the package:** Ola as clinical owner for medicines, countersigned by the clinical lead (Q158 A).
+- **The decline reasons** (`service_not_offered`, `no_capacity`, `more_information_needed`, `better_elsewhere`, `other`) and their screen words.
+- **The outcome list** (`seen_care_returned`, `seen_care_continues`, `admitted`, `referred_onward`, `did_not_attend`) and what a feedback note must say.
+- **Department wanted:** whether the 15 facility department codes plus free text are enough (Q-REF-11), or a specialty list is needed (it would be drafted for sign-off).
+
+### DPO items
+
+- **Disclosure to another facility (Q261 A):** the frozen package only, and the preview before acceptance (reason, department, urgency, sex and age in years, Q-REF-8).
+- **The agreement wording:** both v1 texts above, and that a Health ID referral needs the patient's app account (Q-REF-7).
+- **The read window:** until 14 days after completion, never more than 120 days after acceptance; 90 days to arrive (Q-REF-10).
+- **The receiving front desk** sees the names of accepted referrals before the patient arrives (Q-REF-14).
+- **The printed letter:** who may print it (holders of `ehr.referral.send` at the referring facility, every print audited), what it shows (no Health ID, Q-REF-13), and the patient copy.
+- **What the patient sees** in the portal (Q-REF-12), and allergies recorded at other facilities going into a package.
+- **Retention:** referrals, their packages, events and letters are part of the record. Declined, withdrawn and expired ones are kept, never deleted.
+
+### Target
+
+Release D, sprint wave 3 (from 25 Nov 2026). Size **L**.
+- Backend: 0191-0193, ehr-api routes (`src/ehr/referrals/`), identity-api's directory kind, support routes and control key, the SX-1 area and the role matrix.
+- Website: the wave 3 website lane, then Lekan's review.
+- Review: Rahman (database, identity and security, release cut), Ola (orders between facilities and medicines), an independent agent review per change, and the owner's verbatim signature on each migration.
+- Go-live: `REFERRALS_ENABLED` and `cross_facility_referrals_enabled` on only after the go-live gate above.
 
 # Not planned yet
 
