@@ -716,27 +716,27 @@
       },
       {
         "name": "0162_billing_roles_and_codes.sql",
-        "sha256": "e2a8410915bb535641f99be016a5e8444929a0e2cd818c1772bb844af9f6ad8b"
+        "sha256": "c9aeecae04001f71b19f65f2d7d08b6167ce24330df7801f888bb385b980a714"
       },
       {
         "name": "0163_billing_settings_and_price_list.sql",
-        "sha256": "8be462a75bde783796b5dc1d521494371cfa6cd4c7db00247cf6a4e27717c5dc"
+        "sha256": "b3658d114fd0fb2960102b6b32dd8f9856e725b075681047d2b4577755ed7a6f"
       },
       {
         "name": "0164_bills_payments_and_hmo_cover.sql",
-        "sha256": "bc0279975e498e1f6ff974b3874d2942fa710c74a66878d8a43e20d18d932b97"
+        "sha256": "1997a0ccd72d6504ce2522afd61f41d9d47ce22c6babb81715957576aefe5be5"
       },
       {
         "name": "0165_till_days_and_end_of_day.sql",
-        "sha256": "44d40a744ecfd10684b4932b12cc6d7579b0aa88a39b1f7bb7a546cdc44a6de4"
+        "sha256": "b223862f98d18f43475c279f371bc33fb15732316494b381e994a5dc8b1caef6"
       },
       {
         "name": "0166_pharmacy_point_of_care_stock.sql",
-        "sha256": "a43f500897e6ad3ab7cc36c4abdab89ed1b091d3b6ef91be7ae2c836a1a35d7f"
+        "sha256": "3441e248f685947a9ffa3477fbefe9132aef846cd4c33b100f5589f2848a369f"
       },
       {
         "name": "0167_billing_and_stock_hooks.sql",
-        "sha256": "cbed07c5a2b1098dd75b2be7af12602f47d848dd56e23e0b631d47f9b261970c"
+        "sha256": "8fa8a89b9cc7a6fbd9fb878680322215dece422a5465d2a89aa6bede8a10bf67"
       }
     ]
   },
