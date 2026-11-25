@@ -1,16 +1,17 @@
-import { RequestMethod } from '@nestjs/common';
+import { Logger, RequestMethod } from '@nestjs/common';
 import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import type { PoolClient } from 'pg';
 import { REQUIRED_PERMISSIONS } from '../../common/decorators';
 import type { DataAccessContext } from '../../common/request-context';
+import { resetEnvironmentForTests } from '../../config/environment';
 import type { DatabaseService } from '../../database/database.service';
-import type { WorkItemProgressService } from '../../integrations/work-item-progress.service';
+import { OwnProgressSlots, type PatientOrders, WorkItemProgressService } from '../../integrations/work-item-progress.service';
 import type { OrderRouteReader } from '../order-routes/order-route-reader';
 import { MyOrdersController } from './my-orders.controller';
 import { MyOrdersQueryDto } from './my-orders.dto';
-import { addYears, lagosDay, MY_ORDERS_SQL, MyOrdersService, OWN_PROGRESS_CONCURRENCY } from './my-orders.service';
+import { addYears, lagosDay, MY_ORDERS_SQL, MyOrdersService } from './my-orders.service';
 
 // MY-1 (0143): "Ordered by me". What the member may see, and the audit rows,
 // are the database's (services/ehr-api/test/database/my-orders.integration.sql);
@@ -44,11 +45,19 @@ function harness(rows: Record<string, unknown>[] | Error = [row({})]) {
     operation(client as unknown as PoolClient)) };
   const routes = { summaries: jest.fn(async (_client: unknown, _context: unknown, _kind: string, _patient: string,
     ids: string[]) => new Map(ids.map((id) => [id, { orderRouteId: `route-${id.slice(-3)}` }]))) };
+  // ORD-3's several-patient form, one call per kind for the page (decision 4). The one-patient calls answer
+  // too, so a page that used them would still list its orders, but the page must not use them.
+  const received = { status: 'received', receivedAt: null, acceptedAt: null, dispensedAt: null, reversedAt: null };
+  const resultsReady = { status: 'results_ready', receivedAt: null, collectedAt: null, lastResultAt: null };
   const progress = {
     pharmacy: jest.fn(async (_context: unknown, _patient: string, items: { id: string }[]) =>
-      new Map(items.map((item) => [item.id, { status: 'received', receivedAt: null, dispensedAt: null, reversedAt: null }]))),
+      new Map(items.map((item) => [item.id, received]))),
     lab: jest.fn(async (_context: unknown, _patient: string, items: { id: string }[]) =>
-      new Map(items.map((item) => [item.id, { status: 'results_ready', receivedAt: null, collectedAt: null, lastResultAt: null }]))),
+      new Map(items.map((item) => [item.id, resultsReady]))),
+    pharmacyForPatients: jest.fn(async (_context: unknown, patients: readonly PatientOrders[], _options?: unknown) =>
+      new Map<string, unknown>(patients.flatMap((patient) => patient.items.map((item) => [item.id, received] as const)))),
+    labForPatients: jest.fn(async (_context: unknown, patients: readonly PatientOrders[], _options?: unknown) =>
+      new Map<string, unknown>(patients.flatMap((patient) => patient.items.map((item) => [item.id, resultsReady] as const)))),
   };
   const service = new MyOrdersService(database as unknown as DatabaseService, routes as unknown as OrderRouteReader,
     progress as unknown as WorkItemProgressService);
@@ -132,22 +141,43 @@ describe('MY-1: GET /ehr/my-orders', () => {
       expect.objectContaining({ kind: 'lab_request', priority: 'urgent', ownProgress: expect.objectContaining({ status: 'results_ready' }) }),
     ] });
     expect(JSON.stringify(page)).not.toMatch(/HID-|hidCode|healthId"/);
-    expect(progress.pharmacy).toHaveBeenCalledTimes(1);
-    expect(progress.lab).toHaveBeenCalledTimes(1);
+    expect(progress.pharmacyForPatients).toHaveBeenCalledTimes(1);
+    expect(progress.labForPatients).toHaveBeenCalledTimes(1);
     expect(routes.summaries).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'prescription', patientA,
       ['123e4567-e89b-42d3-a456-426614174101']);
   });
 
-  it('asks progress once per patient and kind on the page', async () => {
+  it('asks progress once per kind for the page, with the page\'s patients in order', async () => {
     const { service, progress } = harness([
-      row({ order_id: '123e4567-e89b-42d3-a456-426614174101' }),
+      row({ order_id: '123e4567-e89b-42d3-a456-426614174101', patient_id: patientB }),
       row({ order_id: '123e4567-e89b-42d3-a456-426614174102' }),
-      row({ order_id: '123e4567-e89b-42d3-a456-426614174103', patient_id: patientB }),
+      row({ order_id: '123e4567-e89b-42d3-a456-426614174103', patient_id: patientB, status: 'draft' }),
+      row({ kind: 'lab_request', order_id: '123e4567-e89b-42d3-a456-426614174201' }),
     ]);
+    const member = context(BOTH);
+    const page = await service.list(member, query(), now);
+    expect(progress.pharmacyForPatients).toHaveBeenCalledTimes(1);
+    expect(progress.pharmacyForPatients.mock.calls[0]![0]).toBe(member);
+    expect(progress.pharmacyForPatients.mock.calls[0]![1]).toEqual([
+      { patientId: patientB, items: [{ id: '123e4567-e89b-42d3-a456-426614174101', status: 'active' },
+        { id: '123e4567-e89b-42d3-a456-426614174103', status: 'draft' }] },
+      { patientId: patientA, items: [{ id: '123e4567-e89b-42d3-a456-426614174102', status: 'active' }] },
+    ]);
+    expect(progress.labForPatients).toHaveBeenCalledTimes(1);
+    expect(progress.labForPatients.mock.calls[0]![1]).toEqual([
+      { patientId: patientA, items: [{ id: '123e4567-e89b-42d3-a456-426614174201', status: 'active' }] },
+    ]);
+    // Never one call per patient here: the client owns the fallback for an image without the several-patient form.
+    expect(progress.pharmacy).not.toHaveBeenCalled();
+    expect(progress.lab).not.toHaveBeenCalled();
+    expect(page.items.map((item) => item.ownProgress.status)).toEqual(['received', 'received', 'received', 'results_ready']);
+  });
+
+  it('a page of one kind does not ask the other', async () => {
+    const { service, progress } = harness([row({})]);
     await service.list(context(BOTH), query(), now);
-    expect(progress.pharmacy).toHaveBeenCalledTimes(2);
-    expect(progress.pharmacy.mock.calls[0]![2]).toEqual([{ id: '123e4567-e89b-42d3-a456-426614174101', status: 'active' },
-      { id: '123e4567-e89b-42d3-a456-426614174102', status: 'active' }]);
+    expect(progress.pharmacyForPatients).toHaveBeenCalledTimes(1);
+    expect(progress.labForPatients).not.toHaveBeenCalled();
   });
 
   it('an empty page still answers hiddenCount (the database\'s row with no order)', async () => {
@@ -155,7 +185,8 @@ describe('MY-1: GET /ehr/my-orders', () => {
       hidden_count: '3', created_at: null, updated_at: null })]);
     await expect(service.list(context(BOTH), query(), now)).resolves.toEqual({ items: [], hiddenCount: 3,
       hiddenCountComplete: true, since: '2026-08-22', nextCursor: null });
-    expect(progress.pharmacy).not.toHaveBeenCalled();
+    expect(progress.pharmacyForPatients).not.toHaveBeenCalled();
+    expect(progress.labForPatients).not.toHaveBeenCalled();
   });
 
   it('a page the database stopped early (none listed) still has more, resuming where the database says', async () => {
@@ -245,36 +276,185 @@ describe('MY-1: GET /ehr/my-orders', () => {
     expect(page.items[2]).toHaveProperty('orderRoute', null);
   });
 
-  it('asks progress in parallel, at most 6 at once, and answers unknown for what misses the page\'s deadline', async () => {
-    const rows = Array.from({ length: 10 }, (_unused, index) => row({
-      order_id: `123e4567-e89b-42d3-a456-4266141742${String(index).padStart(2, '0')}`,
-      patient_id: `123e4567-e89b-42d3-a456-4266141743${String(index).padStart(2, '0')}` }));
-    const { service, progress } = harness(rows);
+  it('both kinds are asked at once, with one OwnProgressSlots for the page passed to both; the deadline aborts the '
+    + 'signal and whatever is late is unknown', async () => {
+    const { service, progress } = harness([
+      row({}),
+      row({ kind: 'lab_request', order_id: '123e4567-e89b-42d3-a456-426614174201', patient_id: patientB }),
+      row({ order_id: '123e4567-e89b-42d3-a456-426614174103', patient_id: patientB }),
+    ]);
     service.progressDeadlineMs = 50;
-    let running = 0;
-    let most = 0;
-    progress.pharmacy.mockImplementation(async (_context: unknown, patient: string, items: { id: string }[]) => {
-      running += 1;
-      most = Math.max(most, running);
-      // The patient ending 03 hangs (the service neither refuses nor answers).
-      if (patient.endsWith('4303')) await new Promise(() => undefined);
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      running -= 1;
-      return new Map(items.map((item) => [item.id, { status: 'received', receivedAt: null, dispensedAt: null, reversedAt: null }]));
+    const started: string[] = [];
+    // The pharmacy neither refuses nor answers, and ignores the signal; the laboratory answers.
+    progress.pharmacyForPatients.mockImplementation(async () => {
+      started.push('pharmacy');
+      return new Promise<Map<string, unknown>>(() => undefined);
     });
-    const started = Date.now();
+    let labStartedWhilePharmacyOpen = false;
+    progress.labForPatients.mockImplementation(async (_context: unknown, patients: readonly PatientOrders[]) => {
+      started.push('lab');
+      labStartedWhilePharmacyOpen = started.includes('pharmacy');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return new Map<string, unknown>(patients.flatMap((patient) => patient.items.map((item) => [item.id,
+        { status: 'sample_collected', receivedAt: null, collectedAt: null, lastResultAt: null }] as const)));
+    });
+    const begun = Date.now();
     const page = await service.list(context(BOTH), query(), now);
-    expect(Date.now() - started).toBeLessThan(1000);
-    expect(most).toBe(OWN_PROGRESS_CONCURRENCY);
-    expect(progress.pharmacy).toHaveBeenCalledTimes(10);
-    expect(page.items.map((item) => item.ownProgress.status)).toEqual(
-      ['received', 'received', 'received', 'unknown', 'received', 'received', 'received', 'received', 'received', 'received']);
+    expect(Date.now() - begun).toBeLessThan(1000);
+    // At once: the laboratory was asked while the pharmacy's call was still open.
+    expect(started).toEqual(['pharmacy', 'lab']);
+    expect(labStartedWhilePharmacyOpen).toBe(true);
+    const pharmacyOptions = progress.pharmacyForPatients.mock.calls[0]![2] as { signal: AbortSignal; slots: OwnProgressSlots };
+    const labOptions = progress.labForPatients.mock.calls[0]![2] as { signal: AbortSignal; slots: OwnProgressSlots };
+    expect(pharmacyOptions.slots).toBeInstanceOf(OwnProgressSlots);
+    expect(labOptions.slots).toBe(pharmacyOptions.slots);
+    expect(pharmacyOptions.signal).toBeInstanceOf(AbortSignal);
+    expect(labOptions.signal).toBe(pharmacyOptions.signal);
+    expect(pharmacyOptions.signal.aborted).toBe(true);
+    expect(page.items.map((item) => item.ownProgress.status)).toEqual(['unknown', 'sample_collected', 'unknown']);
   });
 
-  it('a progress call that throws makes only its own orders unknown', async () => {
-    const { service, progress } = harness([row({}), row({ order_id: '123e4567-e89b-42d3-a456-426614174103', patient_id: patientB })]);
-    progress.pharmacy.mockImplementationOnce(async () => { throw new Error('unexpected'); });
+  it('an answer the client tells before the deadline stays, though its kind\'s call never ends', async () => {
+    const { service, progress } = harness([
+      row({}),
+      row({ kind: 'lab_request', order_id: '123e4567-e89b-42d3-a456-426614174201', patient_id: patientB }),
+      row({ order_id: '123e4567-e89b-42d3-a456-426614174103', patient_id: patientB }),
+    ]);
+    service.progressDeadlineMs = 50;
+    type Told = { onAnswer?: (id: string, value: unknown) => void };
+    // The pharmacy tells patient A's answer, then neither answers nor ends; the laboratory tells nothing and hangs.
+    progress.pharmacyForPatients.mockImplementation(async (_context: unknown, _patients: unknown, options?: unknown) => {
+      (options as Told).onAnswer?.('123e4567-e89b-42d3-a456-426614174101', { status: 'dispensed', receivedAt: null,
+        acceptedAt: null, dispensedAt: null, reversedAt: null });
+      return new Promise<Map<string, unknown>>(() => undefined);
+    });
+    progress.labForPatients.mockImplementation(async () => new Promise<Map<string, unknown>>(() => undefined));
     const page = await service.list(context(BOTH), query(), now);
-    expect(page.items.map((item) => item.ownProgress.status)).toEqual(['unknown', 'received']);
+    expect(page.items.map((item) => item.ownProgress.status)).toEqual(['dispensed', 'unknown', 'unknown']);
+    expect(typeof (progress.labForPatients.mock.calls[0]![2] as Told).onAnswer).toBe('function');
+  });
+
+  it('an answer told after the deadline does not change the progress the page was given', async () => {
+    const { service, progress } = harness();
+    service.progressDeadlineMs = 20;
+    type Told = { onAnswer?: (id: string, value: unknown) => void };
+    let tell: Told['onAnswer'];
+    // The pharmacy never ends, and tells its answer only once the page has stopped waiting.
+    progress.pharmacyForPatients.mockImplementation(async (_context: unknown, _patients: unknown, options?: unknown) => {
+      tell = (options as Told).onAnswer;
+      return new Promise<Map<string, unknown>>(() => undefined);
+    });
+    // The map list() reads its items from, as ownProgress hands it over at the deadline.
+    const ownProgress = (service as unknown as { ownProgress: (context: DataAccessContext, rows: unknown[]) =>
+      Promise<Map<string, { status: string }>> }).ownProgress.bind(service);
+    const given = await ownProgress(context(BOTH), [row({})]);
+    expect(given.get('123e4567-e89b-42d3-a456-426614174101')?.status).toBe('unknown');
+    tell!('123e4567-e89b-42d3-a456-426614174101', { status: 'dispensed', receivedAt: null, acceptedAt: null,
+      dispensedAt: null, reversedAt: null });
+    expect(given.get('123e4567-e89b-42d3-a456-426614174101')?.status).toBe('unknown');
+  });
+
+  it('each page has slots and a signal of its own (nothing is kept between pages)', async () => {
+    const { service, progress } = harness();
+    await service.list(context(BOTH), query(), now);
+    await service.list(context(BOTH), query(), now);
+    const [first, second] = progress.pharmacyForPatients.mock.calls.map((call) => call[2] as
+      { signal: AbortSignal; slots: OwnProgressSlots });
+    expect(first!.slots).toBeInstanceOf(OwnProgressSlots);
+    expect(second!.slots).not.toBe(first!.slots);
+    expect(second!.signal).not.toBe(first!.signal);
+    // A page that answered in time does not abort its signal.
+    expect(first!.signal.aborted).toBe(false);
+  });
+
+  it('one kind that throws leaves the other kind answered', async () => {
+    const { service, progress } = harness([row({}),
+      row({ kind: 'lab_request', order_id: '123e4567-e89b-42d3-a456-426614174201', patient_id: patientB }),
+      row({ order_id: '123e4567-e89b-42d3-a456-426614174103', patient_id: patientB })]);
+    progress.pharmacyForPatients.mockImplementationOnce(async () => { throw new Error('unexpected'); });
+    const page = await service.list(context(BOTH), query(), now);
+    expect(page.items.map((item) => item.ownProgress.status)).toEqual(['unknown', 'results_ready', 'unknown']);
+  });
+});
+
+describe('MY-1 with ORD-3\'s own client: what answered before the deadline stays', () => {
+  // The real WorkItemProgressService, with fetch standing in for pharmacy-api and lab-api.
+  const patientN = (n: number) => `123e4567-e89b-42d3-a456-4266141750${String(n).padStart(2, '0')}`;
+  const orderN = (n: number) => `123e4567-e89b-42d3-a456-4266141760${String(n).padStart(2, '0')}`;
+  const PHARMACY_BATCH_URL = 'https://pharmacy.example.test/api/v1/pharmacy/work-items/progress/batch';
+  const member = { ...context(BOTH), userCookie: 'hid_access=synthetic', origin: 'https://ehr.example.test' } as DataAccessContext;
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
+    { status, headers: { 'content-type': 'application/json' } });
+  /** A fetch that never answers; it rejects as fetch does once its signal aborts. */
+  const hanging = (init: RequestInit | undefined) => new Promise<Response>((_resolve, reject) => {
+    const abort = () => reject(new DOMException('This operation was aborted', 'AbortError'));
+    if (init?.signal?.aborted) abort();
+    init?.signal?.addEventListener('abort', abort);
+  });
+  const received = (id: string) => ({ sourceEhrPrescriptionId: id, status: 'received',
+    receivedAt: '2026-11-20T08:10:00.000Z', acceptedAt: null, dispensedAt: null, reversedAt: null });
+
+  beforeEach(() => {
+    Object.assign(process.env, {
+      NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost:5432/hid', DATABASE_SSL: 'false',
+      CORS_ORIGINS: 'http://localhost:3000', STORAGE_MODE: 'disabled',
+      PHARMACY_API_URL: 'https://pharmacy.example.test', LAB_API_URL: 'https://lab.example.test',
+      PHARMACY_SERVICE_IDENTITY_MODE: 'local-secret', LAB_SERVICE_IDENTITY_MODE: 'local-secret',
+      PHARMACY_INTERNAL_SERVICE_TOKEN: 's'.repeat(32), LAB_INTERNAL_SERVICE_TOKEN: 's'.repeat(32),
+    });
+    delete process.env.PHARMACY_EHR_WORKLOAD_TOKEN_FILE;
+    delete process.env.LAB_EHR_WORKLOAD_TOKEN_FILE;
+    resetEnvironmentForTests();
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  function realPage(rows: Record<string, unknown>[], deadlineMs: number) {
+    const { client } = harness(rows);
+    const database = { withTransaction: jest.fn(async (_context: unknown, operation: (client: PoolClient) => Promise<unknown>) =>
+      operation(client as unknown as PoolClient)) };
+    const routes = { summaries: jest.fn(async () => new Map()) };
+    const service = new MyOrdersService(database as unknown as DatabaseService, routes as unknown as OrderRouteReader,
+      new WorkItemProgressService({ authorization: jest.fn() } as never));
+    service.progressDeadlineMs = deadlineMs;
+    return service;
+  }
+
+  it('against a pharmacy-api without the batch form (404), one patient whose call hangs is unknown at the deadline; '
+    + 'every patient answered before it stays answered, and a draft-only patient stays not received', async () => {
+    const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      if (String(url) === PHARMACY_BATCH_URL) return json({ code: 'NOT_FOUND' }, 404);
+      const body = JSON.parse(String(init?.body)) as { patientId: string; sourceEhrPrescriptionIds: string[] };
+      if (body.patientId === patientN(3)) return hanging(init);
+      return json({ items: body.sourceEhrPrescriptionIds.map(received) });
+    });
+    const rows = [...Array.from({ length: 10 }, (_unused, index) => row({ order_id: orderN(index + 1),
+      patient_id: patientN(index + 1) })), row({ order_id: orderN(11), patient_id: patientN(11), status: 'draft' })];
+    const begun = Date.now();
+    const page = await realPage(rows, 200).list(member, query(), now);
+    expect(Date.now() - begun).toBeLessThan(1_500);
+    expect(page.items.map((item) => [item.orderId, item.ownProgress.status])).toEqual([
+      ...Array.from({ length: 10 }, (_unused, index) => [orderN(index + 1), index === 2 ? 'unknown' : 'received']),
+      [orderN(11), 'not_received'],
+    ]);
+    // One 404 for the batch form, then each patient with something sent once on the one-patient route (not the draft).
+    expect(fetch).toHaveBeenCalledTimes(11);
+    // The deadline ended the hanging call; it was not left to its own 3 seconds.
+    const singles = fetch.mock.calls.filter(([url]) => String(url) !== PHARMACY_BATCH_URL);
+    expect(singles.map(([, init]) => (JSON.parse(String(init?.body)) as { patientId: string }).patientId))
+      .toEqual(Array.from({ length: 10 }, (_unused, index) => patientN(index + 1)));
+    expect(singles.map(([, init]) => init?.signal?.aborted)).toEqual(Array.from({ length: 10 }, (_unused, index) => index === 2));
+  });
+
+  it('a draft-only patient stays not received when the rest of its kind misses the deadline', async () => {
+    jest.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => hanging(init));
+    const page = await realPage([row({ order_id: orderN(1), patient_id: patientN(1), status: 'draft' }),
+      row({ order_id: orderN(2), patient_id: patientN(2) }),
+      row({ kind: 'lab_request', order_id: orderN(3), patient_id: patientN(1), status: 'draft' }),
+      row({ kind: 'lab_request', order_id: orderN(4), patient_id: patientN(2) })], 100).list(member, query(), now);
+    expect(page.items.map((item) => [item.orderId, item.ownProgress.status])).toEqual([
+      [orderN(1), 'not_received'], [orderN(2), 'unknown'], [orderN(3), 'not_received'], [orderN(4), 'unknown'],
+    ]);
   });
 });
