@@ -111,6 +111,10 @@ const environmentSchema = z
     OFFLINE_ESCROW_KEYS: optionalString,
     // Prescription strength, form, duration, quantity and priority (0125): off by default, off is exactly as before.
     PRESCRIPTION_DISPENSING_DETAILS_ENABLED: booleanString,
+    // ED-1 (0168, 0169): the emergency department board. Off by default; every board route answers 503
+    // ED_BOARD_NOT_AVAILABLE. On in staging and at the sealed demo and QA facilities; in production only after the
+    // clinical lead's checklist (the triage scale first) and the owner's go-live.
+    ED_BOARD_ENABLED: booleanString,
   })
   .superRefine((environment, context) => {
     if (environment.AI_ENABLED) {

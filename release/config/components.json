@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0151",
-    "count": 152,
+    "last": "0169",
+    "count": 154,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -705,6 +705,14 @@
       {
         "name": "0151_sealed_qa_front_desk_and_nurse_logins.sql",
         "sha256": "abab517679255cec2d67aadae9d44f1b629e8e3e9ee30d77cfee33817b2c75f2"
+      },
+      {
+        "name": "0168_emergency_department_board.sql",
+        "sha256": "440a4a622b3a91409e264c4a52eab7f6e44a742727b2cd8cf87924cb91abdc2b"
+      },
+      {
+        "name": "0169_emergency_department_board_access.sql",
+        "sha256": "9aa42c47c4e6ed38a6c2a51333ce777066f3b97cb982cb3db27efff220d7d72b"
       }
     ]
   },

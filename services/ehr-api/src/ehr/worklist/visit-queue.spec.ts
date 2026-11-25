@@ -139,6 +139,7 @@ describe('EHR-C7 the waiting list (0135)', () => {
           stage: 'waiting', triageLevel: null, assignedMembershipId: null, checkInBasis: 'search',
           checkedInAt: '2026-11-18T09:00:00.000Z', checkInDay: '2026-11-18', stageChangedAt: '2026-11-18T09:00:00.000Z',
           closedAt: null, rowVersion: 1, chartBlocked: false, recordKind: 'standard', dateOfBirthEstimated: false,
+          edAttendanceId: null,
         },
       });
     });

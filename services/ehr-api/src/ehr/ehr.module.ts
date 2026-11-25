@@ -35,6 +35,8 @@ import { CatalogModule } from './catalog/catalog.module';
 
 import { ConsultationDraftsModule } from './consultation-drafts/consultation-drafts.module';
 import { MyOrdersModule } from './my-orders/my-orders.module';
+// ED-1 (0168, 0169): the emergency department board, behind ED_BOARD_ENABLED.
+import { EdBoardModule } from './ed-board/ed-board.module';
 @Module({
   imports: [
     ClinicalInfrastructureModule,
@@ -55,6 +57,8 @@ import { MyOrdersModule } from './my-orders/my-orders.module';
     VisitQueueModule,
     // ORD-7 (0149): the medicine and lab-test lists.
     CatalogModule,
+    // ED-1 (0168, 0169): the emergency department board, behind ED_BOARD_ENABLED.
+    EdBoardModule,
   ],
   controllers: [PatientRecordsController,StaffPatientChatController,HealthProfileController],
   providers: [StaffChatScopeService,StaffEvidenceService,StaffChatHistoryService,PatientRecordsService, ImportedAttachmentService, BedrockAiService, ClaudeAiService, PatientAttachmentTextService,PatientEvidenceService, PatientChatService, PatientChatHistoryService, PatientChatSourceService,

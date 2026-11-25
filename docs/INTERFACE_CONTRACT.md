@@ -9069,7 +9069,10 @@ The card (every answer):
 ```
 
 - `stage`: `waiting`, `triage`, `ready`, `with_clinician` (open); `finished`, `left`, `cancelled` (closed).
-- `triageLevel`: 1 (most urgent) to 5, or null. `checkInBasis`: `search` or `own-facility`.
+- `triageLevel`: 1 (most urgent) to 5, or null. `checkInBasis`: `search` or `own-facility`; with ED-1 (0168) also
+  `emergency` (put on the emergency board from an emergency search, see ED-1 below).
+- `edAttendanceId` (ED-1, 0168): the open or decided emergency department record of the row, or null (also null on a
+  database without 0168). Show the row as "Emergency department" and link to the board.
 - `checkInDay`: the Lagos calendar day of the check-in. `chartBlocked`: an active deny directive covers this facility.
 - No clinical content. `patientId` opens the chart only through the usual consent check (PIN, approval or 0131's
   own-facility rule); the card itself gives no access.
@@ -12321,3 +12324,200 @@ when `dateOfBirthEstimated`, and "NIN Not Verified". On `sent_for_review`
 show the message and nobody else's details. After `identified`, offer
 "Verify NIN" (ID-6). Never show `firstName`/`lastName` of a record whose
 `recordKind` is `unknown`.
+
+## ED-1. Emergency department board and triage (Release D, migrations 0168 and 0169, provisional; not live until signed)
+
+Built exactly as `docs/EHR_PLANNED_CONTRACT.md` ED-1 says, at the recommended option of every open question (not yet
+answered by the owner; the owner can still change them): Q-ED-1 A (an ED patient is a row of the live waiting list
+plus an ED record), Q-ED-2 A (who uses the board, table below), Q-ED-3 A (a patient found by this member's emergency
+search, while the member holds an active break-glass grant for them here, may be put on the board), Q-ED-4 A (a short
+presenting complaint, never shown to the front desk), Q-ED-5 A (two-step disposition), Q-ED-6 A (an admission request
+is kept on the ED record until wards ship), Q-ED-7 A (no new write basis: break-glass stays read only). Numbers 0168
+and 0169 are provisional (given at merge, after 0152-0154 and the department files cut before them); neither file
+reads anything 0152-0167 create or change. 0168 applies on 0135's waiting-list basis CHECK and on APPT-1's (0160).
+
+**The triage scale.** The board uses the waiting list's live `triageLevel` (0135: 1 most urgent to 5) and its words
+("Level 1: most urgent" to "Level 5: not urgent"). There is no second scale. The clinical lead must sign off the
+five-level scale before real patients use the board. The Triage & Vitals page's sample priority (Routine, Urgent,
+Emergency) is replaced by the same five levels, not mapped onto them.
+
+One service flag, `ED_BOARD_ENABLED` in ehr-api, off by default. While off, every route below answers 503
+`ED_BOARD_NOT_AVAILABLE`. On in staging and at the sealed demo and QA facilities; in production only after the
+clinical lead's checklist (the triage scale first) and the owner's go-live. A database without 0168 also answers 503
+`ED_BOARD_NOT_AVAILABLE`. (A 503 answer's `detail` is the service's generic text; screens show their own words for
+the code: "The emergency board is not available yet.")
+
+Staff routes need `X-Facility-Id` and `X-Purpose-Of-Use: direct-care`; the one exception is route 1 with an emergency
+search's `matchRef`, which sends `emergency`. Every write needs an `Idempotency-Key` (a replay with the same body
+answers the first answer with `"replayed": true`; another body 409 `IDEMPOTENCY_KEY_REUSED`). No Health ID or NIN in
+any path, query, body or answer: patients by UUID, ED records by UUID, new arrivals by a search card's `matchRef`.
+
+**Who** (four new codes, 0169; every ED route also needs 0135's pair `ehr.encounter.read` and `ehr.encounter.write`):
+
+| Backend role | `ehr.ed.read` | `ehr.ed.arrive` | `ehr.ed.triage` | `ehr.ed.disposition` |
+|---|---|---|---|---|
+| `receptionist` | yes | yes | no | no |
+| `nurse` | yes | yes | yes | no |
+| `clinician`, `doctor` | yes | yes | yes | yes |
+| `admin`, `org_admin`, `lab`, `pharmacist`, others | no | no | no | no |
+
+Refusals in plain words, never "permission": 403 `ED_BOARD_NOT_ALLOWED` ("Only the front desk, nurses, clinicians and
+doctors of this facility can use the emergency board."), 403 `ED_TRIAGE_NOT_ALLOWED` ("Only nurses, clinicians and
+doctors can triage, record a complaint or move patients on the board.") for triage, the complaint, move, the visit
+link and "Left the department", 403 `ED_DISPOSITION_NOT_ALLOWED` ("Only clinicians and doctors can record where the
+patient goes next."). Session areas (SX-1): `emergencyBoard`, "Emergency department board", shown with `ehr.ed.read`,
+used in full with `ehr.ed.arrive`, `ehr.ed.triage` and `ehr.ed.disposition` (front desk and nurses: view; clinicians
+and doctors: full).
+
+**The board card** (every answer):
+
+```json
+{ "attendanceId": "uuid", "entryId": "uuid", "patientId": "uuid", "fullName": "Tunde Boardone",
+  "recordKind": "standard", "unknownLabel": null, "sex": "male", "dateOfBirth": "1984-03-09",
+  "dateOfBirthEstimated": false, "healthIdLast4": "BB33", "chartBlocked": false,
+  "arrivalBasis": "search", "arrivalMode": "ambulance", "arrivedAt": "2026-12-03T08:10:00.000Z",
+  "minutesInDepartment": 42, "column": "waiting", "stage": "ready", "triageLevel": 2,
+  "triagedAt": "2026-12-03T08:16:00.000Z", "triagedByMembershipId": "uuid",
+  "presentingComplaint": "Fall from motorcycle, left leg pain", "complaintHidden": false,
+  "assignedMembershipId": null, "encounterId": null, "status": "open", "disposition": null,
+  "leftAt": null, "rowVersion": 3 }
+```
+
+- `recordKind`: `standard` or `unknown` (0145). For `unknown`, `fullName` is "Unknown patient U-0007" and
+  `unknownLabel` "U-0007"; once the record is identified, the real name shows by itself. `dateOfBirthEstimated` as
+  0145.
+- `arrivalBasis`: `search`, `own-facility` or `emergency`. `arrivalMode`: `walk_in`, `ambulance`, `brought_by_public`,
+  `police`, `referred`, `other`.
+- `column`: `waiting` (stage `waiting`, `triage` or `ready`), `being_seen` (stage `with_clinician`), `disposition`
+  (status `decided`) or `closed`. `stage`, `triageLevel` and `assignedMembershipId` are the waiting-list row's own
+  fields (0135). `minutesInDepartment`: from `arrivedAt` to now, or to `leftAt` once closed.
+- `presentingComplaint`: `null` with `complaintHidden: true` for a member without `ehr.ed.triage` (the front desk), on
+  every answer. Otherwise the text, or `null` with `complaintHidden: false` when none was recorded.
+- `status`: `open`, `decided` (a decision is recorded, the patient is still in the department) or `closed`.
+- `disposition`: `null`, or `{ "outcome", "decidedAt", "decidedByMembershipId", "admitToDepartmentCode",
+  "admittingMembershipId", "referredToFacilityName" }`. `outcome`: `discharged`, `admit_requested`, `referred_out`,
+  `sent_to_outpatients`, `left_before_seen`, `left_against_advice` or `died`.
+- Staff names come from `GET /identity/facility-staff-names` (SX-9), as on the waiting list.
+
+**1. `POST /api/v1/ehr/ed-attendances`**: put a patient on the board. Body:
+
+| Field | Rule |
+|---|---|
+| `matchRef` or `patientId` | exactly one. `matchRef`: this member's own direct-care staff search in the last 10 minutes here (basis `search`), or, with `X-Purpose-Of-Use: emergency`, this member's own emergency search while this member holds an active, unexpired break-glass grant for that patient here (basis `emergency`). `patientId`: a patient already this facility's own (0131), including every unknown record made here (0145) (basis `own-facility`). Both or neither: 400 `ED_ARRIVAL_NEEDS_ONE_PATIENT` |
+| `arrivalMode` | required, from the list above |
+| `arrivedAt` | optional, ISO UTC ending in `Z`. Left out: now. No more than 6 hours in the past and not in the future (up to 2 minutes ahead, a device clock's difference, is taken as now); otherwise 400 `ED_ARRIVAL_TIME_INVALID` |
+| `triageLevel` | optional, 1-5 (400 `ED_TRIAGE_INVALID` otherwise). Only with `ehr.ed.triage` |
+| `presentingComplaint` | optional, 1-120 characters after trimming, no control characters. Only with `ehr.ed.triage` |
+
+Anything else answers 403 `ED_ARRIVAL_NEEDS_SEARCH` ("Search for the patient first, then add them to the board. A
+search result can be used for 10 minutes."), the same for every reason. Answer 201 `{ "outcome": "arrived" |
+"moved_from_waiting_list" | "already_on_board", "attendance": card, "replayed": false }`: a new waiting-list row and
+ED record; the open outpatient waiting-list row moved to the board (its basis kept); or the record already on the
+board (the body's triage fields are not applied). A triage level on arrival moves the row from `waiting` or `triage`
+to `ready`. The board stays on after a break-glass grant ends; the chart still needs a grant. An arrival is never a
+basis for opening the chart (0131 is unchanged).
+
+**2. `GET /api/v1/ehr/ed-board[?includeClosedToday=true]`**: this facility's open and decided records (with the flag
+also the closed ones that arrived today, Lagos day), by column (waiting, being seen, disposition, closed), then triage
+level (1 first, no level last), then arrival time. Answer `{ "items": [card], "counts": { "waiting", "beingSeen",
+"disposition" }, "hasMore": false, "limit": 200 }` (the counts cover every open and decided record). Read it again
+every 30 seconds while shown.
+
+**3. `GET /api/v1/ehr/ed-attendances/:attendanceId`**: `{ "attendance": card, "history": [{ "kind", "at",
+"byMembershipId", "fromStage", "toStage", "triageLevel", "outcome", "reason", "complaintChanged" }] }`. `kind`:
+`arrived`, `moved_from_waiting_list`, `triaged`, `moved`, `visit_linked`, `disposition`, `disposition_changed`,
+`left`, `cancelled`, `closed_on_waiting_list`. The complaint's text is never in the history: `complaintChanged` says
+only that one was recorded or changed.
+
+Every write below answers 200 `{ "attendance": card, "replayed": false }` and takes `expectedRowVersion` (the card's
+`rowVersion`; another answers 412 `ED_VERSION_CONFLICT`, "Someone else changed this patient's place on the board.
+Reload it and try again.").
+
+**4. `POST /api/v1/ehr/ed-attendances/:attendanceId/triage`**: `{ "expectedRowVersion", "triageLevel": 1-5,
+"presentingComplaint"? }` (`null` clears the complaint; left out keeps it). `ehr.ed.triage`; only while `open` (a
+decided record: 409 `ED_ATTENDANCE_DECIDED`). Sets the waiting-list row's level, moves `waiting` or `triage` to
+`ready`, records who triaged and when. Triage again is allowed; every change is in the history.
+
+**5. `POST /api/v1/ehr/ed-attendances/:attendanceId/move`**: `{ "expectedRowVersion", "stage"?: "waiting" | "triage" |
+"ready" | "with_clinician", "assignedMembershipId"? }` (`null` clears), at least one (400 `ED_NOTHING_TO_CHANGE`).
+`ehr.ed.triage`; only while `open`. The assignee follows 0135's rule (400 `ED_ASSIGNEE_INVALID`). "Start care" sends
+`with_clinician` and the member's own membership id.
+
+**6. `POST /api/v1/ehr/ed-attendances/:attendanceId/visit`**: `{ "expectedRowVersion", "encounterId" }`.
+`ehr.ed.triage`; while `open` or `decided`; a linked visit can be replaced. The visit must be this patient's, at this
+facility, not `cancelled` or `entered_in_error`, started no earlier than one hour before `arrivedAt`; anything else
+400 `ED_VISIT_INVALID`, the same for every reason. The link reads no clinical content. The screen gets the visit from
+EHR-C1 (`encounterType: "emergency"`, `reuseOpenVisit: true`) after the chart opens under the usual access.
+
+**7. `POST /api/v1/ehr/ed-attendances/:attendanceId/disposition`**: `{ "expectedRowVersion", "outcome",
+"admitToDepartmentCode"?, "admittingMembershipId"?, "referredToFacilityName"?, "reason"? }`. `ehr.ed.disposition`.
+From `open`; from `decided` to change the decision, with `reason` (8-500 characters; 400 `ED_REASON_REQUIRED`).
+- `admit_requested` needs `admitToDepartmentCode`, one of this facility's profile departments (0114 codes; any code
+  when the facility has no profile) other than `emergency` (400 `ED_ADMIT_DEPARTMENT_INVALID`).
+  `admittingMembershipId` is optional: an active clinician or doctor here (400 `VALIDATION_FAILED` otherwise). Both
+  only with `admit_requested`; `referredToFacilityName` (2-120) only with `referred_out` (400 `VALIDATION_FAILED`).
+- `discharged`, `admit_requested` and `referred_out` make the status `decided`; the patient stays in the Disposition
+  column until route 8.
+- `left_before_seen` and `left_against_advice` close the record and the waiting-list row (stage `left`); `died` closes
+  both (stage `finished`; no death certificate and no notice of any kind); `sent_to_outpatients` closes the ED record
+  only and puts the waiting-list row back to `waiting`, with its triage level.
+- Never completes or changes the visit (EHR-C5 as today).
+
+**8. `POST /api/v1/ehr/ed-attendances/:attendanceId/leave`**: `{ "expectedRowVersion" }`. "Left the department" (for an
+admission request, "Handed over to the ward"). `ehr.ed.triage`; only while `decided` (an open record: 409
+`ED_ATTENDANCE_NOT_DECIDED`, "Record where the patient goes next first."). Closes the record and the waiting-list row
+(stage `finished`).
+
+**9. `POST /api/v1/ehr/ed-attendances/:attendanceId/cancel`**: `{ "expectedRowVersion", "reason" }` (8-500; 400
+`ED_REASON_REQUIRED`). For an arrival made in error. `ehr.ed.arrive`; only while `open` with no visit linked and no
+decision (409 `ED_CANCEL_NOT_ALLOWED`). The waiting-list row the arrival made closes as `cancelled`; a row moved from
+the outpatient waiting list stays open as it was. The record is kept.
+
+Other answers: 404 `ED_ATTENDANCE_NOT_FOUND` ("This patient is not on this facility's emergency board.", also another
+facility's record); 409 `ED_ATTENDANCE_CLOSED` ("This patient has left the emergency department. Add them again if they
+are back."); 409 `ED_ATTENDANCE_DECIDED`; 400 `VALIDATION_FAILED` for a body outside the rules (the request
+validation's own wording); 400 `PURPOSE_OF_USE_REQUIRED`; 400 `IDEMPOTENCY_KEY_REQUIRED`. A close on the waiting list
+at the same moment as a board write for the same patient answers 412 `ED_VERSION_CONFLICT` (reload and try again).
+
+**The waiting list.** EHR-C7's routes are unchanged; their card gains `edAttendanceId` (above). A board patient's row
+closed on the waiting list (finished, left or cancelled) closes the ED record too (history `closed_on_waiting_list`).
+Stage and triage changes made on the waiting list are the board's own (the same fields).
+
+### Audit
+
+Every route writes its rows in the request's transaction, refusals that are answers included (a refusal the database
+raises, for example a missing code, is in ehr-api's request audit): `ehr.ed.arrive` (basis, outcome; plus 0135's
+`ehr.visit-queue.check-in` with `by: "emergency_department"` when a waiting-list row is made), `ehr.ed.board` (one
+collection row) and `ehr.ed.board.shown` (one row per patient shown), `ehr.ed.record-read`, `ehr.ed.triage`,
+`ehr.ed.move`, `ehr.ed.link-visit`, `ehr.ed.disposition` (outcome), `ehr.ed.leave`, `ehr.ed.cancel`, and
+`ehr.ed.closed-on-waiting-list` (the waiting-list close, as that action's actor). The waiting-list helper writes no row
+of its own. No row holds a name, date of birth, Health ID, presenting complaint, referral facility name or reason text.
+
+### Notifications
+
+None: no inbox notice, push or email on arrival, triage or disposition (the patient is in the department); `died`
+sends nothing to anyone; break-glass keeps its own emergency-contact alert (0084); no staff notices (gap F2).
+
+### Database (0168, 0169)
+
+0168: `ehr.ed_attendances` (one row per arrival, beside its waiting-list row; one open or decided record per row and
+per patient and facility; CHECKs tie the status, the disposition, the admission request and the close together) and
+`ehr.ed_attendance_events` (append only; the Idempotency-Key with the request's SHA-256, unique per membership and
+key), row-level security on and no privilege for any runtime; the waiting-list basis CHECK gains `emergency` (every
+value found kept: 0135's or APPT-1's); the trigger `visit_queue_ed_close_mirror` on `ehr.visit_queue`; SECURITY DEFINER
+functions `ehr.ed_arrive`, `ehr.ed_board`, `ehr.ed_read`, `ehr.ed_triage`, `ehr.ed_move`, `ehr.ed_link_visit`,
+`ehr.ed_record_disposition`, `ehr.ed_leave`, `ehr.ed_cancel` and `ehr.visit_queue_ed_attendances`, EXECUTE for
+`hid_ehr_runtime` only (as `runtime-grants.sql`); helpers no role may execute. Without 0169 no role holds an ED code, so
+every function refuses. 0168 writes no audit row. 0169: the four codes, the thirteen role rows of the table above, and
+thirteen `auth.role-permission.add` audit rows as the system actor (reason "ED-1 Emergency department board (Release
+D, recommended Q-ED-2 A)"); no grant. Both files take their locks first, NOWAIT, with busy refusals that begin with
+their own number (the runner's dry-run retry).
+
+### Screen notes
+
+Show times in Lagos whatever the device's zone. Never put a Health ID in a URL: board and record URLs carry the ED
+record's UUID only. An unknown patient shows "Unknown patient U-0007" and "Estimated age". Show a level 1 or 2 card in
+the critical tone, as the waiting list does; no timer colours until the clinical lead names a target. Say on the
+board: "Do not show this board on a screen patients or visitors can see." Show "NIN Verified" / "NIN Not Verified"
+where a patient card shows NIN status. Before go-live keep the sample board at the demo facilities only, with its
+banner, and send nothing.
