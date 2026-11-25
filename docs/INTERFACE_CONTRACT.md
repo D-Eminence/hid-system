@@ -12423,3 +12423,271 @@ when `dateOfBirthEstimated`, and "NIN Not Verified". On `sent_for_review`
 show the message and nobody else's details. After `identified`, offer
 "Verify NIN" (ID-6). Never show `firstName`/`lastName` of a record whose
 `recordKind` is `unknown`.
+
+## QUAL-1. Quality and safety reporting: incidents and near misses (Release D, migrations 0197 and 0198, provisional; not live until signed)
+
+Built exactly as `docs/EHR_PLANNED_CONTRACT.md` QUAL-1 says, on the owner's decisions of 25 Nov 2026 (hid-system#332,
+"I approve Q147–Q290 at the recommended options"): Q248 A (the reporter is named but confidential), Q249 A (an
+optional, audited patient link, seen only by managers), Q250 A (a fixed category list and a harm scale, shipped as a
+DRAFT list for the clinical lead), Q251 A (`quality.incident.manage` and named quality leads; doctors do not manage as
+such), Q252 A ("patient or family told" required for moderate harm and above), Q253 A (internal quality records;
+nothing deleted until legal sets the period). Smaller choices are built at their recommended option, not yet
+answered by the owner: Q-QUAL-1 A to Q-QUAL-8 A (the planned contract's table). Numbers 0197 and 0198 are provisional
+(given at merge in release order); neither file reads anything 0152-0196 create or change, and 0197 changes no
+existing object.
+
+**Switches.** One service flag, `QUALITY_INCIDENTS_ENABLED` in ehr-api, off by default: while off, every route below
+answers 503 `QUALITY_NOT_AVAILABLE` ("Quality and safety reporting is not switched on yet."), as does a database
+without 0197. On in staging; in production only after the clinical lead's signed list is loaded by a signed
+migration, the DPO and legal review, the Q160 A go-live gate and the owner's go-live. When facility setup (Q149, gap
+map F2) ships, the facility's own `quality` switch must also be on. The patient link has its own database switch,
+`ehr.quality_switches.patient_link`, seeded off and turned on only by a signed migration after the DPO's review: while
+off, a `patientId` on route 2 or 11 answers 503 `QUALITY_PATIENT_LINK_NOT_AVAILABLE` ("Linking a patient is not
+switched on yet. Report without the patient, and do not write their name.") and nothing is saved; clearing a link
+always works.
+
+Every route is under `/api/v1/ehr/quality` and needs `X-Facility-Id` and `X-Purpose-Of-Use: healthcare-operations`
+(otherwise 400 `PURPOSE_OF_USE_REQUIRED`). Every write needs an `Idempotency-Key` (400 `IDEMPOTENCY_KEY_REQUIRED`; a
+replay with the same body answers the first answer with `"replayed": true`; another body 409
+`IDEMPOTENCY_KEY_REUSED`). No Health ID or NIN in any path, query, body or answer: incidents, actions and leads by
+UUID, staff by membership UUID, the patient by UUID in a body only.
+
+**Who** (two new codes, 0198; a named quality lead is a row of `ehr.quality_leads`, not a code or role):
+
+| Backend role | `quality.incident.report` | `quality.incident.manage` |
+|---|---|---|
+| `receptionist`, `nurse`, `clinician`, `doctor`, `lab`, `pharmacist` | yes | no |
+| `admin`, `org_admin` | yes | yes |
+| `cashier`, `billing_officer` (BILL-1) and any other staff role a hospital can invite when 0198 runs | yes | no |
+| narrow, platform, outreach and scanner roles, `org_admin_awaiting_review` | no | no |
+
+- Every route: an active membership here, not held by the cutover, holding `quality.incident.report`; otherwise 403
+  `QUALITY_NOT_ALLOWED` ("Only staff of this facility can report incidents.").
+- Manager steps (routes 5, 9-15; route 3's whole-facility list; route 4's manager view): `quality.incident.manage`
+  here, or an active quality lead row here; otherwise 403 `QUALITY_MANAGER_ONLY` ("Only this facility's quality
+  leads and administrators can do this.").
+- Naming and ending leads (routes 14, 15): `quality.incident.manage` itself; otherwise 403 `QUALITY_LEADS_ADMIN_ONLY`
+  ("Only this facility's administrators can name or remove quality leads.").
+- Routes 6-8: the incident's current reviewer or a manager; otherwise 403 `QUALITY_REVIEWER_ONLY` ("Only the reviewer
+  of this incident or a quality lead can do this.").
+- Refusals in plain words, never "permission". Session areas (SX-1): `quality`, "Quality and safety", shown with
+  `quality.incident.report`, used in full with `quality.incident.manage`. A named lead's session shows the area as
+  view only; the screen takes the manager's view from route 1's `isManager`.
+
+**Who sees what.** A manager sees every incident of the facility, with the reporter and the linked patient. The
+current reviewer sees that incident without the reporter (`reporterHidden: true`) or the patient (`patientHidden:
+true`). The reporter sees their own reports as filed, with status and dates (`reportedByMe: true`), but not the
+investigation, actions or resolution. A member who is both reporter and reviewer gets the reviewer's view. Anyone
+else, and any member of another facility, gets 404 `QUALITY_INCIDENT_NOT_FOUND` ("This incident report is not
+available."), the same as for an incident that does not exist.
+
+**The incident card** (route 4 and every write's answer), in the manager's view:
+
+```json
+{ "incidentId": "uuid", "incidentNumber": 12, "view": "manager",
+  "title": "Wrong strength dispensed (fictional)", "description": "…",
+  "occurredAt": "2026-12-03T08:10:00.000Z", "occurredDay": "2026-12-03",
+  "departmentCode": "pharmacy", "locationText": "Dispensary counter 2",
+  "category": "medication", "harmLevel": "no_harm", "immediateAction": "…",
+  "patientOrFamilyTold": null, "listVersion": "QS-DRAFT-1",
+  "status": "investigated", "reportedAt": "2026-12-03T09:02:00.000Z", "reportedByMe": false,
+  "reporterMembershipId": "uuid", "reporterHidden": false,
+  "patientLinked": true, "patientHidden": false,
+  "patient": { "patientId": "uuid", "fullName": "Tunde Fictional", "recordKind": "standard", "unknownLabel": null,
+               "sex": "male", "dateOfBirth": "1984-03-09", "healthIdLast4": "BB33" },
+  "reviewerMembershipId": "uuid", "assignedAt": "2026-12-03T10:00:00.000Z",
+  "investigation": { "findings": "…", "recordedAt": "…", "recordedByMembershipId": "uuid" },
+  "resolution": null, "reopenedCount": 0, "openActions": 0, "overdueActions": 0,
+  "can": { "assign": true, "investigate": true, "addAction": true, "resolve": true, "reopen": false, "correct": true },
+  "updatedAt": "…", "rowVersion": 5 }
+```
+
+- `view`: `manager`, `reviewer` or `reporter`; hidden fields are `null`. `status`: `reported`, `assigned`,
+  `investigated` or `resolved`. `occurredDay`: the Lagos day of `occurredAt`. `incidentNumber`: 1, 2, 3 … per facility.
+- `patient`: managers only. An unknown record (0145) shows `fullName` "Unknown patient U-0007", `recordKind`
+  `unknown`, `unknownLabel` "U-0007".
+- `category`, `harmLevel`: the codes below. `patientOrFamilyTold`: `yes`, `no`, `not_applicable` or null.
+- `can`: the steps this member may take now. Staff names from `GET /identity/facility-staff-names` (SX-9).
+- An action: `{ "actionId", "description", "ownerMembershipId", "dueDate": "YYYY-MM-DD", "status": "open" | "done" |
+  "cancelled", "overdue", "completedAt", "note", "createdAt", "createdByMembershipId" }`.
+- A history entry (oldest first): `{ "kind", "at", "byMembershipId", "fromStatus", "toStatus", "reason", "text",
+  "actionId", "changes" }`. `kind`: `reported`, `patient_linked`, `assigned`, `reassigned`, `investigation_recorded`,
+  `investigation_amended`, `action_added`, `action_updated`, `resolved`, `reopened`, `corrected`,
+  `patient_link_changed`. `text` keeps what was written at that step (each earlier version). `changes`: coded values
+  before and after; a patient-link entry says only that the link was set, changed or cleared, and history never names
+  a patient. The reviewer's view has no actor on the `reported`, `patient_linked` and `patient_link_changed` entries;
+  the reporter's view holds only the status changes (`kind`, `at`, `fromStatus`, `toStatus`).
+
+**The lists (DRAFT `QS-DRAFT-1`, awaiting the clinical lead's sign-off; medication wording a draft for Ola).**
+Categories: `medication`, `patient_fall`, `identification_documentation`, `procedure_treatment`, `infection_control`,
+`equipment_device`, `blood_transfusion`, `safety_security`, `facility_environment`, `other`. Harm levels: `near_miss`,
+`no_harm`, `mild`, `moderate`, `severe`, `death`; "patient or family told" is required for `moderate`, `severe` and
+`death`. The codes are fixed by the database; the words come from route 1 and change only by a signed migration.
+
+**1. `GET /api/v1/ehr/quality/me`**: `{ "canReport", "isManager", "managerBasis": "role" | "quality_lead" | null,
+"canNameLeads", "patientLinkAvailable", "lists": { "listVersion", "listStatus": "draft" | "signed", "categories":
+[{ "code", "label", "hint" }], "harmLevels": [{ "code", "label", "hint", "toldRequired" }], "toldValues": ["yes",
+"no", "not_applicable"] }, "departmentCodes": [...] }`. `departmentCodes`: this facility's profile departments, or all
+fifteen 0114 codes when it has no profile. Show "Draft list, awaiting clinical sign-off" while `listStatus` is
+`draft`.
+
+**2. `POST /api/v1/ehr/quality/incidents`**: file a report. Body:
+
+| Field | Rule |
+|---|---|
+| `title` | required, 3-120 characters after trimming, no control characters |
+| `description` | required ("What happened"), 10-4000 characters |
+| `occurredAt` | required, ISO UTC ending in `Z`; no more than 365 days ago and not in the future (up to 2 minutes ahead is taken as now); otherwise 400 `QUALITY_TIME_INVALID` ("The time it happened can be up to a year ago, and not in the future.") |
+| `departmentCode` | optional, one of route 1's `departmentCodes`; otherwise 400 `QUALITY_DEPARTMENT_INVALID` ("Choose one of this facility's departments.") |
+| `locationText` | optional ("Where exactly"), 2-120 characters |
+| one of the two above | required; otherwise 400 `QUALITY_LOCATION_REQUIRED` ("Say where it happened: choose a department, describe the place, or both.") |
+| `category` | required, a code of the active list; otherwise 400 `QUALITY_CATEGORY_INVALID` ("Choose a category from the list.") |
+| `harmLevel` | required, a code of the active list; otherwise 400 `QUALITY_HARM_LEVEL_INVALID` ("Choose how much harm was done from the list.") |
+| `immediateAction` | optional, 2-2000 characters |
+| `patientOrFamilyTold` | `yes`, `no` or `not_applicable`; required for `moderate`, `severe` and `death`, otherwise 400 `QUALITY_TOLD_REQUIRED` ("For moderate harm, severe harm or death, say whether the patient or family was told.") |
+| `patientId` | optional; the patient-link switch (503 above), and a patient of this facility: active, allowed by the seal, and 0131's own-facility basis (with 0145's unknown records made here) or a visit or waiting-list check-in here in the last 90 days. Otherwise 403 `QUALITY_PATIENT_LINK_REFUSED` ("Only a patient of this facility can be linked. Report without the patient, and do not write their name. A quality lead can link the patient later."), the same for every reason, and nothing is saved |
+
+Answer 201 `{ "incident": card, "actions": [], "history": [...], "replayed": false }` in this member's view; status
+`reported`. The link reads no clinical content and gives no chart access.
+
+**3. `GET /api/v1/ehr/quality/incidents`**: optional `status` (`reported`, `assigned`, `investigated`, `resolved` or
+`open`), `category`, `harmLevel`, `departmentCode`, `occurredFrom` and `occurredTo` (Lagos days, inclusive, at most
+366 days apart), `mine` (`reported` or `assigned`), `limit` (1-100, default 50), `cursor`. Any other key or value: 400
+`VALIDATION_FAILED`; a cursor this route did not make: 400 `QUALITY_LIST_CURSOR_INVALID` ("This page of the list can
+no longer be opened. Start the list again."). A manager sees the whole facility (or, with `mine`, only their own);
+anyone else sees the reports they filed and the incidents assigned to them now. Newest report first. Answer
+`{ "items": [{ "incidentId", "incidentNumber", "title", "category", "harmLevel", "departmentCode", "occurredAt",
+"reportedAt", "status", "reviewerMembershipId", "patientLinked", "reportedByMe", "assignedToMe", "openActions",
+"overdueActions", "rowVersion" }], "nextCursor", "limit", "counts": { "reported", "assigned", "investigated",
+"resolved" } | null }`. No item carries the reporter, the patient or any text but the title; `reviewerMembershipId`
+is null on an item seen only as its reporter; `counts` (the whole facility) for managers only.
+
+**4. `GET /api/v1/ehr/quality/incidents/:incidentId`**: `{ "incident": card, "actions": [...], "history": [...] }` in
+this member's view (actions and history empty or reduced for the reporter's view, as above).
+
+Every write below takes `expectedRowVersion` (the card's `rowVersion`; another answers 412 `QUALITY_VERSION_CONFLICT`,
+"Someone else changed this incident. Reload it and try again."), raises it by one (an action's change included), and
+answers 200 `{ "incident": card, "actions": [...], "history": [...], "replayed": false }` (201 for route 7). A
+resolved incident refuses every write but route 10: 409 `QUALITY_INCIDENT_RESOLVED` ("This incident is resolved.
+Reopen it first."). A step at the wrong stage: 409 `QUALITY_STATUS_INVALID` ("This step is not possible at the
+incident's current stage.", or the step's own words below).
+
+**5. `POST /api/v1/ehr/quality/incidents/:incidentId/assign`** (manager): `{ "expectedRowVersion",
+"reviewerMembershipId" }`. An active member here holding `quality.incident.report` (400 `QUALITY_REVIEWER_INVALID`,
+"Choose a reviewer who works at this facility."). From `reported`: `assigned`. From `assigned` or `investigated`: the
+reviewer changes (history `reassigned`), the status stays, and the earlier reviewer loses sight of it. The same
+reviewer: 400 `QUALITY_NOTHING_TO_CHANGE` ("Change at least one thing.").
+
+**6. `POST /api/v1/ehr/quality/incidents/:incidentId/investigation`** (reviewer or manager): `{ "expectedRowVersion",
+"findings": "10-4000 characters" }`. From `assigned`: `investigated`. From `investigated`: replaced, the earlier text
+kept in the history (`investigation_amended`). From `reported`: 409 `QUALITY_STATUS_INVALID` ("Assign a reviewer
+first.").
+
+**7. `POST /api/v1/ehr/quality/incidents/:incidentId/actions`** (reviewer or manager): `{ "expectedRowVersion",
+"description": "5-500 characters", "ownerMembershipId", "dueDate": "YYYY-MM-DD" }`, while `assigned` or
+`investigated`. Owner: an active member here holding `quality.incident.report` (400 `QUALITY_ACTION_OWNER_INVALID`,
+"Choose a staff member of this facility to own this action."). Due date: today to 365 days ahead, Lagos (400
+`QUALITY_DUE_DATE_INVALID`, "Choose a due date from today up to a year ahead."). At most 20 per incident (409
+`QUALITY_ACTION_LIMIT`, "An incident can have up to 20 corrective actions."). The owner is not told and does not see the
+incident unless they are its reviewer or a manager.
+
+**8. `POST /api/v1/ehr/quality/incidents/:incidentId/actions/:actionId`** (reviewer or manager): `{
+"expectedRowVersion", "status"?: "open" | "done" | "cancelled", "note"?, "ownerMembershipId"?, "dueDate"? }`, at least
+one change (400 `QUALITY_NOTHING_TO_CHANGE`). `note` 2-500 characters, required to cancel (400
+`QUALITY_REASON_REQUIRED`). `done` sets `completedAt`; back to `open` clears it. Another incident's action: 404
+`QUALITY_ACTION_NOT_FOUND` ("This action is not available.").
+
+**9. `POST /api/v1/ehr/quality/incidents/:incidentId/resolve`** (manager): `{ "expectedRowVersion", "resolution":
+"10-2000 characters" }`. Only from `investigated` (409 `QUALITY_STATUS_INVALID`, "Record the investigation first."),
+and only when every action is done or cancelled (409 `QUALITY_ACTIONS_OPEN`, "Mark every corrective action done or
+cancelled before resolving."). Status `resolved`; the resolution attests the investigation at `expectedRowVersion`.
+
+**10. `POST /api/v1/ehr/quality/incidents/:incidentId/reopen`** (manager): `{ "expectedRowVersion", "reason": "8-500
+characters" }` (400 `QUALITY_REASON_REQUIRED`, "Say why in at least 8 characters."). Only from `resolved`. Status
+`assigned` with the same reviewer; findings and actions stay; the resolution moves to the history; `reopenedCount` + 1.
+
+**11. `POST /api/v1/ehr/quality/incidents/:incidentId/correction`** (manager): `{ "expectedRowVersion", "reason":
+"8-500 characters", "category"?, "harmLevel"?, "departmentCode"?, "locationText"?, "patientOrFamilyTold"?,
+"patientId"? }`, at least one change; `null` clears `departmentCode`, `locationText`, `patientOrFamilyTold` or
+`patientId`. The result keeps route 2's rules (`QUALITY_LOCATION_REQUIRED`, `QUALITY_TOLD_REQUIRED`); a new
+`patientId` needs the switch and a patient of this facility, as route 2. The report as filed (title, what happened,
+when, immediate action, who filed it) never changes.
+
+**12. `GET /api/v1/ehr/quality/incident-counts?month=YYYY-MM[&format=csv]`** (manager): this facility's incidents
+whose `occurredDay` falls in the Lagos month (any status), by category, harm level and department. `month` must have
+started (400 `QUALITY_MONTH_INVALID`, "Choose a month that has started."). JSON `{ "month", "basis": "occurred",
+"listVersion", "listStatus", "generatedAt", "total", "rows": [{ "category", "harmLevel", "departmentCode", "count" }]
+}`, zero rows left out, in the lists' order then department code (none last). `format=csv`: `text/csv;
+charset=utf-8`, `Content-Disposition: attachment; filename="quality-incident-counts-YYYY-MM.csv"`, a first line
+"Internal quality-improvement record. Counts only.", then `month,category_code,category,harm_level_code,harm_level,
+department_code,count`. Exact counts; no id, title, text, name, patient or staff member.
+
+**13. `GET /api/v1/ehr/quality/leads`** (manager): `{ "leads": [{ "leadId", "membershipId", "namedAt",
+"namedByMembershipId" }], "limit": 10 }`, active leads only.
+
+**14. `POST /api/v1/ehr/quality/leads`** (`quality.incident.manage`): `{ "membershipId" }`, an active member here
+holding `quality.incident.report` (400 `QUALITY_LEAD_INVALID`, "Choose a staff member who works at this facility.").
+Already a lead: 409 `QUALITY_LEAD_EXISTS` ("This staff member is already a quality lead."); ten active already: 409
+`QUALITY_LEAD_LIMIT` ("A facility can have up to 10 quality leads."). Answer 201 `{ "lead": { "leadId",
+"membershipId", "namedAt", "namedByMembershipId", "endedAt": null }, "replayed": false }`. Manager rights from the
+lead's next request; lost at once when the membership ends or is held.
+
+**15. `POST /api/v1/ehr/quality/leads/:leadId/end`** (`quality.incident.manage`): `{ "reason": "8-500 characters" }`.
+Answer 200 `{ "lead": { …, "endedAt", "endedByMembershipId" }, "replayed": false }`; the row is kept. Already ended:
+409 `QUALITY_LEAD_ENDED` ("This quality lead has already been removed."); another facility's or none: 404
+`QUALITY_LEAD_NOT_FOUND` ("This quality lead is not available.").
+
+Other answers: 400 `VALIDATION_FAILED` ("Check the highlighted fields.") for a body or query outside the rules.
+
+### Audit
+
+Written by the database functions in the request's transaction, refusals that are answers included (a refusal the
+database raises is in ehr-api's request audit), purpose `healthcare-operations`: `quality.incident.report`,
+`quality.incident.patient-link` (the patient in the row's patient column; outcome `linked`, `changed` or `cleared`
+with the basis found; a `refused` row names no patient), `quality.incident.list` (one collection row),
+`quality.incident.read` (patient column set when a manager was shown the patient), `quality.incident.assign`,
+`quality.incident.investigation`, `quality.incident.action-add`, `quality.incident.action-update`,
+`quality.incident.resolve`, `quality.incident.reopen`, `quality.incident.correct` (fields changed, by code),
+`quality.incident.counts-export` (month, total, format), `quality.lead.list`, `quality.lead.name`,
+`quality.lead.end`. No row holds a title, what happened, findings, a resolution, an action's text, the place in words,
+a reason, a name, a date of birth or a Health ID. The facility audit trail (`audit.read`, the administrator roles)
+shows who filed each report (Q248 A). None of these actions is in the patient's access log (0093, 0138).
+
+### Notifications and patients
+
+None: no inbox notice, push, email or SMS to anyone (no staff inbox yet, Q151 A). Patients see nothing: no screen, no
+notice, no access-history or access-log entry. Telling the patient or family happens in person; the report records
+whether it was done.
+
+### Database (0197, 0198)
+
+0197 (it changes no existing table, function, policy, trigger or row): `ehr.quality_list_versions` and
+`ehr.quality_list_items` (the DRAFT list `QS-DRAFT-1`, 16 rows, append only), `ehr.quality_switches` (`patient_link`
+off), `ehr.quality_leads`, `ehr.quality_incidents` (the report as filed fixed by a trigger; CHECKs for the codes, the
+place, "told" for moderate harm and above, and the status), `ehr.quality_incident_actions` and
+`ehr.quality_incident_events` (append only; the Idempotency-Key with the request's SHA-256, unique per membership and
+key). Row-level security enabled and forced on all seven, one owner-only policy each (the five facility tables also
+bound to `platform.current_facility_id()`), no privilege for any runtime, BEFORE TRUNCATE on all seven, no DELETE
+anywhere; no identity column or sequence. SECURITY DEFINER functions with `search_path = pg_catalog, pg_temp`, every
+name schema-qualified, no temporary table or dynamic SQL, owned like 0135's, EXECUTE for `hid_ehr_runtime` only (as
+`runtime-grants.sql`): `ehr.quality_me`, `ehr.quality_incident_report`, `ehr.quality_incident_list`,
+`ehr.quality_incident_read`, `ehr.quality_incident_assign`, `ehr.quality_incident_investigate`,
+`ehr.quality_incident_action_add`, `ehr.quality_incident_action_update`, `ehr.quality_incident_resolve`,
+`ehr.quality_incident_reopen`, `ehr.quality_incident_correct`, `ehr.quality_incident_counts`,
+`ehr.quality_lead_list`, `ehr.quality_lead_name`, `ehr.quality_lead_end`; helpers no role may execute. Without 0198
+no role holds a quality code, so every function refuses. 0198: the two codes, `quality.incident.report` for the
+eight named roles plus every other staff role a hospital can invite when it runs, `quality.incident.manage` for
+`admin` and `org_admin`, one audit row per code and row as the system actor (reason "QUAL-1 Quality and safety
+reporting (Release D, owner decisions Q248 A and Q251 A)"); no grant. Both files take their locks first, NOWAIT, with
+busy refusals that begin with their own number (the runner's dry-run retry); exact "already applied" detection; owner,
+privilege, policy and trigger (`tgtype`, `tgqual`, `tgattr`, `tgnargs`, `tgfoid`, `tgenabled`) post-checks.
+
+### Screen notes
+
+Show every date and time through `@hid/ui/display`, in Lagos time whatever the device's zone. Never put a Health ID in
+an address: incident addresses carry the incident's UUID only, and the patient is never in an address of this page.
+"Report an incident" on a patient's page passes the patient in the page's state. Say on the form: "Write what
+happened, not who is to blame. Do not write any patient's or colleague's name or Health ID."; on the incident page:
+"Confidential. Only quality leads and administrators see who reported this."; on the counts page and in the CSV:
+"Internal quality-improvement record." Pick reviewers, action owners and leads from SX-9's current staff, never a
+typed id. Before go-live keep the sample at the demo facilities only, with its banner, and send nothing.
