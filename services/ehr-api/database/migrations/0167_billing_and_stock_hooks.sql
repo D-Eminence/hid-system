@@ -55,12 +55,17 @@
 -- H6 pharmacy.dispensing_reversals BEFORE INSERT (zz_billing_reversal): the
 --    work item's automatic line (a reversed item is never dispensed again,
 --    and a corrected medicine comes as a new prescription with its own line)
---    is marked reversed and, when the bill can lose it without falling below
---    what was paid, waived or covered, cancelled by the reversing pharmacist
---    ("Dispensing reversed"); else it stays, marked reversed, so billing
---    staff see a refund is due (on the bill and the work item's badge). No
---    stock moves: a reversal corrects the record, and the medicine may never
---    have come back; what does come back is counted back on the Stock page.
+--    is marked reversed and cancelled by the reversing pharmacist
+--    ("Dispensing reversed"), whether it was unpaid, part paid or paid: its
+--    unpaid balance is never asked for, and pay-before never holds up the
+--    corrected medicine for it. What was collected beyond the bill's new
+--    total is left on the bill (0164's bill_recompute) as refund due (the
+--    patient's money, given back first) and cover over the bill (a waiver or
+--    HMO cover to cancel and record again); billing staff see the refund on
+--    the bill and on the work item's badge. A later line on the same bill
+--    uses what is over first. No stock moves: a reversal corrects the record,
+--    and the medicine may never have come back; what does come back is
+--    counted back on the Stock page.
 -- H7 lab.specimens BEFORE UPDATE OF status (zz_billing_collect_gate): a
 --    specimen becoming collected meets the pay-before gate for lab.
 -- Pay-before is off everywhere until the clinical lead signs BILL-3
@@ -104,7 +109,7 @@ declare
   made constant jsonb := '{
     "commercial.hook_check_in()": "0132c9412cbb3b0f3b73d2ebbbe60e90",
     "commercial.hook_dispensing()": "f1bf808db6a26acb8bbd3a795d20b055",
-    "commercial.hook_dispensing_reversal()": "4fb8a4e2b325347149d5ac098e69c68a",
+    "commercial.hook_dispensing_reversal()": "e36c067703060e7185c203fdc744e3c4",
     "commercial.hook_facility(uuid)": "4efd0ae0c3c4ad8ce694a74b223cafa5",
     "commercial.hook_lab_work_item()": "903edbb2d3a10fc4a91610cec007349a",
     "commercial.hook_pharmacy_acceptance()": "2f5cabce9719e94cfc88d1e9bd7ca665",
@@ -443,7 +448,7 @@ as $$
 declare
   line commercial.bill_lines%rowtype;
   bill commercial.bills%rowtype;
-  can_cancel boolean;
+  after_bill commercial.bills%rowtype;
 begin
   if not commercial.hook_facility(new.facility_id) then
     return new;
@@ -458,25 +463,25 @@ begin
   if bill.voided_at is not null then
     return new;
   end if;
-  can_cancel := bill.total_kobo - line.total_kobo
-    >= bill.paid_kobo + bill.pending_check_kobo + bill.waived_kobo + bill.hmo_covered_kobo;
-  if can_cancel then
-    update commercial.bill_lines bill_line
-       set dispensing_reversed_at = clock_timestamp(), cancelled = true, cancel_reason = 'Dispensing reversed',
-           cancelled_by_membership_id = new.reversed_by_membership_id, cancelled_at = clock_timestamp()
-     where bill_line.id = line.id;
-  else
-    update commercial.bill_lines bill_line set dispensing_reversed_at = clock_timestamp() where bill_line.id = line.id;
-  end if;
+  -- Always off the bill: never-paid, part-paid and paid alike; what was collected beyond the new total stays as
+  -- the bill's refund due and cover over the bill (0164's bill_recompute).
+  update commercial.bill_lines bill_line
+     set dispensing_reversed_at = clock_timestamp(), cancelled = true, cancel_reason = 'Dispensing reversed',
+         cancelled_by_membership_id = new.reversed_by_membership_id, cancelled_at = clock_timestamp()
+   where bill_line.id = line.id;
   perform commercial.bill_recompute(bill.id);
-  perform commercial.bill_event(bill.id, bill.facility_id, case when can_cancel then 'line-cancel' else 'dispensing-reversed' end,
+  select bill_row.* into after_bill from commercial.bills bill_row where bill_row.id = bill.id;
+  perform commercial.bill_event(bill.id, bill.facility_id,
+    case when after_bill.refund_due_kobo + after_bill.cover_over_kobo > 0 then 'dispensing-reversed' else 'line-cancel' end,
     new.reversed_by_membership_id,
     jsonb_build_object('lineId', line.id, 'totalKobo', line.total_kobo, 'dispensingReversed', true,
-      'refundDue', not can_cancel));
-  perform commercial.audit(case when can_cancel then 'commercial.bill.line-cancel' else 'commercial.bill.dispensing-reversed' end,
+      'refundDueKobo', after_bill.refund_due_kobo, 'coverOverKobo', after_bill.cover_over_kobo));
+  perform commercial.audit(
+    case when after_bill.refund_due_kobo + after_bill.cover_over_kobo > 0 then 'commercial.bill.dispensing-reversed'
+         else 'commercial.bill.line-cancel' end,
     'success', 'bill', bill.id::text, bill.patient_id,
     jsonb_build_object('lineId', line.id, 'totalKobo', line.total_kobo, 'origin', line.origin, 'dispensingReversed', true,
-      'refundDue', not can_cancel, 'by', 'system'),
+      'refundDueKobo', after_bill.refund_due_kobo, 'coverOverKobo', after_bill.cover_over_kobo, 'by', 'system'),
     commercial.staff_source(null));
   return new;
 end
@@ -540,7 +545,7 @@ declare
   made constant jsonb := '{
     "commercial.hook_check_in()": "0132c9412cbb3b0f3b73d2ebbbe60e90",
     "commercial.hook_dispensing()": "f1bf808db6a26acb8bbd3a795d20b055",
-    "commercial.hook_dispensing_reversal()": "4fb8a4e2b325347149d5ac098e69c68a",
+    "commercial.hook_dispensing_reversal()": "e36c067703060e7185c203fdc744e3c4",
     "commercial.hook_facility(uuid)": "4efd0ae0c3c4ad8ce694a74b223cafa5",
     "commercial.hook_lab_work_item()": "903edbb2d3a10fc4a91610cec007349a",
     "commercial.hook_pharmacy_acceptance()": "2f5cabce9719e94cfc88d1e9bd7ca665",

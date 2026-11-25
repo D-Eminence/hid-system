@@ -16,7 +16,8 @@
 //
 // The flow (the contract's verifier list, less the HTTP boot of the services):
 // an administrator saves the payment settings; a billing officer prices a
-// consultation and a stock-kept medicine; a cashier opens a day, makes a bill,
+// consultation and a stock-kept medicine; a cashier opens a day, makes a bill
+// (and an anonymous walk-in lab bill, which is not a counter sale),
 // takes POS and cash; a billing officer voids the cash (the cashier cannot,
 // and the officer cannot void what the officer took); an HMO cover is recorded
 // (owed, never paid); the pharmacist keeps stock, receives three batches and
@@ -149,6 +150,16 @@ try {
       [{ source: 'pharmacy', patient: { anonymous: true, name: 'Runtime walk-in' },
         lines: [{ catalogueItemId: consultation.id, quantity: 1 }] }])).bill;
     assert.equal(bill.totalKobo, 500000);
+    assert.equal(bill.refundDueKobo, 0);
+    assert.equal(bill.coverOverKobo, 0);
+  });
+  await step('cashier makes an anonymous walk-in lab bill (not a counter sale)', async () => {
+    const lab = (await ehr(members.cashier, 'select commercial.bill_create($1, $2, $3) as answer',
+      [{ source: 'lab', patient: { anonymous: true }, lines: [{ catalogueItemId: consultation.id, quantity: 1 }] }])).bill;
+    assert.equal(lab.source, 'lab');
+    assert.equal(lab.counter, false);
+    assert.equal(lab.patient, null);
+    assert.equal(lab.displayName, 'Walk-in');
   });
   await step('cashier takes POS and cash', async () => {
     const pos = await ehr(members.cashier, 'select commercial.payment_record($1, $2, $3, $4, $5) as answer',

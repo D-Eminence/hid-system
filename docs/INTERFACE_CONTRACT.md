@@ -12487,9 +12487,12 @@ dispensing would have accepted the item (ORD-4), the acceptance is recorded on
 its own after the pay-before refusal (audited `pharmacy.work-item.pharmacist-accept`
 with `forPayment: true`), so its bill line stays for the cashier and the next
 Dispense after payment goes through. A dispensing reversal moves no stock; the
-work item's line is cancelled ("Dispensing reversed") when the bill can lose
-it, else kept and marked `dispensingReversed` on the bill and the work item's
-`bill` (a refund is due). Own pharmacy
+work item's line is always cancelled ("Dispensing reversed"), unpaid, part
+paid or paid, so its unpaid balance is never asked for. What was collected
+beyond the bill's new total is the bill's `refundDueKobo` (the patient's money
+first) and `coverOverKobo` (waiver or HMO cover to cancel and record again);
+while a refund is due the work item's `bill` keeps `dispensingReversed: true`
+with `refundDueKobo` ("Refund due"). Own pharmacy
 work items (list and read) gain `bill` and `stock` when the facility uses
 billing (nothing otherwise, as before). Lab specimen collection answers 409
 `PAYMENT_REQUIRED` or `PAYMENT_PENDING_CHECK` with pay-before on for lab. The

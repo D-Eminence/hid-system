@@ -33,10 +33,16 @@
 --   8. hooks: an accepted priced prescription adds a line with its quantity,
 --      an unpriced code is counted, a dispensing takes stock expiry first,
 --      pay-before refuses an unpaid bill and never a deferred one, a reversal
---      moves no stock and takes its line off an unpaid bill or marks a paid
---      one for a refund, a lab work item adds its line and the collection
---      gate;
---   9. audit rows never hold a name, Health ID, reference or reason text.
+--      moves no stock and takes its line off the bill, unpaid or paid (what
+--      was paid for it is left as refund due), a lab work item adds its line
+--      and the collection gate;
+--   9. audit rows never hold a name, Health ID, reference or reason text;
+--  10. a reversal of a part-paid medicine (its unpaid balance is never asked
+--      for, the refund due is only what was collected beyond the bill, and
+--      pay-before lets the corrected medicine through once it is paid), of
+--      one partly covered by an HMO and of one partly waived (the patient's
+--      money is given back first; cover left over the bill is shown); an
+--      anonymous walk-in lab bill.
 --
 -- Each case records its outcome; the suite fails at the end listing every
 -- case whose outcome differs.
@@ -88,11 +94,12 @@ select gen_random_uuid(), ('b1620100-0000-4000-8000-0000000000' || lpad(n::text,
 from b_members;
 
 -- Patients: p1 standard (visit bill), p2 an unknown patient (ID-7), p3 arrives at triage 1, p4 at facility B,
--- p5 raised to triage 2 later, p6 a counter sale put on a Health ID.
+-- p5 raised to triage 2 later, p6 a counter sale put on a Health ID; p7-p9 the reversals of section 10.
 create temporary table b_patients (n integer primary key, hid text, first text, last text) on commit drop;
 insert into b_patients values
   (1, 'HID-BLAA22', 'Amaka', 'Billone'), (2, 'HID-BLAB22', 'Unknown', 'Patient'), (3, 'HID-BLAC22', 'Chioma', 'Billthree'),
-  (4, 'HID-BLAD22', 'Dele', 'Billfour'), (5, 'HID-BLAE22', 'Ebere', 'Billfive'), (6, 'HID-BLAF22', 'Funmi', 'Billsix');
+  (4, 'HID-BLAD22', 'Dele', 'Billfour'), (5, 'HID-BLAE22', 'Ebere', 'Billfive'), (6, 'HID-BLAF22', 'Funmi', 'Billsix'),
+  (7, 'HID-BLAG22', 'Gozie', 'Billseven'), (8, 'HID-BLAH22', 'Halima', 'Billeight'), (9, 'HID-BLAJ22', 'Ibrahim', 'Billnine');
 insert into identity.patients (id, hid_code, first_name, last_name, full_name, gender, dob, status, source_system)
 select ('b1620400-0000-4000-8000-0000000000' || lpad(n::text, 2, '0'))::uuid, hid, first, last, first || ' ' || last,
   'female', date '1990-01-01' + n, 'active', 'hid' from b_patients;
@@ -793,7 +800,7 @@ begin
   perform pg_temp.check_case('8 pay-before for lab refuses collection on an unpaid bill', 'HB409 PAYMENT_REQUIRED', answer);
 end $$;
 -- p1's third prescription (2 capsules) is accepted, the bill is paid in full, the medicine dispensed and then reversed:
--- the paid line cannot come off, so it stays, marked reversed, for billing staff to refund.
+-- the paid line comes off too, and what was paid for it is left on the bill as refund due.
 do $$ begin
   perform pg_temp.as_member(3, 'direct-care');
   insert into pharmacy.work_item_acceptances (work_item_id, patient_id, facility_id, accepted_by, accepted_by_membership_id,
@@ -823,15 +830,19 @@ do $$ begin
     'b1620000-0000-4000-8000-000000000002', 'reversed', 'b1620100-0000-4000-8000-000000000003', pg_temp.member(3),
     'Wrong strength picked', 'billing-reverse-key-003', repeat('0', 64), 'billing-suite-correlation');
 end $$;
-select pg_temp.check_case('8 the paid line stays on the paid bill, marked reversed', 'f/t/paid',
+select pg_temp.check_case('8 the paid line comes off the paid bill, marked reversed', 't/t/paid',
   (select format('%s/%s/%s', line.cancelled, line.dispensing_reversed_at is not null, bill.status)
      from commercial.bill_lines line join commercial.bills bill on bill.id = line.bill_id
     where line.work_item_id = 'b1620620-0000-4000-8000-000000000003'));
 select pg_temp.check_case('8 the bill shows billing staff the line was reversed', 'true',
   (select line->>'dispensingReversed' from jsonb_array_elements(commercial.bill_json(pg_temp.bill_of(1))->'lines') line
     where line->>'workItemId' = 'b1620620-0000-4000-8000-000000000003'));
-select pg_temp.check_case('8 so does the work item''s badge', 'true/paid',
-  (select format('%s/%s', bill->>'dispensingReversed', bill->>'status') from (select pg_temp.as_member(3)) s,
+select pg_temp.check_case('8 what was paid for it is the bill''s refund due, nothing is due', '30000/0/0',
+  (select format('%s/%s/%s', bill->>'refundDueKobo', bill->>'coverOverKobo', bill->>'dueKobo')
+     from (select commercial.bill_json(pg_temp.bill_of(1)) bill) b));
+select pg_temp.check_case('8 so does the work item''s badge', 'true/paid/30000',
+  (select format('%s/%s/%s', bill->>'dispensingReversed', bill->>'status', bill->>'refundDueKobo')
+     from (select pg_temp.as_member(3)) s,
      commercial.work_item_bills('pharmacy', array['b1620620-0000-4000-8000-000000000003'::uuid])));
 select pg_temp.check_case('8 the bill''s log has both reversals', 'dispensing-reversed:1,line-cancel:1',
   (select string_agg(kind || ':' || count, ',' order by kind) from (
@@ -862,6 +873,192 @@ select pg_temp.check_case('9 no name, Health ID, reference, approval code or rea
     where (action like 'commercial.%' or action like 'pharmacy.stock%' or action like 'pharmacy.sale%')
       and (details::text ~* 'billone|billsix|amaka|HID-BL|123456789012|TRF-0001|APP-778|hardship|wrong amount|fictional supplies|walk-in|dr test'
            or coalesce(reason, '') <> '')));
+
+-- 10. Reversals of a part-paid, HMO-covered or waived medicine; an anonymous walk-in lab bill.
+-- p7 (a visit), p8 and p9 (no visit: a pharmacy bill each). Prescriptions 4 (the wrong strength, 4 capsules) and 5 (the
+-- corrected medicine, 2 capsules) are p7's; 6 is p8's and 7 is p9's (2 capsules each).
+set local session_replication_role = replica;
+insert into ehr.encounters (id, patient_id, facility_id, created_by, created_by_membership_id, encounter_type, status,
+  started_at)
+select ('b1620600-0000-4000-8000-00000000000' || n)::uuid, pg_temp.patient(n), 'b1620000-0000-4000-8000-000000000002',
+  'b1620100-0000-4000-8000-000000000004', pg_temp.member(4), 'ambulatory', 'in_progress', clock_timestamp()
+from generate_series(7, 9) n;
+insert into ehr.prescriptions (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  medication_code_system, medication_code, medication_display, frequency, instructions, status, quantity_to_dispense,
+  quantity_unit)
+select ('b1620610-0000-4000-8000-00000000000' || n)::uuid, ('b1620600-0000-4000-8000-00000000000' || p)::uuid,
+  pg_temp.patient(p), 'b1620000-0000-4000-8000-000000000002', 'b1620100-0000-4000-8000-000000000004', pg_temp.member(4),
+  'HID-MED', 'MED-00042', 'Amoxicillin 500 mg capsule', 'twice a day', 'After food', 'active', q, 'Capsule'
+from (values (4, 7, 4), (5, 7, 2), (6, 8, 2), (7, 9, 2)) listed(n, p, q);
+set local session_replication_role = origin;
+select set_config('app.facility_id', 'b1620000-0000-4000-8000-000000000002', true),
+  set_config('app.correlation_id', 'billing-suite-fixture', true);
+insert into pharmacy.work_items (id, patient_id, facility_id, ordering_facility_id, source_ehr_prescription_id,
+  source_ehr_prescription_version, source_encounter_id, source_status, status, medication_code_system, medication_code,
+  medication_display, frequency, instructions, prescribed_by, prescribed_at, accepted_by, accepted_by_membership_id,
+  accepted_at, acceptance_reason, idempotency_key, request_sha256, correlation_id)
+select ('b1620620-0000-4000-8000-00000000000' || n)::uuid, pg_temp.patient(p), 'b1620000-0000-4000-8000-000000000002',
+  'b1620000-0000-4000-8000-000000000002', ('b1620610-0000-4000-8000-00000000000' || n)::uuid, 1,
+  ('b1620600-0000-4000-8000-00000000000' || p)::uuid, 'active', 'accepted', 'HID-MED', 'MED-00042',
+  'Amoxicillin 500 mg capsule', 'twice a day', 'As directed', 'b1620100-0000-4000-8000-000000000004', clock_timestamp(),
+  'b1620100-0000-4000-8000-000000000004', pg_temp.member(4), clock_timestamp(),
+  'Sent automatically when the prescription was activated', 'own-pharmacy-send:billing-' || n, repeat('0', 64),
+  'billing-suite-correlation'
+from (values (4, 7), (5, 7), (6, 8), (7, 9)) listed(n, p);
+-- Accept, dispense and reverse a work item as the pharmacist (the live tables' validators are off, as in section 8).
+create function pg_temp.accept(n integer, patient integer) returns void language plpgsql as $f$
+begin
+  perform pg_temp.as_member(3, 'direct-care');
+  insert into pharmacy.work_item_acceptances (work_item_id, patient_id, facility_id, accepted_by, accepted_by_membership_id,
+    accepted_with, idempotency_key, request_sha256, correlation_id)
+  values (('b1620620-0000-4000-8000-00000000000' || n)::uuid, pg_temp.patient(patient), 'b1620000-0000-4000-8000-000000000002',
+    'b1620100-0000-4000-8000-000000000003', pg_temp.member(3), 'accept', 'billing-accept-key-100' || n, repeat('0', 64),
+    'billing-suite-correlation');
+end
+$f$;
+create function pg_temp.dispense(n integer, patient integer, quantity integer) returns text language plpgsql as $f$
+begin
+  perform pg_temp.as_member(3, 'direct-care');
+  insert into pharmacy.dispensings (id, work_item_id, work_item_version, patient_id, facility_id, medication_code_system,
+    medication_code, medication_display, quantity_dispensed, quantity_unit, status, dispensed_by, dispensed_by_membership_id,
+    reason, idempotency_key, request_sha256, correlation_id)
+  values (('b1620640-0000-4000-8000-00000000000' || n)::uuid, ('b1620620-0000-4000-8000-00000000000' || n)::uuid, 1,
+    pg_temp.patient(patient), 'b1620000-0000-4000-8000-000000000002', 'HID-MED', 'MED-00042', 'Amoxicillin 500 mg capsule',
+    quantity, 'capsule', 'dispensed', 'b1620100-0000-4000-8000-000000000003', pg_temp.member(3), 'Dispensed as prescribed',
+    'billing-dispense-key-1' || n, repeat('0', 64), 'billing-suite-correlation');
+  return 'dispensed';
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end
+$f$;
+create function pg_temp.reverse(n integer, patient integer) returns void language plpgsql as $f$
+begin
+  perform pg_temp.as_member(3, 'direct-care');
+  insert into pharmacy.dispensing_reversals (dispensing_id, dispensing_version, work_item_id, patient_id, facility_id,
+    status, reversed_by, reversed_by_membership_id, reason, idempotency_key, request_sha256, correlation_id)
+  values (('b1620640-0000-4000-8000-00000000000' || n)::uuid, 1, ('b1620620-0000-4000-8000-00000000000' || n)::uuid,
+    pg_temp.patient(patient), 'b1620000-0000-4000-8000-000000000002', 'reversed', 'b1620100-0000-4000-8000-000000000003',
+    pg_temp.member(3), 'Wrong strength picked', 'billing-reverse-key-10' || n, repeat('0', 64), 'billing-suite-correlation');
+end
+$f$;
+-- A bill's money in one string: total/paid/HMO covered/waived/due/refund due/cover over/status.
+create function pg_temp.money(bill uuid) returns text language sql as $f$
+  select format('%s/%s/%s/%s/%s/%s/%s/%s', b->>'total_kobo', b->>'paid_kobo', b->>'hmo_covered_kobo', b->>'waived_kobo',
+    b->>'due_kobo', b->>'refund_due_kobo', b->>'cover_over_kobo', b->>'status')
+    from (select to_jsonb(row_value) b from commercial.bills row_value where row_value.id = bill) x
+$f$;
+create function pg_temp.badge(n integer) returns text language sql as $f$
+  select coalesce(string_agg(format('%s/%s/%s', bill->>'dispensingReversed', bill->>'refundDueKobo', bill->>'dueKobo'), ','),
+    'no badge')
+    from (select pg_temp.as_member(3)) s,
+         commercial.work_item_bills('pharmacy', array[('b1620620-0000-4000-8000-00000000000' || n)::uuid])
+$f$;
+select pg_temp.check_case('10 more amoxicillin is received', 'ok',
+  pg_temp.pharm('rcv10', 3, format($s$select pharmacy.stock_receive(jsonb_build_object('lines', jsonb_build_array(
+      jsonb_build_object('catalogueItemId', '%1$s', 'batchNumber', 'NEW', 'expiresOn', (clock_timestamp() at time zone 'Africa/Lagos')::date + 200, 'quantity', 20))), 'kbillingstock00001001', repeat('a', 64))$s$, pg_temp.ids('amox'))));
+-- Pay-before is off while the medicines are given out (a part-paid bill can then reach a dispensing).
+update commercial.payment_settings set pay_before_pharmacy = false where facility_id = 'b1620000-0000-4000-8000-000000000002';
+
+-- p7: the consultation is paid; the wrong strength (4 capsules, 60000) is part paid (20000), given and reversed.
+select pg_temp.check_in(5, 7);
+select pg_temp.check_case('10 p7''s consultation is paid', 'ok',
+  pg_temp.ehr('x', 3, format($s$select commercial.payment_record('%s', '{"method":"cash","amountKobo":400000}', null, 'kbillingpay0000001001', repeat('b', 64))$s$, pg_temp.bill_of(7))));
+select pg_temp.accept(4, 7);
+select pg_temp.check_case('10 p7''s wrong strength is on the visit bill', 'pharmacy/4/60000/t',
+  (select format('%s/%s/%s/%s', origin, quantity, total_kobo, bill_id = pg_temp.bill_of(7)) from commercial.bill_lines
+    where work_item_id = 'b1620620-0000-4000-8000-000000000004'));
+select pg_temp.check_case('10 p7 pays 20000 towards it', 'ok',
+  pg_temp.ehr('x', 3, format($s$select commercial.payment_record('%s', '{"method":"cash","amountKobo":20000}', null, 'kbillingpay0000001002', repeat('c', 64))$s$, pg_temp.bill_of(7))));
+select pg_temp.check_case('10 the part-paid medicine is given', 'dispensed', pg_temp.dispense(4, 7, 4));
+select pg_temp.reverse(4, 7);
+select pg_temp.check_case('10 the part-paid line comes off the bill, marked reversed', 't/Dispensing reversed/t',
+  (select format('%s/%s/%s', cancelled, cancel_reason, dispensing_reversed_at is not null) from commercial.bill_lines
+    where work_item_id = 'b1620620-0000-4000-8000-000000000004'));
+select pg_temp.check_case('10 nothing is asked for it; only the 20000 collected for it is refund due',
+  '400000/420000/0/0/0/20000/0/paid', pg_temp.money(pg_temp.bill_of(7)));
+select pg_temp.check_case('10 the bill read says the same', '0/20000/0',
+  (select format('%s/%s/%s', bill->>'dueKobo', bill->>'refundDueKobo', bill->>'coverOverKobo')
+     from (select commercial.bill_json(pg_temp.bill_of(7)) bill) b));
+select pg_temp.check_case('10 the work item''s badge: refund due, nothing due', 'true/20000/0', pg_temp.badge(4));
+select pg_temp.check_case('10 the bill''s log records the refund due', '20000/0',
+  (select format('%s/%s', details->>'refundDueKobo', details->>'coverOverKobo') from commercial.bill_events
+    where bill_id = pg_temp.bill_of(7) and kind = 'dispensing-reversed'));
+select pg_temp.check_case('10 no more money can be taken on it', 'HB409 OVERPAYMENT',
+  pg_temp.ehr('x', 3, format($s$select commercial.payment_record('%s', '{"method":"cash","amountKobo":100}', null, 'kbillingpay0000001003', repeat('d', 64))$s$, pg_temp.bill_of(7))));
+select pg_temp.check_case('10 p7''s totals agree', 'true', (select commercial.bill_totals_agree(pg_temp.bill_of(7))::text));
+-- The corrected medicine (2 capsules, 30000) with pay-before on: the 20000 over is used first, so 10000 is due.
+update commercial.payment_settings set pay_before_pharmacy = true where facility_id = 'b1620000-0000-4000-8000-000000000002';
+select pg_temp.accept(5, 7);
+select pg_temp.check_case('10 the corrected medicine asks only what the money over does not cover',
+  '430000/420000/0/0/10000/0/0/part_paid', pg_temp.money(pg_temp.bill_of(7)));
+select pg_temp.check_case('10 pay-before holds the corrected medicine for its own 10000 only', 'HB409 PAYMENT_REQUIRED',
+  pg_temp.dispense(5, 7, 2));
+select pg_temp.check_case('10 p7 pays the 10000', 'ok',
+  pg_temp.ehr('x', 3, format($s$select commercial.payment_record('%s', '{"method":"cash","amountKobo":10000}', null, 'kbillingpay0000001004', repeat('e', 64))$s$, pg_temp.bill_of(7))));
+select pg_temp.check_case('10 pay-before then lets the corrected medicine through', 'dispensed', pg_temp.dispense(5, 7, 2));
+select pg_temp.check_case('10 the reversed item''s badge goes once nothing is to be refunded', 'no badge', pg_temp.badge(4));
+update commercial.payment_settings set pay_before_pharmacy = false where facility_id = 'b1620000-0000-4000-8000-000000000002';
+
+-- p8 (no visit: its own pharmacy bill): 30000, the HMO covers 20000 and p8 pays 5000; given and reversed.
+select pg_temp.accept(6, 8);
+select pg_temp.check_case('10 p8''s medicine is on a pharmacy bill', 'pharmacy/30000',
+  (select format('%s/%s', source, total_kobo) from commercial.bills where id = pg_temp.bill_of(8)));
+select pg_temp.check_case('10 the HMO covers 20000', 'ok',
+  pg_temp.ehr('x', 2, format($s$select commercial.payment_record('%s', '{"method":"hmo","amountKobo":20000,"hmoId":"%s","reference":"APP-1001"}', null, 'kbillingpay0000001005', repeat('f', 64))$s$,
+    pg_temp.bill_of(8), pg_temp.v('s1')->'hmos'->0->>'id')));
+select pg_temp.check_case('10 p8 pays 5000', 'ok',
+  pg_temp.ehr('x', 3, format($s$select commercial.payment_record('%s', '{"method":"cash","amountKobo":5000}', null, 'kbillingpay0000001006', repeat('1', 64))$s$, pg_temp.bill_of(8))));
+select pg_temp.check_case('10 p8''s medicine is given', 'dispensed', pg_temp.dispense(6, 8, 2));
+select pg_temp.reverse(6, 8);
+select pg_temp.check_case('10 HMO part: the 5000 unpaid is dropped, p8''s 5000 is refund due, the HMO''s 20000 is cover over the bill',
+  '0/5000/20000/0/0/5000/20000/paid', pg_temp.money(pg_temp.bill_of(8)));
+select pg_temp.check_case('10 p8''s badge shows only the patient''s refund', 'true/5000/0', pg_temp.badge(6));
+select pg_temp.check_case('10 another officer cancels the HMO cover', 'ok',
+  pg_temp.ehr('x', 9, format($s$select commercial.hmo_cover_cancel('%s', '%s', 'Medicine not given', null, 'kbillingcover00001001', repeat('2', 64))$s$,
+    pg_temp.bill_of(8), (select id from commercial.hmo_covers where bill_id = pg_temp.bill_of(8)))));
+select pg_temp.check_case('10 no cover over the bill now; the refund is unchanged', '0/5000/0/0/0/5000/0/paid',
+  pg_temp.money(pg_temp.bill_of(8)));
+select pg_temp.check_case('10 the 5000 is given back (payment cancelled as a refund)', 'ok',
+  pg_temp.ehr('x', 9, format($s$select commercial.payment_void('%s', '%s', 'Refund: medicine not given', null, null, 'kbillingvoid000001001', repeat('3', 64))$s$,
+    pg_temp.bill_of(8), (select id from commercial.payments where bill_id = pg_temp.bill_of(8) and method = 'cash'))));
+select pg_temp.check_case('10 p8''s bill then has nothing on it and is void', '0/0/0/0/0/0/0/void',
+  pg_temp.money(pg_temp.bill_of(8)));
+select pg_temp.check_case('10 and the badge goes', 'no badge', pg_temp.badge(6));
+
+-- p9 (its own pharmacy bill): 30000, 10000 waived and 20000 paid in full; given and reversed.
+select pg_temp.accept(7, 9);
+select pg_temp.check_case('10 the officer waives 10000 for p9', 'ok',
+  pg_temp.ehr('x', 2, format($s$select commercial.payment_record('%s', '{"method":"waiver","amountKobo":10000,"reason":"Hardship case"}', null, 'kbillingpay0000001007', repeat('4', 64))$s$, pg_temp.bill_of(9))));
+select pg_temp.check_case('10 p9 pays the 20000 left', 'ok',
+  pg_temp.ehr('x', 3, format($s$select commercial.payment_record('%s', '{"method":"cash","amountKobo":20000}', null, 'kbillingpay0000001008', repeat('5', 64))$s$, pg_temp.bill_of(9))));
+select pg_temp.check_case('10 p9''s medicine is given', 'dispensed', pg_temp.dispense(7, 9, 2));
+select pg_temp.reverse(7, 9);
+select pg_temp.check_case('10 waived part: p9''s 20000 is refund due, the 10000 waiver is cover over the bill',
+  '0/20000/0/10000/0/20000/10000/paid', pg_temp.money(pg_temp.bill_of(9)));
+select pg_temp.check_case('10 p9''s badge', 'true/20000/0', pg_temp.badge(7));
+
+-- An anonymous walk-in lab bill (the contract's { source: lab, patient: { anonymous } }): a bill, not a counter sale.
+select pg_temp.check_case('10 an anonymous lab bill is made', 'ok',
+  pg_temp.ehr('labwalk', 1, format($s$select commercial.bill_create('{"source":"lab","patient":{"anonymous":true,"name":"Lab walk-in"},"lines":[{"catalogueItemId":"%s","quantity":1}]}', 'kbillinglabwalk000001', repeat('6', 64))$s$, pg_temp.ids('fbc'))));
+select pg_temp.check_case('10 it is a lab bill with the name only, not a counter sale', 'lab/false/null/Lab walk-in/unpaid/300000',
+  (select format('%s/%s/%s/%s/%s/%s', b->>'source', b->>'counter', coalesce(b->>'patient', 'null'), b->>'displayName',
+     b->>'status', b->>'totalKobo') from (select pg_temp.v('labwalk')->'bill' b) x));
+select pg_temp.check_case('10 an anonymous lab bill with no name', 'ok',
+  pg_temp.ehr('labwalk2', 1, format($s$select commercial.bill_create('{"source":"lab","patient":{"anonymous":true},"lines":[{"catalogueItemId":"%s","quantity":1}]}', 'kbillinglabwalk000002', repeat('7', 64))$s$, pg_temp.ids('fbc'))));
+select pg_temp.check_case('10 is shown as a walk-in', 'Walk-in', (select pg_temp.v('labwalk2')->'bill'->>'displayName'));
+select pg_temp.check_case('10 it takes payment', 'ok',
+  pg_temp.ehr('x', 3, format($s$select commercial.payment_record('%s', '{"method":"cash","amountKobo":300000}', null, 'kbillingpay0000001009', repeat('8', 64))$s$, pg_temp.v('labwalk')->'bill'->>'id')));
+select pg_temp.check_case('10 it is not put on a Health ID (counter sales only)', 'HB409 BILL_NOT_A_COUNTER_SALE',
+  pg_temp.ehr('x', 1, format($s$select commercial.bill_attach_patient('%s', 'HID-BLAF22', 'kbillinglabwalk000003', repeat('9', 64))$s$,
+    pg_temp.v('labwalk')->'bill'->>'id')));
+select pg_temp.check_case('10 there is no hand-over for it', 'HB409 BILL_NOT_A_COUNTER_SALE',
+  pg_temp.pharm('x', 3, format($s$select pharmacy.sale_hand_over('%s', null, 'kbillinglabwalk000004', repeat('a', 64))$s$,
+    pg_temp.v('labwalk')->'bill'->>'id')));
+select pg_temp.check_case('10 an anonymous visit bill is still refused', 'HB400 VALIDATION_FAILED',
+  pg_temp.ehr('x', 1, format($s$select commercial.bill_create('{"source":"visit","patient":{"anonymous":true},"lines":[{"catalogueItemId":"%s","quantity":1}]}', 'kbillinglabwalk000005', repeat('b', 64))$s$, pg_temp.ids('fbc'))));
+select pg_temp.check_case('10 the stock ledger still agrees', 'true',
+  (select pharmacy.stock_ledger_agrees('b1620000-0000-4000-8000-000000000002')::text));
+select pg_temp.check_case('10 every bill''s totals agree at the end', '0', pg_temp.agree());
 
 do $$
 declare

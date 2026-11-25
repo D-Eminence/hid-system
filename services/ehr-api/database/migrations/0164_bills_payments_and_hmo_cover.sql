@@ -27,15 +27,22 @@
 --    prescriber a counter sale of a prescription-only medicine was sold on
 --    (0166 writes it; a counter sale only). A bill with live lines and
 --    nothing left to pay is paid, even when every line is free (a sale of
---    free programme medicines is handed over like any other).
+--    free programme medicines is handed over like any other). An anonymous
+--    bill is a pharmacy counter sale or a walk-in lab bill (the lab keeps
+--    the name only; no hand-over, never put on a Health ID). What a
+--    dispensing reversal left collected beyond the bill's total is kept as
+--    refund due (the patient's money, given back first) and cover over the
+--    bill (waiver or HMO cover still to be cancelled and recorded again);
+--    such a bill has nothing due and is paid.
 -- T2 commercial.bill_lines: the item, its name and kind as they were, a
 --    whole quantity 1-10,000, the unit price in kobo at the time it was
 --    added (a later price change never changes it), the origin (check_in,
 --    pharmacy, lab, counter, manual), the work item (unique while not
 --    cancelled, so a work item gets at most one automatic line), a "check
 --    quantity" mark, cancellation with reason and member, and when the
---    work item's dispensing was reversed (0167 cancels the line then, or
---    marks it for a refund when it was paid).
+--    work item's dispensing was reversed (0167 then always cancels the line,
+--    so its unpaid balance is never asked for, and what was collected for
+--    it is left as the bill's refund due).
 -- T3 commercial.payments: cash, pos, transfer, waiver, online; status
 --    recorded, pending_check (a transfer until a second person confirms it)
 --    or confirmed; a receipt number unique per facility; the till day it was
@@ -108,23 +115,23 @@ declare
        and namespace.nspname <> 'migration');
   made constant jsonb := '{
     "commercial.bill_attach_patient(uuid,text,text,text)": "b0db64981618b4d688068e0efe2d32d4",
-    "commercial.bill_create(jsonb,text,text)": "fe0b1c3dee1a2afe5d1192023fdfc5bb",
+    "commercial.bill_create(jsonb,text,text)": "665dc20070909425d73c65a2825e46b2",
     "commercial.bill_defer(uuid,text,text,text,text)": "94ec437e9660a4702de68ff80bd0edd7",
     "commercial.bill_defer_put(uuid,text,text,text,uuid)": "78022498b23e3b609c5518b87b72b77f",
     "commercial.bill_event(uuid,uuid,text,uuid,jsonb)": "96ab26ee8e6ef1706820d0fb8d2af7ba",
     "commercial.bill_for_work(uuid,uuid,text)": "ef364a4d5104462ccbdca575302b55a4",
     "commercial.bill_get(uuid)": "1cb53c93da1ed4f63599298cccdade93",
-    "commercial.bill_json(uuid)": "2d759b2f3e1736991c351b0fe0169d9a",
+    "commercial.bill_json(uuid)": "9ae0582dc8a30c815c02aa6c0cd0aee8",
     "commercial.bill_line_add(uuid,jsonb,bigint,text,text)": "8187254afca47cbd8a6801d1a11a1791",
     "commercial.bill_line_cancel(uuid,uuid,text,bigint,text,text)": "4f5688921056a3896a28d28242d7ee53",
     "commercial.bill_line_put(uuid,uuid,integer,text,text,uuid,boolean,text,uuid,text,text)": "3bd0607d682ebe97f3921303ed5bd8fc",
     "commercial.bill_list(text,text,text,date,integer)": "2133b8cbb626092c193a0356ea73b272",
     "commercial.bill_lock(uuid,uuid,bigint)": "10056a5864f81b6310e3acd35dfad566",
     "commercial.bill_new(uuid,text,uuid,uuid,text,boolean,uuid,text,text)": "8f3f64785861919b6f603d8ba53d48fa",
-    "commercial.bill_recompute(uuid)": "a343bb9089c0dade20cf8bc4b1d7b813",
+    "commercial.bill_recompute(uuid)": "628ee7944cccea79e71e6ea7f8fbf978",
     "commercial.bill_summary(date)": "8d3315e77d0def44e712b497e33da2b4",
     "commercial.bill_sums(uuid)": "c6fd7055dfa3c85b0dfe77c285484fcd",
-    "commercial.bill_totals_agree(uuid)": "58e3a323ea3adfb94631e0e6f6816d1d",
+    "commercial.bill_totals_agree(uuid)": "ec44041889c9f4c4a7fdd6096cd01624",
     "commercial.bill_void(uuid,text,bigint,text,text)": "ad03076e11f20979dacb90883c92af7d",
     "commercial.hmo_cover_cancel(uuid,uuid,text,bigint,text,text)": "d5dd9af97e8c38b3f3d54bee53792c98",
     "commercial.hmo_receivables(uuid,integer)": "5032198e84267e549604f31c35239fd4",
@@ -132,7 +139,7 @@ declare
     "commercial.patient_card(uuid)": "b51e6a898739b4219696ccedca1877ec",
     "commercial.resolve_health_id(text,text)": "99e6d5e1a4c27dea25f9b2cb7799eb7e",
     "commercial.staff_source(uuid)": "df47a040ca9124981981cccb083bb8f1",
-    "commercial.work_item_bills(text,uuid[])": "c5f0ce2094e57bb4afff0a68fb93ab4d"}';
+    "commercial.work_item_bills(text,uuid[])": "7ca3d58ca7674012c51818d6703febd5"}';
   present integer;
   differing text;
 begin
@@ -203,6 +210,8 @@ create table commercial.bills (
   waived_kobo bigint not null default 0 check (waived_kobo >= 0),
   hmo_covered_kobo bigint not null default 0 check (hmo_covered_kobo >= 0),
   due_kobo bigint not null default 0 check (due_kobo >= 0),
+  refund_due_kobo bigint not null default 0 check (refund_due_kobo >= 0),
+  cover_over_kobo bigint not null default 0 check (cover_over_kobo >= 0),
   deferred_reason text check (deferred_reason in ('emergency', 'inpatient', 'unknown_patient')),
   deferred_by text check (deferred_by in ('system', 'staff')),
   deferred_at timestamptz,
@@ -225,10 +234,16 @@ create table commercial.bills (
   unique (id, facility_id),
   constraint bills_due_ck check (due_kobo = greatest(total_kobo - paid_kobo - pending_check_kobo - waived_kobo
     - hmo_covered_kobo, 0)),
+  -- Collected beyond the total (only after a dispensing reversal): the patient's money first, then cover.
+  constraint bills_over_ck check (
+    refund_due_kobo = least(greatest(paid_kobo + pending_check_kobo + waived_kobo + hmo_covered_kobo - total_kobo, 0),
+      paid_kobo + pending_check_kobo)
+    and cover_over_kobo = greatest(paid_kobo + pending_check_kobo + waived_kobo + hmo_covered_kobo - total_kobo, 0)
+      - refund_due_kobo),
   constraint bills_source_ck check ((source = 'visit') = (visit_queue_entry_id is not null)),
   constraint bills_anonymous_ck check (patient_id is null or anonymous_name is null),
   constraint bills_counter_ck check (not counter or (source = 'pharmacy' and visit_queue_entry_id is null)),
-  constraint bills_anonymous_counter_ck check (patient_id is not null or counter),
+  constraint bills_anonymous_counter_ck check (patient_id is not null or counter or source = 'lab'),
   constraint bills_outside_ck check (outside_prescriber_name is null or counter),
   constraint bills_deferred_ck check ((deferred_reason is null) = (deferred_by is null)
     and (deferred_reason is null) = (deferred_at is null)),
@@ -428,7 +443,8 @@ as $$
   select jsonb_build_object(
     'id', bill.id, 'number', bill.number, 'source', bill.source, 'status', bill.status, 'counter', bill.counter,
     'patient', case when bill.patient_id is null then null else commercial.patient_card(bill.patient_id) end,
-    'displayName', case when bill.patient_id is null then coalesce(bill.anonymous_name, 'Counter sale')
+    'displayName', case when bill.patient_id is null
+                        then coalesce(bill.anonymous_name, case when bill.counter then 'Counter sale' else 'Walk-in' end)
                         else (select patient.full_name from identity.patients patient where patient.id = bill.patient_id) end,
     'visit', case when bill.visit_queue_entry_id is null then null
                   else (select jsonb_build_object('visitQueueEntryId', entry.id, 'queueDay', entry.queue_day)
@@ -442,6 +458,7 @@ as $$
               from commercial.bill_lines line where line.bill_id = bill.id), '[]'::jsonb),
     'totalKobo', bill.total_kobo, 'paidKobo', bill.paid_kobo, 'waivedKobo', bill.waived_kobo,
     'hmoCoveredKobo', bill.hmo_covered_kobo, 'pendingCheckKobo', bill.pending_check_kobo, 'dueKobo', bill.due_kobo,
+    'refundDueKobo', bill.refund_due_kobo, 'coverOverKobo', bill.cover_over_kobo,
     'payments', coalesce((select jsonb_agg(jsonb_build_object('id', payment.id, 'method', payment.method,
                 'amountKobo', payment.amount_kobo, 'reference', payment.reference, 'hmoId', null,
                 'waivedBy', case when payment.method = 'waiver' then commercial.member_name(payment.received_by_membership_id) end,
@@ -507,31 +524,38 @@ declare
   sums record;
   bill commercial.bills%rowtype;
   due bigint;
+  over bigint;
+  refund bigint;
   status_value text;
 begin
   select * into sums from commercial.bill_sums(requested_bill);
   select bill_row.* into bill from commercial.bills bill_row where bill_row.id = requested_bill;
   due := greatest(sums.total_kobo - sums.paid_kobo - sums.pending_check_kobo - sums.waived_kobo - sums.hmo_covered_kobo, 0);
+  -- Collected beyond the total (a dispensing reversal took a line off): the patient's money is given back first.
+  over := greatest(sums.paid_kobo + sums.pending_check_kobo + sums.waived_kobo + sums.hmo_covered_kobo - sums.total_kobo, 0);
+  refund := least(over, sums.paid_kobo + sums.pending_check_kobo);
   status_value := case
     when bill.voided_at is not null then 'void'
     when sums.all_lines > 0 and sums.live_lines = 0 and sums.paid_kobo + sums.pending_check_kobo + sums.waived_kobo
          + sums.hmo_covered_kobo = 0 then 'void'
     when bill.deferred_reason is not null and due > 0 then 'deferred'
     -- Nothing left to pay on live lines is paid, free lines too (a sale of
-    -- free programme medicines has nothing to take and is handed over).
-    when due = 0 and sums.live_lines > 0 then 'paid'
+    -- free programme medicines has nothing to take and is handed over); so
+    -- is a bill whose lines a reversal took off after money was taken.
+    when due = 0 and (sums.live_lines > 0 or over > 0) then 'paid'
     when sums.paid_kobo + sums.pending_check_kobo + sums.waived_kobo + sums.hmo_covered_kobo > 0 then 'part_paid'
     else 'unpaid' end;
   update commercial.bills bill_row
      set total_kobo = sums.total_kobo, paid_kobo = sums.paid_kobo, pending_check_kobo = sums.pending_check_kobo,
          waived_kobo = sums.waived_kobo, hmo_covered_kobo = sums.hmo_covered_kobo, due_kobo = due,
-         status = status_value, row_version = bill_row.row_version + 1, updated_at = clock_timestamp()
+         refund_due_kobo = refund, cover_over_kobo = over - refund, status = status_value, row_version = bill_row.row_version + 1, updated_at = clock_timestamp()
    where bill_row.id = requested_bill;
 end
 $$;
 
 -- Whether a bill's kept totals and status agree with its lines, payments and
--- covers (the tests and the rehearsal call it after every command).
+-- covers (the tests and the rehearsal call it after every command). More
+-- collected than the total only after a dispensing reversal took a line off.
 create function commercial.bill_totals_agree(requested_bill uuid)
 returns boolean
 language sql
@@ -542,7 +566,13 @@ as $$
          = (sums.total_kobo, sums.paid_kobo, sums.pending_check_kobo, sums.waived_kobo, sums.hmo_covered_kobo)
      and bill.due_kobo = greatest(sums.total_kobo - sums.paid_kobo - sums.pending_check_kobo - sums.waived_kobo
                                   - sums.hmo_covered_kobo, 0)
-     and bill.paid_kobo + bill.pending_check_kobo + bill.waived_kobo + bill.hmo_covered_kobo <= bill.total_kobo
+     and (bill.paid_kobo + bill.pending_check_kobo + bill.waived_kobo + bill.hmo_covered_kobo <= bill.total_kobo
+          or exists (select 1 from commercial.bill_lines line where line.bill_id = bill.id and line.cancelled
+                      and line.dispensing_reversed_at is not null))
+     and bill.refund_due_kobo = least(greatest(sums.paid_kobo + sums.pending_check_kobo + sums.waived_kobo
+           + sums.hmo_covered_kobo - sums.total_kobo, 0), sums.paid_kobo + sums.pending_check_kobo)
+     and bill.cover_over_kobo = greatest(sums.paid_kobo + sums.pending_check_kobo + sums.waived_kobo
+           + sums.hmo_covered_kobo - sums.total_kobo, 0) - bill.refund_due_kobo
     from commercial.bills bill, commercial.bill_sums(bill.id) sums
    where bill.id = requested_bill
 $$;
@@ -954,12 +984,9 @@ begin
        or char_length(coalesce(patient_input->>'name', '')) > 120 then
       raise exception using errcode = 'HB400', message = 'VALIDATION_FAILED', detail = '{"field": "patient"}';
     end if;
-    bill_id := commercial.bill_new(actor.facility_id, source_value, null, null, patient_input->>'name', true,
-      actor.membership_id, requested_key, requested_sha256);
-    if source_value = 'lab' then
-      -- A lab sale is not a counter sale (no hand-over); it keeps the name only.
-      update commercial.bills bill set counter = false where bill.id = bill_id;
-    end if;
+    -- An anonymous pharmacy bill is a counter sale; a walk-in lab bill is not (no hand-over) and keeps the name only.
+    bill_id := commercial.bill_new(actor.facility_id, source_value, null, null, patient_input->>'name',
+      source_value = 'pharmacy', actor.membership_id, requested_key, requested_sha256);
   else
     raise exception using errcode = 'HB400', message = 'VALIDATION_FAILED', detail = '{"field": "patient"}';
   end if;
@@ -1347,10 +1374,10 @@ end
 $$;
 
 -- The bill badge of the caller's own work items (pharmacy or lab): the bill,
--- its status, what is due and its latest receipt, and whether the work
--- item's dispensing was reversed on a line that could not come off the bill
--- (paid: a refund is due). A work item with no line (or a cancelled one) has
--- no badge ("Not billed").
+-- its status, what is due and its latest receipt, and, for a work item whose
+-- dispensing was reversed (its line is taken off), the bill's refund due
+-- while there is one. A work item with no live line has no badge ("Not
+-- billed"), except a reversed one whose bill has a refund due ("Refund due").
 create function commercial.work_item_bills(requested_kind text, requested_ids uuid[])
 returns table (work_item_id uuid, bill jsonb)
 language plpgsql
@@ -1373,6 +1400,7 @@ begin
            jsonb_build_object('billId', bill_row.id, 'status', bill_row.status, 'dueKobo', bill_row.due_kobo,
              'pendingCheckKobo', bill_row.pending_check_kobo,
              'dispensingReversed', line.dispensing_reversed_at is not null,
+             'refundDueKobo', bill_row.refund_due_kobo,
              'deferred', case when bill_row.deferred_reason is null then null else bill_row.deferred_reason end,
              'receiptNumber', (select payment.receipt_number from commercial.payments payment
                                 where payment.bill_id = bill_row.id and payment.voided_at is null
@@ -1381,7 +1409,15 @@ begin
       from commercial.bill_lines line
       join commercial.bills bill_row on bill_row.id = line.bill_id
      where line.facility_id = facility_value and line.work_item_kind = requested_kind
-       and line.work_item_id = any (requested_ids) and not line.cancelled;
+       and line.work_item_id = any (requested_ids)
+       and (not line.cancelled
+            or (line.dispensing_reversed_at is not null and bill_row.refund_due_kobo > 0 and bill_row.voided_at is null
+                and not exists (select 1 from commercial.bill_lines live where live.work_item_kind = line.work_item_kind
+                                 and live.work_item_id = line.work_item_id and not live.cancelled)
+                and line.id = (select latest.id from commercial.bill_lines latest
+                                where latest.work_item_kind = line.work_item_kind and latest.work_item_id = line.work_item_id
+                                  and latest.dispensing_reversed_at is not null
+                                order by latest.created_at desc, latest.id desc limit 1)));
 end
 $$;
 
@@ -1436,23 +1472,23 @@ do $post$
 declare
   made constant jsonb := '{
     "commercial.bill_attach_patient(uuid,text,text,text)": "b0db64981618b4d688068e0efe2d32d4",
-    "commercial.bill_create(jsonb,text,text)": "fe0b1c3dee1a2afe5d1192023fdfc5bb",
+    "commercial.bill_create(jsonb,text,text)": "665dc20070909425d73c65a2825e46b2",
     "commercial.bill_defer(uuid,text,text,text,text)": "94ec437e9660a4702de68ff80bd0edd7",
     "commercial.bill_defer_put(uuid,text,text,text,uuid)": "78022498b23e3b609c5518b87b72b77f",
     "commercial.bill_event(uuid,uuid,text,uuid,jsonb)": "96ab26ee8e6ef1706820d0fb8d2af7ba",
     "commercial.bill_for_work(uuid,uuid,text)": "ef364a4d5104462ccbdca575302b55a4",
     "commercial.bill_get(uuid)": "1cb53c93da1ed4f63599298cccdade93",
-    "commercial.bill_json(uuid)": "2d759b2f3e1736991c351b0fe0169d9a",
+    "commercial.bill_json(uuid)": "9ae0582dc8a30c815c02aa6c0cd0aee8",
     "commercial.bill_line_add(uuid,jsonb,bigint,text,text)": "8187254afca47cbd8a6801d1a11a1791",
     "commercial.bill_line_cancel(uuid,uuid,text,bigint,text,text)": "4f5688921056a3896a28d28242d7ee53",
     "commercial.bill_line_put(uuid,uuid,integer,text,text,uuid,boolean,text,uuid,text,text)": "3bd0607d682ebe97f3921303ed5bd8fc",
     "commercial.bill_list(text,text,text,date,integer)": "2133b8cbb626092c193a0356ea73b272",
     "commercial.bill_lock(uuid,uuid,bigint)": "10056a5864f81b6310e3acd35dfad566",
     "commercial.bill_new(uuid,text,uuid,uuid,text,boolean,uuid,text,text)": "8f3f64785861919b6f603d8ba53d48fa",
-    "commercial.bill_recompute(uuid)": "a343bb9089c0dade20cf8bc4b1d7b813",
+    "commercial.bill_recompute(uuid)": "628ee7944cccea79e71e6ea7f8fbf978",
     "commercial.bill_summary(date)": "8d3315e77d0def44e712b497e33da2b4",
     "commercial.bill_sums(uuid)": "c6fd7055dfa3c85b0dfe77c285484fcd",
-    "commercial.bill_totals_agree(uuid)": "58e3a323ea3adfb94631e0e6f6816d1d",
+    "commercial.bill_totals_agree(uuid)": "ec44041889c9f4c4a7fdd6096cd01624",
     "commercial.bill_void(uuid,text,bigint,text,text)": "ad03076e11f20979dacb90883c92af7d",
     "commercial.hmo_cover_cancel(uuid,uuid,text,bigint,text,text)": "d5dd9af97e8c38b3f3d54bee53792c98",
     "commercial.hmo_receivables(uuid,integer)": "5032198e84267e549604f31c35239fd4",
@@ -1460,7 +1496,7 @@ declare
     "commercial.patient_card(uuid)": "b51e6a898739b4219696ccedca1877ec",
     "commercial.resolve_health_id(text,text)": "99e6d5e1a4c27dea25f9b2cb7799eb7e",
     "commercial.staff_source(uuid)": "df47a040ca9124981981cccb083bb8f1",
-    "commercial.work_item_bills(text,uuid[])": "c5f0ce2094e57bb4afff0a68fb93ab4d"}';
+    "commercial.work_item_bills(text,uuid[])": "7ca3d58ca7674012c51818d6703febd5"}';
   own constant text[] := array['commercial.staff_source(uuid)', 'commercial.patient_card(uuid)', 'commercial.bill_json(uuid)',
     'commercial.bill_sums(uuid)', 'commercial.bill_recompute(uuid)', 'commercial.bill_totals_agree(uuid)',
     'commercial.bill_lock(uuid,uuid,bigint)', 'commercial.bill_event(uuid,uuid,text,uuid,jsonb)',
