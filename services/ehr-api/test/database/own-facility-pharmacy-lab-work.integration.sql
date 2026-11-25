@@ -488,11 +488,17 @@ begin
   -- reads as the owner too (today ehr.order_belongs_to, called by
   -- ehr.list_order_routes_for_order and ehr.order_route_summaries after
   -- ehr.order_route_reader's read consent test; 0133 D5), so whoever adds
-  -- one adds it to D5's analysis by hand.
+  -- one adds it to D5's analysis by hand. BILL-1's 0167 adds
+  -- commercial.hook_pharmacy_acceptance(), the pharmacist acceptance's billing
+  -- hook: it reads only the accepted prescription's quantity to dispense and
+  -- unit, in the acceptance's own transaction, to price its bill line; it
+  -- returns nothing to the session and gives the pharmacist nothing more
+  -- (its suite, patient-billing, case 8).
   if (select string_agg(proc.oid::regprocedure::text, ' ' order by proc.oid::regprocedure::text) from pg_proc proc
        where proc.prosecdef and proc.prosrc ~* 'ehr\.prescriptions'
          and proc.proowner = (select proowner from pg_proc where oid = 'pharmacy.validate_dispensing()'::regprocedure))
-     is distinct from 'ehr.list_my_orders(text[],boolean,date,timestamp with time zone,text,uuid,integer) '
+     is distinct from 'commercial.hook_pharmacy_acceptance() '
+       || 'ehr.list_my_orders(text[],boolean,date,timestamp with time zone,text,uuid,integer) '
        || 'ehr.patient_list_order_routes() ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,'
        || 'character) ehr.send_prescription_to_own_pharmacy(uuid,bigint) ehr.withdraw_own_pharmacy_send(uuid) '
        || 'identity.decide_unknown_patient(uuid,text,bigint,text,text,text) '

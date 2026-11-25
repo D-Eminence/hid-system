@@ -303,8 +303,11 @@ try {
   const auditSequence = 'sequence:audit.events_sequence_id_seq';
   const advanced = (sequence, by) => ({ last_value: String(Number(sequence.last_value) + by - (sequence.is_called ? 0 : 1)),
     is_called: true });
+  // BILL-1's 0162 writes 77 audit rows at any data (17 codes, 2 roles, 58 role rows, as the system actor), so
+  // the dry run takes 1 + 77 numbers; the QA step writes none here (no QA tenant).
+  const auditNumbersPerRun = 1 + 77;
   assert.deepEqual(await snapshot('hid_upgrade'),
-    { ...upgradeBefore, [auditSequence]: advanced(upgradeBefore[auditSequence], 1) },
+    { ...upgradeBefore, [auditSequence]: advanced(upgradeBefore[auditSequence], auditNumbersPerRun) },
     'Upgrade dry run must preserve all historical rows');
   migration('existing baseline schema upgrade', 'apply-migrations.mjs', 'hid_upgrade');
   migration('upgraded baseline role bootstrap', 'bootstrap-database-roles.mjs', 'hid_upgrade');
@@ -362,9 +365,9 @@ try {
   // the upgrade is unchanged. (0147 gives its two to nobody here: 0136's
   // counts are 0, 0 and 0 once the rehearsal has ended this baseline's one
   // synthetic admin membership above, so the auth.account_roles comparison
-  // below holds.)
-  const declaredRoles = ['org_admin_awaiting_review', 'outreach_organiser', 'outreach_volunteer',
-    'reading_starter', 'work_list_reader'];
+  // below holds.) BILL-1's 0162 adds exactly two, cashier and billing_officer (BILL-5).
+  const declaredRoles = ['billing_officer', 'cashier', 'org_admin_awaiting_review', 'outreach_organiser',
+    'outreach_volunteer', 'reading_starter', 'work_list_reader'];
   await withClient('hid_upgrade', async client => {
     await client.query("set timezone = 'UTC'");
     const kept = (await client.query(`select to_jsonb(t)::text as value from auth.roles t
@@ -373,7 +376,7 @@ try {
       upgradeBefore['auth.roles'], 'Upgrade changed a historical auth.roles row');
     assert.deepEqual((await client.query(`select code, active from auth.roles where code = any($1::text[])
       order by code`, [declaredRoles])).rows, declaredRoles.map(code => ({ code, active: true })),
-    'Migrations 0086, 0115 and 0147 must add exactly their declared roles');
+    'Migrations 0086, 0115, 0147 and 0162 must add exactly their declared roles');
   });
   // Migrations 0105 (document scanning) and 0106 (the OCR worker) each seed
   // exactly one workload account and its platform role; every other row of
@@ -416,7 +419,8 @@ try {
   await withClient('hid_upgrade', async client => {
     await client.query("set timezone = 'UTC'");
     const kept = (await client.query(`select to_jsonb(t)::text as value from audit.events t
-      where correlation_id <> '0150-doctors-start-readings-q141b' order by to_jsonb(t)::text collate "C"`)).rows;
+      where correlation_id not in ('0150-doctors-start-readings-q141b', '0162-billing-roles-and-codes')
+      order by to_jsonb(t)::text collate "C"`)).rows;
     assert.deepEqual({ rows: kept.length, sha256: sha256(kept.map(row => row.value).join('\n')) },
       upgradeBefore['audit.events'], 'Upgrade changed a historical audit.events row');
     assert.deepEqual((await client.query(`select actor_type, action, outcome, resource_type, resource_id, provenance,
@@ -425,9 +429,15 @@ try {
     [{ actor_type: 'system', action: 'auth.role-permission.add', outcome: 'success', resource_type: 'role-permission',
       resource_id: 'doctor/ocr.job.start', provenance: 'migration', source_system: 'hid-0150', actor_account_id: null,
       facility_id: null, patient_id: null }], 'Migration 0150 must write exactly its one audit row');
-    // The dry run's number and the apply's.
-    assert.deepEqual(upgradeAfter[auditSequence], advanced(upgradeBefore[auditSequence], 2),
-      'Only 0150 takes numbers from audit.events\' identity sequence (one in the dry run, one in the apply)');
+    // BILL-1's 0162: exactly its 77 rows, as the system actor, naming no person, facility or patient.
+    assert.deepEqual((await client.query(`select action, count(*)::int as n from audit.events
+      where correlation_id = '0162-billing-roles-and-codes' and actor_type = 'system' and actor_account_id is null
+        and facility_id is null and patient_id is null group by action order by action`)).rows,
+    [{ action: 'auth.permission.add', n: 17 }, { action: 'auth.role-permission.add', n: 58 },
+      { action: 'auth.role.add', n: 2 }], 'Migration 0162 must write exactly its 77 audit rows');
+    // The dry run's numbers and the apply's.
+    assert.deepEqual(upgradeAfter[auditSequence], advanced(upgradeBefore[auditSequence], 2 * auditNumbersPerRun),
+      'Only 0150 and 0162 take numbers from audit.events\' identity sequence (in the dry run and in the apply)');
   });
   const expectedChanged = new Set([
     'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
@@ -521,6 +531,10 @@ try {
   // consent whatever 0133's check does, so only this proves the check answers).
   evidence.checks.own_facility_work_runtime = JSON.parse(command('exact-role own facility pharmacy and lab work',
     process.execPath, [join(repository, 'services/ehr-api/scripts/verify-own-facility-work-runtime.mjs')], workflowEnvironment));
+  // BILL-1 (0162-0167): patient billing and pharmacy point-of-care stock, every command as hid_ehr_api_runtime or
+  // hid_pharmacy_api_runtime through the functions the routes call (totals agree after each; the stock ledger agrees).
+  evidence.checks.patient_billing_runtime = JSON.parse(command('exact-role patient billing and pharmacy stock',
+    process.execPath, [join(repository, 'services/ehr-api/scripts/verify-patient-billing-runtime.mjs')], workflowEnvironment));
   await withClient(database, (client) => client.query(baselineSql));
   evidence.checks.schema = { dry_run_rolled_back: true, applied: files.length, rerun_pending: 0, schema_rls_suite: 'passed' };
   // Release A (coordinator, 19 November 2026, on #280): the runner applies the pending files one by one, each in

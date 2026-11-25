@@ -24,7 +24,9 @@ import type { WorkloadAuthService } from './workload-auth.service';
 const SEEDS = seededRolePermissions();
 const permissionsOf = (role: string): readonly string[] => SEEDS.get(role) ?? [];
 const KEYS: FacilityModuleKey[] = ['patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage', 'consultation',
-  'orders', 'lab', 'labResults', 'pharmacy', 'prescriptions', 'migrate', 'outreach', 'admin', 'audit'];
+  'orders', 'lab', 'labResults', 'pharmacy', 'prescriptions', 'migrate', 'outreach', 'admin', 'audit',
+  // BILL-1 (0162): the Finance group and the pharmacy's stock.
+  'billing', 'priceList', 'endOfDay', 'pharmacyStock'];
 const only = (...shown: FacilityModuleKey[]) => Object.fromEntries(KEYS.map((key) => [key, shown.includes(key)]));
 
 describe('facility areas for each seeded role (SX-1)', () => {
@@ -36,7 +38,9 @@ describe('facility areas for each seeded role (SX-1)', () => {
 
   it.each<[string, FacilityModuleKey[]]>([
     // 0136 (Q103 A, Q112 A): the front desk sees vitals (triage) and scans paper records into the file.
-    ['receptionist', ['patients', 'registration', 'accessRequests', 'triage', 'outreach']],
+    // BILL-1 (0162): small clinics take money at the desk.
+    ['receptionist', ['patients', 'registration', 'accessRequests', 'triage', 'outreach', 'billing', 'priceList',
+      'endOfDay']],
     ['nurse', ['patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage', 'consultation', 'labResults',
       'prescriptions', 'migrate', 'outreach']],
     // 0136 (Q103 A): doctors lose the leftover Outreach permissions.
@@ -44,10 +48,14 @@ describe('facility areas for each seeded role (SX-1)', () => {
       'labResults', 'prescriptions', 'migrate']],
     ['clinician', ['patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage', 'consultation', 'orders',
       'labResults', 'prescriptions', 'migrate', 'outreach']],
-    ['lab', ['patients', 'accessRequests', 'lab', 'labResults']],
-    ['pharmacist', ['patients', 'accessRequests', 'pharmacy', 'prescriptions']],
-    ['admin', ['registration', 'labResults', 'outreach', 'admin', 'audit']],
-    ['org_admin', ['registration', 'outreach', 'admin', 'audit']],
+    ['lab', ['patients', 'accessRequests', 'lab', 'labResults', 'billing', 'priceList', 'endOfDay']],
+    ['pharmacist', ['patients', 'accessRequests', 'pharmacy', 'prescriptions', 'billing', 'priceList', 'endOfDay',
+      'pharmacyStock']],
+    ['admin', ['registration', 'labResults', 'outreach', 'admin', 'audit', 'billing', 'priceList']],
+    ['org_admin', ['registration', 'outreach', 'admin', 'audit', 'billing', 'priceList']],
+    // BILL-1 (0162, BILL-5): the two new roles see only what a bill shows.
+    ['cashier', ['billing', 'priceList', 'endOfDay']],
+    ['billing_officer', ['billing', 'priceList', 'endOfDay']],
     ['org_admin_awaiting_review', ['outreach', 'admin', 'audit']],
     ['outreach_organiser', ['outreach']],
     ['outreach_volunteer', ['outreach']],
@@ -81,7 +89,7 @@ describe('facility areas for each seeded role (SX-1)', () => {
   it('a membership holding two roles shows what either role shows', () => {
     const both = [...new Set([...permissionsOf('nurse'), ...permissionsOf('lab')])];
     expect(facilityModules(both)).toEqual(only('patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage',
-      'consultation', 'lab', 'labResults', 'prescriptions', 'migrate', 'outreach'));
+      'consultation', 'lab', 'labResults', 'prescriptions', 'migrate', 'outreach', 'billing', 'priceList', 'endOfDay'));
   });
 });
 

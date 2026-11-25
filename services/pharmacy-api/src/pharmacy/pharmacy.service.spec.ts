@@ -140,11 +140,12 @@ describe('PharmacyService', () => {
       quantity_unit: 'tablet', status: 'dispensed', dispensed_by: ids.account, dispensed_at: new Date(),
       row_version: '1', created_at: new Date(), reversal_id: null };
     // The work item, C17's answer for it (P4c: no route, so Identity's consent decides), the
-    // replay read, the insert and the outbox.
+    // replay read, BILL-1's batch setting, the insert, BILL-1's stock taken (none) and the outbox.
     const query = jest.fn().mockResolvedValueOnce({ rows: [workRow] })
       .mockResolvedValueOnce({ rows: [{ outcome: 'none', route_id: null, work_item_id: ids.work }] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [dispensingRow] }).mockResolvedValueOnce({ rows: [] });
+      .mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{}] })
+      .mockResolvedValueOnce({ rows: [dispensingRow] }).mockResolvedValueOnce({ rows: [{ taken: null }] })
+      .mockResolvedValueOnce({ rows: [] });
     const database = { withTransaction: jest.fn(async (_context, operation) => operation({ query })) };
     const service = new PharmacyService(database as never, identity as never, audit as never,
       new PharmacyOrderRouteAccess(identity as never), new PharmacyOrderRouteCards(database as never));
@@ -153,6 +154,28 @@ describe('PharmacyService', () => {
     'dispensing-key-1234')).resolves.toMatchObject({ id: ids.dispensing, status: 'dispensed',
       effectiveStatus: 'dispensed' });
     expect(query.mock.calls.every(([sql]) => !/^update pharmacy\.work_items/i.test(String(sql).trim()))).toBe(true);
+  });
+
+  it('BILL-1 (0167): passes the batch to the hook and answers its pay-before refusal, audited after the rollback', async () => {
+    const refusal = Object.assign(new Error('PAYMENT_REQUIRED'), { code: 'HB409' });
+    const query = jest.fn().mockResolvedValueOnce({ rows: [workRow] })
+      .mockResolvedValueOnce({ rows: [{ outcome: 'none', route_id: null, work_item_id: ids.work }] })
+      .mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{}] })
+      .mockRejectedValueOnce(refusal);
+    const auditClient = { query: jest.fn() };
+    const database = { withTransaction: jest.fn()
+      .mockImplementationOnce(async (_context, operation) => operation({ query }))
+      .mockImplementationOnce(async (_context, operation) => operation(auditClient)) };
+    const recorded = { recordWithClient: jest.fn().mockResolvedValue(undefined) };
+    const service = new PharmacyService(database as never, identity as never, recorded as never,
+      new PharmacyOrderRouteAccess(identity as never), new PharmacyOrderRouteCards(database as never));
+    const batchId = '123e4567-e89b-42d3-a456-426614174099';
+    await expect(service.dispense(context, ids.work, { expectedWorkItemVersion: 1, quantityDispensed: 21,
+      quantityUnit: 'tablet', reason: 'Medicine handed to patient', batchId }, 'dispensing-key-1234'))
+      .rejects.toMatchObject({ code: 'PAYMENT_REQUIRED', message: 'This bill must be paid first.' });
+    expect(query.mock.calls[3]?.[1]).toEqual([batchId]);
+    expect(recorded.recordWithClient).toHaveBeenCalledWith(auditClient, context, 'pharmacy.dispensing.create',
+      { resourceType: 'pharmacy-work-item', resourceId: ids.work }, { code: 'PAYMENT_REQUIRED' }, 'denied');
   });
 });
 

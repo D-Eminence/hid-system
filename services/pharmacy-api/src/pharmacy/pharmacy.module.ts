@@ -15,9 +15,15 @@ import { HealthIdInUrlRefusalModule } from './health-id-in-url';
 // ORD-3: read-only progress of this facility's own work items, for ehr-api.
 import { PharmacyWorkItemProgressController } from './work-item-progress.controller';
 import { PharmacyWorkItemProgressService } from './work-item-progress.service';
+// BILL-1 (0166): point-of-care stock and counter sales.
+import { PharmacyStockController } from './stock/stock.controller';
+import { PharmacyStockService, STOCK_BILLING_ENABLED } from './stock/stock.service';
 
-@Module({ imports: [PharmacyIdentityModule, HealthIdInUrlRefusalModule], controllers: [PharmacyController, PharmacyOrderRoutesController, PharmacyWorkItemProgressController],
-  providers: [PharmacyService, PharmacyOrderRoutesService, PharmacyWorkItemProgressService, PharmacyOrderRouteAccess, PharmacyOrderRouteCards,
+@Module({ imports: [PharmacyIdentityModule, HealthIdInUrlRefusalModule], controllers: [PharmacyController, PharmacyOrderRoutesController, PharmacyWorkItemProgressController,
+    PharmacyStockController],
+  providers: [PharmacyService, PharmacyOrderRoutesService, PharmacyStockService,
+    // BILL-1: billing at real facilities is off until go-live (COMMERCIAL_BILLING_ENABLED).
+    { provide: STOCK_BILLING_ENABLED, useFactory: () => getEnvironment().COMMERCIAL_BILLING_ENABLED }, PharmacyWorkItemProgressService, PharmacyOrderRouteAccess, PharmacyOrderRouteCards,
     // The patient on own work (0124), on only while OWN_WORK_PATIENT_CARD_ENABLED is true.
     { provide: PharmacyOwnWorkPatientCards,
       useFactory: () => new PharmacyOwnWorkPatientCards(getEnvironment().OWN_WORK_PATIENT_CARD_ENABLED) },

@@ -49,6 +49,8 @@ const environmentSchema = z.object({
   OWN_WORK_PATIENT_CARD_ENABLED: booleanString,
   // The prescriber's priority, strength, form, duration and quantity on own work (0125): off by default, off is exactly as before.
   PRESCRIPTION_DISPENSING_DETAILS_ENABLED: booleanString,
+  // BILL-1 (0166): stock and counter sales. Off by default; the sealed QA and demo facilities are on regardless.
+  COMMERCIAL_BILLING_ENABLED: booleanString,
 }).superRefine((environment, context) => {
   if (environment.PHARMACY_SERVICE_IDENTITY_MODE === 'local-secret'
       && !environment.PHARMACY_INTERNAL_SERVICE_TOKEN) {

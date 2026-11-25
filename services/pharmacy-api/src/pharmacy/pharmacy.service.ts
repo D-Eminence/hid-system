@@ -15,6 +15,8 @@ import { IMPORT_PAGE_DEFAULT, type ListImportedMedicationsQueryDto, type OcrMedi
 import { PharmacyOrderRouteAccess, basisDetails, type ResourceBasis } from './order-route-access';
 import { PharmacyOrderRouteCards, type OrderRouteCard, type WorkItemRoutePatient } from './order-route-cards';
 import { OWN_WORK_PATIENT_CARDS_OFF, PharmacyOwnWorkPatientCards } from './own-work-patient-cards';
+import { classifyBillingError } from './stock/billing-errors';
+import { billingFields, workItemBilling } from './stock/stock.service';
 import { OWN_WORK_OFF, PharmacyOwnWork, type OwnWorkState, type OwnWorkWithdrawnReason } from './own-work-access';
 import { workListSince } from './work-list-window';
 import { PRESCRIPTION_DETAILS_OFF, PharmacyPrescriptionDetails,
@@ -279,6 +281,17 @@ function routedDispensingRefusal(error: unknown): DomainProblem | undefined {
  * That one answers its own detail and the problem member `withdrawnReason`.
  * There is no check before the insert: the database decides, free of races.
  */
+/** BILL-1 (0167): the dispensing hook's refusals (pay-before and stock), in the contract's words. */
+const DISPENSING_BILLING_REFUSALS = new Set(['PAYMENT_REQUIRED', 'PAYMENT_PENDING_CHECK', 'OUT_OF_STOCK',
+  'STOCK_UNIT_MISMATCH']);
+export const STOCK_BATCH_SQL = "select set_config('hid.stock_batch_id', $1, true), set_config('hid.billing_source', 'pharmacy-api', true)";
+export const STOCK_TAKEN_SQL = "select current_setting('hid.stock_taken', true) as taken";
+function dispensingBillingRefusal(error: unknown): DomainProblem | undefined {
+  const failure = classifyBillingError(error);
+  if (failure.refusal === null || !/^HB4/.test(failure.sqlstate ?? '')) return undefined;
+  return failure.problem;
+}
+
 function sameFacilityDispensingRefusal(error: unknown): DomainProblem | undefined {
   const { code, message, detail } = (typeof error === 'object' && error !== null ? error : {}) as { code?: unknown;
     message?: unknown; detail?: unknown };
@@ -528,8 +541,11 @@ export class PharmacyService {
       const changed = await this.dispensedChanges.changes(client, result.rows.filter((row) => row.dispensing_id)
         .map((row) => row.id), context.correlationId);
       const receiving = await this.routeCards.receiving(client, context);
-      return { items: result.rows.map((row) => this.projectWorkItem(row, cards.get(row.id), own.get(row.id),
-        this.prescriptionDetails.forRow(row, details.get(row.id)), states?.get(row.id), changed.get(row.id))), since,
+      // BILL-1 (0164-0166): each own row's bill and its medicine's stock; nothing when billing is not set up.
+      const billing = await workItemBilling(client, result.rows.filter((row) => !row.order_route_id));
+      return { items: result.rows.map((row) => ({ ...this.projectWorkItem(row, cards.get(row.id), own.get(row.id),
+        this.prescriptionDetails.forRow(row, details.get(row.id)), states?.get(row.id), changed.get(row.id)),
+        ...billingFields(billing.get(row.id)) })), since,
         ...receiving,
         ...this.routeCards.lateCorrection(context), ...this.routeCards.cannotComplete(context) };
     });
@@ -635,8 +651,11 @@ export class PharmacyService {
       // cannot be read). The read's audit row above already names the item and the patient.
       const changed = row.dispensing_id
         ? await this.dispensedChanges.changes(client, [row.id], context.correlationId) : undefined;
-      return this.projectWorkItem(row, cards?.get(row.id), own?.get(row.id),
-        this.prescriptionDetails.forRow(row, details?.get(row.id)), states?.get(row.id), changed?.get(row.id));
+      // BILL-1 (0164-0166): its bill and its medicine's stock, for own work; nothing when billing is not set up.
+      const billing = row.order_route_id ? undefined : await workItemBilling(client, [row]);
+      return { ...this.projectWorkItem(row, cards?.get(row.id), own?.get(row.id),
+        this.prescriptionDetails.forRow(row, details?.get(row.id)), states?.get(row.id), changed?.get(row.id)),
+      ...billingFields(billing?.get(row.id)) };
     });
   }
 
@@ -792,6 +811,20 @@ export class PharmacyService {
   }
 
   async dispense(context: DataAccessContext, workItemId: string, input: CreateDispensingDto, key: string) {
+    try {
+      return await this.dispenseOnce(context, workItemId, input, key);
+    } catch (error) {
+      // BILL-1 (0167): a pay-before or stock refusal rolled the dispensing back; its refusal row is written now.
+      if (error instanceof DomainProblem && DISPENSING_BILLING_REFUSALS.has(error.code)) {
+        await this.database.withTransaction(context, (client) => this.audit.recordWithClient(client, context,
+          'pharmacy.dispensing.create', { resourceType: 'pharmacy-work-item', resourceId: workItemId },
+          { code: error.code }, 'denied')).catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
+  private async dispenseOnce(context: DataAccessContext, workItemId: string, input: CreateDispensingDto, key: string) {
     return this.database.withTransaction(context, async (client) => {
       const work = (await client.query<WorkItemRow>(`${WORK_ITEM_SELECT} where w.id=$1`,
         [workItemId])).rows[0];
@@ -810,6 +843,8 @@ export class PharmacyService {
       }
       // ORD-4: a received item is accepted by its first dispensing; never a reason to refuse it.
       const acceptedWithDispensing = await this.acceptWithDispensing(client, context, work, key, digest);
+      // BILL-1 (0167): the batch to take a stock-kept item from (else expiry first), for the dispensing's hook.
+      await client.query(STOCK_BATCH_SQL, [input.batchId ?? '']);
       const inserted = await client.query<DispensingRow>(`insert into pharmacy.dispensings (
         id,work_item_id,work_item_version,patient_id,facility_id,medication_code_system,medication_code,
         medication_display,quantity_dispensed,quantity_unit,dispensed_by,dispensed_by_membership_id,
@@ -820,20 +855,35 @@ export class PharmacyService {
         input.quantityDispensed, input.quantityUnit, context.actor.accountId, context.membershipId,
         input.reason, key, digest, context.correlationId])
         .catch((error: unknown) => {
-          throw (work.order_route_id ? routedDispensingRefusal(error) : sameFacilityDispensingRefusal(error)) ?? error;
+          throw dispensingBillingRefusal(error)
+            ?? (work.order_route_id ? routedDispensingRefusal(error) : sameFacilityDispensingRefusal(error)) ?? error;
         });
       const row = inserted.rows[0];
       if (!row) throw new DomainProblem(503, 'PHARMACY_DISPENSING_NOT_CREATED',
         'Pharmacy could not record the dispensing');
+      const stockTaken = await this.stockTaken(client);
       await this.outbox(client, 'MedicationDispensed', 'medication-dispensing', row.id,
         row.facility_id, row.patient_id, context.correlationId,
         { dispensingId: row.id, workItemId: row.work_item_id, status: 'dispensed' });
       await this.audit.recordWithClient(client, context, 'pharmacy.dispensing.create', {
         patientId: row.patient_id, resourceType: 'medication-dispensing', resourceId: row.id,
       }, { workItemId: row.work_item_id, workItemVersion: Number(row.work_item_version), status: 'dispensed',
-        ...basisDetails(basis), ...(acceptedWithDispensing ? { acceptedWithDispensing: true } : {}) });
+        ...basisDetails(basis), ...(acceptedWithDispensing ? { acceptedWithDispensing: true } : {}),
+        ...(stockTaken ? { stockTaken } : {}) });
       return this.projectDispensing(row);
     }, { isolationLevel: 'SERIALIZABLE' });
+  }
+
+  /** BILL-1 (0167): the batches and counts the dispensing's hook took (batch ids and counts only), if any. */
+  private async stockTaken(client: PoolClient): Promise<unknown[] | undefined> {
+    const value = (await client.query<{ taken: string | null }>(STOCK_TAKEN_SQL)).rows[0]?.taken;
+    if (typeof value !== 'string' || value === '') return undefined;
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return Array.isArray(parsed) && parsed.length > 0 ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   async getDispensing(context: DataAccessContext, id: string) {

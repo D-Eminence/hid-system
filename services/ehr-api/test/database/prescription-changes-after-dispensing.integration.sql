@@ -224,7 +224,8 @@ begin
         and (proc.prosrc ~* 'ehr\.prescriptions' or proc.prosrc ~* 'own_prescription_sends' or proc.prosrc ~ '0148'))
     || ' | ' || (select string_agg(proc.oid::regprocedure::text, ' ' order by proc.oid::regprocedure::text) from pg_proc proc
                   where proc.prosecdef and proc.prosrc ~* 'ehr\.prescriptions' and proc.proowner = validator_owner),
-    '0 | ehr.list_my_orders(text[],boolean,date,timestamp with time zone,text,uuid,integer) '
+    '0 | commercial.hook_pharmacy_acceptance() '
+    || 'ehr.list_my_orders(text[],boolean,date,timestamp with time zone,text,uuid,integer) '
     || 'ehr.patient_list_order_routes() ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,'
     || 'character) ehr.send_prescription_to_own_pharmacy(uuid,bigint) ehr.withdraw_own_pharmacy_send(uuid) '
     || 'identity.decide_unknown_patient(uuid,text,bigint,text,text,text) '

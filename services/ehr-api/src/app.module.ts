@@ -7,6 +7,7 @@ import { CorrelationMiddleware } from './common/correlation.middleware';
 import { DatabaseModule } from './database/database.module';
 import { DocumentModule } from './documents/document.module';
 import { EhrModule } from './ehr/ehr.module';
+import { CommercialModule } from './commercial/commercial.module';
 import { HealthController } from './health.controller';
 import { ServiceClientsModule } from './integrations/service-clients.module';
 import { OfflineModule } from './offline/offline.module';
@@ -21,6 +22,8 @@ import { ChartSummaryModule } from './ehr/chart-summary/chart-summary.module';
     DocumentModule,
     StorageModule,
     EhrModule,
+    // BILL-1 (0162-0167): patient billing release 1.
+    CommercialModule,
     ServiceClientsModule,
     OfflineModule,
     // EHR-C4: the chart summary.

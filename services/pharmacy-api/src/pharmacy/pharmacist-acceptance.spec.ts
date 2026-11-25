@@ -861,7 +861,9 @@ describe('ORD-4: dispensing a received item accepts it first', () => {
       'C17', 'savepoint pharmacy_own_work_access', 'own-work basis', 'release savepoint pharmacy_own_work_access',
       'dispensing replay', 'savepoint pharmacy_own_work_steps', 'steps', 'release savepoint pharmacy_own_work_steps',
       'savepoint pharmacy_dispensing_acceptance', 'insert acceptance', 'insert event',
-      'release savepoint pharmacy_dispensing_acceptance', 'insert dispensing', 'outbox', 'audit', 'COMMIT']);
+      'release savepoint pharmacy_dispensing_acceptance', 'session', 'insert dispensing',
+      // BILL-1 (0167): the batch setting before the insert ('session') and the stock it took after.
+      "select current_setting('hid.stock_taken', true) as taken", 'outbox', 'audit', 'COMMIT']);
     expect(h.audited()).toEqual([{ action: 'pharmacy.dispensing.create', patientId: ada, resourceType: 'medication-dispensing',
       resourceId: '65000000-0000-4000-8000-0000000000ff', outcome: 'success', details: { workItemId: id(1),
         workItemVersion: 1, status: 'dispensed', basis: 'own-work', acceptedWithDispensing: true } }]);

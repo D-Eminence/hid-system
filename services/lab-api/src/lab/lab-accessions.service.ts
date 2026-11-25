@@ -130,7 +130,8 @@ export class LabAccessionsService {
         : operation==='receive'?[specimenId,accessionId,context.facilityId,expectedVersion,payload.receivedAt,context.actor.accountId,context.membershipId,payload.condition]
           : [specimenId,accessionId,context.facilityId,expectedVersion,null,context.actor.accountId,context.membershipId,payload.reason];
       const result=await client.query<SpecimenRow>(`update lab.specimens set ${set},row_version=row_version+1
-        where id=$1 and accession_id=$2 and facility_id=$3 and row_version=$4 returning ${SPECIMEN_COLUMNS}`,values);
+        where id=$1 and accession_id=$2 and facility_id=$3 and row_version=$4 returning ${SPECIMEN_COLUMNS}`,values)
+        .catch((error:unknown) => { throw labPayBeforeRefusal(error) ?? error; });
       const row=result.rows[0]; if(!row) throw new DomainProblem(412,'VERSION_CONFLICT','Specimen changed since it was loaded');
       await client.query(`insert into lab.specimen_command_idempotency(facility_id,patient_id,actor_id,idempotency_key,operation,
         specimen_id,request_sha256,result_version) values($1,$2,$3,$4,$5,$6,$7,$8)`,
@@ -171,4 +172,19 @@ export class LabAccessionsService {
       facilityId:row.facility_id,patientId:row.patient_id,action,resourceType:action.includes('specimen')?'lab-specimen':'lab-accession',
       resourceId:row.id,outcome:'success' as const,purposeOfUse:context.purposeOfUse,details,sourceSystem:'lab-api' };
   }
+}
+
+/**
+ * BILL-1 (0167): the collection gate's refusal when the facility's pay-before
+ * for lab is on (off everywhere until the clinical lead signs BILL-3) and the
+ * test's bill is neither paid nor deferred. The words are the billing
+ * contract's (docs/EHR_PLANNED_CONTRACT.md, BILL-1, Errors).
+ */
+export function labPayBeforeRefusal(error:unknown):DomainProblem|undefined {
+  const { code, message } = (typeof error==='object' && error!==null ? error : {}) as { code?:unknown; message?:unknown };
+  if (code!=='HB409') return undefined;
+  if (message==='PAYMENT_REQUIRED') return new DomainProblem(409,'PAYMENT_REQUIRED','This bill must be paid first.');
+  if (message==='PAYMENT_PENDING_CHECK') return new DomainProblem(409,'PAYMENT_PENDING_CHECK',
+    'A transfer on this bill is waiting to be checked.');
+  return undefined;
 }

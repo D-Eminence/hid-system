@@ -52,6 +52,20 @@
         "admin",
         "org_admin"
       ]
+    },
+    {
+      "id": "cashier",
+      "label": "Cashier",
+      "roles": [
+        "cashier"
+      ]
+    },
+    {
+      "id": "billingOfficer",
+      "label": "Billing officer",
+      "roles": [
+        "billing_officer"
+      ]
     }
   ],
   "columnNotes": "Akos's table has one Doctor column; clinician holds the same seeded permissions as doctor today, so it is compared with that column. Facility admin stands for both admin and org_admin. The administrator awaiting review (org_admin_awaiting_review) is a short-lived state and is not compared.",
@@ -95,7 +109,9 @@
         "doctor": "full",
         "lab": "scoped",
         "pharmacy": "scoped",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "cashier": "hidden",
+        "billingOfficer": "hidden"
       },
       "scopedText": {
         "lab": "with lab orders only",
@@ -111,7 +127,9 @@
         "doctor": "hidden",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "cashier": "hidden",
+        "billingOfficer": "hidden"
       }
     },
     {
@@ -123,7 +141,9 @@
         "doctor": "full",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "audit"
+        "facilityAdmin": "audit",
+        "cashier": "hidden",
+        "billingOfficer": "hidden"
       }
     },
     {
@@ -135,7 +155,9 @@
         "doctor": "full",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "audit"
+        "facilityAdmin": "audit",
+        "cashier": "hidden",
+        "billingOfficer": "hidden"
       }
     },
     {
@@ -147,7 +169,9 @@
         "doctor": "full",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "cashier": "hidden",
+        "billingOfficer": "hidden"
       }
     },
     {
@@ -159,7 +183,9 @@
         "doctor": "view",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "cashier": "hidden",
+        "billingOfficer": "hidden"
       },
       "notCompared": "No permission tells nursing observations apart from triage and vitals today; the screens use the triage area for both."
     },
@@ -172,7 +198,9 @@
         "doctor": "full",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "cashier": "hidden",
+        "billingOfficer": "hidden"
       }
     },
     {
@@ -184,7 +212,9 @@
         "doctor": "full",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "cashier": "hidden",
+        "billingOfficer": "hidden"
       }
     },
     {
@@ -196,7 +226,9 @@
         "doctor": "hidden",
         "lab": "full",
         "pharmacy": "hidden",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "cashier": "hidden",
+        "billingOfficer": "hidden"
       }
     },
     {
@@ -208,7 +240,9 @@
         "doctor": "view",
         "lab": "full",
         "pharmacy": "hidden",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "cashier": "hidden",
+        "billingOfficer": "hidden"
       }
     },
     {
@@ -220,7 +254,9 @@
         "doctor": "hidden",
         "lab": "hidden",
         "pharmacy": "full",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "cashier": "hidden",
+        "billingOfficer": "hidden"
       }
     },
     {
@@ -232,7 +268,9 @@
         "doctor": "full",
         "lab": "hidden",
         "pharmacy": "view",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "cashier": "hidden",
+        "billingOfficer": "hidden"
       }
     },
     {
@@ -244,7 +282,9 @@
         "doctor": "view",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "cashier": "hidden",
+        "billingOfficer": "hidden"
       }
     },
     {
@@ -256,7 +296,9 @@
         "doctor": "hidden",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "full"
+        "facilityAdmin": "full",
+        "cashier": "hidden",
+        "billingOfficer": "hidden"
       }
     },
     {
@@ -268,7 +310,9 @@
         "doctor": "hidden",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "full"
+        "facilityAdmin": "full",
+        "cashier": "hidden",
+        "billingOfficer": "hidden"
       }
     },
     {
@@ -280,13 +324,80 @@
         "doctor": "hidden",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "full"
+        "facilityAdmin": "full",
+        "cashier": "hidden",
+        "billingOfficer": "hidden"
       },
       "derived": "Not a row of Akos's table: taken from its \"View (audit)\" cells, which give the facility admin the audit trail. The audit trail is read only, so holding audit.read is its full use."
+    },
+    {
+      "label": "Payments and receipts",
+      "module": "billing",
+      "cells": {
+        "frontDesk": "full",
+        "nurse": "hidden",
+        "doctor": "hidden",
+        "lab": "full",
+        "pharmacy": "full",
+        "facilityAdmin": "view",
+        "cashier": "full",
+        "billingOfficer": "full"
+      },
+      "derived": "Not a row of Akos's table: BILL-1 (migration 0162, owner sprint approval of 25 November 2026) adds the Finance group's areas and the pharmacy's stock; each cell is the contract's role table (docs/EHR_PLANNED_CONTRACT.md, BILL-1, Codes and roles)."
+    },
+    {
+      "label": "Price list",
+      "module": "priceList",
+      "cells": {
+        "frontDesk": "view",
+        "nurse": "hidden",
+        "doctor": "hidden",
+        "lab": "view",
+        "pharmacy": "view",
+        "facilityAdmin": "full",
+        "cashier": "view",
+        "billingOfficer": "full"
+      },
+      "derived": "Not a row of Akos's table: BILL-1 (migration 0162, owner sprint approval of 25 November 2026) adds the Finance group's areas and the pharmacy's stock; each cell is the contract's role table (docs/EHR_PLANNED_CONTRACT.md, BILL-1, Codes and roles)."
+    },
+    {
+      "label": "End of day",
+      "module": "endOfDay",
+      "cells": {
+        "frontDesk": "full",
+        "nurse": "hidden",
+        "doctor": "hidden",
+        "lab": "full",
+        "pharmacy": "full",
+        "facilityAdmin": "hidden",
+        "cashier": "full",
+        "billingOfficer": "full"
+      },
+      "derived": "Not a row of Akos's table: BILL-1 (migration 0162, owner sprint approval of 25 November 2026) adds the Finance group's areas and the pharmacy's stock; each cell is the contract's role table (docs/EHR_PLANNED_CONTRACT.md, BILL-1, Codes and roles)."
+    },
+    {
+      "label": "Pharmacy stock",
+      "module": "pharmacyStock",
+      "cells": {
+        "frontDesk": "hidden",
+        "nurse": "hidden",
+        "doctor": "hidden",
+        "lab": "hidden",
+        "pharmacy": "full",
+        "facilityAdmin": "hidden",
+        "cashier": "hidden",
+        "billingOfficer": "hidden"
+      },
+      "derived": "Not a row of Akos's table: BILL-1 (migration 0162, owner sprint approval of 25 November 2026) adds the Finance group's areas and the pharmacy's stock; each cell is the contract's role table (docs/EHR_PLANNED_CONTRACT.md, BILL-1, Codes and roles)."
     }
   ],
   "todayRolePermissions": {
     "receptionist": [
+      "billing.bill.create",
+      "billing.bill.read",
+      "billing.catalogue.read",
+      "billing.payment.record",
+      "billing.shift.own",
       "ehr.document.read-own",
       "ehr.document.write",
       "ehr.encounter.read",
@@ -306,6 +417,7 @@
       "outreach.registration.write"
     ],
     "nurse": [
+      "billing.bill.defer",
       "ehr.diagnosis.read",
       "ehr.document.read",
       "ehr.document.write",
@@ -345,6 +457,7 @@
       "pharmacy.work-item.read"
     ],
     "doctor": [
+      "billing.bill.defer",
       "ehr.diagnosis.read",
       "ehr.diagnosis.write",
       "ehr.document.read",
@@ -382,6 +495,7 @@
       "pharmacy.import.write"
     ],
     "clinician": [
+      "billing.bill.defer",
       "ehr.diagnosis.read",
       "ehr.diagnosis.write",
       "ehr.document.read",
@@ -425,6 +539,10 @@
       "pharmacy.work-item.read"
     ],
     "lab": [
+      "billing.bill.read",
+      "billing.catalogue.read",
+      "billing.payment.record",
+      "billing.shift.own",
       "ehr.document.read",
       "ehr.document.write",
       "ehr.lab-request.read",
@@ -455,6 +573,11 @@
       "lab.work-item.read"
     ],
     "pharmacist": [
+      "billing.bill.create",
+      "billing.bill.read",
+      "billing.catalogue.read",
+      "billing.payment.record",
+      "billing.shift.own",
       "ehr.encounter.read",
       "ehr.prescription.read",
       "identity.authorization.check",
@@ -467,11 +590,24 @@
       "pharmacy.import.read",
       "pharmacy.import.write",
       "pharmacy.order-route.receive",
+      "pharmacy.stock.manage",
+      "pharmacy.stock.read",
+      "pharmacy.walk-in.create",
       "pharmacy.work-item.accept",
       "pharmacy.work-item.read"
     ],
     "admin": [
       "audit.read",
+      "billing.bill.adjust",
+      "billing.bill.read",
+      "billing.catalogue.manage",
+      "billing.catalogue.read",
+      "billing.payment.confirm",
+      "billing.payment.void",
+      "billing.payment.waive",
+      "billing.report.read",
+      "billing.settings.manage",
+      "billing.shift.manage",
       "identity.registration.approve",
       "identity.registration.write",
       "lab.accession.read",
@@ -490,6 +626,16 @@
     ],
     "org_admin": [
       "audit.read",
+      "billing.bill.adjust",
+      "billing.bill.read",
+      "billing.catalogue.manage",
+      "billing.catalogue.read",
+      "billing.payment.confirm",
+      "billing.payment.void",
+      "billing.payment.waive",
+      "billing.report.read",
+      "billing.settings.manage",
+      "billing.shift.manage",
       "identity.registration.approve",
       "identity.registration.write",
       "organization.manage",
@@ -505,6 +651,28 @@
     ],
     "reading_starter": [
       "ocr.job.start"
+    ],
+    "cashier": [
+      "billing.bill.create",
+      "billing.bill.read",
+      "billing.catalogue.read",
+      "billing.payment.record",
+      "billing.shift.own"
+    ],
+    "billing_officer": [
+      "billing.bill.adjust",
+      "billing.bill.create",
+      "billing.bill.defer",
+      "billing.bill.read",
+      "billing.catalogue.manage",
+      "billing.catalogue.read",
+      "billing.payment.confirm",
+      "billing.payment.record",
+      "billing.payment.void",
+      "billing.payment.waive",
+      "billing.report.read",
+      "billing.shift.manage",
+      "billing.shift.own"
     ]
   },
   "todayDifferences": [

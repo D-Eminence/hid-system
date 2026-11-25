@@ -55,6 +55,13 @@ create extension dblink with schema public;
 \endif
 
 begin;
+-- BILL-1 (0162) adds the billing and pharmacy-stock codes to these roles. This
+-- suite checks its file against the role table as Release C leaves it, so its
+-- rolled-back transaction first takes 0162's rows out where 0162 is applied
+-- (the patient-billing suite checks 0162's own rows).
+delete from auth.role_permissions
+ where permission_code like 'billing.%'
+    or permission_code in ('pharmacy.walk-in.create', 'pharmacy.stock.read', 'pharmacy.stock.manage');
 
 -- Runs 0151 as written and keeps what it answered (SQLSTATE and message, or
 -- 'applied'). 0151 is one statement, so when it raises, ON_ERROR_ROLLBACK

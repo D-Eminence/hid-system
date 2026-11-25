@@ -28,7 +28,7 @@ export class DomainProblem extends HttpException {
     detail: string,
     public readonly errors?: ProblemDetails['errors'],
     /** Extra fields the answer carries (EHR-C6: the existing draft's `draftId`); never a standard field. */
-    public readonly extensions?: Readonly<Record<string, string>>,
+    public readonly extensions?: Readonly<Record<string, string | number | boolean>>,
   ) {
     super(detail, status);
   }

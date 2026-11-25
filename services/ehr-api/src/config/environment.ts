@@ -111,6 +111,12 @@ const environmentSchema = z
     OFFLINE_ESCROW_KEYS: optionalString,
     // Prescription strength, form, duration, quantity and priority (0125): off by default, off is exactly as before.
     PRESCRIPTION_DISPENSING_DETAILS_ENABLED: booleanString,
+    // BILL-1 (0162-0167): patient billing. Off by default; the sealed QA and demo facilities are on regardless.
+    COMMERCIAL_BILLING_ENABLED: booleanString,
+    // BILL-3: pay-before for pharmacy and lab may be saved only once the clinical lead signs it.
+    COMMERCIAL_PAY_BEFORE_ENABLED: booleanString,
+    // BILL-14: paying online through the facility's own Paystack account; off everywhere until approved.
+    COMMERCIAL_ONLINE_PAYMENT_ENABLED: booleanString,
   })
   .superRefine((environment, context) => {
     if (environment.AI_ENABLED) {
