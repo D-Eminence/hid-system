@@ -9,7 +9,7 @@ import { DeliverAccountDeletionDto } from './dto/deliver-account-deletion.dto';
 import { DeliverEmergencyContactAlertDto } from './dto/deliver-emergency-contact-alert.dto';
 import { DeliverOtpDto, OtpPurpose, validateRecipient } from './dto/deliver-otp.dto';
 import { DeliverContactChangedDto, DeliverEmailChangeCodeDto, DeliverPasswordResetCodeDto, DeliverPasswordUpdatedDto,
-  DeliverPatientWelcomeDto, DeliverStaffPasswordResetCodeDto } from './dto/deliver-patient-emails.dto';
+  DeliverAppointmentNoticeDto, DeliverPatientWelcomeDto, DeliverStaffPasswordResetCodeDto } from './dto/deliver-patient-emails.dto';
 import { DeliverPatientShareInvitationDto, DeliverRecordAccessAlertDto, DeliverShareReceivedDto }
   from './dto/deliver-sharing-emails.dto';
 import { DeliverStaffInvitationDto } from './dto/deliver-staff-invitation.dto';
@@ -221,6 +221,35 @@ export class NotificationController {
     await this.authenticateEmailRequest(request, idempotencyKey, input);
     const result = await this.notifications.deliverRecordAccessAlert({ recipient: input.recipient,
       occurredAt: new Date(input.occurredAt), idempotencyKey: idempotencyKey! }, input.plan);
+    return this.response(result);
+  }
+
+  /**
+   * APPT-1 (0161): an appointment notice from Identity's senders. Email: the
+   * generic "There is an update to your appointments" for every kind. SMS: the
+   * reminder only, "Reminder: you have an appointment at {facility} on {day}
+   * at {time}." (Lagos), never the clinic or reason. An older
+   * notification-api answers 404, which Identity records as a failure.
+   */
+  @Post('appointment-notice') @HttpCode(202)
+  async appointmentNotice(@Body() input: DeliverAppointmentNoticeDto, @Req() request: Request,
+    @Headers('idempotency-key') idempotencyKey: string | undefined) {
+    await this.auth.authenticate(request.header('x-hid-internal-caller'), request.header('x-hid-service-authorization'), request.header('x-hid-service-token'));
+    if (!idempotencyKey || !/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/.test(idempotencyKey)) {
+      throw new BadRequestException('A valid idempotency key is required');
+    }
+    if (!validateRecipient(input.channel, input.recipient)) {
+      throw new BadRequestException('Recipient does not match the selected channel');
+    }
+    if (input.channel === 'sms' && (input.kind !== 'reminder' || !input.facilityName || !input.startsAt)) {
+      throw new BadRequestException('An appointment SMS is a reminder with the facility name and the start time');
+    }
+    if (input.channel === 'email' && (input.facilityName !== undefined || input.startsAt !== undefined)) {
+      throw new BadRequestException('An appointment email carries no facility or time');
+    }
+    const result = await this.notifications.deliverAppointmentNotice({ channel: input.channel, recipient: input.recipient,
+      kind: input.kind, ...(input.facilityName ? { facilityName: input.facilityName } : {}),
+      ...(input.startsAt ? { startsAt: new Date(input.startsAt) } : {}), idempotencyKey }, input.plan);
     return this.response(result);
   }
 

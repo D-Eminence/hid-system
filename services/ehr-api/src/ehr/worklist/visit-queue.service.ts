@@ -24,8 +24,11 @@ export interface VisitQueueCard {
   stage: VisitQueueStage;
   triageLevel: number | null;
   assignedMembershipId: string | null;
-  /** How the patient was checked in: from a search, or already this facility's patient. */
-  checkInBasis: 'search' | 'own-facility';
+  /**
+   * How the patient was checked in: from a search, already this facility's
+   * patient, or (APPT-1, 0160) from this facility's appointment on its day.
+   */
+  checkInBasis: 'search' | 'own-facility' | 'appointment';
   checkedInAt: string;
   /** The Lagos calendar day of the check-in (YYYY-MM-DD). */
   checkInDay: string;
@@ -52,7 +55,7 @@ export interface VisitQueueList {
   limit: typeof VISIT_QUEUE_LIST_LIMIT;
 }
 
-interface CardRow extends QueryResultRow {
+export interface VisitQueueCardRow extends QueryResultRow {
   entry_id: string;
   patient_id: string;
   full_name: string;
@@ -62,7 +65,7 @@ interface CardRow extends QueryResultRow {
   stage: VisitQueueStage;
   triage_level: number | null;
   assigned_membership_id: string | null;
-  check_in_basis: 'search' | 'own_facility';
+  check_in_basis: 'search' | 'own_facility' | 'appointment';
   checked_in_at: Date;
   queue_day: string;
   stage_changed_at: Date;
@@ -72,6 +75,8 @@ interface CardRow extends QueryResultRow {
   record_kind?: string | null;
   dob_estimated?: boolean | null;
 }
+
+type CardRow = VisitQueueCardRow;
 
 interface OutcomeRow extends CardRow {
   outcome: string;
@@ -182,6 +187,11 @@ export class VisitQueueService {
   }
 }
 
+/** One waiting-list card from its row (also the check-in answer of APPT-1's appointment check-in). */
+export function toVisitQueueCard(row: CardRow): VisitQueueCard {
+  return toCard(row);
+}
+
 function toCard(row: CardRow): VisitQueueCard {
   return {
     entryId: row.entry_id,
@@ -193,7 +203,8 @@ function toCard(row: CardRow): VisitQueueCard {
     stage: row.stage,
     triageLevel: row.triage_level === null ? null : Number(row.triage_level),
     assignedMembershipId: row.assigned_membership_id,
-    checkInBasis: row.check_in_basis === 'own_facility' ? 'own-facility' : 'search',
+    checkInBasis: row.check_in_basis === 'own_facility' ? 'own-facility'
+      : row.check_in_basis === 'appointment' ? 'appointment' : 'search',
     checkedInAt: new Date(row.checked_in_at).toISOString(),
     checkInDay: row.queue_day,
     stageChangedAt: new Date(row.stage_changed_at).toISOString(),

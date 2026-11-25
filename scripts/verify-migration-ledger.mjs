@@ -164,6 +164,9 @@ const acceptedMigrations = new Map([
   ['0149_catalog_medicines_and_lab_tests.sql', 'a92d10f221ab1cfadc1eca18c55fc6e7ef56d79e0280fc5f0bbc29633976eac9'],
   ['0150_doctors_start_readings_again.sql', 'b8e11941ec490653cc999fb6a32a184520388b9aae65b765efead1e903ee2fd6'],
   ['0151_sealed_qa_front_desk_and_nurse_logins.sql', 'abab517679255cec2d67aadae9d44f1b629e8e3e9ee30d77cfee33817b2c75f2'],
+  // APPT-1 (Release D), numbers provisional (given at merge, after 0152-0154), unsigned.
+  ['0160_appointments.sql', '1d26117473baabf20b1fd482f558072fbe07d8dc941e59f7d5f25c9d42193d99'],
+  ['0161_appointment_notices_and_call_list.sql', '031b88d07b7386d3db2516e6322849f4bd90b77e054cef3819abcf4767d51b55'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

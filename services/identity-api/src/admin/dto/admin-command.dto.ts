@@ -70,7 +70,9 @@ export class PlatformControlCommandDto {
   // cross_facility_orders_enabled: sending and accepting orders between facilities (P4c, migration 0086).
   // cross_facility_route_access_enabled: work on accepted orders between facilities (P4c, migration 0086).
   // outreach_organiser_signup_enabled: open sign-up to run outreach on outreach. (seeded off).
-  @Matches(/^(patient_portal_enabled|provider_portal_enabled|outreach_portal_enabled|maintenance_mode|uploads_enabled|break_glass_enabled|provider_self_service_enabled|staff_invitations_enabled|cross_facility_orders_enabled|cross_facility_route_access_enabled|outreach_organiser_signup_enabled)$/)
+  // appointment_sms_reminders_enabled: appointment reminder SMS (APPT-1, migration 0161; seeded off; on only
+  // after the SMS budget, the Termii sender ID and the DPO's notice).
+  @Matches(/^(patient_portal_enabled|provider_portal_enabled|outreach_portal_enabled|maintenance_mode|uploads_enabled|break_glass_enabled|provider_self_service_enabled|staff_invitations_enabled|cross_facility_orders_enabled|cross_facility_route_access_enabled|outreach_organiser_signup_enabled|appointment_sms_reminders_enabled)$/)
   controlKey!: string;
   @IsBoolean()
   enabled!: boolean;

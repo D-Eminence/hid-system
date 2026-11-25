@@ -111,6 +111,10 @@ const environmentSchema = z
     OFFLINE_ESCROW_KEYS: optionalString,
     // Prescription strength, form, duration, quantity and priority (0125): off by default, off is exactly as before.
     PRESCRIPTION_DISPENSING_DETAILS_ENABLED: booleanString,
+    // APPT-1 (0160, 0161): appointments. Off by default; every appointment route answers 503
+    // APPOINTMENTS_NOT_AVAILABLE and the reminder sweep does not run. On in staging and at the sealed
+    // demo and QA facilities; in production only after the clinical lead's checklist and the owner's go-live.
+    APPOINTMENTS_ENABLED: booleanString,
   })
   .superRefine((environment, context) => {
     if (environment.AI_ENABLED) {

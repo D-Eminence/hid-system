@@ -12,6 +12,8 @@ import { patientShareInvitationContent, recordAccessAlertContent, shareReceivedC
   type ShareLevel } from '../providers/sharing-emails';
 import { SesEmailProvider } from '../providers/ses.provider';
 import { TermiiSmsProvider } from '../providers/termii.provider';
+import { appointmentReminderSmsText, appointmentUpdateEmailContent, type AppointmentNoticeKind }
+  from '../providers/appointment-notices';
 
 const NOTIFICATION_PROVIDER_OVERRIDES = Symbol('NOTIFICATION_PROVIDER_OVERRIDES');
 type ProviderName = 'ses' | 'termii' | 'meta-whatsapp' | 'brevo';
@@ -236,6 +238,23 @@ export class NotificationService {
       content: recordAccessAlertContent({ occurredAt: input.occurredAt,
         supportEmail: this.environment.EMERGENCY_CONTACT_SUPPORT_EMAIL }),
     }, rawPlan);
+  }
+
+  /**
+   * APPT-1 (0161): an appointment notice. The email is generic for every kind
+   * (no time, facility, clinic or reason); the SMS is the reminder only, with
+   * the facility's name and the start time in Lagos (Identity sends none while
+   * the Platform control appointment_sms_reminders_enabled is off).
+   */
+  deliverAppointmentNotice(input: { channel: 'email' | 'sms'; recipient: string; kind: AppointmentNoticeKind;
+    facilityName?: string; startsAt?: Date; idempotencyKey: string }, rawPlan?: unknown): Promise<DeliveryResult> {
+    if (input.channel === 'sms') {
+      const text = appointmentReminderSmsText({ facilityName: input.facilityName!, startsAt: input.startsAt! });
+      return this.deliver({ channel: 'sms', recipient: input.recipient, code: '', purpose: 'APPOINTMENT_REMINDER',
+        idempotencyKey: input.idempotencyKey, content: { subject: 'Appointment reminder', text } }, rawPlan);
+    }
+    return this.deliver({ channel: 'email', recipient: input.recipient, code: '', purpose: 'APPOINTMENT_NOTICE',
+      idempotencyKey: input.idempotencyKey, content: appointmentUpdateEmailContent() }, rawPlan);
   }
 
   /** E4 (0096): the account deletion was scheduled (with its date), cancelled or completed; nothing else. */

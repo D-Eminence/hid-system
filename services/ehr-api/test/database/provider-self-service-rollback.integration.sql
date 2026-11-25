@@ -495,8 +495,9 @@ declare
   result record;
 begin
   execute 'select array_agg(control_key order by control_key) from platform.admin_list_controls()' into listed;
-  -- 0115 added an eleventh control (outreach_organiser_signup_enabled).
-  if cardinality(listed) <> 11 or not listed @> array['provider_self_service_enabled', 'staff_invitations_enabled',
+  -- 0115 added an eleventh control (outreach_organiser_signup_enabled), 0161 (APPT-1) a twelfth where it is applied.
+  if cardinality(listed) <> 11 + (case when exists (select 1 from pg_proc where proname = 'appointment_send_reminders')
+                                      then 1 else 0 end) or not listed @> array['provider_self_service_enabled', 'staff_invitations_enabled',
       'cross_facility_orders_enabled', 'cross_facility_route_access_enabled'] then
     raise exception 'The previous admin console does not list the four new controls: %', listed;
   end if;

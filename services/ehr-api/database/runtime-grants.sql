@@ -2044,3 +2044,76 @@ revoke all on function ehr.search_catalog_medicines(text, integer, text, text),
   ehr.catalog_lab_test_id_fixed() from public;
 revoke all on ehr.catalog_versions, ehr.catalog_medicines, ehr.catalog_lab_tests, ehr.catalog_retired_codes
   from public;
+
+-- Appointments (0160, APPT-1 of Release D; built at the recommended options
+-- Q-APPT-1 A, Q-APPT-2 A, Q-APPT-5 A and Q-APPT-6 A, not yet answered by the
+-- owner), exactly as 0160 grants and revokes them: booking, the day list, one
+-- appointment, one patient's list, reschedule, cancel, no-show, check-in,
+-- bookable staff, the clinics and the default length to the EHR runtime only.
+-- No privilege for any runtime on ehr.appointment_settings,
+-- ehr.appointment_clinics, ehr.appointments or ehr.appointment_events (only
+-- these functions read and write them, as their owner), and none on the card,
+-- caller, audit and idempotency helpers or the history's immutability trigger.
+grant execute on function
+  ehr.appointment_book(text, uuid, text, uuid, uuid, timestamptz, integer, text, text, text, text),
+  ehr.appointment_list(date, uuid, uuid, text[], integer, timestamptz, timestamptz, uuid),
+  ehr.appointment_read(uuid),
+  ehr.appointment_patient_list(uuid),
+  ehr.appointment_reschedule(uuid, bigint, timestamptz, integer, uuid, boolean, text, text, text),
+  ehr.appointment_cancel(uuid, bigint, text, text, text),
+  ehr.appointment_mark_no_show(uuid, bigint, text, text),
+  ehr.appointment_check_in(uuid, bigint, boolean, text, text, text),
+  ehr.appointment_bookable_staff(),
+  ehr.appointment_clinic_list(boolean),
+  ehr.appointment_clinic_save(uuid, bigint, text, text, integer, boolean, boolean, text, text),
+  ehr.appointment_settings_read(),
+  ehr.appointment_settings_save(bigint, integer, text, text) to hid_ehr_runtime;
+revoke all on function
+  ehr.appointment_book(text, uuid, text, uuid, uuid, timestamptz, integer, text, text, text, text),
+  ehr.appointment_list(date, uuid, uuid, text[], integer, timestamptz, timestamptz, uuid),
+  ehr.appointment_read(uuid),
+  ehr.appointment_patient_list(uuid),
+  ehr.appointment_reschedule(uuid, bigint, timestamptz, integer, uuid, boolean, text, text, text),
+  ehr.appointment_cancel(uuid, bigint, text, text, text),
+  ehr.appointment_mark_no_show(uuid, bigint, text, text),
+  ehr.appointment_check_in(uuid, bigint, boolean, text, text, text),
+  ehr.appointment_bookable_staff(),
+  ehr.appointment_clinic_list(boolean),
+  ehr.appointment_clinic_save(uuid, bigint, text, text, integer, boolean, boolean, text, text),
+  ehr.appointment_settings_read(),
+  ehr.appointment_settings_save(bigint, integer, text, text),
+  ehr.appointment_cards(uuid[], uuid, uuid, uuid),
+  ehr.appointment_caller(text[], text[]),
+  ehr.appointment_audit(text, uuid, uuid, uuid, uuid, text, text, uuid, text, text, text, text, jsonb),
+  ehr.appointment_idempotency(uuid, text, text),
+  ehr.appointment_events_immutable() from public;
+revoke all on ehr.appointment_settings, ehr.appointment_clinics, ehr.appointments, ehr.appointment_events from public;
+
+-- Appointment notices, reminders, the portal list and the call list (0161,
+-- APPT-1 of Release D; built at the recommended options Q-APPT-3 A and
+-- Q-APPT-7 A, not yet answered by the owner), exactly as 0161 grants and
+-- revokes them: the reminder sweep and the patient's own list to the EHR
+-- runtime; the call list and the email and SMS senders' claim and record to
+-- the Identity runtime (only Identity holds the contact key and sends mail).
+-- No privilege for any runtime on ehr.appointment_email_outbox or
+-- ehr.appointment_sms_outbox, and none on the notice helper or its trigger.
+grant execute on function
+  ehr.appointment_send_reminders(integer),
+  ehr.appointment_my_list(uuid, text, integer, timestamptz, uuid) to hid_ehr_runtime;
+grant execute on function
+  identity.appointment_call_list(date, uuid, uuid),
+  identity.appointment_sms_claim(integer),
+  identity.appointment_sms_record(uuid, text, text),
+  identity.appointment_email_claim(text, integer, integer),
+  identity.appointment_email_record(uuid, text, text, text) to hid_identity_runtime;
+revoke all on function
+  ehr.appointment_send_reminders(integer),
+  ehr.appointment_my_list(uuid, text, integer, timestamptz, uuid),
+  identity.appointment_call_list(date, uuid, uuid),
+  identity.appointment_sms_claim(integer),
+  identity.appointment_sms_record(uuid, text, text),
+  identity.appointment_email_claim(text, integer, integer),
+  identity.appointment_email_record(uuid, text, text, text),
+  ehr.appointment_notice(uuid, text, timestamptz),
+  ehr.appointment_events_notify() from public;
+revoke all on ehr.appointment_email_outbox, ehr.appointment_sms_outbox from public;

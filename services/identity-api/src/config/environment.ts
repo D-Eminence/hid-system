@@ -175,6 +175,11 @@ const environmentSchema = z.object({
   // The "your records were opened" email (0095, D9): a code default, on. While
   // false the inbox notice is still written and no email is sent.
   RECORD_ACCESS_EMAIL_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
+  // APPT-1 (0160, 0161): appointments. Off by default: GET identity/appointment-call-list answers 503
+  // APPOINTMENTS_NOT_AVAILABLE and the sweeper sends no appointment email or SMS. On in staging; in
+  // production only after the clinical lead's checklist and the owner's go-live. SMS also needs the
+  // Platform control appointment_sms_reminders_enabled, which 0161 seeds off.
+  APPOINTMENTS_ENABLED: booleanString,
   // Delete my account (B5, migration 0096): a code default, on; production's
   // task definitions set no new key. While false, the patient routes answer
   // 404 as an older Identity does and the website hides the card; deletions
