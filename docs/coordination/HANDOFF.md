@@ -2,6 +2,8 @@
 
 This file is for a coordinator session that takes over: a new cloud session, or the owner's local Claude Code in VS Code. It is not product documentation. The clinical lead's and DPO's names stay out of the repository and GitHub. The owner knows them.
 
+**ACTIVE COORDINATOR: the cloud session, since 25 Nov ~17:45 UTC (owner: "you're active"). The local VS Code coordinator must not merge, release or push until the owner hands over again.** Website run 45661915015 was confirmed green (live 17:20 UTC, all pins on 0cfddcc9).
+
 ## Only one coordinator acts at a time
 - Before acting, the owner tells this session it is the active coordinator.
 - Any other coordinator stops merging, releasing and pushing until the owner hands back.
