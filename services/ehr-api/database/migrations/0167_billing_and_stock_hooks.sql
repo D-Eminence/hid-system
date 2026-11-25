@@ -2,8 +2,11 @@
 -- lab and waiting-list tables. Written on claude/sprint-billing-backend
 -- (staging at 95fa1e52, 0001-0151 applied) after 0162-0166 in the same pull
 -- request. Provisional number (Release D block 0162-0167); nothing here reads
--- 0152-0154 (ORD-12's 0154 refills, when merged first, keep one automatic
--- line per work item; lines by fill come with ORD-12's own follow-up). No
+-- 0152-0154. With ORD-12's 0154 refills (further dispensings of one work
+-- item), a work item keeps one automatic line, which bills its first
+-- dispensing only (H5 records which); a refill takes stock and has no line,
+-- and its reversal leaves the line alone (H6). Whether refills are billed is
+-- for ORD-12's own follow-up. No
 -- migration number appears inside a function body. The declaration is signed
 -- separately. Ola reviews this file and 0166 (the pharmacy and lab hooks);
 -- Rahman gives the final database check.
@@ -51,11 +54,14 @@
 --    pharmacy.take_stock_expiry_first; HB409 OUT_OF_STOCK takes nothing). The
 --    batch named by pharmacy-api in hid.stock_batch_id (transaction-local) is
 --    used when set; what was taken is left in hid.stock_taken for the
---    dispensing's audit row.
+--    dispensing's audit row. Before the stock, once past the gate: the work
+--    item's live automatic line that bills no dispensing yet records this
+--    one (0164's commercial.bill_lines.dispensing_id), so a line bills
+--    exactly the first dispensing of its work item.
 -- H6 pharmacy.dispensing_reversals BEFORE INSERT (zz_billing_reversal): the
---    work item's automatic line (a reversed item is never dispensed again,
---    and a corrected medicine comes as a new prescription with its own line)
---    is marked reversed and cancelled by the reversing pharmacist
+--    automatic line that bills the reversed dispensing (dispensing_id, H5; a
+--    corrected medicine comes as a new prescription with its own line) is
+--    marked reversed and cancelled by the reversing pharmacist
 --    ("Dispensing reversed"), whether it was unpaid, part paid or paid: its
 --    unpaid balance is never asked for, and pay-before never holds up the
 --    corrected medicine for it. What was collected beyond the bill's new
@@ -65,7 +71,8 @@
 --    the bill and on the work item's badge. A later line on the same bill
 --    uses what is over first. No stock moves: a reversal corrects the record,
 --    and the medicine may never have come back; what does come back is
---    counted back on the Stock page.
+--    counted back on the Stock page. A reversal of a dispensing no live line
+--    bills (a refill, or one recorded where no hook acted) changes no bill.
 -- H7 lab.specimens BEFORE UPDATE OF status (zz_billing_collect_gate): a
 --    specimen becoming collected meets the pay-before gate for lab.
 -- Pay-before is off everywhere until the clinical lead signs BILL-3
@@ -113,8 +120,8 @@ declare
        and namespace.nspname <> 'migration');
   made constant jsonb := '{
     "commercial.hook_check_in()": "0132c9412cbb3b0f3b73d2ebbbe60e90",
-    "commercial.hook_dispensing()": "f1bf808db6a26acb8bbd3a795d20b055",
-    "commercial.hook_dispensing_reversal()": "e36c067703060e7185c203fdc744e3c4",
+    "commercial.hook_dispensing()": "01e1ae08809209866134a4b1d8ba9261",
+    "commercial.hook_dispensing_reversal()": "26f47e77c559cac01724f6731c57bd03",
     "commercial.hook_facility(uuid)": "4efd0ae0c3c4ad8ce694a74b223cafa5",
     "commercial.hook_lab_work_item()": "903edbb2d3a10fc4a91610cec007349a",
     "commercial.hook_pharmacy_acceptance()": "2f5cabce9719e94cfc88d1e9bd7ca665",
@@ -422,6 +429,11 @@ begin
   if refusal is not null then
     raise exception using errcode = 'HB409', message = refusal;
   end if;
+  -- The work item's live line bills this dispensing when it bills none yet (the first one). Any later dispensing of
+  -- the same work item (a refill) is not the line's, so its reversal never touches the line.
+  update commercial.bill_lines bill_line set dispensing_id = new.id
+   where bill_line.facility_id = new.facility_id and bill_line.work_item_kind = 'pharmacy'
+     and bill_line.work_item_id = new.work_item_id and not bill_line.cancelled and bill_line.dispensing_id is null;
   item_id := pharmacy.stock_item_for_code(new.facility_id, btrim(new.medication_code_system), btrim(new.medication_code));
   if item_id is null then
     return new;
@@ -458,9 +470,12 @@ begin
   if not commercial.hook_facility(new.facility_id) then
     return new;
   end if;
+  -- Only the line that bills the reversed dispensing: a reversal of another dispensing of the work item (a refill)
+  -- leaves the line, and the dispensing it bills, alone.
   select bill_line.* into line from commercial.bill_lines bill_line
    where bill_line.facility_id = new.facility_id and bill_line.work_item_kind = 'pharmacy'
-     and bill_line.work_item_id = new.work_item_id and not bill_line.cancelled;
+     and bill_line.work_item_id = new.work_item_id and bill_line.dispensing_id = new.dispensing_id
+     and not bill_line.cancelled;
   if not found then
     return new;
   end if;
@@ -549,8 +564,8 @@ do $post$
 declare
   made constant jsonb := '{
     "commercial.hook_check_in()": "0132c9412cbb3b0f3b73d2ebbbe60e90",
-    "commercial.hook_dispensing()": "f1bf808db6a26acb8bbd3a795d20b055",
-    "commercial.hook_dispensing_reversal()": "e36c067703060e7185c203fdc744e3c4",
+    "commercial.hook_dispensing()": "01e1ae08809209866134a4b1d8ba9261",
+    "commercial.hook_dispensing_reversal()": "26f47e77c559cac01724f6731c57bd03",
     "commercial.hook_facility(uuid)": "4efd0ae0c3c4ad8ce694a74b223cafa5",
     "commercial.hook_lab_work_item()": "903edbb2d3a10fc4a91610cec007349a",
     "commercial.hook_pharmacy_acceptance()": "2f5cabce9719e94cfc88d1e9bd7ca665",

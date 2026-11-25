@@ -39,10 +39,16 @@
 --    added (a later price change never changes it), the origin (check_in,
 --    pharmacy, lab, counter, manual), the work item (unique while not
 --    cancelled, so a work item gets at most one automatic line), a "check
---    quantity" mark, cancellation with reason and member, and when the
---    work item's dispensing was reversed (0167 then always cancels the line,
---    so its unpaid balance is never asked for, and what was collected for
---    it is left as the bill's refund due).
+--    quantity" mark, cancellation with reason and member, the dispensing
+--    the line bills (0167 records on a pharmacy line the first dispensing of
+--    its work item made while the line is live; unique; no foreign key, as
+--    0167 writes it in the dispensing's BEFORE INSERT trigger and pharmacy
+--    dispensings are never deleted), and when that
+--    dispensing was reversed (0167 then always cancels the line, so its
+--    unpaid balance is never asked for, and what was collected for it is
+--    left as the bill's refund due). A reversal of any other dispensing of
+--    the same work item (a refill, if refills are recorded as further
+--    dispensings of one work item) never touches the line.
 -- T3 commercial.payments: cash, pos, transfer, waiver, online; status
 --    recorded, pending_check (a transfer until a second person confirms it)
 --    or confirmed; a receipt number unique per facility; the till day it was
@@ -277,6 +283,7 @@ create table commercial.bill_lines (
   cancelled_by_membership_id uuid references identity.staff_facility_memberships(id) on delete restrict,
   cancelled_at timestamptz,
   dispensing_reversed_at timestamptz,
+  dispensing_id uuid,
   created_by_membership_id uuid references identity.staff_facility_memberships(id) on delete restrict,
   idempotency_key text check (idempotency_key ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$'),
   request_sha256 char(64) check (request_sha256 ~ '^[0-9a-f]{64}$'),
@@ -286,12 +293,14 @@ create table commercial.bill_lines (
   constraint bill_lines_total_ck check (total_kobo = quantity * unit_kobo),
   constraint bill_lines_work_ck check ((work_item_kind is null) = (work_item_id is null)),
   constraint bill_lines_reversed_ck check (dispensing_reversed_at is null or work_item_kind = 'pharmacy'),
+  constraint bill_lines_dispensing_ck check (dispensing_id is null or work_item_kind = 'pharmacy'),
   constraint bill_lines_cancel_ck check (cancelled = (cancel_reason is not null)
     and cancelled = (cancelled_at is not null) and cancelled = (cancelled_by_membership_id is not null))
 );
 create unique index bill_lines_one_per_work_uq on commercial.bill_lines (work_item_kind, work_item_id)
   where work_item_id is not null and not cancelled;
 create index bill_lines_bill_idx on commercial.bill_lines (bill_id, created_at);
+create unique index bill_lines_dispensing_uq on commercial.bill_lines (dispensing_id) where dispensing_id is not null;
 
 create table commercial.payments (
   id uuid primary key default gen_random_uuid(),

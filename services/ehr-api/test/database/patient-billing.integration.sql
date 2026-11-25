@@ -42,7 +42,10 @@
 --      pay-before lets the corrected medicine through once it is paid), of
 --      one partly covered by an HMO and of one partly waived (the patient's
 --      money is given back first; cover left over the bill is shown); an
---      anonymous walk-in lab bill.
+--      anonymous walk-in lab bill;
+--  11. a second dispensing of one work item (a refill, simulated): the line
+--      bills the first dispensing only, so the second's reversal leaves the
+--      line and the bill, and the first one's reversal takes the line off.
 --
 -- Each case records its outcome; the suite fails at the end listing every
 -- case whose outcome differs.
@@ -1096,6 +1099,102 @@ select pg_temp.check_case('10 an anonymous visit bill is still refused', 'HB400 
 select pg_temp.check_case('10 the stock ledger still agrees', 'true',
   (select pharmacy.stock_ledger_agrees('b1620000-0000-4000-8000-000000000002')::text));
 select pg_temp.check_case('10 every bill''s totals agree at the end', '0', pg_temp.agree());
+
+-- 11. A second dispensing of one work item, as ORD-12's refills record them (simulated here: 0023's one-dispensing
+-- key is dropped for this transaction only). p8's prescription 8 (2 capsules): the line bills the first dispensing
+-- only; the second takes stock and changes no bill; its reversal leaves the line and the bill; the first one's
+-- reversal takes the line off.
+set local session_replication_role = replica;
+insert into ehr.prescriptions (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  medication_code_system, medication_code, medication_display, frequency, instructions, status, quantity_to_dispense,
+  quantity_unit)
+values ('b1620610-0000-4000-8000-000000000008', 'b1620600-0000-4000-8000-000000000008', pg_temp.patient(8),
+  'b1620000-0000-4000-8000-000000000002', 'b1620100-0000-4000-8000-000000000004', pg_temp.member(4), 'HID-MED',
+  'MED-00042', 'Amoxicillin 500 mg capsule', 'twice a day', 'After food', 'active', 2, 'Capsule');
+set local session_replication_role = origin;
+select set_config('app.facility_id', 'b1620000-0000-4000-8000-000000000002', true),
+  set_config('app.correlation_id', 'billing-suite-fixture', true);
+insert into pharmacy.work_items (id, patient_id, facility_id, ordering_facility_id, source_ehr_prescription_id,
+  source_ehr_prescription_version, source_encounter_id, source_status, status, medication_code_system, medication_code,
+  medication_display, frequency, instructions, prescribed_by, prescribed_at, accepted_by, accepted_by_membership_id,
+  accepted_at, acceptance_reason, idempotency_key, request_sha256, correlation_id)
+values ('b1620620-0000-4000-8000-000000000008', pg_temp.patient(8), 'b1620000-0000-4000-8000-000000000002',
+  'b1620000-0000-4000-8000-000000000002', 'b1620610-0000-4000-8000-000000000008', 1,
+  'b1620600-0000-4000-8000-000000000008', 'active', 'accepted', 'HID-MED', 'MED-00042', 'Amoxicillin 500 mg capsule',
+  'twice a day', 'As directed', 'b1620100-0000-4000-8000-000000000004', clock_timestamp(),
+  'b1620100-0000-4000-8000-000000000004', pg_temp.member(4), clock_timestamp(),
+  'Sent automatically when the prescription was activated', 'own-pharmacy-send:billing-8', repeat('0', 64),
+  'billing-suite-correlation');
+select pg_temp.accept(8, 8);
+create function pg_temp.refill_line() returns text language sql as $f$
+  select format('%s/%s/%s/%s/%s', origin, total_kobo, cancelled, dispensing_reversed_at is not null,
+    coalesce(dispensing_id::text, 'none'))
+    from commercial.bill_lines where work_item_id = 'b1620620-0000-4000-8000-000000000008'
+$f$;
+create function pg_temp.refill_bill() returns uuid language sql as $f$
+  select bill_id from commercial.bill_lines where work_item_id = 'b1620620-0000-4000-8000-000000000008'
+$f$;
+create function pg_temp.amox_on_hand() returns bigint language sql as $f$
+  select sum(on_hand)::bigint from pharmacy.stock_batches
+   where facility_id = 'b1620000-0000-4000-8000-000000000002' and catalogue_item_id = (pg_temp.ids('amox'))::uuid
+$f$;
+select pg_temp.check_case('11 the line bills no dispensing before the first', 'pharmacy/30000/f/f/none',
+  pg_temp.refill_line());
+select pg_temp.check_case('11 the first dispensing is given', 'dispensed', pg_temp.dispense(8, 8, 2));
+select pg_temp.check_case('11 the line bills the first dispensing',
+  'pharmacy/30000/f/f/b1620640-0000-4000-8000-000000000008', pg_temp.refill_line());
+insert into pg_temp.b_saved (label, value) values
+  ('refill-money', to_jsonb(pg_temp.money(pg_temp.refill_bill()))), ('refill-stock', to_jsonb(pg_temp.amox_on_hand()));
+alter table pharmacy.dispensings drop constraint if exists dispensings_work_item_id_key;
+do $$
+declare
+  answer text;
+begin
+  perform pg_temp.as_member(3, 'direct-care');
+  begin
+    insert into pharmacy.dispensings (id, work_item_id, work_item_version, patient_id, facility_id, medication_code_system,
+      medication_code, medication_display, quantity_dispensed, quantity_unit, status, dispensed_by,
+      dispensed_by_membership_id, reason, idempotency_key, request_sha256, correlation_id)
+    values ('b1620641-0000-4000-8000-000000000008', 'b1620620-0000-4000-8000-000000000008', 1, pg_temp.patient(8),
+      'b1620000-0000-4000-8000-000000000002', 'HID-MED', 'MED-00042', 'Amoxicillin 500 mg capsule', 2, 'capsule',
+      'dispensed', 'b1620100-0000-4000-8000-000000000003', pg_temp.member(3), 'Second supply as prescribed',
+      'billing-dispense-key-208', repeat('0', 64), 'billing-suite-correlation');
+    answer := 'dispensed';
+  exception when others then
+    answer := sqlstate || ' ' || sqlerrm;
+  end;
+  perform pg_temp.check_case('11 a second dispensing of the same work item is given', 'dispensed', answer);
+end $$;
+select pg_temp.check_case('11 the second dispensing takes stock', '2',
+  (select ((pg_temp.v('refill-stock'))::bigint - pg_temp.amox_on_hand())::text));
+select pg_temp.check_case('11 the line still bills the first dispensing',
+  'pharmacy/30000/f/f/b1620640-0000-4000-8000-000000000008', pg_temp.refill_line());
+select pg_temp.check_case('11 the second dispensing changes no bill', 'true',
+  (select (pg_temp.money(pg_temp.refill_bill()) = pg_temp.v('refill-money') #>> '{}')::text));
+do $$ begin
+  perform pg_temp.as_member(3, 'direct-care');
+  insert into pharmacy.dispensing_reversals (dispensing_id, dispensing_version, work_item_id, patient_id, facility_id,
+    status, reversed_by, reversed_by_membership_id, reason, idempotency_key, request_sha256, correlation_id)
+  values ('b1620641-0000-4000-8000-000000000008', 1, 'b1620620-0000-4000-8000-000000000008', pg_temp.patient(8),
+    'b1620000-0000-4000-8000-000000000002', 'reversed', 'b1620100-0000-4000-8000-000000000003', pg_temp.member(3),
+    'Second supply given in error', 'billing-reverse-key-208', repeat('0', 64), 'billing-suite-correlation');
+end $$;
+select pg_temp.check_case('11 reversing the second dispensing leaves the line on the bill',
+  'pharmacy/30000/f/f/b1620640-0000-4000-8000-000000000008', pg_temp.refill_line());
+select pg_temp.check_case('11 reversing the second dispensing changes no bill', 'true',
+  (select (pg_temp.money(pg_temp.refill_bill()) = pg_temp.v('refill-money') #>> '{}')::text));
+select pg_temp.check_case('11 nor writes to the bill''s log', '0',
+  (select count(*)::text from commercial.bill_events where bill_id = pg_temp.refill_bill()
+      and (details->>'dispensingReversed')::boolean));
+select pg_temp.reverse(8, 8);
+select pg_temp.check_case('11 reversing the first dispensing takes the line off',
+  'pharmacy/30000/t/t/b1620640-0000-4000-8000-000000000008', pg_temp.refill_line());
+select pg_temp.check_case('11 the bill''s log has that reversal', '1',
+  (select count(*)::text from commercial.bill_events where bill_id = pg_temp.refill_bill()
+      and (details->>'dispensingReversed')::boolean));
+select pg_temp.check_case('11 the stock ledger still agrees', 'true',
+  (select pharmacy.stock_ledger_agrees('b1620000-0000-4000-8000-000000000002')::text));
+select pg_temp.check_case('11 every bill''s totals agree at the end', '0', pg_temp.agree());
 
 do $$
 declare
