@@ -2070,8 +2070,8 @@ revoke all on ehr.clinician_recent_diagnoses from public;
 -- recommended options Q-ED-1 A, Q-ED-3 A, Q-ED-4 A, Q-ED-5 A, Q-ED-6 A and
 -- Q-ED-7 A, not yet answered by the owner), exactly as 0168 grants and revokes
 -- them: arrival, the board, one record, triage, move, the visit link, the
--- disposition, leave, cancel and the waiting list's helper to the EHR runtime
--- only. No privilege for any runtime on ehr.ed_attendances or
+-- disposition, leave, cancel, the waiting list's helper and the waiting
+-- list's update while the board is switched off to the EHR runtime only. No privilege for any runtime on ehr.ed_attendances or
 -- ehr.ed_attendance_events (only these functions read and write them, as their
 -- owner), and none on the card, caller, audit and idempotency helpers, the
 -- history's immutability trigger or the waiting-list close mirror. 0169 (who
@@ -2086,7 +2086,8 @@ grant execute on function
   ehr.ed_record_disposition(uuid, bigint, text, text, uuid, text, text, text, text),
   ehr.ed_leave(uuid, bigint, text, text),
   ehr.ed_cancel(uuid, bigint, text, text, text),
-  ehr.visit_queue_ed_attendances(uuid[]) to hid_ehr_runtime;
+  ehr.visit_queue_ed_attendances(uuid[]),
+  ehr.visit_queue_ed_board_off_update(uuid, bigint, text, smallint, boolean, uuid, boolean) to hid_ehr_runtime;
 revoke all on function
   ehr.ed_arrive(text, uuid, text, timestamptz, smallint, text, text, text),
   ehr.ed_board(boolean),
@@ -2098,6 +2099,7 @@ revoke all on function
   ehr.ed_leave(uuid, bigint, text, text),
   ehr.ed_cancel(uuid, bigint, text, text, text),
   ehr.visit_queue_ed_attendances(uuid[]),
+  ehr.visit_queue_ed_board_off_update(uuid, bigint, text, smallint, boolean, uuid, boolean),
   ehr.ed_cards(uuid[], uuid, uuid, uuid, boolean),
   ehr.ed_caller(text, text[]),
   ehr.ed_audit(text, uuid, uuid, uuid, uuid, text, text, uuid, text, text, text, text, jsonb),

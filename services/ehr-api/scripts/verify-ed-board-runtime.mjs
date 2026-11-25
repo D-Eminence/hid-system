@@ -4,7 +4,8 @@
 // context ehr-api's transactions set) and identity-api's staff patient search (as hid_identity_api_runtime): arrival
 // by each basis (a desk search's matchRef, this facility's own patient, an emergency search's matchRef with the
 // member's own break-glass grant), triage, start care, the visit link, each kind of disposition, "Left the
-// department", cancel, the waiting-list helper and the waiting list's guard. The emergency search's
+// department", cancel, the waiting-list helper, the waiting list's guard and, with ED_BOARD_ENABLED switched off
+// after use (the kill switch), the waiting list finishing a board patient's row. The emergency search's
 // matchRef and the break-glass grant are fixtures written as 0132 and 0031 write them (ID-5's own verifier covers
 // the activation). Executes only against the owned disposable synthetic rehearsal. No delivery or cloud calls;
 // fictional people, places and identifiers only.
@@ -17,12 +18,17 @@ const require = createRequire(join(service, 'package.json'));
 const socket = process.env.PGHOST;
 assert(process.env.NODE_ENV === 'test' && socket?.startsWith('/tmp/hid-tuf-migration.')
   && process.env.PGDATABASE === 'hid_rehearsal', 'Only the owned synthetic rehearsal is supported');
-Object.assign(process.env, { ED_BOARD_ENABLED: 'true', STORAGE_MODE: 'disabled' });
+// The waiting list reads ED_BOARD_ENABLED through ehr-api's configuration, which needs these to parse; no
+// connection is made with DATABASE_URL (the pool below uses the rehearsal's socket).
+Object.assign(process.env, { ED_BOARD_ENABLED: 'true', STORAGE_MODE: 'disabled',
+  DATABASE_URL: process.env.DATABASE_URL ?? 'postgresql://unused@localhost/unused',
+  CORS_ORIGINS: process.env.CORS_ORIGINS ?? 'http://localhost:3000' });
 require('ts-node').register({ project: join(service, 'tsconfig.json'), transpileOnly: true });
 require('reflect-metadata');
 const { Pool } = require('pg');
 const { EdBoardService } = require(join(service, 'src/ehr/ed-board/ed-board.service.ts'));
 const { VisitQueueService } = require(join(service, 'src/ehr/worklist/visit-queue.service.ts'));
+const { resetEnvironmentForTests } = require(join(service, 'src/config/environment.ts'));
 
 const pool = new Pool({ host: socket, user: process.env.PGUSER, database: process.env.PGDATABASE, max: 5 });
 const run = randomUUID().slice(0, 8);
@@ -203,8 +209,27 @@ try {
   const guarded = await board.read(context('desk'), five.attendance.attendanceId);
   assert.equal(guarded.attendance.status, 'open');
   assert.equal(guarded.attendance.rowVersion, five.attendance.rowVersion);
-  await board.cancel(context('desk'), five.attendance.attendanceId,
-    { expectedRowVersion: five.attendance.rowVersion, reason: 'Added to the board by mistake' }, key('cancel-5'));
+  // The kill switch: with ED_BOARD_ENABLED off after use, the row is an ordinary waiting-list row and the desk can
+  // finish it; the ED record closes with it (closed_on_waiting_list, one audit row with boardOff).
+  process.env.ED_BOARD_ENABLED = 'false';
+  resetEnvironmentForTests();
+  let finished;
+  try {
+    const plain = (await queue.list(context('desk'), false)).items.find((item) => item.patientId === ids.p5);
+    assert.equal(plain?.edAttendanceId, null);
+    finished = await queue.update(context('desk'), plain.entryId, { expectedRowVersion: plain.rowVersion, stage: 'finished' });
+  } finally {
+    process.env.ED_BOARD_ENABLED = 'true';
+    resetEnvironmentForTests();
+  }
+  assert.deepEqual([finished.stage, finished.closedAt !== null], ['finished', true]);
+  const released = await board.read(context('desk'), five.attendance.attendanceId);
+  assert.equal(released.attendance.status, 'closed');
+  assert.deepEqual(released.history.map((entry) => entry.kind), ['arrived', 'closed_on_waiting_list']);
+  const boardOffAudit = (await pool.query(`select count(*)::integer as n from audit.events
+    where action = 'ehr.ed.closed-on-waiting-list' and resource_id = $1 and details ->> 'boardOff' = 'true'`,
+  [five.attendance.attendanceId])).rows[0].n;
+  assert.equal(boardOffAudit, 1);
   // The board now: nobody open; with closed today, all five.
   const shown = await board.board(context('desk'), true);
   assert.deepEqual(shown.counts, { waiting: 0, beingSeen: 0, disposition: 0 });
@@ -220,7 +245,8 @@ try {
   process.stdout.write(JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', roles: ['hid_ehr_api_runtime',
     'hid_identity_api_runtime'], arrival_bases: ['search', 'own-facility', 'emergency'], replay: true,
     triage_move_visit: true, dispositions: ['admit_requested', 'sent_to_outpatients', 'left_before_seen'],
-    leave: true, cancel: true, waiting_list_helper: true, waiting_list_guard: true, complaint_hidden_from_desk: true,
+    leave: true, cancel: true, waiting_list_helper: true, waiting_list_guard: true, board_off_waiting_list: true,
+    complaint_hidden_from_desk: true,
     audit_without_personal_text: true }) + '\n');
 } finally {
   await pool.end();

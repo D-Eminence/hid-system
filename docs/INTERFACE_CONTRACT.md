@@ -9198,8 +9198,8 @@ facility (`ehr.encounter.write` and `ehr.note.write`). Answer 200 with the card.
 clinician or doctor who works at this facility."); 404 `VISIT_QUEUE_ENTRY_NOT_FOUND` (also another facility's row);
 409 `VISIT_QUEUE_ENTRY_CHANGED` ("Someone else changed this patient's place on the waiting list. Reload the list and
 try again."), `VISIT_QUEUE_ENTRY_CLOSED` ("This patient is no longer on the waiting list. Check them in again if they
-are back."), `VISIT_QUEUE_ON_ED_BOARD` (once 0168 is applied: the row's patient is on the emergency department
-board, whose own routes change it; see ED-1). 503 `VISIT_QUEUE_UNAVAILABLE` on a database without 0135.
+are back."), `VISIT_QUEUE_ON_ED_BOARD` (once 0168 is applied and while `ED_BOARD_ENABLED` is on: the row's patient is
+on the emergency department board, whose own routes change it; see ED-1). 503 `VISIT_QUEUE_UNAVAILABLE` on a database without 0135.
 
 Audit, written by the database functions in the request's transaction (refusals included): `ehr.visit-queue.check-in`
 (success with the patient; denied with the internal refusal kind, naming the patient only when one was found and is
@@ -12597,6 +12597,16 @@ department board. Make this change on the board.") for it, for every role (0168'
 history), and the board's roles, reasons and cancel rule cannot be gone around on the waiting list. The one exception
 is 0145's cancel of an unknown record, which makes the patient inactive and cancels the row: the ED record then closes
 too (history `closed_on_waiting_list`).
+
+**The board switched off after use (the kill switch).** All of the above holds only while `ED_BOARD_ENABLED` is on.
+While it is off, the board's routes answer 503 and the waiting list treats every row as its own: `edAttendanceId` is
+always `null` on its cards, and `PATCH /api/v1/ehr/visit-queue/:entryId` goes through 0168's
+`ehr.visit_queue_ed_board_off_update` (0135's update under the board's marker). A board patient's row can then be
+finished, cancelled, closed or changed like any other row, with 0135's own outcomes and refusals. When the change is
+made, the row's open or decided ED record closes (`closed_via` `waiting_list`, history `closed_on_waiting_list`, one
+`ehr.ed.closed-on-waiting-list` audit row with `boardOff: true`, as the waiting-list action's actor), so the patient is
+off the board when it is switched on again and no later board save can overwrite the waiting list's change. A refused
+or stale change leaves the ED record as it was. Switching the flag on again restores the guard at once.
 
 ### Audit
 

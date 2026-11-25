@@ -13,6 +13,7 @@
  */
 import { Pool, type PoolClient } from 'pg';
 import type { DataAccessContext } from '../../common/request-context';
+import { resetEnvironmentForTests } from '../../config/environment';
 import type { DatabaseService } from '../../database/database.service';
 import { VisitQueueService } from '../worklist/visit-queue.service';
 import { EdBoardService } from './ed-board.service';
@@ -42,6 +43,14 @@ function contextFor(member: { n: number; role: string }): DataAccessContext {
   } as unknown as DataAccessContext;
 }
 
+const originalEnvironment = { ...process.env };
+/** ED_BOARD_ENABLED as the waiting list reads it (the board's own service is called directly here). */
+function boardEnabled(on: boolean): void {
+  Object.assign(process.env, { NODE_ENV: 'test', DATABASE_URL: 'postgresql://ehr:test@localhost:5432/hid',
+    CORS_ORIGINS: 'http://localhost:3000', STORAGE_MODE: 'disabled', ED_BOARD_ENABLED: on ? 'true' : 'false' });
+  resetEnvironmentForTests();
+}
+
 describeRehearsal('ED-1 the emergency department board on PostgreSQL (0168, 0169)', () => {
   let pool: Pool;
   let client: PoolClient;
@@ -49,6 +58,7 @@ describeRehearsal('ED-1 the emergency department board on PostgreSQL (0168, 0169
   let queue: VisitQueueService;
 
   beforeAll(async () => {
+    boardEnabled(true);
     pool = new Pool({ connectionString: url, max: 1 });
     client = await pool.connect();
     await client.query('begin');
@@ -119,6 +129,9 @@ describeRehearsal('ED-1 the emergency department board on PostgreSQL (0168, 0169
   });
 
   afterAll(async () => {
+    for (const name of Object.keys(process.env)) if (!(name in originalEnvironment)) delete process.env[name];
+    Object.assign(process.env, originalEnvironment);
+    resetEnvironmentForTests();
     await client?.query('rollback');
     client?.release();
     await pool?.end();
@@ -171,6 +184,34 @@ describeRehearsal('ED-1 the emergency department board on PostgreSQL (0168, 0169
     expect((await board.board(contextFor(desk), false)).items).toEqual([]);
     expect((await board.board(contextFor(desk), true)).items.map((item) => item.status)).toEqual(['closed']);
   });
+
+  it('with the board switched off after use, the waiting list finishes a board patient\'s row and closes the record',
+    async () => {
+      const arrived = await board.arrive(contextFor(nurse), { patientId: ownPatient, arrivalMode: 'walk_in' }, key('arrive-again'));
+      const attendanceId = arrived.attendance.attendanceId;
+      const [row] = (await queue.list(contextFor(desk), false)).items;
+      expect(row?.edAttendanceId).toBe(attendanceId);
+      await expect(queue.update(contextFor(desk), row!.entryId, { expectedRowVersion: row!.rowVersion, stage: 'finished' }))
+        .rejects.toMatchObject({ code: 'VISIT_QUEUE_ON_ED_BOARD' });
+      boardEnabled(false);
+      try {
+        const [plain] = (await queue.list(contextFor(desk), false)).items;
+        expect(plain).toMatchObject({ entryId: row!.entryId, edAttendanceId: null });
+        const finished = await queue.update(contextFor(desk), row!.entryId,
+          { expectedRowVersion: plain!.rowVersion, stage: 'finished' });
+        expect(finished).toMatchObject({ stage: 'finished', edAttendanceId: null });
+        expect(finished.closedAt).not.toBeNull();
+      } finally {
+        boardEnabled(true);
+      }
+      const record = await board.read(contextFor(desk), attendanceId);
+      expect(record.attendance).toMatchObject({ status: 'closed', column: 'closed' });
+      expect(record.history.map((entry) => entry.kind)).toEqual(['arrived', 'closed_on_waiting_list']);
+      const audited = await client.query(`select count(*)::integer as count from audit.events
+        where action = 'ehr.ed.closed-on-waiting-list' and resource_id = $1 and details ->> 'boardOff' = 'true'`,
+      [attendanceId]);
+      expect(audited.rows[0].count).toBe(1);
+    });
 
   it('writes no name, Health ID or complaint into any audit row', async () => {
     const leaked = await client.query(`select count(*)::integer as count from audit.events

@@ -716,7 +716,7 @@
       },
       {
         "name": "0168_emergency_department_board.sql",
-        "sha256": "eb41a55c862476baf1fd631c5af0173b9ae3fd0f8795854e6ab03ac3e5c6c31f"
+        "sha256": "bf77ec190e378ca9dae670b9f9bcd580546690c10eff49fda30e564e55b91618"
       },
       {
         "name": "0169_emergency_department_board_access.sql",

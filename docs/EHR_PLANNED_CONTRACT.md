@@ -3883,6 +3883,8 @@ Answer `201 { "outcome": "arrived" | "moved_from_waiting_list" | "already_on_boa
 
 While a row has an open or decided ED record, its stage, triage level, assignee and close belong to the board. The waiting list's update answers 409 `VISIT_QUEUE_ON_ED_BOARD` for it, for every role, and the waiting list's card offers no next step or Change form for it, only the link to the board. So the ED record's row version covers every field the board writes, the triage on the board is the only triage, with who did it in the history, and the board's roles, reasons and cancel rule cannot be gone around on the waiting list. The one exception is 0145's cancel of an unknown record, which makes the patient inactive and cancels the row; the ED record then closes too, with history kind `closed_on_waiting_list`.
 
+All of this holds while `ED_BOARD_ENABLED` is on. If the owner switches the board off after use (the kill switch), the waiting list treats its patients' rows as ordinary rows: no ED link on the card, and finish, cancel, close and Change work again. Each such change closes the row's ED record with history kind `closed_on_waiting_list` and an audit row marked `boardOff`, so nothing is stuck while the board is off and nothing the waiting list did is overwritten when it is switched on again.
+
 ### Errors
 
 | HTTP | Code | Message |
@@ -3960,10 +3962,12 @@ Both files follow 0147, 0150 and 0151:
   - A trigger, `visit_queue_ed_guard` (BEFORE UPDATE OF `stage`, `triage_level`, `assigned_membership_id`, `closed_at`), refuses (55000 `VISIT_QUEUE_ON_ED_BOARD`) a change to a row that has an open or decided ED record, unless the change comes from an ED function (which names the row in a transaction-local marker first) or the patient's record is no longer active (0145's cancel of an unknown record).
   - A trigger, `visit_queue_ed_close_mirror` (AFTER UPDATE OF `closed_at`, only when a row closes), closes the open or decided ED record of that row. It writes the `closed_on_waiting_list` event and one audit row. It does nothing when the change came from an ED function (the same marker).
   - Nothing else in 0135 changes: its three functions and its card are not replaced.
+  - The kill switch: while `ED_BOARD_ENABLED` is off, ehr-api sends the waiting list's changes through `ehr.visit_queue_ed_board_off_update` (below) and shows no ED record on the waiting list's cards, so a board patient's row is never stuck while the board is off. While the flag is on, ehr-api never calls it and the guard applies.
 - SECURITY DEFINER functions with `search_path = pg_catalog, pg_temp`, owned like 0135's, EXECUTE for `hid_ehr_runtime` only:
   - `ehr.ed_arrive`, `ehr.ed_board`, `ehr.ed_read`;
   - `ehr.ed_triage`, `ehr.ed_move`, `ehr.ed_link_visit`, `ehr.ed_record_disposition`, `ehr.ed_leave`, `ehr.ed_cancel`;
   - `ehr.visit_queue_ed_attendances(entry ids)`, the waiting-list helper (as 0145's `ehr.visit_queue_record_kinds`);
+  - `ehr.visit_queue_ed_board_off_update`, the waiting list's update while the board is off: 0135's `ehr.visit_queue_update` (md5-pinned) with the same arguments and answer, run under the board's marker. When the row is updated, it closes the row's open or decided ED record (`closed_via` `waiting_list`, a `closed_on_waiting_list` event, one `ehr.ed.closed-on-waiting-list` audit row with `boardOff: true`), locking the row and then the record, as the mirror does. Any other outcome leaves the record as it was;
   - `ehr.ed_cards`, which no role may execute. It returns 0135's card fields, 0145's record kind and label, and the ED fields. It returns the complaint only when the caller holds `ehr.ed.triage`.
 - Each function checks the caller: an active, unheld membership; the ED code; 0135's pair; the purpose (direct care, or emergency for `ehr.ed_arrive` with an emergency `matchRef`); and the facility's seal. A sealed demo or QA facility sees only its own sealed patients, as 0135 does.
 - `ehr.ed_arrive`:

@@ -52,7 +52,18 @@
 --  10. the history, the waiting-list helper, the runtime cannot read the
 --      tables or call the helpers;
 --  11. audit: every row's outcome, and no name, date of birth, Health ID,
---      complaint, referral facility name or reason text in any ED audit row.
+--      complaint, referral facility name or reason text in any ED audit row;
+--  12. the board switched off after use (ED_BOARD_ENABLED off: ehr-api sends
+--      the waiting list's changes through ehr.visit_queue_ed_board_off_update):
+--      a board patient's row can be finished, cancelled (a decided record
+--      too) or changed (triage level) on the waiting list; each closes its ED
+--      record once (closed_via waiting_list, one closed_on_waiting_list event,
+--      one audit row with boardOff true as the waiting-list action's actor);
+--      a stale version, a role without the waiting list and another
+--      facility's member change nothing; a row with no ED record is 0135's
+--      update; the marker is cleared afterwards, so 0135's own update is
+--      still refused for another board patient's row (the guard stays in
+--      force while the flag is on).
 --
 -- Each case records its outcome; the suite fails at the end listing every
 -- case whose outcome differs.
@@ -104,7 +115,7 @@ from b_members;
 
 -- Patients (Health IDs HID-ED + two letters): p1 found by the desk's search; p3 and p4 found by the doctor's
 -- emergency search (p3 with the doctor's break-glass grant, p4 with another member's and an expired one); p6 an
--- unknown record made at A; p7 sealed demo; p9 inactive; p10 a stranger; p2, p5 and p11-p19 registered at A's desk.
+-- unknown record made at A; p7 sealed demo; p9 inactive; p10 a stranger; p2, p5 and p11-p23 registered at A's desk.
 create temporary table b_patients (n integer primary key, hid text, first text, last text, sex text, status text,
   source text) on commit drop;
 insert into b_patients values
@@ -119,7 +130,7 @@ insert into b_patients values
 insert into b_patients
 select n, 'HID-EDB' || translate(lpad(n::text, 2, '0'), '0123456789', 'ABCDEFGHJK') || '2', 'Ola', 'Edperson' || n,
   case when n % 2 = 0 then 'female' else 'male' end, 'active', 'hid-desk-registration'
-from generate_series(11, 19) n;
+from generate_series(11, 23) n;
 insert into identity.patients (id, hid_code, first_name, last_name, full_name, gender, dob, status, source_system)
 select ('e1680400-0000-4000-8000-0000000000' || lpad(n::text, 2, '0'))::uuid, hid, first, last, first || ' ' || last,
   sex, date '1980-01-01' + n, status, source from b_patients;
@@ -134,7 +145,7 @@ values ('e1680400-0000-4000-8000-000000000006', 'e1680000-0000-4000-8000-0000000
   repeat('0', 64));
 insert into identity.sealed_demo_members (member_kind, member_id) values
   ('patient', 'e1680400-0000-4000-8000-000000000007');
--- Registered at A's desk without a NIN (0130), which created the record: p2, p5, p9, p11-p19.
+-- Registered at A's desk without a NIN (0130), which created the record: p2, p5, p9, p11-p23.
 insert into identity.registration_cases (id, facility_id, created_by_account_id, created_by_membership_id, status,
   first_name, last_name, full_name, dob, identity_evidence, no_nin_reason, idempotency_key, request_sha256,
   resolved_patient_id, review_idempotency_key, review_request_sha256, reviewed_by_account_id, reviewed_by_membership_id,
@@ -478,6 +489,24 @@ begin
 exception when others then
   return sqlstate || ' ' || sqlerrm;
 end
+$f$;
+-- 12: the waiting list's update while the board is off (ehr-api's call with the flag off).
+create function pg_temp.board_off_update(n integer, patient integer, stage text, level smallint default null,
+  version bigint default null) returns text language plpgsql as $f$
+begin
+  perform pg_temp.as_member(n);
+  return (select outcome || '/' || coalesce(answer.stage, '-') || '/' || (answer.closed_at is not null)::text || '/'
+                 || coalesce(answer.triage_level::text, '-')
+            from ehr.visit_queue_ed_board_off_update(pg_temp.queue_entry(patient),
+                   coalesce(version, pg_temp.queue_version(patient)), stage, level, null, null, null) answer);
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end
+$f$;
+create function pg_temp.ed_state(patient integer) returns text language sql security definer as $f$
+  select format('%s/%s/%s/%s', attendance.status, coalesce(attendance.closed_via, '-'),
+           coalesce(attendance.disposition_outcome, '-'), (attendance.left_at is not null)::text)
+    from ehr.ed_attendances attendance where attendance.id = pg_temp.att(patient)
 $f$;
 create function pg_temp.try(statement text) returns text language plpgsql as $f$
 begin
@@ -955,6 +984,72 @@ select pg_temp.check_case('11 no name, date of birth, Health ID, complaint, refe
     where (action like 'ehr.ed.%' or (action = 'ehr.visit-queue.check-in' and details ->> 'by' = 'emergency_department'))
       and (details::text ~* 'ed(one|two|three|four|five|six|seven|person)|amaka|bayo|chika|tunde|HID-ED|1980-|1986-|chest pain|motorcycle|unresponsive|teaching hospital|mistake|arrested|no inpatient bed'
            or coalesce(reason, '') <> '')));
+
+-- 12. The board switched off after use (the kill switch).
+set local role hid_ehr_api_runtime;
+select pg_temp.check_case('12 p20, p21, p22 and p23 arrive; p20 triaged on the board; p21 discharged (decided)',
+  'arrived|arrived|arrived|arrived|updated|updated',
+  (select split_part(pg_temp.arrive(2, null, 20, 'walk_in', 'arrive-p20'), '/', 1) || '|'
+     || split_part(pg_temp.arrive(2, null, 21, 'walk_in', 'arrive-p21'), '/', 1) || '|'
+     || split_part(pg_temp.arrive(2, null, 22, 'walk_in', 'arrive-p22'), '/', 1) || '|'
+     || split_part(pg_temp.arrive(2, null, 23, 'walk_in', 'arrive-p23'), '/', 1) || '|'
+     || split_part(pg_temp.triage(2, 20, 'triage-p20', 2::smallint), '/', 1) || '|'
+     || split_part(pg_temp.dispose(3, 21, 'dispose-p21', 'discharged'), '/', 1)));
+select pg_temp.check_case('12 with the board on, 0135''s update of p20''s row is still refused', '55000 VISIT_QUEUE_ON_ED_BOARD',
+  pg_temp.queue_update(1, 20, 'finished'));
+select pg_temp.check_case('12 board off: a stale version changes nothing', 'changed/ready/false/2',
+  pg_temp.board_off_update(1, 20, 'finished', version => 1));
+select pg_temp.check_case('12 board off: lab staff have no waiting list', '42501 VISIT_QUEUE_NOT_PERMITTED',
+  pg_temp.board_off_update(5, 20, 'finished'));
+select pg_temp.check_case('12 board off: another facility''s member does not find the row', 'not_found/-/false/-',
+  pg_temp.board_off_update(8, 20, 'finished', version => 1));
+select pg_temp.check_case('12 board off: p20''s ED record is still open after those', 'open/-/-/false', pg_temp.ed_state(20));
+select pg_temp.check_case('12 board off: the desk finishes p20 on the waiting list', 'updated/finished/true/2',
+  pg_temp.board_off_update(1, 20, 'finished'));
+select pg_temp.check_case('12 board off: the desk cancels p21 (decided) on the waiting list', 'updated/cancelled/true/-',
+  pg_temp.board_off_update(1, 21, 'cancelled'));
+select pg_temp.check_case('12 board off: a nurse sets p22''s level on the waiting list, the row stays open',
+  'updated/waiting/false/1', pg_temp.board_off_update(2, 22, null, 1::smallint));
+select pg_temp.check_case('12 the marker is cleared after the call', '',
+  coalesce(current_setting('hid.ed_board_closing', true), ''));
+select pg_temp.check_case('12 0135''s own update is still refused for p23 (still on the board)', '55000 VISIT_QUEUE_ON_ED_BOARD',
+  pg_temp.queue_update(2, 23, null, 1::smallint));
+select pg_temp.check_case('12 board off: a row with no ED record is 0135''s update', 'updated/triage/false/2',
+  pg_temp.board_off_update(1, 19, 'triage'));
+select pg_temp.check_case('12 p22''s row is the waiting list''s again: 0135''s own update works', 'updated',
+  pg_temp.queue_update(3, 22, 'with_clinician'));
+reset role;
+select pg_temp.check_case('12 p20, p21 and p22''s ED records closed on the waiting list (p21''s disposition kept), p23 open',
+  'closed/waiting_list/-/true|closed/waiting_list/discharged/true|closed/waiting_list/-/true|open/-/-/false',
+  pg_temp.ed_state(20) || '|' || pg_temp.ed_state(21) || '|' || pg_temp.ed_state(22) || '|' || pg_temp.ed_state(23));
+select pg_temp.check_case('12 p20 left when the row was finished', 't',
+  (select (attendance.left_at = entry.closed_at)::text::char(1) from ehr.ed_attendances attendance
+     join ehr.visit_queue entry on entry.id = attendance.visit_queue_entry_id where attendance.id = pg_temp.att(20)));
+select pg_temp.check_case('12 one closed_on_waiting_list event each, from the stage before to the stage after, by the waiting-list member',
+  '20:ready>finished:01|21:waiting>cancelled:01|22:waiting>waiting:02',
+  (select string_agg(format('%s:%s>%s:%s', right(patient_id::text, 2), from_stage, to_stage, right(by_membership_id::text, 2)),
+            '|' order by patient_id)
+     from ehr.ed_attendance_events where kind = 'closed_on_waiting_list'
+      and patient_id in (pg_temp.patient(20), pg_temp.patient(21), pg_temp.patient(22), pg_temp.patient(23))));
+select pg_temp.check_case('12 one audit row each with boardOff, as the waiting-list action''s actor, for direct care',
+  '3/staff/direct-care/2/3',
+  (select format('%s/%s/%s/%s/%s', count(*), min(actor_type), min(purpose_of_use), count(distinct actor_membership_id),
+            count(distinct resource_id))
+     from audit.events where action = 'ehr.ed.closed-on-waiting-list' and details ->> 'boardOff' = 'true'));
+select pg_temp.check_case('12 0135''s own audit row for each waiting-list change (p22''s two)', '4',
+  (select count(*)::text from audit.events where action = 'ehr.visit-queue.update' and outcome = 'success'
+     and patient_id in (pg_temp.patient(20), pg_temp.patient(21), pg_temp.patient(22))));
+select pg_temp.check_case('12 the ED records'' versions went up once for the close', '20:3|21:3|22:2',
+  (select string_agg(format('%s:%s', right(patient_id::text, 2), row_version), '|' order by patient_id)
+     from ehr.ed_attendances where id in (pg_temp.att(20), pg_temp.att(21), pg_temp.att(22))));
+select pg_temp.check_case('12 EXECUTE on the board-off update: the EHR runtime only', 't/f/f',
+  format('%s/%s/%s',
+    has_function_privilege('hid_ehr_runtime',
+      'ehr.visit_queue_ed_board_off_update(uuid, bigint, text, smallint, boolean, uuid, boolean)', 'execute'),
+    has_function_privilege('hid_identity_api_runtime',
+      'ehr.visit_queue_ed_board_off_update(uuid, bigint, text, smallint, boolean, uuid, boolean)', 'execute'),
+    has_function_privilege('public',
+      'ehr.visit_queue_ed_board_off_update(uuid, bigint, text, smallint, boolean, uuid, boolean)', 'execute')));
 
 do $$
 declare

@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
+import { getEnvironment } from '../../config/environment';
 import { DatabaseService } from '../../database/database.service';
 import type { CheckInToVisitQueueDto, UpdateVisitQueueEntryDto, VisitQueueStage } from './visit-queue.dto';
 
@@ -45,7 +46,8 @@ export interface VisitQueueCard {
   /**
    * ED-1 (0168): the open or decided emergency department record of this row,
    * or null. The waiting list marks the row "Emergency department" and links
-   * to the board.
+   * to the board. Always null while ED_BOARD_ENABLED is off: the board is not
+   * served then, so its patients' rows are ordinary waiting-list rows.
    */
   edAttendanceId: string | null;
 }
@@ -109,6 +111,26 @@ export const ED_ATTENDANCES_SQL =
 export const LIST_SQL = `select ${CARD_COLUMNS}, has_more from ehr.visit_queue_list($1) order by ord`;
 export const UPDATE_SQL = `select outcome, ${CARD_COLUMNS}
   from ehr.visit_queue_update($1, $2, $3, $4::smallint, $5, $6, $7)`;
+/**
+ * ED-1 (0168), the kill switch: while ED_BOARD_ENABLED is off, a change goes
+ * through 0168's ehr.visit_queue_ed_board_off_update (0135's update under the
+ * board's marker; when the row is updated it closes the row's open or decided
+ * ED record, with an event and an audit row), so a board patient's row is
+ * never stuck while the board is off. Only where 0168 is applied.
+ */
+export const BOARD_OFF_PRESENT_SQL =
+  `select to_regprocedure('ehr.visit_queue_ed_board_off_update(uuid,bigint,text,smallint,boolean,uuid,boolean)')
+     is not null as present`;
+export const BOARD_OFF_UPDATE_SQL = `select outcome, ${CARD_COLUMNS}
+  from ehr.visit_queue_ed_board_off_update($1, $2, $3, $4::smallint, $5, $6, $7)`;
+
+/** ED_BOARD_ENABLED: only while it is on does a waiting-list row belong to the board. */
+export function edBoardOn(): boolean {
+  return getEnvironment().ED_BOARD_ENABLED;
+}
+
+/** A statement, or (chosen in the transaction) the statement to run. */
+type Statement = string | ((client: PoolClient) => Promise<string>);
 
 /** The one answer for every refused check-in, so it never tells whether a patient exists. */
 export function checkInRefused(): DomainProblem {
@@ -142,7 +164,12 @@ export class VisitQueueService {
     return { items: rows.map(toCard), hasMore: rows.some((row) => row.has_more), limit: VISIT_QUEUE_LIST_LIMIT };
   }
 
-  /** Moves a row between stages, closes it, or sets or clears its triage level or assignee. */
+  /**
+   * Moves a row between stages, closes it, or sets or clears its triage level
+   * or assignee. While the board is on, 0168's guard refuses this for a row
+   * with an open or decided ED record (409 VISIT_QUEUE_ON_ED_BOARD). While it
+   * is off, the change is made and that record closes (BOARD_OFF_UPDATE_SQL).
+   */
   async update(context: DataAccessContext, entryId: string, input: UpdateVisitQueueEntryDto): Promise<VisitQueueCard> {
     const clearTriage = input.triageLevel === null;
     const clearAssignee = input.assignedMembershipId === null;
@@ -150,7 +177,11 @@ export class VisitQueueService {
       throw new DomainProblem(400, 'VISIT_QUEUE_NOTHING_TO_CHANGE',
         'Choose a stage, a triage level or a person to see the patient.');
     }
-    const row = await this.call<OutcomeRow>(context, UPDATE_SQL, [
+    const boardOn = edBoardOn();
+    const sql = boardOn ? UPDATE_SQL : async (client: PoolClient) =>
+      ((await client.query<{ present: boolean }>(BOARD_OFF_PRESENT_SQL)).rows[0]?.present === true
+        ? BOARD_OFF_UPDATE_SQL : UPDATE_SQL);
+    const row = await this.call<OutcomeRow>(context, sql, [
       entryId, input.expectedRowVersion, input.stage ?? null, clearTriage ? null : input.triageLevel ?? null,
       clearTriage, clearAssignee ? null : input.assignedMembershipId ?? null, clearAssignee,
     ]);
@@ -171,16 +202,18 @@ export class VisitQueueService {
     }
   }
 
-  private async call<Row extends QueryResultRow>(context: DataAccessContext, sql: string,
+  private async call<Row extends QueryResultRow>(context: DataAccessContext, sql: Statement,
     values: readonly unknown[]): Promise<Row | undefined> {
     return (await this.query<Row>(context, sql, values))[0];
   }
 
-  private async query<Row extends QueryResultRow>(context: DataAccessContext, sql: string,
+  private async query<Row extends QueryResultRow>(context: DataAccessContext, sql: Statement,
     values: readonly unknown[]): Promise<Row[]> {
+    const boardOn = edBoardOn();
     try {
       return await this.database.withTransaction(context, async (client: PoolClient) => {
-        const rows = (await client.query<Row>(sql, [...values])).rows;
+        const statement = typeof sql === 'string' ? sql : await sql(client);
+        const rows = (await client.query<Row>(statement, [...values])).rows;
         const entryIds = rows.map((row) => (row as { entry_id?: unknown }).entry_id).filter(
           (id): id is string => typeof id === 'string');
         if (entryIds.length === 0) return rows;
@@ -195,7 +228,8 @@ export class VisitQueueService {
             return kind ? { ...row, record_kind: kind.record_kind, dob_estimated: kind.dob_estimated } : row;
           });
         }
-        if (presence?.ed_present === true) {
+        // While the board is off its patients' rows are ordinary rows: no ED record is shown for them.
+        if (boardOn && presence?.ed_present === true) {
           const attendances = new Map((await client.query<{ entry_id: string; attendance_id: string }>(
             ED_ATTENDANCES_SQL, [entryIds])).rows.map((attendance) => [attendance.entry_id, attendance.attendance_id]));
           merged = merged.map((row) => {

@@ -94,14 +94,25 @@
 --                              audit row, unless the change came from an ED
 --                              function (the same marker). Nothing else in
 --                              0135 changes: its three functions and its card
---                              are not replaced.
+--                              are not replaced. The kill switch: while
+--                              ED_BOARD_ENABLED is off ehr-api sends the
+--                              waiting list's changes through
+--                              ehr.visit_queue_ed_board_off_update (E4), which
+--                              runs 0135's update under the marker and, when
+--                              the row was updated, closes its ED record as
+--                              the mirror does (boardOff true in the audit
+--                              row), so a board patient's row is never stuck
+--                              while the board is off. While the flag is on
+--                              ehr-api never calls it.
 -- E4 SECURITY DEFINER functions (search_path pg_catalog, pg_temp), owned like
 --    0135's (the owner of identity.has_active_consent_grant), EXECUTE for
 --    hid_ehr_runtime only: ehr.ed_arrive, ehr.ed_board, ehr.ed_read,
 --    ehr.ed_triage, ehr.ed_move, ehr.ed_link_visit, ehr.ed_record_disposition,
---    ehr.ed_leave, ehr.ed_cancel, and the waiting-list helper
+--    ehr.ed_leave, ehr.ed_cancel, the waiting-list helper
 --    ehr.visit_queue_ed_attendances (beside 0145's
---    ehr.visit_queue_record_kinds). Helpers no role may execute:
+--    ehr.visit_queue_record_kinds) and the waiting list's update while the
+--    board is off, ehr.visit_queue_ed_board_off_update (0135's
+--    ehr.visit_queue_update, md5-pinned, under the marker). Helpers no role may execute:
 --    ehr.ed_cards (0135's card fields, 0145's record kind and label, the ED
 --    fields; the complaint only for a caller holding ehr.ed.triage),
 --    ehr.ed_caller, ehr.ed_audit, ehr.ed_idempotency, the history's
@@ -121,7 +132,8 @@
 --    row is made), ehr.ed.board (+ ehr.ed.board.shown per patient),
 --    ehr.ed.record-read, ehr.ed.triage, ehr.ed.move, ehr.ed.link-visit,
 --    ehr.ed.disposition, ehr.ed.leave, ehr.ed.cancel, and
---    ehr.ed.closed-on-waiting-list (the mirror). Rows hold ids, the outcome or
+--    ehr.ed.closed-on-waiting-list (the mirror, and the waiting list's update
+--    while the board is off, with boardOff true). Rows hold ids, the outcome or
 --    refusal, the basis, the triage level and the disposition outcome; never a
 --    name, date of birth, Health ID, presenting complaint, referral facility
 --    name or reason text. This file itself writes no audit row: it changes no
@@ -154,7 +166,9 @@
 -- close at the same moment as a board write for the same patient can
 -- deadlock; PostgreSQL ends one of the two after deadlock_timeout (40P01, the
 -- whole request rolled back), and ehr-api answers it as a version conflict
--- ("reload and try again").
+-- ("reload and try again"). The waiting list's update while the board is off
+-- takes the mirror's order too (the row, then the record); ehr-api serves no
+-- board write then.
 --
 -- Locks (measured with pg_locks before commit and compared by the suite),
 -- taken first, NOWAIT: SHARE ROW EXCLUSIVE on identity.patients,
@@ -288,6 +302,7 @@ begin
                  (to_regprocedure('ehr.visit_queue_ed_attendances(uuid[])')::oid),
                  (to_regprocedure('ehr.visit_queue_ed_close_mirror()')::oid),
                  (to_regprocedure('ehr.visit_queue_ed_guard()')::oid),
+                 (to_regprocedure('ehr.visit_queue_ed_board_off_update(uuid, bigint, text, smallint, boolean, uuid, boolean)')::oid),
                  ((select trigger_row.oid from pg_trigger trigger_row
                     where trigger_row.tgrelid = 'ehr.visit_queue'::regclass
                       and trigger_row.tgname = 'visit_queue_ed_close_mirror')),
@@ -296,7 +311,7 @@ begin
                       and trigger_row.tgname = 'visit_queue_ed_guard')))
          present(object_id)
    where present.object_id is not null;
-  if v_present = 10 and v_check_found in (v_check_0135_ed, v_check_appt_ed) then
+  if v_present = 11 and v_check_found in (v_check_0135_ed, v_check_appt_ed) then
     raise exception using errcode = '55000', message = '0168: already applied';
   end if;
   if v_present <> 0
@@ -320,7 +335,8 @@ begin
       ('auth.membership_has_permission(text,uuid,uuid,text)', '65e3eaff93fe729fd5c5b986b80c9dd6'),
       ('identity.resolve_patient_search_ref(text,text)', '9a80a8997571565f0e99c96f1cba4697'),
       ('identity.own_facility_basis(uuid,uuid)', '16ec336ac3633a295bc4a89f0e9f7542'),
-      ('identity.facility_departments_valid(text[])', '8c52c07209052d3045736fa26eb6ac52')
+      ('identity.facility_departments_valid(text[])', '8c52c07209052d3045736fa26eb6ac52'),
+      ('ehr.visit_queue_update(uuid,bigint,text,smallint,boolean,uuid,boolean)', '6071d40ccdc0fca94d1bb91a1116df55')
     ) expected(signature, body_md5)
    where (select md5(proc.prosrc) from pg_proc proc where proc.oid = to_regprocedure(expected.signature))
          is distinct from expected.body_md5;
@@ -2000,6 +2016,87 @@ begin
     for each row
     execute function ehr.visit_queue_ed_guard();
 
+  -- The waiting list while the board is switched off (ED_BOARD_ENABLED off after use, the kill switch): ehr-api calls
+  -- this instead of 0135's ehr.visit_queue_update only while the flag is off, so a board patient's row is not stuck.
+  -- It runs 0135's update under the board's marker (so the guard lets it through and the mirror stays out), and when
+  -- the row was updated it takes the patient off the board: the open or decided ED record closes as the mirror closes
+  -- it (closed_via waiting_list, a closed_on_waiting_list event, one ehr.ed.closed-on-waiting-list audit row as the
+  -- waiting-list action's actor, with boardOff true). For a change that leaves the row open (a stage, triage level or
+  -- assignee) the record closes too: the waiting list owns the row from then on, so no later board save can overwrite
+  -- it and no board triage is credited to the earlier nurse. Any other outcome (not_found, changed, closed,
+  -- assignee_invalid) and any refusal 0135 raises leaves the ED record as it was. A row with no open or decided ED
+  -- record is 0135's update exactly. Locks: the waiting-list row (0135's FOR UPDATE), then the ED record, as the mirror.
+  -- While the flag is on ehr-api never calls it, and the guard refuses 0135's update for a board patient's row.
+  create function ehr.visit_queue_ed_board_off_update(requested_entry_id uuid, requested_row_version bigint,
+    requested_stage text, requested_triage_level smallint, requested_clear_triage boolean,
+    requested_assigned_membership_id uuid, requested_clear_assignment boolean)
+  returns table (outcome text, ord bigint, entry_id uuid, patient_id uuid, full_name text, sex text,
+    date_of_birth date, health_id_last4 text, stage text, triage_level smallint, assigned_membership_id uuid,
+    check_in_basis text, checked_in_at timestamptz, queue_day date, stage_changed_at timestamptz,
+    closed_at timestamptz, row_version bigint, chart_blocked boolean)
+  language plpgsql
+  security definer
+  set search_path = pg_catalog, pg_temp
+  as $fn$
+  #variable_conflict use_column
+  declare
+    actor_subject text := platform.current_actor_subject();
+    actor_account uuid := auth.account_id_for_subject(platform.current_actor_subject());
+    actor_membership uuid := platform.current_membership_id();
+    actor_facility uuid := platform.current_facility_id();
+    actor_organization uuid;
+    stage_before text;
+    attendance_row ehr.ed_attendances%rowtype;
+    answer record;
+    now_value timestamptz;
+  begin
+    -- The stage before, read under the row lock 0135's update takes next (the same transaction already holds it).
+    select entry.stage into stage_before from ehr.visit_queue entry
+     where entry.id = requested_entry_id and entry.facility_id = actor_facility
+     for update;
+    perform set_config('hid.ed_board_closing', coalesce(requested_entry_id::text, ''), true);
+    select updated.* into answer
+      from ehr.visit_queue_update(requested_entry_id, requested_row_version, requested_stage, requested_triage_level,
+             requested_clear_triage, requested_assigned_membership_id, requested_clear_assignment) updated;
+    perform set_config('hid.ed_board_closing', '', true);
+    if answer.outcome = 'updated' then
+      select attendance.* into attendance_row from ehr.ed_attendances attendance
+       where attendance.visit_queue_entry_id = requested_entry_id and attendance.facility_id = actor_facility
+         and attendance.status <> 'closed'
+       for update;
+      if found then
+        now_value := clock_timestamp();
+        update ehr.ed_attendances attendance
+           set status = 'closed', left_at = coalesce(answer.closed_at, now_value), closed_via = 'waiting_list',
+               updated_by_membership_id = actor_membership, updated_at = now_value,
+               row_version = attendance.row_version + 1
+         where attendance.id = attendance_row.id;
+        insert into ehr.ed_attendance_events (attendance_id, facility_id, patient_id, kind, at, by_account_id,
+          by_membership_id, from_stage, to_stage)
+        values (attendance_row.id, attendance_row.facility_id, attendance_row.patient_id, 'closed_on_waiting_list',
+          now_value, actor_account, actor_membership, stage_before, answer.stage);
+        select membership.organization_id into actor_organization
+          from identity.staff_facility_memberships membership
+         where membership.id = actor_membership and membership.facility_id = actor_facility
+           and membership.account_id = actor_account;
+        perform ehr.ed_audit(actor_subject, actor_account, actor_membership, actor_organization, actor_facility,
+          platform.current_correlation_id(), platform.current_purpose_of_use(), attendance_row.patient_id,
+          'ehr.ed.closed-on-waiting-list', 'success', 'ed-attendance', attendance_row.id::text,
+          jsonb_build_object('stage', answer.stage, 'statusBefore', attendance_row.status,
+            'visitQueueEntryId', requested_entry_id, 'boardOff', true));
+      end if;
+    end if;
+    return query select answer.outcome, answer.ord, answer.entry_id, answer.patient_id, answer.full_name, answer.sex,
+      answer.date_of_birth, answer.health_id_last4, answer.stage, answer.triage_level, answer.assigned_membership_id,
+      answer.check_in_basis, answer.checked_in_at, answer.queue_day, answer.stage_changed_at, answer.closed_at,
+      answer.row_version, answer.chart_blocked;
+  end
+  $fn$;
+  comment on function ehr.visit_queue_ed_board_off_update(uuid, bigint, text, smallint, boolean, uuid, boolean) is
+    '0168 (ED-1): the waiting list''s update while ED_BOARD_ENABLED is off (ehr-api calls it only then): 0135''s ehr.visit_queue_update under the board''s marker, so a board patient''s row can be finished, cancelled, closed or changed; when the row is updated, its open or decided ED record closes (closed_via waiting_list) with a closed_on_waiting_list event and one ehr.ed.closed-on-waiting-list audit row (boardOff true) as the waiting-list action''s actor. Any other outcome leaves the ED record as it was. Same arguments, outcomes and answer as 0135''s update. EXECUTE for hid_ehr_runtime only.';
+  revoke all on function ehr.visit_queue_ed_board_off_update(uuid, bigint, text, smallint, boolean, uuid, boolean)
+    from public;
+
   -- Owners and EXECUTE (as 0135: the owner of identity.has_active_consent_grant).
   if v_owner <> current_user then
     execute format('alter table ehr.ed_attendances owner to %I', v_owner);
@@ -2020,7 +2117,8 @@ begin
       ehr.ed_record_disposition(uuid, bigint, text, text, uuid, text, text, text, text),
       ehr.ed_leave(uuid, bigint, text, text),
       ehr.ed_cancel(uuid, bigint, text, text, text),
-      ehr.visit_queue_ed_attendances(uuid[])
+      ehr.visit_queue_ed_attendances(uuid[]),
+      ehr.visit_queue_ed_board_off_update(uuid, bigint, text, smallint, boolean, uuid, boolean)
       to hid_ehr_runtime;
   end if;
 
@@ -2057,10 +2155,10 @@ begin
      or (select count(*) from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
           where namespace.nspname = 'ehr'
             and (proc.proname like 'ed\_%' or proc.proname like 'visit\_queue\_ed\_%') and proc.prosecdef
-            and proc.proconfig = array['search_path=pg_catalog, pg_temp']) <> 12
+            and proc.proconfig = array['search_path=pg_catalog, pg_temp']) <> 13
      or (select count(*) from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
           where namespace.nspname = 'ehr'
-            and (proc.proname like 'ed\_%' or proc.proname like 'visit\_queue\_ed\_%')) <> 17
+            and (proc.proname like 'ed\_%' or proc.proname like 'visit\_queue\_ed\_%')) <> 18
      or exists (select 1 from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
                  where namespace.nspname = 'ehr'
                    and (proc.proname like 'ed\_%' or proc.proname like 'visit\_queue\_ed\_%')
@@ -2075,6 +2173,6 @@ begin
     raise exception using errcode = '55000', message = '0168: post-check failed (the triggers)';
   end if;
 
-  raise notice '0168: the emergency department board is installed (2 tables, 17 functions, the waiting-list guard and close mirror; basis emergency on the waiting list). Nobody can use it until 0169 gives the codes.';
+  raise notice '0168: the emergency department board is installed (2 tables, 18 functions, the waiting-list guard and close mirror, the waiting list''s update while the board is off; basis emergency on the waiting list). Nobody can use it until 0169 gives the codes.';
 end
 $ed0168$;
