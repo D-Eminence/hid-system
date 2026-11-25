@@ -13004,13 +13004,14 @@ which needs 0154's `fill_number`):
   `pharmacyStep` keeps its meaning (`dispensed`, or `dispensing_reversed` when
   the latest fill is reversed; the same row carries `refills.recorded` and
   `dispensing.fillNumber`, so the pharmacy reads it as the latest fill's).
-  The progress call ehr-api makes (ORD-3) also reads each item once:
-  `dispensedAt` is the first fill's time (0133's claim time, unchanged); the
-  status is `dispensed` while any fill of the item stands (is not reversed),
-  and `dispensing_reversed`, with `reversedAt` (the latest fill's reversal),
-  only once every fill is reversed. So the prescriber never reads "reversed"
-  for an item whose earlier fill still stands (a reversed refill), and an
-  item filled again after a reversed fill reads `dispensed`.
+  The progress calls ehr-api makes (ORD-3, for one patient and for several)
+  also read each item once: `dispensedAt` is the first fill's time (0133's
+  claim time, unchanged); the status is `dispensed` while any fill of the
+  item stands (is not reversed), and `dispensing_reversed`, with
+  `reversedAt` (the latest fill's reversal), only once every fill is
+  reversed. So the prescriber never reads "reversed" for an item whose
+  earlier fill still stands (a reversed refill), and an item filled again
+  after a reversed fill reads `dispensed`.
 - `GET /api/v1/health/ready` is 503 `PHARMACY_SCHEMA_NOT_READY` on a database
   without 0154's `pharmacy.dispensings.fill_number` (a catalog read; `live`
   stays 200), since every work-item statement names it.
@@ -13084,9 +13085,9 @@ whole, as with 0125's details; on the work list the answer then also says
 marker, so pharmacy-api asks them only in read-write transactions: its work
 list and its single read, both READ COMMITTED (`DatabaseService`'s default;
 neither passes `readOnly`, and a READ ONLY transaction would refuse them,
-25006). No other pharmacy-api call asks them: the progress call ehr-api
-makes, a dispensing, a reversal and an acceptance read the fills
-themselves.
+25006). No other pharmacy-api call asks them: the progress calls ehr-api
+makes (one patient and several), a dispensing, a reversal and an acceptance
+read the fills themselves.
 
 The work list's open rule: an own item is open while it has no fill, or while
 a refill is open. Before the list chooses its 200 rows it asks 0154's open
@@ -13409,7 +13410,10 @@ replaying and refusing fills (`PHARMACY_REFILL_TOO_SOON` with
 `refillsEndedOn` among them), the races and a second 23505; every fill's
 event; the latest-fill reversal; the body pipe; the setting's wiring),
 `work-item-progress.spec.ts` (ORD-12 block: a reversed refill with an
-earlier fill standing reads dispensed), `health.controller.spec.ts` and
+earlier fill standing reads dispensed), `work-item-progress-batch.spec.ts`
+(A18: with refills on, each answered entry of the several-patient call is
+exactly the one-patient answer, `lastFilledAt` included; off, neither
+carries it), `health.controller.spec.ts` and
 `database.service.spec.ts` (not ready without 0154's column), and
 `pharmacy-client-refills.contract.spec.ts` (`@hid/api-client`'s types and
 parsers, `not_yet`, `nextFillOn` and `endsOn` among them, and
