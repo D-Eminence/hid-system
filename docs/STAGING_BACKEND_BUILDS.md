@@ -174,23 +174,29 @@ assessment. Earlier gateway findings were fixed by pinning a fixed package from 
 signed Alpine 3.24 repository (see `gateway/Dockerfile`). On 2026-11-18 Grype
 began reporting CVE-2026-88823, CVE-2026-95691, CVE-2026-95692 and
 CVE-2026-107496 against libssl3 and libcrypto3 3.5.9-r0 (eight High matches,
-through NVD CPE data). Alpine 3.24 serves no newer package; only edge has 3.5.9-r1,
-and it does not fix the 20261117 advisories. The gateway serves plain HTTP on port
-3000 and proxies only to `http://` upstreams, so it never creates a TLS or QUIC
-session; nginx and njs import no AES-GCM-SIV fetch, QUIC method or `CMS_*`
-function, and no module is loaded. Both workflows therefore apply the committed
-`security/gateway-runtime.vex.json` to the gateway scan only. It names those four
-CVEs for the exact libssl3 and libcrypto3 3.5.9-r0 aarch64 Alpine 3.24.2 purls,
-and `assertGatewayVex` in `scripts/production-backend-build.mjs` refuses it after
-`hid_expires_at` (2026-12-01), for any other package, CVE or Critical finding, or
-when the sha256 of `gateway/Dockerfile`, `gateway/nginx.conf.template` or
+through NVD CPE data), and later CVE-2026-84786, CVE-2026-107493,
+CVE-2026-124709, CVE-2026-107494 and CVE-2026-121482. Alpine 3.24 then served no
+newer package, so those nine were covered by an OpenVEX (Q99 A, Q136 A). As of
+2026-11-25 Alpine v3.24/main serves libssl3 and libcrypto3 3.5.9-r1 (built
+2026-11-18, aports 0f4c7e8d0f5f), which patches CVE-2026-88822, CVE-2026-88823,
+CVE-2026-95691, CVE-2026-95692 and CVE-2026-107496, and `gateway/Dockerfile` pins
+it (Q292 A). The other five are not fixed in 3.5.9-r1. The gateway serves plain
+HTTP on port 3000 and proxies only to `http://` upstreams, so it never creates a
+TLS or QUIC session; nginx, its modules, njs, libapk and ssl_client import no
+QUIC method, `SSL_new_listener`, DANE, `PEM_X509_INFO_*`, `CMS_*` or
+`PKCS7_verify` function, and no module is loaded. Both workflows therefore apply
+the committed `security/gateway-runtime.vex.json` to the gateway scan only. It
+names those five CVEs for the exact libssl3 and libcrypto3 3.5.9-r1 aarch64
+Alpine 3.24.2 purls, and `assertGatewayVex` in
+`scripts/production-backend-build.mjs` refuses it after `hid_expires_at`
+(2026-12-01), for any other package, version, CVE or Critical finding, or when the
+sha256 of `gateway/Dockerfile`, `gateway/nginx.conf.template` or
 `gateway/proxy-headers.conf` differs from its `hid_bound_files`, so any gateway
 change needs the VEX re-reviewed. The build scripts read the VEX only for a gateway
 scan with ignored High/Critical rows (a clean gateway scan needs no file), and
 `pack` copies it into the gateway build evidence as `gateway-runtime.vex.json`.
-Replace it with a pinned fixed Alpine 3.24 package when one is served, and do not
-renew it. When Grype starts matching CVE-2026-107493 and CVE-2026-124709 to the
-gateway packages, the gateway scan fails again until they are assessed or fixed.
+Replace it with a pinned fixed Alpine 3.24 package when one is served (OpenSSL
+3.5.10 is due 2026-12-01), and do not renew it.
 
 On 2026-11-19 Grype began reporting CVE-2026-113425, CVE-2026-121810,
 CVE-2026-123007, CVE-2026-123633, CVE-2026-123634 (Critical) and CVE-2026-118899

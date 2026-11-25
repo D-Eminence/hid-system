@@ -220,7 +220,7 @@ for (const app of apps) {
     `API-only gateway must not package the Cloudflare-hosted ${app} frontend`)
 }
 assert.match(gatewayDockerfile, /USER 101/, 'gateway must run as the unprivileged Nginx user')
-assert.match(gatewayDockerfile, /USER 0[\s\S]*RUN apk del --no-cache curl\s+\\\s+&& apk add --no-cache 'pcre2=10\.49-r0' 'libexpat=2\.10\.0-r0' 'zlib=1\.4-r0' 'libx11=1\.8\.14-r0' 'brotli-libs=1\.2\.1-r0'\s+\\\s+'musl=1\.2\.6-r3' 'musl-utils=1\.2\.6-r3' 'libxslt=1\.1\.43-r4' 'libxml2=2\.13\.9-r3'\s+\\\s+&& apk add --no-cache -X https:\/\/nginx\.org\/packages\/alpine\/v3\.24\/main\s+\\\s+'nginx=1\.30\.7-r1' 'nginx-module-njs=1\.30\.7\.1\.0\.2-r1' 'nginx-module-xslt=1\.30\.7-r1'\s+\\\s+'nginx-module-geoip=1\.30\.7-r1' 'nginx-module-image-filter=1\.30\.7-r1'/,
+assert.match(gatewayDockerfile, /USER 0[\s\S]*RUN apk del --no-cache curl\s+\\\s+&& apk add --no-cache 'pcre2=10\.49-r0' 'libexpat=2\.11\.0-r0' 'zlib=1\.4-r0' 'libx11=1\.8\.14-r0' 'brotli-libs=1\.2\.1-r0'\s+\\\s+'musl=1\.2\.6-r3' 'musl-utils=1\.2\.6-r3' 'libxslt=1\.1\.43-r4' 'libxml2=2\.13\.9-r3'\s+\\\s+'libssl3=3\.5\.9-r1' 'libcrypto3=3\.5\.9-r1'\s+\\\s+&& apk add --no-cache -X https:\/\/nginx\.org\/packages\/alpine\/v3\.24\/main\s+\\\s+'nginx=1\.30\.7-r1' 'nginx-module-njs=1\.30\.7\.1\.0\.2-r1' 'nginx-module-xslt=1\.30\.7-r1'\s+\\\s+'nginx-module-geoip=1\.30\.7-r1' 'nginx-module-image-filter=1\.30\.7-r1'/,
   'gateway must install the exact security patches from its signed Alpine and nginx.org repositories')
 assert.doesNotMatch(gatewayDockerfile, /apk upgrade|--allow-untrusted|--no-check-certificate/,
   'gateway must not broadly upgrade packages or bypass package trust')
