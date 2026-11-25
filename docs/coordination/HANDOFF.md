@@ -62,7 +62,18 @@ This file is for a coordinator session that takes over: a new cloud session, or 
 ### Wave 2: inpatient (being built)
 - ADT 0170–0173 and nursing 0174–0177, on branch `claude/sprint-inpatient-backend` and its website branch.
 
-### Later waves
+### Running on the local machine (25 Nov ~22:00 UTC; local commits until the coordinator pushes)
+| Workflow | Work | Worktrees |
+|---|---|---|
+| wf_877a0c93-e09 | #335 Appointments and #336 Billing: Rahman's fixes, 2-lens review + adversarial verify, then a six-order wave 1 apply check | /home/l2e/hid/wt-appt, wt-bill |
+| wf_9f4a817c-565 | #337 Emergency, then #343 Inpatient (0171 board-marker fix); health #328 #329 #330 #335 #336 | wt-ed, wt-inpatient, wt-web-<pr> |
+| wf_3cbe4e94-299 | Wave 3: radiology, blood bank, referrals, dental, quality, HR/rosters, reports (backend + website each) | wt-w3-<dept>-be, wt-w3-<dept>-web |
+If this session dies, these commits exist only in those local worktrees: push each branch before anything else.
+
+### Wave 3 (provisional numbers, #258 7175611427)
+Radiology 0181–0185, Blood bank 0186–0190, Referrals 0191–0193, Dental 0194–0196, Quality 0197–0198, HR/rosters 0199–0202, Reports 0203–0204. Branches `claude/sprint-<dept>-backend` and `claude/sprint-<dept>-web`.
+
+### Later waves (wave 4: maternity, theatre, ICU, telemedicine, ambulance, claims, stock)
 Maternity, theatre, blood bank, radiology, claims, stock and procurement, roster and HR, quality, dental, reports, referrals, telemedicine, ambulance, i18n, P2-1, facility setup, subscription and the staff inbox. Surveys are in `roadmap.json`.
 
 ## Migration numbering (settled 25 Nov ~17:00 UTC, #258 7168672285)
@@ -76,7 +87,8 @@ Numbers are bookings, given finally at integration in release order. A later rel
 | 0160–0169 | Sprint wave 1 |
 | 0170–0177 | Sprint wave 2 (ADT, nursing) |
 | 0178–0180 | Ola: lab self-check (0178), "Discussed with the patient" (0179), ORD-8 (0180) |
-| 0181+ | Free. ORD-10 phase 2 takes the next number when WHOCC answers; later departments are booked per department on #258 |
+| 0181–0204 | Wave 3 (provisional, see above) |
+| 0205+ | Free. ORD-10 phase 2 takes the next number when WHOCC answers; wave 4 booked per department on #258 |
 
 ## Team (sessions don't wake from GitHub; the owner relays, and the team reads hid-system#258)
 - **Rahman** (database, identity, release): #338 and #339 done. He has reviewed all six of Ola's design notes (0155/0156, 0158, 0159, 0181/0182 now 0178/0179, 0183 now 0180); 0159 has one blocking point (each notice stores its recipient). Next: 0154's lock fix, then final checks on wave 1; then refills #331, `createdByMembershipId` and the SX-8 flag for #323; then SX-6, SX-7, ID-8 and CHW-1; then his tooling fixes #325 and #326.
