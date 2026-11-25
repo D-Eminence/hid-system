@@ -52,7 +52,8 @@ describe('SX-10 registration-case list over HTTP', () => {
       return { rows: [{ id: caseId, status: 'pending_new_identity_approval', row_version: '1', resolved_patient_id: null,
         resolved_hid_code: null, candidate_count: '0', contact_recorded: true, nin_verified: true,
         full_name: 'Ada Fictional', dob: '1991-04-05', created_at: new Date('2026-11-18T10:00:58Z'),
-        updated_at: new Date('2026-11-18T10:05:58Z'), created_at_cursor: '2026-11-18 10:00:58.123456+00', created_by_me: true }] };
+        updated_at: new Date('2026-11-18T10:05:58Z'), created_at_cursor: '2026-11-18 10:00:58.123456+00', created_by_me: true,
+        created_by_membership_id: 'c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f' }] };
     }
     return { rows: [] };
   });
@@ -128,7 +129,8 @@ describe('SX-10 registration-case list over HTTP', () => {
     expect(answer.body).toEqual({ view: 'mine', nextCursor: null, cases: [{
       caseId, status: 'pending_new_identity_approval', version: 1, candidateCount: 0, contactRecorded: true,
       ninStatus: 'verified', identityEvidence: 'nin', fullName: 'Ada Fictional', dateOfBirth: '1991-04-05',
-      createdAt: '2026-11-18T10:00:58.000Z', updatedAt: '2026-11-18T10:05:58.000Z', createdByMe: true }] });
+      createdAt: '2026-11-18T10:00:58.000Z', updatedAt: '2026-11-18T10:05:58.000Z', createdByMe: true,
+      createdByMembershipId: 'c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f' }] });
     expect(listQueries()).toHaveLength(1);
     expect(listQueries()[0]?.values).toEqual(['mine', accountId, null, null, null, 11, null]);
     expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({

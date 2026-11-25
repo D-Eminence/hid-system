@@ -151,6 +151,7 @@ interface CaseListRow extends RegistrationCaseRow {
   updated_at: Date;
   created_at_cursor: string;
   created_by_me: boolean;
+  created_by_membership_id: string;
 }
 
 export interface RegistrationCaseListItem extends RegistrationCaseResult {
@@ -160,6 +161,12 @@ export interface RegistrationCaseListItem extends RegistrationCaseResult {
   updatedAt: string;
   /** This member started the case. */
   createdByMe: boolean;
+  /**
+   * The membership that started the case (identity.registration_cases, 0011:
+   * always a membership at this facility), so a screen can say who started it.
+   * An id only: no name, contact or account is returned.
+   */
+  createdByMembershipId: string;
 }
 
 /** ID-6 (0138): what the desk's check of a NIN for a registered patient found. */
@@ -592,7 +599,8 @@ export class NinRegistrationService {
            registration.created_at,
            registration.updated_at,
            registration.created_at::text as created_at_cursor,
-           (registration.created_by_account_id = $2::uuid) as created_by_me
+           (registration.created_by_account_id = $2::uuid) as created_by_me,
+           registration.created_by_membership_id::text as created_by_membership_id
          from identity.registration_cases registration
          left join identity.patients patient on patient.id = registration.resolved_patient_id
         where registration.facility_id = platform.current_facility_id()
@@ -615,6 +623,7 @@ export class NinRegistrationService {
         createdAt: new Date(row.created_at).toISOString(),
         updatedAt: new Date(row.updated_at).toISOString(),
         createdByMe: row.created_by_me === true,
+        createdByMembershipId: row.created_by_membership_id,
       }));
       await this.audit.recordWithClient(client, {
         ...auditBase,

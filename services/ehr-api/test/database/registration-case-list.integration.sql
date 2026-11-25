@@ -119,7 +119,8 @@ set local timezone = 'Africa/Lagos';
 create function pg_temp.registration_case_list(text, uuid, text, timestamptz, uuid, integer, text default null)
 returns table (id text, status text, row_version text, resolved_patient_id text, resolved_hid_code text,
   candidate_count text, contact_recorded boolean, nin_verified boolean, identity_evidence text, full_name text, dob text,
-  created_at timestamptz, updated_at timestamptz, created_at_cursor text, created_by_me boolean)
+  created_at timestamptz, updated_at timestamptz, created_at_cursor text, created_by_me boolean,
+  created_by_membership_id text)
 language sql stable as $$
   select
              registration.id::text,
@@ -146,7 +147,8 @@ language sql stable as $$
              registration.created_at,
              registration.updated_at,
              registration.created_at::text as created_at_cursor,
-             (registration.created_by_account_id = $2::uuid) as created_by_me
+             (registration.created_by_account_id = $2::uuid) as created_by_me,
+             registration.created_by_membership_id::text as created_by_membership_id
            from identity.registration_cases registration
            left join identity.patients patient on patient.id = registration.resolved_patient_id
           where registration.facility_id = platform.current_facility_id()
@@ -243,6 +245,16 @@ begin
     (select count(*)::text || '/' || string_agg(distinct listed.identity_evidence, ',')
        from pg_temp.registration_case_list('facility', 'a5100100-0000-4000-8000-000000000003',
          null, null, null, 101, 'nin_verified') listed));
+  -- 2i (SX-10, "All registrations" names who started each case): each row
+  -- carries the membership that started it, read under row-level security as
+  -- Identity's runtime; cases 1, 2 and 4 by desk 1's membership, 3 by desk 2's.
+  perform pg_temp.list_case('2i approver, view=facility: each case names the membership that started it',
+    'c2:m1,c1:m1,c3:m2,c4:m1',
+    (select string_agg('c' || right(listed.id, 1) || ':m' || right(listed.created_by_membership_id, 1), ','
+              order by listed.ord)
+       from (select row_number() over () as ord, page.*
+               from pg_temp.registration_case_list('facility', 'a5100100-0000-4000-8000-000000000003',
+                 null, null, null, 101) page) listed));
   reset role;
 end $$;
 

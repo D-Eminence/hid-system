@@ -16,6 +16,10 @@ const facilityB = '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a';
 const deskAccount = 'f0e1d2c3-b4a5-4968-8776-655443322110';
 const otherAccount = 'a1a2a3a4-b5b6-4c7c-8d8d-e9e9f0f0a1a1';
 const patientId = '6b1f0d2e-3c4a-4b5d-8e6f-7a8b9c0d1e2f';
+/** The membership each fictional account started its cases with (one per account and facility). */
+const membershipOf = (account: string, facility: string) => (account === deskAccount
+  ? (facility === facilityA ? 'c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f' : 'd4e5f6a7-b8c9-4d0e-8f1a-2b3c4d5e6f70')
+  : 'e5f6a7b8-c9d0-4e1f-8a2b-3c4d5e6f7081');
 
 function contextFor(facilityId: string, permissions: string[]): DataAccessContext {
   return {
@@ -47,6 +51,7 @@ function stored(facility: string, createdBy: string, index: number, extra: Recor
       created_at: new Date(`2026-11-18T10:00:${second}.000Z`), updated_at: new Date(`2026-11-18T10:05:${second}.000Z`),
       created_at_cursor: `2026-11-18 10:00:${second}.123456+00`,
       created_by_me: createdBy === deskAccount,
+      created_by_membership_id: membershipOf(createdBy, facility),
       // Present in the fake table only, to prove it is never projected.
       nin_last4: '8901',
       ...extra,
@@ -109,7 +114,7 @@ describe('SX-10 registration-case list', () => {
       candidateCount: 0, contactRecorded: true, ninStatus: 'verified', identityEvidence: 'nin',
       fullName: 'Ada Fictional1',
       dateOfBirth: '1991-04-05', createdAt: '2026-11-18T10:00:58.000Z', updatedAt: '2026-11-18T10:05:58.000Z',
-      createdByMe: true,
+      createdByMe: true, createdByMembershipId: 'c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f',
     });
     expect(answer.cases[1]).toMatchObject({ status: 'approved_new_identity',
       patient: { patientId, hid: 'HID-QX7K2M' } });
@@ -137,6 +142,10 @@ describe('SX-10 registration-case list', () => {
     const answer = await service.listCases(query({ view: 'facility' }), approver);
     expect(answer.cases.map((item) => [item.fullName, item.createdByMe])).toEqual([
       ['Ada Fictional1', true], ['Ada Fictional2', false], ['Ada Fictional3', true]]);
+    // Who started each case, by membership, so "All registrations" can name them (SX-10).
+    expect(answer.cases.map((item) => item.createdByMembershipId)).toEqual([
+      'c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f', 'e5f6a7b8-c9d0-4e1f-8a2b-3c4d5e6f7081',
+      'c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f']);
   });
 
   it('refuses view=facility to a member who does not approve registrations, and audits it', async () => {

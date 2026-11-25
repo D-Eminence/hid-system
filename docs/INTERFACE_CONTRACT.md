@@ -7125,7 +7125,8 @@ Answer, newest first:
       "dateOfBirth": "1991-04-05",
       "createdAt": "2026-11-18T10:00:58.000Z",
       "updatedAt": "2026-11-18T10:05:58.000Z",
-      "createdByMe": true
+      "createdByMe": true,
+      "createdByMembershipId": "uuid"
     }
   ],
   "nextCursor": null
@@ -7134,9 +7135,11 @@ Answer, newest first:
 
 The item has the same fields as `GET registration-cases/:caseId` (with
 `ninStatus` from ID-0; `patient` only once the case points at a patient), plus
-`fullName`, `dateOfBirth`, `createdAt`, `updatedAt` and `createdByMe`. No NIN
-digits are read or returned (not even the last four), and candidates are not
-listed; open one case for them.
+`fullName`, `dateOfBirth`, `createdAt`, `updatedAt`, `createdByMe` and
+`createdByMembershipId` (the membership at this facility that started the case,
+from `identity.registration_cases.created_by_membership_id`, 0011; an id only,
+no name, contact or account). No NIN digits are read or returned (not even the
+last four), and candidates are not listed; open one case for them.
 
 Audit: one `identity.registration-case.list` row per answer, outcome
 `success`, details `{ view, status, page: "first" | "next", count, caseIds,
