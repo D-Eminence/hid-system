@@ -36,13 +36,13 @@ const ALLOWED_PAYLOAD_KEYS: Readonly<Record<EventProducer, ReadonlySet<string>>>
 
 /**
  * ORD-12 (refills, 0154): every fill writes MedicationDispensed (the patient's
- * record shows every dispensing), and pharmacy-api names the fill on a refill
- * only (`fillNumber`, 2 and above), so a first fill's payload is as before.
- * Taken here as a whole number 1-12 (0154's CHECK), on that event only; any
- * other value fails the event for good, as any field outside the contract
- * does. This dispatcher is released before the pharmacy-api that writes it:
- * an older one refuses the key (terminal), and the event would never be
- * delivered.
+ * record shows every dispensing), and the Pharmacy service names the fill on a
+ * refill only (`fillNumber`, 2 and above), so a first fill's payload is as
+ * before. Taken here as a whole number 1-12 (0154's CHECK), on that event
+ * only; any other value fails the event for good, as any field outside the
+ * contract does. This dispatcher is released before the Pharmacy service that
+ * writes it: an older one refuses the key (terminal), and the event would
+ * never be delivered.
  */
 const FILL_NUMBER_EVENT = 'MedicationDispensed';
 
