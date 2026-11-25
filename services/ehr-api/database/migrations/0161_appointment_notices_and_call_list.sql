@@ -103,6 +103,10 @@
 -- tables and 0135's ehr.visit_queue (only the functions below, as the owner,
 -- read or write them). The post-checks hold it.
 --
+-- Role bootstrap: as 0160 (docs/MIGRATION_RUNBOOK.md, Appointments). A role
+-- bootstrap after this file uses the integration's runtime-grants.sql, never
+-- Release E's alone, before the new images ship.
+--
 -- Old images on this schema: nothing calls the new functions, and only the new
 -- ehr-api books (so only it makes notices). An old identity-api drains nothing
 -- (the emails wait until the new one runs); its Platform controls read the

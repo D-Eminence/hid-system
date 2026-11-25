@@ -12538,3 +12538,10 @@ clinic name): `ehr.appointment.book`, `.read`, `.list` (+ `.list.shown` per pati
 Old images on this schema: nothing calls the new functions; today's ehr-api shows an appointment check-in's basis as
 `search` until the new image ships (no access depends on it); an old identity-api sends no appointment email (they
 wait); its Platform controls read the 11 keys as before.
+
+Database release: 0160 and 0161 apply after Release E (0001-0153) and accept what Billing (0162-0167) and Emergency
+(0168-0169) add to the shared role table and to the waiting-list basis CHECK, so Release D's lanes ship in order of
+readiness (after Emergency's 0168 the CHECK is `search`, `own_facility`, `appointment`, `emergency`, whichever file
+runs first). A role bootstrap after them uses the integration's `runtime-grants.sql`, never Release E's alone, and the
+new images ship only after that (`docs/MIGRATION_RUNBOOK.md`, Appointments). The appointment history cannot be
+updated, deleted or truncated, even by its owner, and no runtime role may read or advance its sequence.

@@ -141,6 +141,13 @@
 -- (visit-queue.service.ts), so an appointment check-in shows as "search" until
 -- the new image ships; no access depends on it.
 --
+-- Role bootstrap (docs/MIGRATION_RUNBOOK.md, Appointments): this file grants
+-- its own EXECUTE. A role bootstrap run after it must use the integration's
+-- runtime-grants.sql (Release E's file followed by the Appointments block and
+-- any other block released with it), never Release E's file alone, which
+-- would take the EHR runtime's EXECUTE on these functions away; the new images
+-- ship only after that.
+--
 -- Undo (not in the ledger; a migration only if the owner signs it): drop the
 -- functions and the four tables, take the seven role rows and the two codes
 -- out, and take 'appointment' out of the CHECK (keeping every other value)
