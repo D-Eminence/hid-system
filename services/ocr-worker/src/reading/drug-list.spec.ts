@@ -135,6 +135,21 @@ describe('drug list (hard pages only)', () => {
     for (const name of LOOKALIKES_WITHOUT_OPTION) expect(UNLISTED_LOOKALIKES).toContain(name);
   });
 
+  it('keeps iodine and fluoride salts as written, and potassium iodine as potassium iodide (Ola, 25 Nov)', () => {
+    expect(matchDrugName('Potassium iodine')?.display).toBe('Potassium iodide?');
+    expect(matchDrugName('Sodium fluoride')?.display).toBe('Sodium fluoride?');
+    for (const name of ['Sodium iodine', 'Iodine potassium', 'Fluoride sodium', 'Potassium fluoride']) {
+      expect([name, matchDrugName(name)]).toEqual([name, null]);
+    }
+    // The listed names themselves are unchanged.
+    expect(matchDrugName('Iodine')?.display).toBe('Iodine?');
+    expect(matchDrugName('Iodine tabs')?.display).toBe('Iodine?');
+    expect(matchDrugName('Fluoride')?.display).toBe('Fluoride?');
+    expect(matchDrugName('Potassium iodide')?.exact).toBe(true);
+    // The same substance under the list's chemical name.
+    expect(matchDrugName('Prussian blue')?.display).toBe('Potassium ferric hexacyanoferrate?');
+  });
+
   it('never makes a salt or product written on the chart less specific than the chart', () => {
     // Recognised as written, never as the list's broader name (lithium, calcium, ferrous salt,
     // intermediate-acting insulin).

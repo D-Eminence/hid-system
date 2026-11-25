@@ -109,6 +109,7 @@ export const SYNONYMS: Readonly<Record<string, string>> = {
   'sodium valproate': 'valproic acid',
   'desferrioxamine': 'deferoxamine',
   'methylene blue': 'methylthioninium chloride',
+  'prussian blue': 'potassium ferric hexacyanoferrate',
   'gentian violet': 'methylrosanilinium chloride',
   'prothionamide': 'protionamide',
   'bendrofluazide': 'bendroflumethiazide',
@@ -130,6 +131,9 @@ export const SYNONYMS: Readonly<Record<string, string>> = {
   // Added (not in the lists' brackets): US names.
   'glyburide': 'glibenclamide',
   'acyclovir': 'aciclovir',
+  // Added 2026-11-25 (Ola's re-check): a common way of writing potassium iodide, one letter away from that name.
+  // Without this the salt word comes off and the iodine left over is a salt-open name, so the misreading gives nothing.
+  'potassium iodine': 'potassium iodide',
 };
 
 /**
@@ -141,14 +145,18 @@ export const SYNONYMS: Readonly<Record<string, string>> = {
  */
 export const CHART_NAMES: readonly string[] = [
   'lithium carbonate', 'ferrous sulfate', 'calcium lactate', 'isophane insulin', 'lithium citrate',
+  // Added 2026-11-25 (Ola's re-check): the list's fluoride is a mouthwash whose salt it does not state.
+  'sodium fluoride',
 ];
 
 /**
  * Listed names that leave the salt open. A name reaches one of these only as written: never after salt words are
- * taken off ("lithium citrate" is not "Lithium?", "calcium phosphate" is not "Calcium?"), since the salt is then the
- * medicine. Such a name is recognised only if it is on CHART_NAMES.
+ * taken off ("lithium citrate" is not "Lithium?", "calcium phosphate" is not "Calcium?", "sodium iodine" is not
+ * "Iodine?"), since the salt is then the medicine. Such a name is recognised only if it is on CHART_NAMES. Iodine and
+ * fluoride joined on 2026-11-25 (Ola's re-check of #315): the new list has both bare (iodine solution and iodized oil;
+ * a fluoride mouthwash), so "potassium iodine" or "sodium fluoride" would otherwise lose its salt.
  */
-export const SALT_OPEN_NAMES: readonly string[] = ['lithium', 'calcium'];
+export const SALT_OPEN_NAMES: readonly string[] = ['lithium', 'calcium', 'iodine', 'fluoride'];
 
 const LISTED_GENERICS = new Set(NEML_GENERICS);
 /** Whether a brand row's generic is on the list, as written or (for a combination brand) each part on its own. */
