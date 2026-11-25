@@ -1,4 +1,4 @@
-"""Production turns on three staff features that are built and off by default.
+"""Production turns on four staff features that are built and off by default.
 
 The names, values and defaults are the ones the services parse (hid-system
 staging-novu-ci-20261005; identity-api at 4c843270, ehr-api, lab-api and
@@ -9,6 +9,8 @@ pharmacy-api at 06f98040, each in src/config/environment.ts):
   pharmacy-api  OWN_WORK_PATIENT_CARD_ENABLED           true | false, default false
   ehr-api       PRESCRIPTION_DISPENSING_DETAILS_ENABLED true | false, default false (0125)
   pharmacy-api  PRESCRIPTION_DISPENSING_DETAILS_ENABLED true | false, default false
+  identity-api  STAFF_OPEN_PATIENT_ENABLED              true | false, default false (SX-8, 0140;
+                identity-api at staging 95fa1e52, src/config/environment.ts)
 
 Any other value stops the service at start-up, so Terraform must write only
 these spellings. tests/staff-features.tftest.hcl checks the container
@@ -26,6 +28,7 @@ PRODUCTION = {
     'staff_facility_selection_mode': ('"keep"', ('"off"', '"keep"', '"ask"')),
     'own_work_patient_card_enabled': ('true', ('true', 'false')),
     'prescription_dispensing_details_enabled': ('true', ('true', 'false')),
+    'staff_open_patient_enabled': ('true', ('true', 'false')),
 }
 
 # Terraform variable -> (container setting, the services that read it).
@@ -33,6 +36,7 @@ WIRING = {
     'staff_facility_selection_mode': ('STAFF_FACILITY_SELECTION_MODE', ('identity-api',)),
     'own_work_patient_card_enabled': ('OWN_WORK_PATIENT_CARD_ENABLED', ('lab-api', 'pharmacy-api')),
     'prescription_dispensing_details_enabled': ('PRESCRIPTION_DISPENSING_DETAILS_ENABLED', ('ehr-api', 'pharmacy-api')),
+    'staff_open_patient_enabled': ('STAFF_OPEN_PATIENT_ENABLED', ('identity-api',)),
 }
 
 
@@ -70,7 +74,8 @@ class ProductionStaffFeatures(unittest.TestCase):
         for text in (root, module):
             for name, default in (('staff_facility_selection_mode', '"off"'),
                                   ('own_work_patient_card_enabled', 'false'),
-                                  ('prescription_dispensing_details_enabled', 'false')):
+                                  ('prescription_dispensing_details_enabled', 'false'),
+                                  ('staff_open_patient_enabled', 'false')):
                 with self.subTest(name=name):
                     block = re.search(rf'variable "{name}" {{(.*?)\n}}', text, re.S)
                     self.assertIsNotNone(block, f'{name} must be declared')
@@ -88,6 +93,7 @@ class ProductionStaffFeatures(unittest.TestCase):
             'staff_facility_selection_mode': 'local.staff_facility_selection_environment',
             'own_work_patient_card_enabled': 'local.own_work_patient_card_environment',
             'prescription_dispensing_details_enabled': 'local.prescription_dispensing_details_environment',
+            'staff_open_patient_enabled': 'local.staff_open_patient_environment',
         }
         services = ('identity-api', 'ehr-api', 'lab-api', 'pharmacy-api', 'ocr-api', 'outreach-api')
         for name, (setting, readers) in WIRING.items():

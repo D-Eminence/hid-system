@@ -47,6 +47,7 @@ mock_provider "awscc" {}
 #   pharmacy-api  OWN_WORK_PATIENT_CARD_ENABLED           true | false (0124, 0133 D4)
 #   ehr-api       PRESCRIPTION_DISPENSING_DETAILS_ENABLED true | false (0125)
 #   pharmacy-api  PRESCRIPTION_DISPENSING_DETAILS_ENABLED true | false (0125)
+#   identity-api  STAFF_OPEN_PATIENT_ENABLED              true | false (SX-8, 0140)
 # Off writes nothing, so the default plan changes no task definition.
 variables {
   expected_account_id      = "123456789012"
@@ -85,7 +86,7 @@ run "staff_features_off_by_default" {
     condition = alltrue([for name, environment in module.application.staff_feature_environment :
       length(environment) == 0
     ])
-    error_message = "With every staff feature off no container may receive STAFF_FACILITY_SELECTION_MODE, OWN_WORK_PATIENT_CARD_ENABLED or PRESCRIPTION_DISPENSING_DETAILS_ENABLED."
+    error_message = "With every staff feature off no container may receive STAFF_FACILITY_SELECTION_MODE, OWN_WORK_PATIENT_CARD_ENABLED, PRESCRIPTION_DISPENSING_DETAILS_ENABLED or STAFF_OPEN_PATIENT_ENABLED."
   }
 }
 
@@ -97,18 +98,22 @@ run "staff_features_production_values" {
     staff_facility_selection_mode           = regex("(?m)^staff_facility_selection_mode\\s*=\\s*\"([a-z]+)\"\\s*$", file("environments/production.tfvars"))[0]
     own_work_patient_card_enabled           = regex("(?m)^own_work_patient_card_enabled\\s*=\\s*(true|false)\\s*$", file("environments/production.tfvars"))[0] == "true"
     prescription_dispensing_details_enabled = regex("(?m)^prescription_dispensing_details_enabled\\s*=\\s*(true|false)\\s*$", file("environments/production.tfvars"))[0] == "true"
+    staff_open_patient_enabled              = regex("(?m)^staff_open_patient_enabled\\s*=\\s*(true|false)\\s*$", file("environments/production.tfvars"))[0] == "true"
   }
 
   assert {
-    condition = alltrue([for key in ["staff_facility_selection_mode", "own_work_patient_card_enabled", "prescription_dispensing_details_enabled"] :
+    condition = alltrue([for key in ["staff_facility_selection_mode", "own_work_patient_card_enabled", "prescription_dispensing_details_enabled", "staff_open_patient_enabled"] :
       length(regexall("(?m)^${key}\\s*=", file("environments/production.tfvars"))) == 1
-    ]) && var.staff_facility_selection_mode == "keep" && var.own_work_patient_card_enabled && var.prescription_dispensing_details_enabled
-    error_message = "environments/production.tfvars must set each staff feature exactly once: staff_facility_selection_mode = \"keep\", own_work_patient_card_enabled = true, prescription_dispensing_details_enabled = true."
+    ]) && var.staff_facility_selection_mode == "keep" && var.own_work_patient_card_enabled && var.prescription_dispensing_details_enabled && var.staff_open_patient_enabled
+    error_message = "environments/production.tfvars must set each staff feature exactly once: staff_facility_selection_mode = \"keep\", own_work_patient_card_enabled = true, prescription_dispensing_details_enabled = true, staff_open_patient_enabled = true."
   }
 
   assert {
-    condition     = module.application.staff_feature_environment["identity-api"] == { STAFF_FACILITY_SELECTION_MODE = "keep" }
-    error_message = "identity-api must receive STAFF_FACILITY_SELECTION_MODE=keep and no other staff feature."
+    condition = module.application.staff_feature_environment["identity-api"] == {
+      STAFF_FACILITY_SELECTION_MODE = "keep"
+      STAFF_OPEN_PATIENT_ENABLED    = "true"
+    }
+    error_message = "identity-api must receive STAFF_FACILITY_SELECTION_MODE=keep and STAFF_OPEN_PATIENT_ENABLED=true, and no other staff feature."
   }
 
   assert {
@@ -148,6 +153,25 @@ run "staff_facility_selection_ask" {
   }
 }
 
+run "staff_open_patient_alone" {
+  command = plan
+
+  # SX-8 on by itself: identity-api only, with exactly the spelling Identity parses.
+  variables { staff_open_patient_enabled = true }
+
+  assert {
+    condition     = module.application.staff_feature_environment["identity-api"] == { STAFF_OPEN_PATIENT_ENABLED = "true" }
+    error_message = "identity-api must receive STAFF_OPEN_PATIENT_ENABLED=true and nothing else."
+  }
+
+  assert {
+    condition = alltrue([for name, environment in module.application.staff_feature_environment :
+      length(environment) == 0 if name != "identity-api"
+    ])
+    error_message = "No container but identity-api may receive STAFF_OPEN_PATIENT_ENABLED."
+  }
+}
+
 run "reject_unknown_facility_selection_mode" {
   command = plan
   variables { staff_facility_selection_mode = "on" }
@@ -158,9 +182,9 @@ run "other_environments_keep_staff_features_off" {
   command = plan
 
   assert {
-    condition = var.staff_facility_selection_mode == "off" && !var.own_work_patient_card_enabled && !var.prescription_dispensing_details_enabled && length(fileset("environments", "*.tfvars")) >= 3 && alltrue(flatten([
+    condition = var.staff_facility_selection_mode == "off" && !var.own_work_patient_card_enabled && !var.prescription_dispensing_details_enabled && !var.staff_open_patient_enabled && length(fileset("environments", "*.tfvars")) >= 3 && alltrue(flatten([
       for name in fileset("environments", "*.tfvars") : [
-        for key in ["staff_facility_selection_mode", "own_work_patient_card_enabled", "prescription_dispensing_details_enabled"] :
+        for key in ["staff_facility_selection_mode", "own_work_patient_card_enabled", "prescription_dispensing_details_enabled", "staff_open_patient_enabled"] :
         length(regexall("(?m)^\\s*${key}\\s*=", file("environments/${name}"))) == 0
       ] if name != "production.tfvars"
     ]))

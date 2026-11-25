@@ -59,6 +59,11 @@ own_work_patient_card_enabled = true
 # ehr-api and pharmacy-api: strength, form, duration, quantity to dispense and
 # priority on new prescriptions and on the pharmacy's own work (0125).
 prescription_dispensing_details_enabled = true
+# identity-api (SX-8, 0140, on live since Release B): the patient a staff sign-in
+# has open is kept across a reload, for at most 8 hours, at one facility,
+# granting nothing. Live identity-api is built from staging 95fa1e52, which
+# carries it.
+staff_open_patient_enabled = true
 
 availability_zones       = ["eu-west-1a", "eu-west-1b"]
 public_subnet_cidrs      = ["10.30.0.0/24", "10.30.1.0/24"]

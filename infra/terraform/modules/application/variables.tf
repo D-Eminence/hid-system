@@ -29,6 +29,11 @@ variable "prescription_dispensing_details_enabled" {
   default = false
 }
 
+variable "staff_open_patient_enabled" {
+  type    = bool
+  default = false
+}
+
 variable "qoreid_secret_arn" {
   type    = string
   default = ""
