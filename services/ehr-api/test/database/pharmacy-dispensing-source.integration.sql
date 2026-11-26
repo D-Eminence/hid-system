@@ -55,8 +55,10 @@ declare
   mismatch text;
 begin
   -- 0154 (ORD-12) added one block before 0101's RETURN: refills, checked
-  -- only for a fill_number above 1. Without it the body is 0101's.
-  if md5(body) <> '71cbc33c8643a6f6790ead6d24a7597e' then
+  -- for a fill_number above 1, and a first fill dispensed in the future on
+  -- an own item whose prescription allows refills. Without it the body is
+  -- 0101's.
+  if md5(body) <> '69015652de60b9cb4ece428acba88eb2' then
     raise exception 'pharmacy.validate_dispensing is not 0154''s (md5 %)', md5(body);
   end if;
   if md5(substr(body, 1, position(E'  -- Refills (ORD-12)' in body) - 1)

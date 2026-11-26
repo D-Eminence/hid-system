@@ -12566,17 +12566,17 @@ writes no version, so it records nothing and ends no refill.
   bound is on how many rows an item can have.
 - `pharmacy.validate_dispensing()` (BEFORE INSERT, origin mode) is 0101's
   text with one block before its RETURN (md5
-  71cbc33c8643a6f6790ead6d24a7597e; the body without the block is 0101's
+  69015652de60b9cb4ece428acba88eb2; the body without the block is 0101's
   17f7e8897bd2ab240332e4d2c9f757b7). The order-route branch, 0077's actor
   and work-item check and 0101's prescription check answer first, as
-  before. Then, for `fill_number > 1` only: a route-backed item, or an own
+  before. Then, for `fill_number > 1`: a route-backed item, or an own
   item past `1 + coalesce(refills_allowed, 0)` fills, is refused 23514
   `NO_REFILLS_LEFT`; a refill whose number is not the next, 1 + every fill
   of the item (a reversed one included), is refused 23514
   `REFILL_NOT_NEXT_FILL`, DETAIL that count (so no number is skipped: a gap
   would leave pharmacy-api answering `PHARMACY_FILL_NUMBER_CHANGED` for
   good); a refill whose `dispensed_at` is after now (`clock_timestamp()`)
-  is refused 23514 `REFILL_DISPENSED_IN_FUTURE` (Rahman's review of 25
+  is refused 23514 `DISPENSED_IN_FUTURE` (Rahman's review of 25
   November 2026, R4's two hardenings, and the clinical owner's calls of 26
   November 2026; pharmacy-api sends fills so far + 1 and never names
   `dispensed_at`, whose default is the time of the INSERT, so neither
@@ -12605,9 +12605,17 @@ writes no version, so it records nothing and ends no refill.
   or later), never `REFILL_TOO_SOON` with a day on which it would be
   refused. The fills and
   their reversals are read as the owner, matched on the item. A first fill
-  is not checked against `ends_on`, the refills' last day, the interval or
-  its `dispensed_at` (unchanged: a first fill dispensed in the future only
-  puts its refills later). The database suite's case 18 pins all of this. The values are those of the prescription
+  is not checked against `ends_on`, the refills' last day or the interval.
+  On an own item whose prescription allows refills (`refills_allowed`
+  above 0) a first fill whose `dispensed_at` is after now
+  (`clock_timestamp()`) is refused 23514 `DISPENSED_IN_FUTURE`, as a refill
+  is (the clinical owner's call on #258, 26 November 2026: its time starts
+  the refill interval, so a future one would hold every refill back, and
+  could have each refused as ended); a backdated one stays allowed. Any
+  other first fill (a route-backed item, or `refills_allowed` null or 0) is
+  checked as before (its `dispensed_at` not at all). The code is
+  fill-neutral, for a first fill and a refill alike. The database suite's
+  case 18 pins all of this. The values are those of the prescription
   row 0101 reads FOR SHARE, which must be active at the version the item
   was accepted at, so a refill after any change is refused 23514
   `PRESCRIPTION_SOURCE_NOT_DISPENSABLE`, as a first fill is. On a
@@ -13115,8 +13123,12 @@ which needs 0154's `fill_number`):
   prescription end on <date>, before this refill would be due. Ask the
   prescriber for a new one."), `REFILL_TOO_SOON` as
   `PHARMACY_REFILL_TOO_SOON` with `refillOpensOn` (the refusal's day,
-  `YYYY-MM-DD`; left out if the DETAIL is not a day) (and 0101's and 0133's
-  as before). Two
+  `YYYY-MM-DD`; left out if the DETAIL is not a day), `DISPENSED_IN_FUTURE`
+  (a first fill or a refill) as `PHARMACY_DISPENSED_IN_FUTURE` ("The
+  dispensing time is later than now, so it was not recorded. Record it
+  again."; pharmacy-api never names `dispensed_at`, whose default is the
+  time of the INSERT, so it does not meet it) (and 0101's and 0133's as
+  before). Two
   requests for one fill at once: the loser meets 0154's key or a
   serialization failure, runs again, and is answered by the replay rule; a
   second 23505 on either key (the winner hidden from this member) is the 409

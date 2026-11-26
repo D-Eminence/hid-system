@@ -1034,6 +1034,23 @@ describe('ORD-12: recording a fill', () => {
     }
   });
 
+  it('D14 a fill the database says is dated after now (0154\'s DISPENSED_IN_FUTURE: a refill, or a first fill of an '
+    + 'item whose prescription allows refills) is 409 PHARMACY_DISPENSED_IN_FUTURE, nothing written', async () => {
+    const future = () => sqlError('23514', { message: 'DISPENSED_IN_FUTURE' });
+    const refill = harness({ items: ONE, on: true, insertErrors: [future()] });
+    expect(await refusal(dispense(refill, 30, 'ord12-dispense-key-000000000037', { fillNumber: 2 })))
+      .toEqual({ status: 409, code: 'PHARMACY_DISPENSED_IN_FUTURE' });
+    expect(refill.committed.outbox).toEqual([]);
+    expect(refill.committed.fills).toHaveLength(1);
+    for (const on of [false, true]) {
+      const first = harness({ items: [{ n: 34, refills: 2 }], on, insertErrors: [future()] });
+      expect(await refusal(dispense(first, 34, 'ord12-dispense-key-000000000038')))
+        .toEqual({ status: 409, code: 'PHARMACY_DISPENSED_IN_FUTURE' });
+      expect(first.committed.outbox).toEqual([]);
+      expect(first.committed.fills).toHaveLength(0);
+    }
+  });
+
   it('D8 another 23514 is passed on unchanged (a broken session, not a refusal for the pharmacist)', async () => {
     const other = sqlError('23514', { message: 'Dispensing does not match its eligible Pharmacy work item and actor context' });
     const h = harness({ items: ONE, on: true, insertErrors: [other] });

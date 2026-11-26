@@ -1233,6 +1233,7 @@ Events: every fill writes `MedicationDispensed` (the patient's record shows ever
 | 409 | `PHARMACY_REFILL_TOO_SOON` | This refill is too early. It can be dispensed from <date> (`refillOpensOn`, YYYY-MM-DD, the Lagos day). |
 | 409 | `PHARMACY_FILL_NUMBER_CHANGED` | Another fill was recorded since the item was read (`fillsRecorded` says how many). |
 | 409 | `PHARMACY_DISPENSING_NOT_LATEST_FILL` | A reversal of a fill that is not the item's latest. |
+| 409 | `PHARMACY_DISPENSED_IN_FUTURE` | The dispensing time is later than now, so it was not recorded. Record it again. (A refill, or a first fill on a prescription that allows refills, dated after now; pharmacy-api never sets that time, so the screens do not meet it.) |
 | 409 | `PHARMACY_WORK_ITEM_ALREADY_DISPENSED` | Unchanged, for a first fill (no `fillNumber`, or 1) on an item that has one, with another body. |
 | 409 | `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` | Unchanged (0101): held, stopped, changed or entered in error. |
 | 412 | `PHARMACY_WORK_ITEM_VERSION_CONFLICT` | Unchanged. |

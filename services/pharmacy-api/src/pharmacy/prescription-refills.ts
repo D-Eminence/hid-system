@@ -416,6 +416,17 @@ export function refillsNotRecorded(): DomainProblem {
     'Refills are not recorded here yet. Ask the prescriber for a new prescription.');
 }
 
+/**
+ * 409: 0154 refused a fill (a first fill of an item whose prescription allows
+ * refills, or a refill) dated after now. This service never names
+ * dispensed_at (its default is the time of the INSERT), so it does not meet
+ * this; answered rather than left a 500, as 0154's other refusals.
+ */
+export function dispensedInFuture(): DomainProblem {
+  return new DomainProblem(409, 'PHARMACY_DISPENSED_IN_FUTURE',
+    'The dispensing time is later than now, so it was not recorded. Record it again.');
+}
+
 /** 409: the dispensing is not the item's latest fill; only the latest fill can be reversed. */
 export function notLatestFill(): DomainProblem {
   return new DomainProblem(409, 'PHARMACY_DISPENSING_NOT_LATEST_FILL',
@@ -434,8 +445,11 @@ export function dispensingKeyConflict(): DomainProblem {
  * the review of 25 November 2026) is PHARMACY_FILL_NUMBER_CHANGED, as this
  * service's own check answers it; this service sends fills so far + 1 in the
  * transaction that counted them, so it meets that refusal only if the
- * database counts fills it cannot see. REFILL_DISPENSED_IN_FUTURE is not
- * mapped: this service never names dispensed_at.
+ * database counts fills it cannot see. A fill dated after now
+ * (DISPENSED_IN_FUTURE, a first fill of an item whose prescription allows
+ * refills or a refill: the clinical owner's call on #258, 26 November 2026)
+ * is PHARMACY_DISPENSED_IN_FUTURE; this service never names dispensed_at, so
+ * it does not meet it.
  */
 export function refillRefusal(error: unknown): DomainProblem | undefined {
   const { code, message, detail } = (typeof error === 'object' && error !== null ? error : {}) as { code?: unknown;
@@ -444,6 +458,7 @@ export function refillRefusal(error: unknown): DomainProblem | undefined {
   if (message === 'NO_REFILLS_LEFT') return noRefillsLeft();
   if (message === 'REFILL_PRESCRIPTION_ENDED') return refillPrescriptionEnded(typeof detail === 'string' ? detail : undefined);
   if (message === 'REFILL_TOO_SOON') return refillTooSoon(typeof detail === 'string' ? detail : undefined);
+  if (message === 'DISPENSED_IN_FUTURE') return dispensedInFuture();
   if (message === 'REFILL_NOT_NEXT_FILL') {
     return fillNumberChanged(typeof detail === 'string' && /^\d{1,2}$/.test(detail) ? Number(detail) : undefined);
   }

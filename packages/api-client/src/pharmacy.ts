@@ -422,7 +422,9 @@ export interface CreatePharmacyDispensingInput {
    * PHARMACY_REFILL_TOO_SOON with `refillOpensOn` (YYYY-MM-DD, the Lagos day
    * the refill opens),
    * PHARMACY_PRESCRIPTION_NOT_DISPENSABLE (held, stopped or changed),
-   * PHARMACY_WORK_ITEM_ALREADY_DISPENSED (a first fill on an item that has one).
+   * PHARMACY_WORK_ITEM_ALREADY_DISPENSED (a first fill on an item that has one),
+   * PHARMACY_DISPENSED_IN_FUTURE (the database found the fill dated after
+   * now; pharmacy-api never sets that time, so a caller does not meet it).
    */
   fillNumber?: number;
 }

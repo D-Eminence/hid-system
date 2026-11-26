@@ -75,7 +75,9 @@
 --    replaced: 0101's text with one block added before its RETURN, so the
 --    order-route branch, 0077's actor and work-item check and 0101's
 --    prescription check (FOR SHARE, active, at the accepted version) are
---    unchanged and answer first. The block runs only for fill_number > 1:
+--    unchanged and answer first. The block refuses a first fill only when
+--    it is dispensed in the future on an own item whose prescription allows
+--    refills (the first-fill rule below); the rest runs for fill_number > 1:
 --    a route-backed item takes one fill (23514 NO_REFILLS_LEFT); an own item
 --    takes at most 1 + coalesce(refills_allowed, 0) fills (23514
 --    NO_REFILLS_LEFT), and a refill is refused after the refills' last day,
@@ -116,17 +118,26 @@
 --    and two refills recorded at once carry the same number at any
 --    isolation level, which R3's key refuses; (ii) a refill dispensed in the
 --    future (dispensed_at later than clock_timestamp()) is refused, 23514
---    REFILL_DISPENSED_IN_FUTURE. A backdated refill (entered later at its
---    real time, after an offline period) stays allowed, and the interval
---    rule treats it as it treats any refill: it is judged on the day it is
+--    DISPENSED_IN_FUTURE (fill-neutral: a first fill is answered the same,
+--    below; pharmacy-api answers it 409 PHARMACY_DISPENSED_IN_FUTURE). A
+--    backdated refill (entered later at its real time, after an offline
+--    period) stays allowed, and the interval rule treats it as it treats
+--    any refill: it is judged on the day it is
 --    entered (today, as above), not on its dispensed_at, so it is recorded
 --    whenever a refill entered now would be; and, as the latest fill not
 --    reversed, its own dispensed_at times the next refill. So a refill
 --    dispensed offline before its day, and entered once it has opened, is
 --    recorded at its real time, and the next one is due from that time.
---    The refills' last day is judged on today too. A first fill's
---    dispensed_at is checked as 0101 checks it (not at all; fill 1 is
---    unchanged): a future first fill only puts its refills later.
+--    The refills' last day is judged on today too. The first-fill rule: a
+--    first fill dispensed in the future, on an own item whose prescription
+--    allows refills (refills_allowed above 0), is refused the same way, 23514
+--    DISPENSED_IN_FUTURE (a should-fix confirmed in review; the clinical
+--    owner's call on #258, 26 November 2026): its dispensed_at starts the refill
+--    interval, so a future one would hold every refill back, and could
+--    make each one refused as ended. A backdated first fill stays allowed.
+--    Any other first fill (a route-backed item, or a prescription with no
+--    refill: refills_allowed null or 0) is checked as 0101 checks it (its
+--    dispensed_at not at all), as before.
 -- R5 pharmacy.claim_prescription_dispensing() (0133 D14, AFTER INSERT,
 --    ENABLE ALWAYS) replaced: fill 1 exactly as before (it turns the item's
 --    live, undispensed claim dispensed, or is refused sent_elsewhere or
@@ -838,7 +849,7 @@ begin
   -- there. Nothing changes.
   if (select count(*) from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
        where (namespace.nspname, proc.proname, md5(proc.prosrc)) in (
-               ('pharmacy', 'validate_dispensing', '71cbc33c8643a6f6790ead6d24a7597e'),
+               ('pharmacy', 'validate_dispensing', '69015652de60b9cb4ece428acba88eb2'),
                ('pharmacy', 'claim_prescription_dispensing', '1a50612f5330a36c9b64d0d831c77812'),
                ('pharmacy', 'work_item_refills', '1563ae61481d70df74c493a497260d44'),
                ('pharmacy', 'open_refill_work_items', '928d4e14fe8d7bff9ce717ef757a6974'),
@@ -1451,8 +1462,11 @@ begin
       raise exception using errcode = '23514', message = 'PRESCRIPTION_SOURCE_NOT_DISPENSABLE';
     end if;
   end if;
-  -- Refills (ORD-12): fill 1 is checked as above and nothing more. A later
-  -- fill only on an own item (a route-backed item takes one fill), at most
+  -- Refills (ORD-12): fill 1 is checked as above, and on an own item whose
+  -- prescription allows refills (refills_allowed above 0) it is not
+  -- dispensed in the future, as no refill is (its time starts the refill
+  -- interval; a backdated one is allowed); nothing more. A later fill only
+  -- on an own item (a route-backed item takes one fill), at most
   -- 1 + refills_allowed fills (null: none), numbered next (1 + every fill of
   -- the item, a reversed one included; the DETAIL is that count), not
   -- dispensed in the future (a backdated one is allowed), and not once the
@@ -1489,7 +1503,7 @@ begin
         raise exception using errcode = '23514', message = 'REFILL_NOT_NEXT_FILL', detail = fills_recorded::text;
       end if;
       if new.dispensed_at > clock_timestamp() then
-        raise exception using errcode = '23514', message = 'REFILL_DISPENSED_IN_FUTURE';
+        raise exception using errcode = '23514', message = 'DISPENSED_IN_FUTURE';
       end if;
       if refills_end_on < (clock_timestamp() at time zone 'Africa/Lagos')::date then
         raise exception using errcode = '23514', message = 'REFILL_PRESCRIPTION_ENDED',
@@ -1504,6 +1518,9 @@ begin
           detail = to_char(refill_opens_on, 'YYYY-MM-DD');
       end if;
     end;
+  elsif parent_row.order_route_id is null and source_row.refills_allowed > 0
+        and new.dispensed_at > clock_timestamp() then
+    raise exception using errcode = '23514', message = 'DISPENSED_IN_FUTURE';
   end if;
   return new;
 end
@@ -1539,7 +1556,7 @@ end;
 $$;
 
 comment on function pharmacy.validate_dispensing() is
-  '0101, refills by 0154 (ORD-12): a route-backed work item is dispensable only while its route is accepted and inside its work window (0086, ORDER_ROUTE_CLOSED); the dispensing must match its work item and the session (0077); a same-facility work item is dispensable only while its ehr.prescriptions row, read FOR SHARE, is active at the version accepted, for its patient, facility and encounter (23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE). A fill_number above 1: own items only, at most 1 + refills_allowed fills (null: none), else 23514 NO_REFILLS_LEFT; numbered next, 1 + every fill of the item (a reversed one included), else 23514 REFILL_NOT_NEXT_FILL, DETAIL that count; dispensed_at no later than now, else 23514 REFILL_DISPENSED_IN_FUTURE (a backdated refill is allowed and judged on today, as any refill); not after the refills'' last day, ehr.prescription_refills_end_on (the earliest of ends_on, the Lagos day written plus (refills_allowed + 2) fills'' durations, and that day plus 365; 23514 REFILL_PRESCRIPTION_ENDED, DETAIL that day, YYYY-MM-DD); not before the Lagos day of the latest fill not reversed (by dispensed_at) plus 3/4 of the duration in days, rounded up, at least 1, judged on today (23514 REFILL_TOO_SOON, DETAIL the day it opens, YYYY-MM-DD); a refill whose day would come after the refills'' last day (a late fill) can never be recorded and is refused REFILL_PRESCRIPTION_ENDED at once, DETAIL the last day. Origin mode only.';
+  '0101, refills by 0154 (ORD-12): a route-backed work item is dispensable only while its route is accepted and inside its work window (0086, ORDER_ROUTE_CLOSED); the dispensing must match its work item and the session (0077); a same-facility work item is dispensable only while its ehr.prescriptions row, read FOR SHARE, is active at the version accepted, for its patient, facility and encounter (23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE). A first fill of an own item whose prescription allows refills (refills_allowed above 0): dispensed_at no later than now, else 23514 DISPENSED_IN_FUTURE (it starts the refill interval; a backdated one is allowed); any other first fill: nothing more. A fill_number above 1: own items only, at most 1 + refills_allowed fills (null: none), else 23514 NO_REFILLS_LEFT; numbered next, 1 + every fill of the item (a reversed one included), else 23514 REFILL_NOT_NEXT_FILL, DETAIL that count; dispensed_at no later than now, else 23514 DISPENSED_IN_FUTURE (a backdated refill is allowed and judged on today, as any refill); not after the refills'' last day, ehr.prescription_refills_end_on (the earliest of ends_on, the Lagos day written plus (refills_allowed + 2) fills'' durations, and that day plus 365; 23514 REFILL_PRESCRIPTION_ENDED, DETAIL that day, YYYY-MM-DD); not before the Lagos day of the latest fill not reversed (by dispensed_at) plus 3/4 of the duration in days, rounded up, at least 1, judged on today (23514 REFILL_TOO_SOON, DETAIL the day it opens, YYYY-MM-DD); a refill whose day would come after the refills'' last day (a late fill) can never be recorded and is refused REFILL_PRESCRIPTION_ENDED at once, DETAIL the last day. Origin mode only.';
 comment on function pharmacy.claim_prescription_dispensing() is
   '0133 D14, refills by 0154 (ORD-12): fill 1 turns the item''s live, undispensed claim dispensed (dispensed_at, kept for good); a later fill needs that claim live, dispensed and the item''s own (no order route) and changes nothing; else 23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE, DETAIL sent_elsewhere or not_claimed. Enabled always; reads only the claims. Executed by no role.';
 
@@ -1971,7 +1988,7 @@ begin
   -- marker), plpgsql, not STRICT, the result, the search_path each had; R4
   -- and R5 no EXECUTE for anyone but the owner (R6's and R7's grants below).
   with expected(proc_name, argument_types, digest, volatility, result_type, search_path) as (values
-         ('validate_dispensing', '', '71cbc33c8643a6f6790ead6d24a7597e', 'v', 'trigger',
+         ('validate_dispensing', '', '69015652de60b9cb4ece428acba88eb2', 'v', 'trigger',
            'search_path=pharmacy, platform, pg_temp'),
          ('claim_prescription_dispensing', '', '1a50612f5330a36c9b64d0d831c77812', 'v', 'trigger',
            'search_path=pg_catalog, pg_temp'),
