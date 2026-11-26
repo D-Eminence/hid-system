@@ -225,8 +225,10 @@
 -- 0. The locks (above).
 -- 1. Preconditions (55000, or 42501 for the applier; nothing applied):
 --    a. 0149's and 0152's objects; b. not applied yet ("0155: already
---    applied" when every object of this file is as it leaves it; any other
---    state with one of them: "not in the reviewed state"); c. by md5: 0152's
+--    applied" when every object of this file is as it leaves it, comparing
+--    only 0155's own role row: admin's, so a role given the code later does
+--    not change the answer; any other state with one of them: "not in the
+--    reviewed state"); c. by md5: 0152's
 --    status (af2b63e1...), 0149's query helper (with its owner and
 --    search_path), auth.membership_has_permission,
 --    auth.account_id_for_subject, the four platform.current_* readers that
@@ -331,8 +333,8 @@ begin
            = '56d5b39e176c83b02a12df1c8a3e3e77'
        and exists (select 1 from auth.permissions permission_row
                     where permission_row.code = new_code and permission_row.active)
-       and (select string_agg(grant_row.role_code, ',' order by grant_row.role_code collate "C")
-              from auth.role_permissions grant_row where grant_row.permission_code = new_code) = 'admin'
+       and exists (select 1 from auth.role_permissions grant_row
+                    where grant_row.role_code = 'admin' and grant_row.permission_code = new_code)
        and (select count(*) from audit.events event_row
              where event_row.correlation_id = '0155-catalog-facility-items') = 2 then
       raise exception using errcode = '55000', message = '0155: already applied';

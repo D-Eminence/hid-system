@@ -33,7 +33,8 @@
 --      status), when 0152's list is missing, and (42501) when the applier
 --      does not own the catalogue; with every precondition met it applies:
 --      the nine tables at the header's modes and no lock on 0149's or 0152's
---      lists or versions; a second run answers "already applied";
+--      lists or versions; a second run answers "already applied", and so
+--      does a run after another role is given the code;
 --   4. fictional staff at facilities A, B and C (and D, with no items), as
 --      the EHR API runtime: the write check answers for the session only (an
 --      admin at the facility of the session's own membership; never a
@@ -695,6 +696,22 @@ select pg_temp.expect('3k a second run answers "already applied" and changes not
   pg_temp.answer(:'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made());
 rollback to savepoint rerun;
 select pg_temp.expect('3l back to the migrated state', :'c155_made', pg_temp.made());
+-- A role given the code after 0155 (owner question 5: a later role is one
+-- more row): a run still answers "already applied", since that test compares
+-- only 0155's own row, admin's.
+savepoint later_role;
+insert into auth.role_permissions (role_code, permission_code) values ('org_admin', 'ehr.catalog.facility-item.write');
+set local role :"c155_owner";
+\set ON_ERROR_STOP off
+:run0155
+:ran0155
+reset role;
+select pg_temp.answer(:'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | '
+       || (select string_agg(role_code, ' ' order by role_code) from auth.role_permissions
+            where permission_code = 'ehr.catalog.facility-item.write') as c155_answer \gset
+rollback to savepoint later_role;
+select pg_temp.expect('3m another role given the code later: a run still answers "already applied"',
+  '55000 0155: already applied | admin org_admin', :'c155_answer');
 
 -- 4. Fictional staff, as the EHR API runtime.
 -- Facilities A, B and C, and D with no items. Members (account n, the
@@ -1464,7 +1481,7 @@ rollback to savepoint undo;
 
 do $$
 declare
-  wanted integer := case when exists (select 1 from pg_extension where extname = 'dblink') then 82 else 77 end;
+  wanted integer := case when exists (select 1 from pg_extension where extname = 'dblink') then 83 else 78 end;
 begin
   if currval('pg_temp.c155_passed') is distinct from wanted then
     raise exception '0155 facility items suite failed: % cases ran, % expected', currval('pg_temp.c155_passed'), wanted;
