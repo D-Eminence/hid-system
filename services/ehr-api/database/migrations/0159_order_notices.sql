@@ -56,9 +56,13 @@
 --    - own work: the work item (lab: through the execution's requested
 --      test, as 0090's return function; pharmacy: the row's work item):
 --      requested_by or prescribed_by, ordering_facility_id and the source
---      order. 0086's and 0100's validators make that account the order's
---      creator. A work item that has a route but no report, or that the
---      session's row-level security hides from the owner, gives a gap.
+--      order. That account is the order's creator: for every lab item since
+--      0018 (0086 keeps the check), and for pharmacy items written since
+--      0100, whose validator first compared prescribed_by with the
+--      prescription's creator; 0100 left older items as they were. The
+--      release notes' count check finds any older one that differs. A work
+--      item that has a route but no report, or that the session's
+--      row-level security hides from the owner, gives a gap.
 --    The kinds: lab_result_critical (the released version's flag is
 --    critical_candidate: lab.result_revisions on the own path, the report's
 --    copy on a route), lab_result_corrected (an earlier version of the
@@ -265,7 +269,10 @@
 -- sweep: per (order kind, order id, kind), the source rows inserted in
 -- origin mode after this file's applied_at (less fills above 1 and
 -- invalidations of versions never released) equal the sum of event_count
--- over its notice rows plus its gap rows. Gaps must be zero. The triggers
+-- over its notice rows plus its gap rows. Gaps must be zero. In the same
+-- run: own pharmacy work items (no route) whose prescribed_by differs from
+-- their prescription's created_by, which must be 0 (pharmacy.work_items
+-- joined to ehr.prescriptions on source_ehr_prescription_id). The triggers
 -- fire in origin mode only, as 0086's return triggers: a replica-mode insert
 -- writes no notice and no gap.
 --

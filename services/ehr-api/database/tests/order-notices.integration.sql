@@ -59,7 +59,8 @@
 --      no patient, card, visit or display, the critical one in its place;
 --      mark read works; Seen is refused (42501 ORDER_NOTICE_CONSENT_REQUIRED);
 --  14. the release notes' count check: source rows = events in notices +
---      gaps, and no gap;
+--      gaps, and no gap; no own pharmacy item names a prescriber other than
+--      its prescription's creator;
 --  15. the switch off: no notice and no gap;
 --  16. the catch rule under READ COMMITTED (the switch's read made to
 --      fail): 40P01 in 0088's report is a gap row and the report goes
@@ -1843,6 +1844,14 @@ select pg_temp.same('14 sources = events counted in notices + gaps',
      from (select array['e4c30000-0000-4000-8000-000000000001', 'e4c30000-0000-4000-8000-000000000002',
              'e4c30000-0000-4000-8000-000000000003']::uuid[] as patients) fixture),
   'releases 12 invalidations 3 first fills 5 reversals 5 = notices 25 + gaps 0');
+select pg_temp.same('14 and no own pharmacy item names a prescriber other than its prescription''s creator',
+  (select count(*) from pharmacy.work_items item
+     join ehr.prescriptions prescription on prescription.id = item.source_ehr_prescription_id
+    where item.order_route_id is null and item.prescribed_by is distinct from prescription.created_by)
+  || ' of ' || (select count(*) from pharmacy.work_items item where item.order_route_id is null
+                  and item.patient_id in ('e4c30000-0000-4000-8000-000000000001',
+                    'e4c30000-0000-4000-8000-000000000002')),
+  '0 of 3');
 
 -- 15. The switch off (the undo's first step): no notice and no gap.
 update ehr.order_notice_switch set enabled = false, changed_at = clock_timestamp();
@@ -2209,9 +2218,9 @@ select pg_temp.same('18h 0159 is back as it was', pg_temp.made_0159(), '3 tables
 
 do $$
 begin
-  if currval('pg_temp.order_notices_passed') is distinct from 123 then
+  if currval('pg_temp.order_notices_passed') is distinct from 124 then
     raise exception 'ORD-11 order notices suite failed: % cases ran in the first transaction, % expected',
-      currval('pg_temp.order_notices_passed'), 123;
+      currval('pg_temp.order_notices_passed'), 124;
   end if;
   raise notice 'ORD-11 order notices suite: % cases passed (READ COMMITTED)', currval('pg_temp.order_notices_passed');
 end $$;

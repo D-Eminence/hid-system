@@ -3635,7 +3635,7 @@ Today staff see only access requests as notifications (Akos P1-6). Lab writes a 
 
 Who gets a notice:
 - The person who placed the order (its creator), at the ordering facility. The notice stores that account and facility when it is written:
-  - own lab and pharmacy work: the work item's `requested_by` or `prescribed_by` and its ordering facility (0086's and 0100's work-item checks make that account the order's creator);
+  - own lab and pharmacy work: the work item's `requested_by` or `prescribed_by` and its ordering facility. That account is the order's creator: the lab work-item check has compared it since 0018, and the pharmacy one since 0100 (older pharmacy items were not checked; the count check before switch-on confirms none differs);
   - an order sent to another facility: the route's `orderer_account_id` (a copy of the order's creator) and its ordering facility.
 - It is shown to a session of that account at that facility whose active membership holds the kind's read permission: `ehr.lab-request.read` for lab notices, `ehr.prescription.read` for dispensing notices. Seen records that membership.
 - One person may hold several memberships at one facility. A sibling membership with the permission sees the same notices. That is the same person at the same facility, so it is allowed.
