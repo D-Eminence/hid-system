@@ -167,7 +167,7 @@ const acceptedMigrations = new Map([
   ['0152_catalog_diagnoses.sql', 'abfecc3571808e4ad29fdf8c1e202f65b3cdf890e9f3106b74bd6ef1bd19f9c9'],
   ['0153_clinician_recent_diagnoses.sql', '45faa6a739056cc07426fdb5363b58c7dda1dbcbc096fb6d1769ae746798500b'],
   // ED-1 (Release D), numbers provisional (given at merge, after 0152-0154 and the files cut before them), unsigned.
-  ['0168_emergency_department_board.sql', 'bf77ec190e378ca9dae670b9f9bcd580546690c10eff49fda30e564e55b91618'],
+  ['0168_emergency_department_board.sql', '4ebabe37ca031f20bc113e4a7d36901bf3bcb6ac22c9a80e94c6c324e73cf1fe'],
   ['0169_emergency_department_board_access.sql', '9aa42c47c4e6ed38a6c2a51333ce777066f3b97cb982cb3db27efff220d7d72b'],
 ])
 
