@@ -1383,6 +1383,26 @@ select pg_temp.check_case('13 a facility code is never for an other item', 'HB40
   pg_temp.ehr('x', 2, $s$select commercial.catalogue_create('{"kind":"other","name":"Facility dressing","nationalCodeSystem":"HID-FACILITY","nationalCode":"b1621300-0000-4000-8000-000000000001","prices":{"cashKobo":5000,"hmo":[]}}', 'kbillingfacility000002', repeat('2', 64))$s$));
 select pg_temp.check_case('13 a facility code that names no item', 'HB409 NATIONAL_CODE_NOT_FOUND',
   pg_temp.ehr('x', 2, $s$select commercial.catalogue_create('{"kind":"drug","name":"Facility mixture","prescriptionOnly":false,"nationalCodeSystem":"HID-FACILITY","nationalCode":"b1621300-0000-4000-8000-0000000000ff","prices":{"cashKobo":5000,"hmo":[]}}', 'kbillingfacility000003', repeat('3', 64))$s$));
+-- A table of that name another role owns is never read as the owner (no runtime can make one in schema ehr; the
+-- check holds anyway): its row is not found.
+do $$ begin
+  if to_regclass('ehr.catalog_facility_items') is null then
+    create table ehr.catalog_facility_items (id uuid primary key, facility_id uuid not null, kind text not null,
+      active boolean not null);
+    insert into ehr.catalog_facility_items values
+      ('b1621300-0000-4000-8000-000000000001', 'b1620000-0000-4000-8000-000000000002', 'medicine', true);
+    grant select on ehr.catalog_facility_items to public;
+    alter table ehr.catalog_facility_items owner to hid_ehr_runtime;
+  end if;
+end $$;
+select pg_temp.check_case('13 a facility item in a table another role owns is not found', 'HB409 NATIONAL_CODE_NOT_FOUND',
+  pg_temp.ehr('x', 2, $s$select commercial.catalogue_create('{"kind":"drug","name":"Planted mixture","prescriptionOnly":false,"nationalCodeSystem":"HID-FACILITY","nationalCode":"b1621300-0000-4000-8000-000000000001","prices":{"cashKobo":5000,"hmo":[]}}', 'kbillingfacility000012', repeat('c', 64))$s$));
+do $$ begin
+  if (select pg_get_userbyid(relowner) from pg_class where oid = to_regclass('ehr.catalog_facility_items'))
+     = 'hid_ehr_runtime' then
+    drop table ehr.catalog_facility_items;
+  end if;
+end $$;
 do $$
 declare
   owner_name text := (select pg_get_userbyid(nspowner) from pg_namespace where nspname = 'commercial');

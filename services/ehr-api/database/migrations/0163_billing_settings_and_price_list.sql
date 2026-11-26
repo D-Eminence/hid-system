@@ -129,7 +129,7 @@ declare
     "commercial.catalogue_write_prices(uuid,uuid,jsonb)": "8fa7f007675931a209e32a9c9b632afc",
     "commercial.command_record(text,text,text,uuid)": "84e04cc81ba491a39773741ce8e26274",
     "commercial.command_replay(text,text,text)": "e7c1ff69e15ec0ca75b1c624355d163a",
-    "commercial.facility_item_ok(text,text)": "57eeb29c858d2d7c47549ff8a452aac1",
+    "commercial.facility_item_ok(text,text)": "598be200cf5cbfa3b236dc3017959474",
     "commercial.holds(text)": "4ee831ae9d72455e1cdeb1d4661aac69",
     "commercial.lagos_day(timestampwithtimezone)": "08620d6c3114df8123f496d76238763f",
     "commercial.member_name(uuid)": "50f7c6db29a6b99ee94973b373ed57cd",
@@ -624,8 +624,9 @@ $$;
 -- when it exists, through one constant, schema-qualified query with bound
 -- values (its name and the four columns 0155 keeps stable for Billing: id,
 -- facility_id, kind and active; Ola, #258, 26 November 2026, 12:44 UTC),
--- matching facility_id because 0155's owner read policy shows every facility.
--- Without 0155 there is no facility item, so no such code is found.
+-- matching facility_id because 0155's owner read policy shows every facility,
+-- and only as an ordinary table of the schema owner's. Without 0155 there is
+-- no facility item, so no such code is found.
 create function commercial.facility_item_ok(requested_kind text, requested_code text)
 returns boolean
 language plpgsql
@@ -637,7 +638,15 @@ declare
 begin
   if requested_kind is null or requested_kind not in ('drug', 'lab_test') or requested_code is null
      or requested_code !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-     or platform.current_facility_id() is null or to_regclass('ehr.catalog_facility_items') is null then
+     or platform.current_facility_id() is null then
+    return false;
+  end if;
+  -- Only 0155's own table: an ordinary table owned by the schema owner (who made this schema too), so nothing another
+  -- role made (a view, its policies or functions) is ever read here as the owner.
+  if not exists (select 1 from pg_catalog.pg_class relation
+                  where relation.oid = to_regclass('ehr.catalog_facility_items') and relation.relkind = 'r'
+                    and relation.relowner = (select namespace.nspowner from pg_catalog.pg_namespace namespace
+                                              where namespace.nspname = 'commercial')) then
     return false;
   end if;
   execute 'select exists (select 1 from ehr.catalog_facility_items item where item.id = $1 and item.facility_id = $2 '
@@ -1330,7 +1339,7 @@ declare
     "commercial.catalogue_write_prices(uuid,uuid,jsonb)": "8fa7f007675931a209e32a9c9b632afc",
     "commercial.command_record(text,text,text,uuid)": "84e04cc81ba491a39773741ce8e26274",
     "commercial.command_replay(text,text,text)": "e7c1ff69e15ec0ca75b1c624355d163a",
-    "commercial.facility_item_ok(text,text)": "57eeb29c858d2d7c47549ff8a452aac1",
+    "commercial.facility_item_ok(text,text)": "598be200cf5cbfa3b236dc3017959474",
     "commercial.holds(text)": "4ee831ae9d72455e1cdeb1d4661aac69",
     "commercial.lagos_day(timestampwithtimezone)": "08620d6c3114df8123f496d76238763f",
     "commercial.member_name(uuid)": "50f7c6db29a6b99ee94973b373ed57cd",
