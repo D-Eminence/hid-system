@@ -44,6 +44,11 @@ This file is for a coordinator session that takes over: a new cloud session, or 
    - Then the interim gate (below), the owner's signature on the new sha256s, the release, and the re-pin.
 2. **Appointments #335**, renumbered at integration to follow 0154. 3. **Billing #336.** 4. **Emergency #337.** One department per release, each built on a staging that holds the previous one. Then wave 2 (#343).
 - **Interim release gate (owner, 25 Nov ~23:10 UTC, "Agent check stands in"):** Rahman's `check:db` (from `a8d99ac1`) in a Docker harness, plus an independent agent review of the final renumbered files. **The harness was never built** (its agent failed), and pgvector isn't on the host. Build it first: image `hid-pg16-vector:local` (postgres:16 plus pgvector) exists, and needs Node 24 added.
+- **Owner, 26 Nov ~12:20 UTC (gate details):**
+  - **The harness is trusted only after its calibration matches Rahman.** On live `0cfddcc9` it must reproduce his Release E result: the same suites failing (schema and records-processing-draft, known to fail on production) and all 12 live verifiers passing. Report that match before relying on any harness PASS.
+  - **Appointments:** signing text only after it is renumbered (0155–0156) on a staging that holds the released 0154. The harness check and the independent review run on those renumbered files.
+  - **#335 round 2:** check that both confirmed findings are tests-only. Any change they need in 0160/0161 is made before renumbering.
+  - **0154's signing text** names 0154 at its final sha256, `runtime-grants.sql` if it changes, and the declaration, and says that `PRESCRIPTION_REFILLS_ENABLED` stays off until the clinical lead countersigns the refill calls (Q158).
 - **Sprint websites** (health #328, #329, #330, #335, #336) go out only after their backends are live. Their features stay behind flags that are off.
 - Follow-up: `security/production-runtime-assessment.json` still says 3.5.9-r0 for the gateway. Update it with the next backend-image change.
 - **The owner wrote "signed" at about 00:30 UTC on 26 Nov, with nothing ready to sign. It is not recorded as a signature:** no file or sha256 was named. Post exact signing text on #332 when 0154 is ready.
