@@ -1,4 +1,4 @@
-# Coordinator handoff: state at 26 Nov 2026, about 12:00 UTC
+# Coordinator handoff: state at 26 Nov 2026, about 12:45 UTC
 
 This file is for a coordinator session that takes over: a new cloud session, or the owner's local Claude Code in VS Code. It is not product documentation. The clinical lead's and DPO's names stay out of the repository and GitHub. The owner knows them.
 
@@ -44,6 +44,19 @@ This file is for a coordinator session that takes over: a new cloud session, or 
    - Then the interim gate (below), the owner's signature on the new sha256s, the release, and the re-pin.
 2. **Appointments #335**, renumbered at integration to follow 0154. 3. **Billing #336.** 4. **Emergency #337.** One department per release, each built on a staging that holds the previous one. Then wave 2 (#343).
 - **Interim release gate (owner, 25 Nov ~23:10 UTC, "Agent check stands in"):** Rahman's `check:db` (from `a8d99ac1`) in a Docker harness, plus an independent agent review of the final renumbered files. **The harness was never built** (its agent failed), and pgvector isn't on the host. Build it first: image `hid-pg16-vector:local` (postgres:16 plus pgvector) exists, and needs Node 24 added.
+- **Owner, 26 Nov ~12:40 UTC: Rahman is back, and his own final check is the release gate again.**
+  - **The Docker harness is off the critical path and not trusted.** Its calibration said PASSED, but ran 0/0 live verifiers (the tree under test was the live tree) and no suites. Script: `/home/l2e/hid/tools/check-db-docker.sh`, image `hid-checkdb:local`.
+  - **Tell Rahman on #258** when a head is ready for his final check.
+  - **Don't build twice:**
+    - **Lekan's five screens** are on his branches (`claude/ordered-by-me`, `claude/changed-after-dispensing`, `claude/registration-lists`, `claude/verify-nin-later`, `claude/entered-in-error-visit-vitals`).
+    - **Ola builds** 0155–0159 and 0178–0180 on `claude/fervent-galileo-datz4t-*`.
+    - **Rahman does** #342, SX-6, SX-7, ID-8 and CHW-1.
+    - **The empty cover branches are abandoned. Never start agents on them:** `claude/blue-*`, `claude/ord11-notices-backend`, `claude/ord7-facility-items-backend`, `claude/ord-name-only-backend`, `claude/ord9-ranking-backend`, `claude/lab-self-check-backend`, and `claude/sx6-*`, `claude/sx7-*`, `claude/id8-*`, `claude/chw1-*`.
+    - **`claude/display-followups`** is the coordinator's, in a spare slot.
+  - **MY-1 (answered on #258):** lab and pharmacy staff may see "Ordered by me"; keep it.
+  - **Running (26 Nov ~12:45 UTC):**
+    - wf_8e3e24c2-b86 (0154): Rahman's 7168468937, the exact sixth trigger, and Ola's five calls (7191383673), then review.
+    - wf_9c13f309-37f (#335): Rahman's round 2 (7182156812) plus folded-in nits; 0161 changes.
 - **Owner, 26 Nov ~12:20 UTC (gate details):**
   - **The harness is trusted only after its calibration matches Rahman.** On live `0cfddcc9` it must reproduce his Release E result: the same suites failing (schema and records-processing-draft, known to fail on production) and all 12 live verifiers passing. Report that match before relying on any harness PASS.
   - **Calibration target (Release E's recorded checks, #338 body and Rahman's 7165136553):**
