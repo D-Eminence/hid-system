@@ -1,5 +1,6 @@
-import { LAB_CORRECTING, PATIENT_FIELDS, LOINC_SYSTEM_SQL_PATTERN, SENSITIVE_ICD11_GROUPS, SENSITIVE_LOINC_CODES, SENSITIVE_TEST_SQL_PATTERN, VITAL_FIELDS, ageYears,
-  icdRevision, isSensitiveDiagnosisCode, isSensitiveTest, patientEvidence, redactIdentifiers, type PatientProfileInput } from './patient-evidence.policy';
+import { LAB_CORRECTING, PATIENT_FIELDS, LOINC_SYSTEM_SQL_PATTERN, SENSITIVE_ICD11_GROUPS, SENSITIVE_LOINC_CODES, SENSITIVE_TEST_INITIALISMS,
+  SENSITIVE_TEST_SQL_PATTERN, VITAL_FIELDS, ageYears, dottedInitialism, icdRevision, isSensitiveDiagnosisCode, isSensitiveTest, patientEvidence,
+  redactIdentifiers, type PatientProfileInput } from './patient-evidence.policy';
 import { evidence, type Evidence, type SourceKind } from './patient-evidence.types';
 
 // Fictional patient and records only.
@@ -636,5 +637,54 @@ describe('Sensitive diagnoses by ICD-10 code: unchanged by the ICD-11 split (S4)
       '']) expect([code, isSensitiveDiagnosisCode(code, 'ICD-10')]).toEqual([code, false]);
     // An ICD-11 code under an ICD-10 label is a mislabel; the ICD-11 table still hides it.
     for (const code of ['1C62.0', '6A20', 'JA00', 'QA41']) expect([code, isSensitiveDiagnosisCode(code, 'ICD-10')]).toEqual([code, true]);
+  });
+});
+
+// 0155 (ORD-7): a facility's own lab test is ordered by its name only (its code is a UUID), so its name is all that can
+// hide it. Ola's call as clinical owner (design note on #258, 26 Nov 2026): the HIV rapid-test kit names, and a dotted
+// form of each initialism, made the same way in lab-api's copy.
+describe('0155: HIV rapid-test kits and dotted initialisms (S4)', () => {
+  const sql = new RegExp(SENSITIVE_TEST_SQL_PATTERN, 'i');
+  const lab = (test: string) => record('lab_result', { test, codeSystem: 'HID-FACILITY', code: '7d1c3a52-5f0e-4c1b-9a63-2b8e4f6a9c01',
+    specimen: 'Blood', resultType: 'text', textValue: 'Synthetic value', releasedAt: '2026-10-01T10:00:00.000Z', verification: 'released' },
+  { title: test });
+  const request = (test: string) => record('investigation', { ...completed, test, codeSystem: 'HID-FACILITY',
+    code: '7d1c3a52-5f0e-4c1b-9a63-2b8e4f6a9c01', status: 'completed' }, { title: test });
+  const diagnosis = (condition: string) => record('diagnosis', { _encounterId: encounterId, codeSystem: 'LOCAL', code: 'X1', condition,
+    clinicalStatus: 'active', verificationStatus: 'confirmed', onsetAt: null, abatementAt: null }, { title: condition });
+  // Each initialism written with a dot after each letter, in capitals: "R.V.S.", "V.D.R.L.", "C.D.4.".
+  const DOTTED = SENSITIVE_TEST_INITIALISMS.map(letters => `${[...letters.toUpperCase()].join('.')}.`);
+  const KITS = ['Determine', 'Determine HIV-1/2 Ag/Ab Combo', 'Uni-Gold', 'Unigold', 'Uni Gold Recombigen', 'Stat-Pak', 'StatPak',
+    'Stat Pak', 'OraQuick', 'Ora-Quick', 'Ora Quick ADVANCE', 'Rapid test (Determine)'];
+
+  it('makes the dotted form by one rule: a dot or space between the letters', () => {
+    expect(dottedInitialism('rvs')).toBe('r[ .]+v[ .]+s');
+    expect(dottedInitialism('cd4')).toBe('c[ .]+d[ .]+4');
+    expect(SENSITIVE_TEST_SQL_PATTERN).toContain('|h[ .]+i[ .]+v|');
+    expect(DOTTED).toEqual(expect.arrayContaining(['R.V.S.', 'V.D.R.L.', 'H.C.V.', 'C.D.4.', 'H.I.V.']));
+  });
+
+  it.each([...DOTTED, 'R. V. S.', 'R.V.S', 'r.v.s.', 'V. D. R. L', 'C.D.4 count', 'C. D. 4', 'Retroviral screening (R.V.S.)', ...KITS])(
+    '%j is hidden: by the policy, by the SQL pattern, as a result and as a request', (name) => {
+      expect([name, isSensitiveTest(name), sql.test(name)]).toEqual([name, true, true]);
+      expect(clean([lab(name), request(name)])).toEqual([]);
+    });
+
+  it('still shows a plain "Full blood count", and names near the new words', () => {
+    for (const name of ['Full blood count', 'F.B.C.', 'Blood group determination', 'Predetermined panel', 'Gold standard culture',
+      'Statin level', 'Oral glucose tolerance test', 'C.D.8 count', 'V.D.', 'Urine M/C/S']) {
+      expect([name, isSensitiveTest(name), sql.test(name)]).toEqual([name, false, false]);
+    }
+    expect(clean([lab('Full blood count'), request('Full blood count')])).toHaveLength(2);
+  });
+
+  it.each(['R.V.S.', 'V.D.R.L. reactive', 'H.C.V. infection', 'C.D.4 count low', 'R.V.D.', 'R. V. D.', 'R.V.I.', 'P.M.T.C.T.',
+    'P.L.H.I.V.', 'P.T.S.D.', 'A.N.C. booking'])('a diagnosis named %j is hidden', (condition) => {
+    expect(clean([diagnosis(condition)])).toEqual([]);
+  });
+
+  it('keeps a diagnosis whose name is near the dotted forms', () => {
+    expect(clean([diagnosis('Essential hypertension'), diagnosis('R.V. infarct'), diagnosis('Malaria (uncomplicated)')]))
+      .toHaveLength(3);
   });
 });

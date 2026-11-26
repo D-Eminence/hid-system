@@ -56,9 +56,22 @@ const FREE_TEXT_TITLES = new Set<SourceKind>(['note', 'import', 'import_version'
  * "Discussed with the patient" mark exists, these are left out of the patient
  * chat outright: hiding is the safe direction. The list is a default for Ola
  * to approve (D7, D10). Fragments use only syntax that means the same in a
- * JavaScript RegExp and a PostgreSQL ARE (letters, digits, [], ?, *, |, (?:)),
- * so the SQL filter and this policy agree. They never contain a quote.
+ * JavaScript RegExp and a PostgreSQL ARE (letters, digits, [], ?, *, +, |,
+ * (?:)), so the SQL filter and this policy agree. They never contain a quote.
  */
+/*
+ * The initialisms of the test list. Each is also matched with dots or spaces
+ * between its letters ("R.V.S.", "V.D.R.L", "C. D. 4"), a form made by
+ * dottedInitialism. lab-api's copy (patient-results.service.ts) makes it the
+ * same way from the same list, so the test pattern stays one string in both
+ * (Ola's call as clinical owner, design note on #258, 26 Nov 2026).
+ */
+export const SENSITIVE_TEST_INITIALISMS = [
+  'hiv', 'aids', 'rvs', 'cd4', 'vl', 'hbv', 'hcv', 'hsv', 'vdrl', 'rpr', 'tpha', 'sti', 'std', 'hcg', 'bhcg', 'upt',
+  'psa', 'afp', 'cea', 'phq',
+] as const;
+/** An initialism with one or more dots or spaces between its letters: 'rvs' gives 'r[ .]+v[ .]+s'. */
+export const dottedInitialism = (letters: string): string => [...letters].join('[ .]+');
 export const SENSITIVE_TEST_FRAGMENTS = [
   'hiv[a-z0-9]*', 'aids', 'rvs', 'retrovir[a-z]*', 'cd[ -]?4[a-z0-9]*', 'viral[ -]?loads?',
   'hepatitis', 'hbsag', 'hbeag', 'anti[ -]?hbc', 'hbc[ -]?ab', 'hbv[a-z]*', 'hcv[a-z]*',
@@ -73,7 +86,13 @@ export const SENSITIVE_TEST_FRAGMENTS = [
   'vl', 'hb[ -]?electrophoresis', 'ha?emoglobin[ -]?electrophoresis',
   // The same tests written out in full, as LOINC display names and lab menus write them.
   'prostate[ -]specific', '[a-z]*fetoprotein', 'carcinoembryonic', 'cancer[ -]?(?:ag|antigen)', 'chorionic', 'choriogonadotrop[a-z]*',
-  'human[ -]*immuno[ -]*deficiency', 'hep[ .-]*[bc](?:[ .-]*[sec])?(?:[ .-]*a[gb])?', 'hbs[ -]?ag', 'h[ .]+i[ .]+v',
+  'human[ -]*immuno[ -]*deficiency', 'hep[ .-]*[bc](?:[ .-]*[sec])?(?:[ .-]*a[gb])?', 'hbs[ -]?ag',
+  // HIV rapid-test kits named alone: Determine, Uni-Gold and Stat-Pak are the three tests of Nigeria's serial HIV
+  // algorithm, and OraQuick is sold for self-testing. A facility's own test is ordered by its name only (0155), so
+  // its name is all that can hide it. A false match hides a test the patient could have seen: the safe side.
+  'determine', 'uni[ -]?gold', 'stat[ -]?pak', 'ora[ -]?quick',
+  // The initialisms above with dots or spaces ("H.I.V", "R.V.S.", "C.D.4").
+  ...SENSITIVE_TEST_INITIALISMS.map(dottedInitialism),
 ] as const;
 /*
  * LOINC codes of the same tests, matched when the code system is LOINC
@@ -99,6 +118,8 @@ export const SENSITIVE_LOINC_SQL_LIST = SENSITIVE_LOINC_CODES.map(code => `'${co
 const CANCER_SITES = 'breast|prostate|cervix|cervical|cx|colon|rectum|rectal|colorectal|lung|liver|stomach|gastric|ovary|ovarian'
   + '|uterus|uterine|endometrium|endometrial|bladder|pancreas|pancreatic|oesophagus|esophagus|thyroid|kidney|renal|skin|bone|brain'
   + '|testis|testicular|penis|penile|vulva|vulval|oral|tongue|larynx|nasopharynx|head and neck';
+/** The initialisms of the condition list below, each also matched dotted (dottedInitialism). */
+const SENSITIVE_CONDITION_INITIALISMS = ['rvd', 'rvi', 'plwha', 'plhiv', 'pmtct', 'anc', 'ptsd', 'ocd', 'adhd'] as const;
 const SENSITIVE_CONDITION_FRAGMENTS = [
   'cancers?', '[a-z]*carcinoma[a-z]*', 'malignan[a-z]*', 'neoplas[a-z]*', '[a-z]*lymphoma[a-z]*', 'leuka?emia[a-z]*', '[a-z]*sarcoma[a-z]*',
   'metasta[a-z]*', 'tumou?rs?', 'depress[a-z]*', 'schizo[a-z]*', 'bipolar', 'psychos[a-z]*', 'psychotic', 'suicid[a-z]*',
@@ -122,6 +143,8 @@ const SENSITIVE_CONDITION_FRAGMENTS = [
   'rvd', 'rvi', 'plwha', 'plhiv', 'pmtct',
   // "Ca breast", "Ca. of the cervix", "breast Ca": cancer of a named site.
   `ca\\.?(?:[ -]+of(?:[ -]+the)?)?[ -]+(?:${CANCER_SITES})`, `(?:${CANCER_SITES})[ -]+ca`,
+  // The condition list's own initialisms with dots or spaces ("R.V.D.", "P.M.T.C.T."), made as the test list's are.
+  ...SENSITIVE_CONDITION_INITIALISMS.map(dottedInitialism),
 ] as const;
 const SENSITIVE_MEDICINE_FRAGMENTS = [
   'tenofovir', 'lamivudine', 'emtricitabine', 'dolutegravir', 'efavirenz', 'nevirapine', 'zidovudine', 'abacavir',

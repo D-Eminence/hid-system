@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { LOINC_SYSTEM_SQL_PATTERN, PATIENT_SELF_LAB_QUERY, SENSITIVE_LOINC_SQL_LIST, SENSITIVE_TEST_SQL_PATTERN, STAFF_LAB_QUERY } from './patient-results.service';
+import { LOINC_SYSTEM_SQL_PATTERN, PATIENT_SELF_LAB_QUERY, SENSITIVE_LOINC_SQL_LIST, SENSITIVE_TEST_INITIALISMS, SENSITIVE_TEST_SQL_PATTERN,
+  STAFF_LAB_QUERY, dottedInitialism } from './patient-results.service';
 
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 // The text of PATIENT_LAB_QUERY at 34d69557, which the staff chat keeps unchanged.
@@ -14,7 +15,7 @@ describe('Lab result queries for the patient and the staff chat (A6)', () => {
   });
 
   it('uses the same sensitive test list as ehr-api (patient-evidence.query.spec.ts pins the same hash)', () => {
-    expect(sha(SENSITIVE_TEST_SQL_PATTERN)).toBe('6d9bc65c5b2d11d8bbdf72e66417e710e5e445423a2a89347edd205469988571');
+    expect(sha(SENSITIVE_TEST_SQL_PATTERN)).toBe('1b7b625d901f186fa1807706f75c52f52d20e5f4445ebf5127791f9d1b6d4b3e');
   });
 
   it('never gives the patient the correction reason', () => {
@@ -95,5 +96,39 @@ describe('Second review: more spellings and codes, and LOINC by its OID (S4)', (
     expect(LOINC_SYSTEM_SQL_PATTERN).not.toContain("'");
     // patient-evidence.query.spec.ts in ehr-api pins the same hash.
     expect(sha(LOINC_SYSTEM_SQL_PATTERN)).toBe('c2d253608793eec2a8437e3b718d2498e40feab386ad6e7163338b33bcf9f9ef');
+  });
+});
+
+// 0155 (ORD-7): a facility's own lab test is ordered by its name only, so its name is all that can hide it from the
+// patient. Ola's call as clinical owner (design note on #258, 26 Nov 2026): the HIV rapid-test kit names, and a dotted
+// form of each initialism, made as ehr-api makes them (the same sha256 is pinned above and in ehr-api).
+describe('0155: HIV rapid-test kits and dotted initialisms (S4)', () => {
+  const re = new RegExp(SENSITIVE_TEST_SQL_PATTERN, 'i');
+  const DOTTED = SENSITIVE_TEST_INITIALISMS.map(letters => `${[...letters.toUpperCase()].join('.')}.`);
+  const KITS = ['Determine', 'Determine HIV-1/2 Ag/Ab Combo', 'Uni-Gold', 'Unigold', 'Uni Gold Recombigen', 'Stat-Pak', 'StatPak',
+    'Stat Pak', 'OraQuick', 'Ora-Quick', 'Ora Quick ADVANCE', 'Rapid test (Determine)'];
+
+  it('makes the dotted form by the same rule as ehr-api', () => {
+    expect(dottedInitialism('vdrl')).toBe('v[ .]+d[ .]+r[ .]+l');
+    expect(SENSITIVE_TEST_SQL_PATTERN).toContain('|h[ .]+i[ .]+v|');
+    expect(DOTTED).toEqual(expect.arrayContaining(['R.V.S.', 'V.D.R.L.', 'H.C.V.', 'C.D.4.', 'H.I.V.']));
+  });
+
+  it.each([...DOTTED, 'R. V. S.', 'R.V.S', 'r.v.s.', 'V. D. R. L', 'C.D.4 count', 'C. D. 4', 'Retroviral screening (R.V.S.)', ...KITS])(
+    'leaves out %j', (name) => {
+      expect([name, re.test(name)]).toEqual([name, true]);
+    });
+
+  it('still shows a plain "Full blood count", and names near the new words', () => {
+    for (const name of ['Full blood count', 'F.B.C.', 'Blood group determination', 'Predetermined panel', 'Gold standard culture',
+      'Statin level', 'Oral glucose tolerance test', 'C.D.8 count', 'V.D.', 'Urine M/C/S']) {
+      expect([name, re.test(name)]).toEqual([name, false]);
+    }
+  });
+
+  it('the patient query leaves them out by name, the staff query does not', () => {
+    expect(PATIENT_SELF_LAB_QUERY).toContain(`coalesce(t.name,'') !~* '${SENSITIVE_TEST_SQL_PATTERN}'`);
+    expect(SENSITIVE_TEST_SQL_PATTERN).not.toContain("'");
+    expect(STAFF_LAB_QUERY).not.toContain('determine');
   });
 });

@@ -35,7 +35,7 @@ describe('Staff chat queries stay exactly as they were (golden)', () => {
   });
 
   it('uses the same sensitive test list as lab-api (patient-results.query.spec.ts pins the same hash)', () => {
-    expect(sha(SENSITIVE_TEST_SQL_PATTERN)).toBe('6d9bc65c5b2d11d8bbdf72e66417e710e5e445423a2a89347edd205469988571');
+    expect(sha(SENSITIVE_TEST_SQL_PATTERN)).toBe('1b7b625d901f186fa1807706f75c52f52d20e5f4445ebf5127791f9d1b6d4b3e');
   });
 
   it('refuses an unknown audience', () => {

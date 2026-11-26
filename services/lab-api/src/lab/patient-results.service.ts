@@ -39,7 +39,19 @@ export const STAFF_LAB_QUERY = `select r.id, r.current_version::text||':'||rel.i
  * viral load, CD4 count, HBsAg, HCV Ab, hCG, PSA, AFP, CEA and CA-125. The
  * code system is LOINC by name or URL, or by its OID (LOINC_SYSTEM_SQL_PATTERN,
  * identical to ehr-api's).
+ *
+ * SENSITIVE_TEST_INITIALISMS and dottedInitialism are ehr-api's, letter for
+ * letter: each initialism is also matched with dots or spaces between its
+ * letters ("R.V.S.", "V.D.R.L", "C. D. 4"), so both services build one
+ * pattern string (patient-results.query.spec.ts and ehr-api's
+ * patient-evidence.query.spec.ts pin the same sha256).
  */
+export const SENSITIVE_TEST_INITIALISMS=[
+  'hiv','aids','rvs','cd4','vl','hbv','hcv','hsv','vdrl','rpr','tpha','sti','std','hcg','bhcg','upt',
+  'psa','afp','cea','phq',
+] as const;
+/** An initialism with one or more dots or spaces between its letters: 'rvs' gives 'r[ .]+v[ .]+s'. */
+export const dottedInitialism=(letters:string):string=>[...letters].join('[ .]+');
 export const SENSITIVE_TEST_SQL_PATTERN = '(^|[^a-z0-9])(?:'+[
   'hiv[a-z0-9]*','aids','rvs','retrovir[a-z]*','cd[ -]?4[a-z0-9]*','viral[ -]?loads?',
   'hepatitis','hbsag','hbeag','anti[ -]?hbc','hbc[ -]?ab','hbv[a-z]*','hcv[a-z]*',
@@ -52,7 +64,11 @@ export const SENSITIVE_TEST_SQL_PATTERN = '(^|[^a-z0-9])(?:'+[
   'phq[ -]?[0-9]*','gad[ -]?[0-9]+','psych[a-z]*',
   'vl','hb[ -]?electrophoresis','ha?emoglobin[ -]?electrophoresis',
   'prostate[ -]specific','[a-z]*fetoprotein','carcinoembryonic','cancer[ -]?(?:ag|antigen)','chorionic','choriogonadotrop[a-z]*',
-  'human[ -]*immuno[ -]*deficiency','hep[ .-]*[bc](?:[ .-]*[sec])?(?:[ .-]*a[gb])?','hbs[ -]?ag','h[ .]+i[ .]+v',
+  'human[ -]*immuno[ -]*deficiency','hep[ .-]*[bc](?:[ .-]*[sec])?(?:[ .-]*a[gb])?','hbs[ -]?ag',
+  // HIV rapid-test kits named alone (Determine, Uni-Gold and Stat-Pak: Nigeria's serial HIV algorithm; OraQuick:
+  // self-testing). A facility's own test (0155) is hidden by its name only.
+  'determine','uni[ -]?gold','stat[ -]?pak','ora[ -]?quick',
+  ...SENSITIVE_TEST_INITIALISMS.map(dottedInitialism),
 ].join('|')+')($|[^a-z0-9])';
 export const SENSITIVE_LOINC_CODES=[
   '75622-1','56888-1','7917-8','68961-2','20447-9','24467-3','5196-1','5195-3','16128-1','13955-0',
