@@ -3764,7 +3764,7 @@ Audit:
 | 403 | `PERMISSION_DENIED` | As today. |
 | 403 | `CONSENT_REQUIRED` | Ask the patient for access to see this result first. (Seen only.) |
 | 404 | `ORDER_NOTICE_NOT_FOUND` | This notice is not available. (Also for someone else's notice.) |
-| 503 | `ORDER_NOTICES_UNAVAILABLE` | Notices about your orders are not available yet. (`ORDER_NOTICES_ENABLED` off, or a database without 0159.) |
+| 503 | `ORDER_NOTICES_UNAVAILABLE` | sent as "The service could not complete the request." (`ORDER_NOTICES_ENABLED` off, a database without 0159, or any other database failure, such as a statement timeout or a deadlock, as MY-1. Every 5xx detail is replaced by that text, so a screen reads the status and the code, never the words, and uses its own. The request may be tried again.) |
 
 ### Screen notes
 
@@ -3772,7 +3772,7 @@ Audit:
   - Keep the bell for access requests only.
   - On the doctor's Home, show "Notices about your orders are not available yet. Check each order's progress." Link to each visit's order rows, which already show `ownProgress` (ORD-3): "Results ready 11:05", "Dispensed 11:05".
   - When MY-1 (0143, Release B) ships, use "Ordered by me" for this.
-- **How the website tells whether notices are served:** a 200 from `summary` or the list, or a 404 `ORDER_NOTICE_NOT_FOUND`, means served. A 404 with another code (an unknown route answers `NOT_FOUND`) means not served. 503 `ORDER_NOTICES_UNAVAILABLE` means not yet.
+- **How the website tells whether notices are served:** a 200 from `summary` or the list, or a 404 `ORDER_NOTICE_NOT_FOUND`, means served. A 404 with another code (an unknown route answers `NOT_FOUND`) means not served. 503 `ORDER_NOTICES_UNAVAILABLE` means not available right now: the setting is off, the database lacks 0159, or a passing database failure. Keep asking (see the polling note below), and never remember "not served" from a 503: once notices have been shown, a 503 keeps the last list and the critical ones on screen and says they could not be refreshed.
 - **After:**
   - Poll `summary` at most once a minute and put it on the bell: "4 new, 1 critical".
   - The results list puts critical notices first, in red, with "Open result" and then "Mark as Seen". Seen stays disabled until the result has been opened on the page.
