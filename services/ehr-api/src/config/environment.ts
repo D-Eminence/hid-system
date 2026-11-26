@@ -111,6 +111,10 @@ const environmentSchema = z
     OFFLINE_ESCROW_KEYS: optionalString,
     // Prescription strength, form, duration, quantity and priority (0125): off by default, off is exactly as before.
     PRESCRIPTION_DISPENSING_DETAILS_ENABLED: booleanString,
+    // QUAL-1 (0197, 0198): quality and safety reporting. Off by default; every quality route answers 503
+    // QUALITY_NOT_AVAILABLE. On in staging; in production only after the clinical lead's signed list is loaded by a
+    // signed migration, the DPO and legal review, the Q160 A go-live gate and the owner's go-live.
+    QUALITY_INCIDENTS_ENABLED: booleanString,
   })
   .superRefine((environment, context) => {
     if (environment.AI_ENABLED) {

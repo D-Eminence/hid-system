@@ -35,6 +35,8 @@ import { CatalogModule } from './catalog/catalog.module';
 
 import { ConsultationDraftsModule } from './consultation-drafts/consultation-drafts.module';
 import { MyOrdersModule } from './my-orders/my-orders.module';
+// QUAL-1 (0197, 0198): quality and safety reporting, behind QUALITY_INCIDENTS_ENABLED.
+import { QualityModule } from './quality/quality.module';
 @Module({
   imports: [
     ClinicalInfrastructureModule,
@@ -55,6 +57,8 @@ import { MyOrdersModule } from './my-orders/my-orders.module';
     VisitQueueModule,
     // ORD-7 (0149): the medicine and lab-test lists.
     CatalogModule,
+    // QUAL-1 (0197, 0198): quality and safety reporting, behind QUALITY_INCIDENTS_ENABLED.
+    QualityModule,
   ],
   controllers: [PatientRecordsController,StaffPatientChatController,HealthProfileController],
   providers: [StaffChatScopeService,StaffEvidenceService,StaffChatHistoryService,PatientRecordsService, ImportedAttachmentService, BedrockAiService, ClaudeAiService, PatientAttachmentTextService,PatientEvidenceService, PatientChatService, PatientChatHistoryService, PatientChatSourceService,
