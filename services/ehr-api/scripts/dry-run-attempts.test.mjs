@@ -87,6 +87,34 @@ test('0152\'s two busy refusals, read from the file, name the versions table and
   assert.ok(lists < sql.indexOf('create or replace function ehr.catalog_status()'), 'before the status is replaced');
 });
 
+// 0155 (ORD-7 facility items): the role tables, facilities and memberships in one NOWAIT attempt, taken first, so
+// the new table's foreign keys never wait there; both refusals are retried.
+test('0155\'s two busy refusals, read from the file, are retried, and its locks come first', async () => {
+  const file = '0155_catalog_facility_items.sql';
+  const refusals = await busyRefusalsOf(file);
+  const tables = 'auth.role_permissions, identity.facilities, identity.staff_facility_memberships, auth.permissions, '
+    + 'audit.events or a table 0155\'s rows check (the roles, accounts, organizations and patients)';
+  assert.deepEqual(refusals, [
+    `0155: ${tables} is busy, and this transaction already holds an earlier migration's locks, so it does not wait; `
+      + `nothing applied; ${tail}`,
+    `0155: ${tables} stayed busy for 5 seconds; nothing applied; ${tail}`,
+  ]);
+  for (const message of refusals) {
+    assert.equal(isBusyRefusal(new MigrationFileError(file, databaseError('55P03', message))), true, message);
+    assert.equal(isBusyRefusal(new MigrationFileError('0153_clinician_recent_diagnoses.sql', databaseError('55P03', message))), false);
+  }
+  const sql = await readFile(path.join(scripts, '../database/migrations', file), 'utf8');
+  const attempt = sql.indexOf('lock table auth.role_permissions, identity.facilities, identity.staff_facility_memberships\n'
+    + '        in share row exclusive mode nowait;');
+  const handler = sql.indexOf('exception when lock_not_available then', attempt);
+  assert.ok(attempt > 0 && attempt < handler, 'the three tables are locked in the attempt');
+  assert.ok(handler < sql.indexOf('create table ehr.catalog_facility_items'), 'before the table and its keys');
+  assert.ok(handler < sql.indexOf('create or replace function ehr.catalog_status()'), 'before the status is replaced');
+  // No body opens a table when it is made (the header names them; the code does not use them).
+  const code = sql.split('\n').filter((line) => !line.trimStart().startsWith('--')).join('\n');
+  assert.doesNotMatch(code, /%rowtype|%type/i);
+});
+
 test('anything else is not retried', () => {
   const file = '0131_own_facility_patient_access.sql';
   for (const error of [
