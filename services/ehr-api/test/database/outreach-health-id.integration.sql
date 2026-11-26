@@ -638,10 +638,12 @@ select pg_temp.hi_case('7w a redacted registration''s claim loses its phone, kee
           and claim.contact_key_version is null, claim.code_hmac = repeat('f', 64), claim.invalidated_at is not null)
        from identity.outreach_health_id_claims claim
       where claim.registration_case_id = '6c080000-0000-4000-8000-000000000009'$s$);
+-- Runtime roles: hid_ roles but the owner (the migration login, whatever its name) and a superuser (CI's rehearsal
+-- superuser is named hid_rehearsal_admin, and is not the owner on its non-superuser-owned copy; no runtime role is one).
 select pg_temp.hi_case('7x no runtime role can run the claim scrub or its trigger function', 'f/f', session_user::text, null, null, null, null,
   $s$select concat_ws('/', bool_or(has_function_privilege(role_row.oid, 'identity.outreach_health_id_scrub_claims(integer)', 'EXECUTE')),
        bool_or(has_function_privilege(role_row.oid, 'identity.outreach_health_id_claim_redacted_case()', 'EXECUTE')))
-       from pg_roles role_row where role_row.rolname like 'hid\_%'
+       from pg_roles role_row where role_row.rolname like 'hid\_%' and not role_row.rolsuper
         and role_row.oid <> (select relowner from pg_class where oid = 'identity.patients'::regclass)$s$);
 -- A redaction that ran while the claim was still being created left its phone
 -- (simulated: the phone put back after the redaction); the scrub removes it.

@@ -1158,6 +1158,44 @@ begin
 end
 $$;
 
+-- The OCR job lifecycle below needs what production's OCR owner is expected
+-- to have: an owner of the OCR SECURITY DEFINER commands that bypasses
+-- row-level security without being a superuser (docs/INTERFACE_CONTRACT.md,
+-- expected owner attributes, release checklist P8). The job trigger
+-- ocr.record_job_event runs as that owner and inserts into ocr.job_events,
+-- which forces row-level security and has no INSERT policy at all (0013); and
+-- the worker commands, also run as that owner, see no job in a worker session,
+-- which names no facility. So under an owner that neither is a superuser nor
+-- bypasses row-level security, every job insert and status change is refused
+-- whatever the caller's session settings or role. For these cases only, each
+-- such OCR command is given to schema_test_ocr_owner, a role made here (by the
+-- session user, a superuser, as for every suite) that bypasses row-level
+-- security, is not a superuser and is a member of the commands' owner, so it
+-- holds that owner's privileges and no more; after them the commands go back
+-- to their owner and the role is dropped. Under an owner that already is a
+-- superuser or bypasses row-level security nothing changes and no role is
+-- made. The rest of this suite runs with the schema's own owner.
+reset role;
+create temporary table ocr_command_owners on commit drop as
+select p.oid::regprocedure::text as command, r.rolname as owner
+  from pg_proc p join pg_roles r on r.oid = p.proowner
+ where p.pronamespace = 'ocr'::regnamespace and p.prosecdef and not (r.rolsuper or r.rolbypassrls);
+do $$
+declare command_row record;
+begin
+  if exists (select 1 from ocr_command_owners) then
+    create role schema_test_ocr_owner nologin nosuperuser nocreatedb nocreaterole inherit bypassrls;
+    for command_row in select distinct owner from ocr_command_owners loop
+      execute format('grant %I to schema_test_ocr_owner', command_row.owner);
+    end loop;
+  end if;
+  for command_row in select command from ocr_command_owners order by command loop
+    execute format('alter function %s owner to schema_test_ocr_owner', command_row.command);
+  end loop;
+end
+$$;
+set role hid_schema_test_runtime;
+
 insert into ocr.jobs (
   id, facility_id, document_id, patient_id, source_object_version_id,
   source_sha256_hex, idempotency_key, request_sha256, provider, max_attempts,
@@ -1424,6 +1462,21 @@ begin
   end if;
 end
 $$;
+
+-- The OCR commands go back to their owner, and the role made for them goes.
+reset role;
+do $$
+declare command_row record;
+begin
+  for command_row in select command, owner from ocr_command_owners order by command loop
+    execute format('alter function %s owner to %I', command_row.command, command_row.owner);
+  end loop;
+  if exists (select 1 from ocr_command_owners) then
+    drop role schema_test_ocr_owner;
+  end if;
+end
+$$;
+set role hid_schema_test_runtime;
 
 select set_config('app.purpose_of_use', 'direct-care', true);
 select set_config('app.correlation_id', 'schema-test-lab-import-0001', true);

@@ -92,6 +92,8 @@
     "verify:secret-readiness": "node scripts/verify-secret-readiness.mjs",
     "verify:migration-ledger": "node scripts/verify-migration-ledger.mjs",
     "verify:prebaseline-git": "bash scripts/verify-prebaseline-git.sh",
+    "check:db": "node scripts/local-db-check.mjs",
+    "check:db:all": "node scripts/local-db-check.mjs --all",
     "verify:migration": "npm --prefix services/ehr-api run migration:verify && npm --prefix services/ehr-api run migration:verify-nin-crosswalk",
     "verify:containers": "node scripts/verify-container-platform.mjs",
     "verify:identity": "npm --prefix apps/web run verify:identity",

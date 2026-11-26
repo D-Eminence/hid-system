@@ -101,6 +101,69 @@ function quote(identifier) {
   return `"${identifier.replaceAll('"', '""')}"`;
 }
 
+// PostgreSQL superuser ownership can hide FORCE RLS mistakes inside definer
+// commands and owner-run triggers. Recreate the schema-migrator ownership
+// boundary on an independent synthetic copy: the schemas and every table,
+// view, sequence and function the migration login (here the superuser admin)
+// owns go to a role that neither is a superuser nor bypasses row-level
+// security, and so do the policies that name the login. The migrations write
+// the login's own name into owner policies (`current_user = '<login>'`) and
+// into some policies' TO lists, so a copy that changed only the owners would
+// refuse its own owner, which production's migration login, the owner, never
+// meets. Runtime callers retain their exact grants.
+const schemaOwner = 'hid_synthetic_schema_owner';
+async function giveSchemaToNonSuperuser(db) {
+  return withClient(db, async client => {
+    const owner = schemaOwner;
+    if (!(await client.query('select 1 from pg_roles where rolname = $1', [owner])).rowCount) {
+      await client.query(`create role ${owner} nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls`);
+    }
+    const schemas = (await client.query(`select nspname from pg_namespace
+      where nspname not like 'pg_%' and nspname not in ('information_schema','public')`)).rows;
+    for (const {nspname} of schemas) {
+      await client.query(`alter schema ${quote(nspname)} owner to ${owner}`);
+      const tables = (await client.query(`select c.relname,c.relkind from pg_class c
+        join pg_namespace n on n.oid=c.relnamespace join pg_roles r on r.oid=c.relowner
+        where n.nspname=$1 and r.rolname=$2 and c.relkind in ('r','p','v','m','S')
+        order by case when c.relkind='S' then 1 else 0 end,c.relname`, [nspname,admin])).rows;
+      for (const {relname,relkind} of tables) {
+        const kind = relkind==='v' ? 'view' : relkind==='m' ? 'materialized view' : relkind==='S' ? 'sequence' : 'table';
+        await client.query(`alter ${kind} ${quote(nspname)}.${quote(relname)} owner to ${owner}`);
+      }
+      const functions = (await client.query(`select p.oid::regprocedure::text as signature from pg_proc p
+        join pg_namespace n on n.oid=p.pronamespace join pg_roles r on r.oid=p.proowner
+        where n.nspname=$1 and r.rolname=$2 and p.prokind='f'`, [nspname,admin])).rows;
+      for (const {signature} of functions) await client.query(`alter function ${signature} owner to ${owner}`);
+    }
+    const loginName = `'${admin}'::name`;
+    const policyNamesLogin = `(select oid from pg_roles where rolname = $1) = any(pol.polroles)
+      or strpos(coalesce(pg_get_expr(pol.polqual, pol.polrelid), '')
+                || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), ''), $2) > 0`;
+    const policies = (await client.query(`select format('alter policy %I on %I.%I', pol.polname, n.nspname, c.relname)
+        || case when (select oid from pg_roles where rolname = $1) = any(pol.polroles)
+             then ' to ' || (select string_agg(case when role_oid = 0 then 'public'
+                    when role_oid = (select oid from pg_roles where rolname = $1) then quote_ident($3)
+                    else role_oid::regrole::text end, ', ' order by position)
+                  from unnest(pol.polroles) with ordinality as listed(role_oid, position))
+             else '' end
+        || coalesce(' using (' || replace(pg_get_expr(pol.polqual, pol.polrelid), $2, $4) || ')', '')
+        || coalesce(' with check (' || replace(pg_get_expr(pol.polwithcheck, pol.polrelid), $2, $4) || ')', '') as statement
+      from pg_policy pol join pg_class c on c.oid = pol.polrelid join pg_namespace n on n.oid = c.relnamespace
+      where ${policyNamesLogin} order by 1`, [admin, loginName, owner, `'${owner}'::name`])).rows;
+    for (const {statement} of policies) await client.query(statement);
+    assert.equal((await client.query(`select count(*)::integer n from pg_policy pol where ${policyNamesLogin}`,
+      [admin, loginName])).rows[0].n, 0, 'A policy still names the migration login instead of the schema owner');
+    assert.deepEqual((await client.query(`select rolsuper,rolbypassrls,rolcanlogin from pg_roles where rolname=$1`, [owner])).rows[0],
+      {rolsuper:false,rolbypassrls:false,rolcanlogin:false});
+    assert.equal((await client.query(`select count(*)::integer n from pg_proc p join pg_roles r on r.oid=p.proowner
+      where p.proname in ('complete_recovery_otp','current_patient_account','patient_self_session','patient_self_profile',
+        'authorize_patient_self','patient_self_access_history','activate_break_glass','enroll_registered_patient')
+        and r.rolname=$1`, [owner])).rows[0].n,8);
+    return {role:owner,login:false,superuser:false,bypass_rls:false,definer_commands_checked:8,
+      policies_naming_the_owner:policies.length};
+  });
+}
+
 // Columns a later migration adds to tables that already hold historical rows.
 // The snapshot leaves them out, so a historical row compares on the columns it
 // had; the upgrade check then asserts every historical row holds the added
@@ -473,6 +536,54 @@ try {
       ['-X', '-d', database, '-v', 'ON_ERROR_STOP=1', '-f', join(service, 'database/tests', name)]);
   }
   evidence.checks.additional_schema_suites = additionalSuites;
+  // The services' database suites (services/ehr-api/test/database): each is one transaction that ends in ROLLBACK,
+  // judged by psql's exit status, so CI and npm run check:db run them all (coordinator, hid-system #258,
+  // 20 November 2026). They run twice, under two schema owners that their commands meet differently (review of
+  // hid-system #310):
+  // - on this freshly migrated database, whose schema belongs to the superuser admin: an owner that bypasses
+  //   row-level security, as production's OCR owner is expected to (docs/INTERFACE_CONTRACT.md, expected owner
+  //   attributes, release checklist P8; ocr-source-deletion's worker data cases run only under such an owner);
+  // - on hid_service_suites, a copy of it given to hid_synthetic_schema_owner (giveSchemaToNonSuperuser, the
+  //   boundary hid_owner_check has, below), an owner that neither is a superuser nor bypasses row-level security, as
+  //   P8 expects of production's other owners (the outreach tables' among them). A superuser owner skips forced
+  //   row-level security, so a suite could pass on the first and the same commands fail under such an owner.
+  //   The cluster's superuser, hid_rehearsal_admin, runs the suites on both and owns the schema only on the first;
+  //   a superuser holds every privilege, so a suite's runtime-role check skips superusers as well as the owner.
+  // The copy is of the freshly migrated database the suites were written for, not of hid_owner_check's backup, which
+  // also holds the baseline records and every runtime workflow's rows. schema.integration.sql (above, on the superuser
+  // owner's database, where its OCR owner emulation does nothing) runs on the copy too, so that emulation is exercised.
+  const serviceSuitesDatabase = 'hid_service_suites';
+  command('copy the migrated database for the service suites', join(pgBindir, 'createdb'),
+    ['-T', database, serviceSuitesDatabase]);
+  const serviceSuitesOwner = await giveSchemaToNonSuperuser(serviceSuitesDatabase);
+  const serviceSuites = (await readdir(join(service, 'test/database')))
+    .filter((name) => name.endsWith('.integration.sql')).sort();
+  const migratedOwner = await withClient(database, async (client) => (await client.query(`select r.rolname as role,
+    r.rolsuper as superuser, r.rolbypassrls as bypass_rls from pg_class c join pg_roles r on r.oid = c.relowner
+    where c.oid = 'ocr.jobs'::regclass`)).rows[0]);
+  assert.deepEqual(migratedOwner, { role: admin, superuser: true, bypass_rls: true });
+  const serviceSuiteRuns = [
+    { database, owner: migratedOwner, suites: serviceSuites.map((name) => `test/database/${name}`) },
+    { database: serviceSuitesDatabase, owner: serviceSuitesOwner,
+      suites: ['database/tests/schema.integration.sql', ...serviceSuites.map((name) => `test/database/${name}`)] },
+  ];
+  // Every suite runs on both, and the step then fails once, naming each failed suite, its database and its first error.
+  const suiteFailures = [];
+  for (const run of serviceSuiteRuns) {
+    run.failed = [];
+    for (const suite of run.suites) {
+      try {
+        command(`database suite ${suite} on ${run.database}`, join(pgBindir, 'psql'),
+          ['-X', '-q', '-d', run.database, '-v', 'ON_ERROR_STOP=1', '-f', join(service, suite)]);
+      } catch (error) {
+        run.failed.push(suite);
+        suiteFailures.push(`${run.database}: ${suite}: `
+          + (/ERROR:\s+([^\n]*)/.exec(error.message)?.[1] ?? error.message).slice(0, 300));
+      }
+    }
+  }
+  evidence.checks.service_database_suites = { suites: serviceSuites, runs: serviceSuiteRuns };
+  assert.deepEqual(suiteFailures, [], `service database suites failed:\n${suiteFailures.join('\n')}`);
   const workflowEnvironment = {
     PGDATABASE: database, DATABASE_URL: url(database), CORS_ORIGINS: 'http://127.0.0.1', AUTH_MODE: 'local',
     AUTH_SIGNING_SECRET: randomBytes(32).toString('base64url'),
@@ -775,41 +886,14 @@ try {
   evidence.backup = await artifact('pre-migration.dump');
   evidence.backup_completed_at = new Date().toISOString();
   evidence.checks.pre_migration_integrity = beforeIntegrity;
-  // PostgreSQL superuser ownership can hide FORCE RLS mistakes inside definer
-  // commands. Recreate the schema-migrator ownership boundary on an independent
-  // restored synthetic database; runtime callers retain their exact grants.
+  // The same ownership boundary (giveSchemaToNonSuperuser) on an independent
+  // restored synthetic database, with the baseline records, for the schema's
+  // additional suites.
   restore('hid_owner_check', backupPath);
-  await withClient('hid_owner_check', async client => {
-    const owner = 'hid_synthetic_schema_owner';
-    await client.query(`create role ${owner} nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls`);
-    const schemas = (await client.query(`select nspname from pg_namespace
-      where nspname not like 'pg_%' and nspname not in ('information_schema','public')`)).rows;
-    for (const {nspname} of schemas) {
-      await client.query(`alter schema ${quote(nspname)} owner to ${owner}`);
-      const tables = (await client.query(`select c.relname,c.relkind from pg_class c
-        join pg_namespace n on n.oid=c.relnamespace join pg_roles r on r.oid=c.relowner
-        where n.nspname=$1 and r.rolname=$2 and c.relkind in ('r','p','v','m','S')
-        order by case when c.relkind='S' then 1 else 0 end,c.relname`, [nspname,admin])).rows;
-      for (const {relname,relkind} of tables) {
-        const kind = relkind==='v' ? 'view' : relkind==='m' ? 'materialized view' : relkind==='S' ? 'sequence' : 'table';
-        await client.query(`alter ${kind} ${quote(nspname)}.${quote(relname)} owner to ${owner}`);
-      }
-      const functions = (await client.query(`select p.oid::regprocedure::text as signature from pg_proc p
-        join pg_namespace n on n.oid=p.pronamespace join pg_roles r on r.oid=p.proowner
-        where n.nspname=$1 and r.rolname=$2 and p.prokind='f'`, [nspname,admin])).rows;
-      for (const {signature} of functions) await client.query(`alter function ${signature} owner to ${owner}`);
-    }
-    assert.deepEqual((await client.query(`select rolsuper,rolbypassrls,rolcanlogin from pg_roles where rolname=$1`, [owner])).rows[0],
-      {rolsuper:false,rolbypassrls:false,rolcanlogin:false});
-    assert.equal((await client.query(`select count(*)::integer n from pg_proc p join pg_roles r on r.oid=p.proowner
-      where p.proname in ('complete_recovery_otp','current_patient_account','patient_self_session','patient_self_profile',
-        'authorize_patient_self','patient_self_access_history','activate_break_glass','enroll_registered_patient')
-        and r.rolname=$1`, [owner])).rows[0].n,8);
-  });
+  const ownerCheck = await giveSchemaToNonSuperuser('hid_owner_check');
   for (const name of additionalSuites) command(`non-superuser definer ownership integration ${name}`, join(pgBindir, 'psql'),
     ['-X', '-d', 'hid_owner_check', '-v', 'ON_ERROR_STOP=1', '-f', join(service, 'database/tests', name)]);
-  evidence.checks.non_superuser_definer_owner = {role:'hid_synthetic_schema_owner',login:false,superuser:false,
-    bypass_rls:false,definer_commands_checked:8,runtime_callers:'exact service roles',suites:additionalSuites};
+  evidence.checks.non_superuser_definer_owner = {...ownerCheck,runtime_callers:'exact service roles',suites:additionalSuites};
   await writeFile(join(evidenceDirectory, 'before-counts-checksums.json'), JSON.stringify(before, null, 2) + '\n');
   await artifact('before-counts-checksums.json');
   process.stdout.write('Synthetic schema, baseline records, and pre-migration backup verified.\n');

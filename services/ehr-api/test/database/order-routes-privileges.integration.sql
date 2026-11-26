@@ -740,6 +740,9 @@ select pg_temp.assert('no role but the owner holds a privilege on a new table', 
    where acl.grantee <> c.relowner)
   and not exists (select 1 from new_tables t, pg_roles runtime where runtime.rolname ~ '^hid_'
     and runtime.rolname <> (select r.rolname from pg_class c join pg_roles r on r.oid = c.relowner where c.oid = t.relation)
+    -- not a superuser (CI's rehearsal superuser is named hid_rehearsal_admin, and is not the owner on its
+    -- non-superuser-owned copy; no runtime role is one)
+    and not runtime.rolsuper
     and (has_table_privilege(runtime.oid, t.relation, 'SELECT') or has_table_privilege(runtime.oid, t.relation, 'INSERT')
       or has_table_privilege(runtime.oid, t.relation, 'UPDATE') or has_table_privilege(runtime.oid, t.relation, 'DELETE')
       or has_table_privilege(runtime.oid, t.relation, 'TRUNCATE') or has_table_privilege(runtime.oid, t.relation, 'REFERENCES')
@@ -759,6 +762,9 @@ select pg_temp.assert('the late correction''s capability table: owner only, forc
                where c.oid = 'ehr.order_route_correction_capabilities'::regclass and acl.grantee <> c.relowner)
   and not exists (select 1 from pg_roles runtime where runtime.rolname ~ '^hid_'
     and runtime.oid <> (select c.relowner from pg_class c where c.oid = 'ehr.order_route_correction_capabilities'::regclass)
+    -- not a superuser (CI's rehearsal superuser is named hid_rehearsal_admin, and is not the owner on its
+    -- non-superuser-owned copy; no runtime role is one)
+    and not runtime.rolsuper
     and (has_table_privilege(runtime.oid, 'ehr.order_route_correction_capabilities', 'SELECT')
       or has_table_privilege(runtime.oid, 'ehr.order_route_correction_capabilities', 'INSERT')
       or has_table_privilege(runtime.oid, 'ehr.order_route_correction_capabilities', 'UPDATE')

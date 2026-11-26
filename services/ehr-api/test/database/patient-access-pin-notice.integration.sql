@@ -31,9 +31,15 @@ begin
   end if;
   select string_agg(role_row.rolname, ', ' order by role_row.rolname) into mismatch
     from pg_roles role_row
-   where role_row.rolname like 'hid\_%'
-     and (has_function_privilege(role_row.oid, 'notification.on_identity_pin_outbox_created()', 'EXECUTE')
-          or (has_function_privilege(role_row.oid, 'identity.list_my_access_requests()', 'EXECUTE')
+   -- not a superuser (CI's rehearsal superuser is named hid_rehearsal_admin; no runtime role is one), nor the
+   -- function's owner, the migration login, whatever its name (hid_synthetic_schema_owner on the rehearsal's copy)
+   where role_row.rolname like 'hid\_%' and not role_row.rolsuper
+     and ((role_row.oid <> (select p.proowner from pg_proc p
+                             where p.oid = 'notification.on_identity_pin_outbox_created()'::regprocedure)
+           and has_function_privilege(role_row.oid, 'notification.on_identity_pin_outbox_created()', 'EXECUTE'))
+          or (role_row.oid <> (select p.proowner from pg_proc p
+                                where p.oid = 'identity.list_my_access_requests()'::regprocedure)
+              and has_function_privilege(role_row.oid, 'identity.list_my_access_requests()', 'EXECUTE')
               and role_row.rolname not in ('hid_identity_runtime', 'hid_identity_api_runtime')));
   if mismatch is not null then
     raise exception 'pin notice: unexpected EXECUTE for %', mismatch;
