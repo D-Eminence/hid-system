@@ -13,8 +13,13 @@
 --      refuses at once ("... so it does not wait; ..."). Both messages are
 --      the ones the runner's dry run retries (its own number first, its
 --      wording last; hid-system#306), and nothing is applied. The same when
---      the other session holds identity.sealed_qa_members (ACCESS EXCLUSIVE:
---      0160 now takes the sealed-member tables up front, NOWAIT);
+--      the other session holds identity.sealed_qa_members, and again when it
+--      holds identity.sealed_demo_members (each in ACCESS EXCLUSIVE, one at a
+--      time: 0160 takes both sealed-member tables up front, NOWAIT; without
+--      one of them in that step, 0160 would get past it here and answer
+--      "already applied", and on production its closing count would wait
+--      for the table under the runner's lock timeout, which the dry run does
+--      not retry);
 --   2. a second run of each answers "already applied" (55000) and changes
 --      nothing;
 --   3. 0161 taken away for this transaction: a half state ("not in the
@@ -140,6 +145,13 @@ select public.dblink_exec('m160_blocker', 'begin') as began \gset
 select public.dblink_exec('m160_blocker', 'lock table identity.sealed_qa_members in access exclusive mode') as blocked \gset
 :run0160
 select pg_temp.expect('1c2 identity.sealed_qa_members held by another session: 0160 tries for 5 seconds, then refuses as the runner retries',
+  'busy refusal: stayed busy for 5 seconds | ' || :'made0160_before',
+  pg_temp.answer('0160', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0160());
+select public.dblink_exec('m160_blocker', 'rollback') as ended \gset
+select public.dblink_exec('m160_blocker', 'begin') as began \gset
+select public.dblink_exec('m160_blocker', 'lock table identity.sealed_demo_members in access exclusive mode') as blocked \gset
+:run0160
+select pg_temp.expect('1c3 identity.sealed_demo_members held by another session: 0160 tries for 5 seconds, then refuses as the runner retries',
   'busy refusal: stayed busy for 5 seconds | ' || :'made0160_before',
   pg_temp.answer('0160', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0160());
 select public.dblink_exec('m160_blocker', 'rollback') as ended \gset
