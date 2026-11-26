@@ -219,16 +219,20 @@
 -- dry run ends. 0159 ships in a release of its own, so the dry-run hold is
 -- 0159's alone.
 -- Measured on throwaway PostgreSQL 16, Release E with 0154 and the runtime
--- roles (fictional data), ten runs with a superuser applier and ten with a
--- NOSUPERUSER NOBYPASSRLS applier: the file takes 40-53 ms to commit; the
--- hold, from section 2 to commit, is 25-35 ms in all 20 runs. Nothing in
--- the file scans a table (the foreign key is on a new, empty table), so the
--- hold does not grow with data. Behind another session's open writer of
--- pharmacy.dispensings or identity.patients, or DDL on ehr.order_routes,
--- the file stops with section 2's 55P03 after 4.99-5.00 seconds, nothing
--- applied; with an earlier migration's lock held in the same transaction
--- it stops at once (32 ms) with the one-attempt text; an open reader of
--- pharmacy.dispensings does not stop it (55 ms).
+-- roles, 20,000 fictional rows in each of the four trigger tables, the
+-- file in one transaction, 11 runs with a superuser applier and 11 with a
+-- NOSUPERUSER NOBYPASSRLS one: the hold, from section 2 to commit, had
+-- medians of 28.9 and 25.2 ms and stayed within 22.8-36.7 ms in all 22
+-- runs; the file took 39-75 ms to commit. In the verification, with other
+-- work on the machine, the hold reached 40.8 ms (median 29.4 ms in 11
+-- runs). Nothing in the file scans a table (the foreign key is on a new,
+-- empty table), so the hold does not grow with data (the verification's
+-- runs on empty tables had medians of 28.6 and 31.1 ms). Behind another
+-- session's open writer of pharmacy.dispensings, or DDL on
+-- platform.legal_holds, the file stops with section 2's 55P03 after
+-- 4.99-5.00 seconds, nothing applied; with an earlier migration's lock held
+-- in the same transaction it stops at once (26-28 ms) with the one-attempt
+-- text; an open reader of pharmacy.dispensings does not stop it (48-61 ms).
 -- Subtransactions: each firing opens one, a gap one more. The most firings
 -- in one transaction come from an 0088 report or an 0090 correction of a
 -- routed lab work item: one invalidation per released result. lab-api takes
