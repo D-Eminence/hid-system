@@ -40,18 +40,26 @@ export const STAFF_LAB_QUERY = `select r.id, r.current_version::text||':'||rel.i
  * code system is LOINC by name or URL, or by its OID (LOINC_SYSTEM_SQL_PATTERN,
  * identical to ehr-api's).
  *
- * SENSITIVE_TEST_INITIALISMS and dottedInitialism are ehr-api's, letter for
- * letter: each initialism is also matched with dots or spaces between its
- * letters ("R.V.S.", "V.D.R.L", "C. D. 4"), so both services build one
- * pattern string (patient-results.query.spec.ts and ehr-api's
- * patient-evidence.query.spec.ts pin the same sha256).
+ * SENSITIVE_TEST_INITIALISMS, INITIALISMS_TAKING_LETTERS, dottedInitialism
+ * and initialismForm are ehr-api's, letter for letter: each initialism is also
+ * matched however its letters are set apart, by dots, hyphens, spaces or any
+ * other mark, or by nothing ("R.V.S.", "C.D4", "CD.4", "H-I-V"), then digits
+ * ("H.I.V1"), or letters too for the five whose own fragment takes them. So
+ * both services build one pattern string: patient-results.query.spec.ts
+ * checks it is ehr-api's string, and it and ehr-api's
+ * patient-evidence.query.spec.ts pin the same sha256.
  */
 export const SENSITIVE_TEST_INITIALISMS=[
   'hiv','aids','rvs','cd4','vl','hbv','hcv','hsv','vdrl','rpr','tpha','sti','std','hcg','bhcg','upt',
-  'psa','afp','cea','phq',
+  'psa','afp','cea','phq','brca',
 ] as const;
-/** An initialism with one or more dots or spaces between its letters: 'rvs' gives 'r[ .]+v[ .]+s'. */
-export const dottedInitialism=(letters:string):string=>[...letters].join('[ .]+');
+/** The initialisms whose own fragment takes letters after them ('hiv[a-z0-9]*'), so their spaced form does too. */
+export const INITIALISMS_TAKING_LETTERS=['hiv','cd4','hbv','hcv','hsv'] as const;
+/** An initialism with any run of marks that are not letters or digits, or none, between its letters: 'rvs' gives 'r[^a-z0-9]*v[^a-z0-9]*s'. */
+export const dottedInitialism=(letters:string):string=>[...letters].join('[^a-z0-9]*');
+/** dottedInitialism, then digits ('[0-9]*'), or letters and digits ('[a-z0-9]*') for INITIALISMS_TAKING_LETTERS. */
+export const initialismForm=(letters:string):string=>dottedInitialism(letters)
+  +((INITIALISMS_TAKING_LETTERS as readonly string[]).includes(letters)?'[a-z0-9]*':'[0-9]*');
 export const SENSITIVE_TEST_SQL_PATTERN = '(^|[^a-z0-9])(?:'+[
   'hiv[a-z0-9]*','aids','rvs','retrovir[a-z]*','cd[ -]?4[a-z0-9]*','viral[ -]?loads?',
   'hepatitis','hbsag','hbeag','anti[ -]?hbc','hbc[ -]?ab','hbv[a-z]*','hcv[a-z]*',
@@ -62,13 +70,16 @@ export const SENSITIVE_TEST_SQL_PATTERN = '(^|[^a-z0-9])(?:'+[
   'biops[a-z]*','histolog[a-z]*','histopath[a-z]*','cytolog[a-z]*','pap','pap[ -]?smears?',
   'karyotyp[a-z]*','brca[0-9]*','genetic[a-z]*','genotyp[a-z]*',
   'phq[ -]?[0-9]*','gad[ -]?[0-9]+','psych[a-z]*',
+  // GAD only with its number ("G.A.D.-7"); plain "GAD" and "anti-GAD" (a diabetes antibody test) stay shown.
+  'g[^a-z0-9]*a[^a-z0-9]*d[^a-z0-9]*[0-9]+',
   'vl','hb[ -]?electrophoresis','ha?emoglobin[ -]?electrophoresis',
   'prostate[ -]specific','[a-z]*fetoprotein','carcinoembryonic','cancer[ -]?(?:ag|antigen)','chorionic','choriogonadotrop[a-z]*',
   'human[ -]*immuno[ -]*deficiency','hep[ .-]*[bc](?:[ .-]*[sec])?(?:[ .-]*a[gb])?','hbs[ -]?ag',
   // HIV rapid-test kits named alone (Determine, Uni-Gold and Stat-Pak: Nigeria's serial HIV algorithm; OraQuick:
-  // self-testing). A facility's own test (0155) is hidden by its name only.
-  'determine','uni[ -]?gold','stat[ -]?pak','ora[ -]?quick',
-  ...SENSITIVE_TEST_INITIALISMS.map(dottedInitialism),
+  // self-testing). A facility's own test (0155) is hidden by its name only. "Determine" may run on into letters or
+  // digits ("DetermineHIV"); the parts of the others may be set apart by any marks or none ("Uni.Gold", "UniGold").
+  'determine[a-z0-9]*','uni[^a-z0-9]*gold','stat[^a-z0-9]*pak','ora[^a-z0-9]*quick',
+  ...SENSITIVE_TEST_INITIALISMS.map(initialismForm),
 ].join('|')+')($|[^a-z0-9])';
 export const SENSITIVE_LOINC_CODES=[
   '75622-1','56888-1','7917-8','68961-2','20447-9','24467-3','5196-1','5195-3','16128-1','13955-0',

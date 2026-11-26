@@ -1,6 +1,6 @@
-import { LAB_CORRECTING, PATIENT_FIELDS, LOINC_SYSTEM_SQL_PATTERN, SENSITIVE_ICD11_GROUPS, SENSITIVE_LOINC_CODES, SENSITIVE_TEST_INITIALISMS,
-  SENSITIVE_TEST_SQL_PATTERN, VITAL_FIELDS, ageYears, dottedInitialism, icdRevision, isSensitiveDiagnosisCode, isSensitiveTest, patientEvidence,
-  redactIdentifiers, type PatientProfileInput } from './patient-evidence.policy';
+import { INITIALISMS_TAKING_LETTERS, LAB_CORRECTING, PATIENT_FIELDS, LOINC_SYSTEM_SQL_PATTERN, SENSITIVE_ICD11_GROUPS, SENSITIVE_LOINC_CODES,
+  SENSITIVE_TEST_INITIALISMS, SENSITIVE_TEST_SQL_PATTERN, VITAL_FIELDS, ageYears, dottedInitialism, icdRevision, initialismForm,
+  isSensitiveDiagnosisCode, isSensitiveTest, patientEvidence, redactIdentifiers, type PatientProfileInput } from './patient-evidence.policy';
 import { evidence, type Evidence, type SourceKind } from './patient-evidence.types';
 
 // Fictional patient and records only.
@@ -657,11 +657,11 @@ describe('0155: HIV rapid-test kits and dotted initialisms (S4)', () => {
   const KITS = ['Determine', 'Determine HIV-1/2 Ag/Ab Combo', 'Uni-Gold', 'Unigold', 'Uni Gold Recombigen', 'Stat-Pak', 'StatPak',
     'Stat Pak', 'OraQuick', 'Ora-Quick', 'Ora Quick ADVANCE', 'Rapid test (Determine)'];
 
-  it('makes the dotted form by one rule: a dot or space between the letters', () => {
-    expect(dottedInitialism('rvs')).toBe('r[ .]+v[ .]+s');
-    expect(dottedInitialism('cd4')).toBe('c[ .]+d[ .]+4');
-    expect(SENSITIVE_TEST_SQL_PATTERN).toContain('|h[ .]+i[ .]+v|');
-    expect(DOTTED).toEqual(expect.arrayContaining(['R.V.S.', 'V.D.R.L.', 'H.C.V.', 'C.D.4.', 'H.I.V.']));
+  it('makes the dotted form by one rule: any marks, or none, between the letters', () => {
+    expect(dottedInitialism('rvs')).toBe('r[^a-z0-9]*v[^a-z0-9]*s');
+    expect(dottedInitialism('cd4')).toBe('c[^a-z0-9]*d[^a-z0-9]*4');
+    expect(SENSITIVE_TEST_SQL_PATTERN).toContain('|h[^a-z0-9]*i[^a-z0-9]*v[a-z0-9]*|');
+    expect(DOTTED).toEqual(expect.arrayContaining(['R.V.S.', 'V.D.R.L.', 'H.C.V.', 'C.D.4.', 'H.I.V.', 'B.R.C.A.']));
   });
 
   it.each([...DOTTED, 'R. V. S.', 'R.V.S', 'r.v.s.', 'V. D. R. L', 'C.D.4 count', 'C. D. 4', 'Retroviral screening (R.V.S.)', ...KITS])(
@@ -700,5 +700,56 @@ describe('0155: HIV rapid-test kits and dotted initialisms (S4)', () => {
     // Its name still hides it; a code that is not a UUID, or a UUID under another code system, is still read.
     expect([isSensitiveTest('Determine HIV 1/2', code, 'HID-FACILITY'), isSensitiveTest('Full blood count', 'HIV-AB', 'HID-FACILITY'),
       isSensitiveTest('Full blood count', code, 'LOCAL')]).toEqual([true, true, true]);
+  });
+});
+
+// Ola's decision as clinical owner (#258, 26 Nov 2026): an initialism's letters may be set apart by any marks or none
+// (dot, hyphen, space, en dash), then digits may follow; letters too for HIV, CD4, HBV, HCV and HSV. BRCA joins the
+// initialisms. GAD counts only with its number. The kit names take any marks between their parts, and "Determine" may
+// run on ("DetermineHIV"). lab-api builds the same pattern string (its spec compares the two).
+describe('0155: any marks between the letters of an initialism, BRCA, numbered GAD and kit names (S4)', () => {
+  const sql = new RegExp(SENSITIVE_TEST_SQL_PATTERN, 'i');
+  const lab = (test: string) => record('lab_result', { test, codeSystem: 'HID-FACILITY', code: '7d1c3a52-5f0e-4c1b-9a63-2b8e4f6a9c01',
+    specimen: 'Blood', resultType: 'text', textValue: 'Synthetic value', releasedAt: '2026-10-01T10:00:00.000Z', verification: 'released' },
+  { title: test });
+  const request = (test: string) => record('investigation', { ...completed, test, codeSystem: 'HID-FACILITY',
+    code: '7d1c3a52-5f0e-4c1b-9a63-2b8e4f6a9c01', status: 'completed' }, { title: test });
+  const diagnosis = (condition: string) => record('diagnosis', { _encounterId: encounterId, codeSystem: 'LOCAL', code: 'X1', condition,
+    clinicalStatus: 'active', verificationStatus: 'confirmed', onsetAt: null, abatementAt: null }, { title: condition });
+  const HIDDEN = ['H-I-V', 'h.i.v', 'H.I.V1', 'HIV1', 'C.D4', 'CD.4', 'C-D-4', 'C D 4', 'cd4 count', 'V-D-R-L', 'V.D.R.L.', 'R.V.S', 'R-V-S',
+    'H.C.V', 'H-B-V', 'B.R.C.A.', 'BRCA1', 'G.A.D.-7', 'GAD-7', 'Uni.Gold', 'Uni  Gold', 'Uni\u2013Gold', 'UniGold', 'Stat.Pak', 'Stat-Pak',
+    'Ora.Quick', 'OraQuick HIV self-test', 'DetermineHIV', 'Determine HIV 1/2', 'P.H.Q.-9'];
+  const SHOWN = ['Full blood count', 'Haemoglobin', 'Malaria parasite', 'Urinalysis', 'Anti-GAD antibody',
+    'GAD (glutamic acid decarboxylase) antibody', 'Fasting blood sugar', 'Stat dose', 'Gold standard culture', 'Statin level',
+    'Liver function test', 'Electrolytes'];
+
+  it('builds each initialism form by one rule: marks or none between the letters, then digits, or letters for five', () => {
+    expect(INITIALISMS_TAKING_LETTERS).toEqual(['hiv', 'cd4', 'hbv', 'hcv', 'hsv']);
+    expect(initialismForm('rvs')).toBe('r[^a-z0-9]*v[^a-z0-9]*s[0-9]*');
+    expect(initialismForm('hiv')).toBe('h[^a-z0-9]*i[^a-z0-9]*v[a-z0-9]*');
+    expect(SENSITIVE_TEST_INITIALISMS).toContain('brca');
+    expect(SENSITIVE_TEST_INITIALISMS).not.toContain('gad');
+    for (const letters of SENSITIVE_TEST_INITIALISMS) expect(SENSITIVE_TEST_SQL_PATTERN).toContain(`|${initialismForm(letters)}`);
+    for (const fragment of ['g[^a-z0-9]*a[^a-z0-9]*d[^a-z0-9]*[0-9]+', 'determine[a-z0-9]*', 'uni[^a-z0-9]*gold', 'stat[^a-z0-9]*pak',
+      'ora[^a-z0-9]*quick']) expect(SENSITIVE_TEST_SQL_PATTERN).toContain(`|${fragment}|`);
+    expect(SENSITIVE_TEST_SQL_PATTERN).not.toContain("'");
+  });
+
+  it.each(HIDDEN)('%j is hidden: by the policy, by the SQL pattern, as a result and as a request', (name) => {
+    expect([name, isSensitiveTest(name), sql.test(name)]).toEqual([name, true, true]);
+    expect(clean([lab(name), request(name)])).toEqual([]);
+  });
+
+  it.each(SHOWN)('%j is still shown, as a result and as a request', (name) => {
+    expect([name, isSensitiveTest(name), sql.test(name)]).toEqual([name, false, false]);
+    expect(clean([lab(name), request(name)])).toHaveLength(2);
+  });
+
+  it.each(['R.V.D.', 'R-V-D', 'P.M.T.C.T.', 'P-T-S-D', 'O.C.D.'])('a diagnosis named %j is hidden', (condition) => {
+    expect(clean([diagnosis(condition)])).toEqual([]);
+  });
+
+  it('keeps a diagnosis named "Anaemia"', () => {
+    expect(clean([diagnosis('Anaemia')])).toHaveLength(1);
   });
 });
