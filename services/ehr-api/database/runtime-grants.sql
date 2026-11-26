@@ -2100,3 +2100,22 @@ grant execute on function ehr.prescription_refills_end_on(timestamptz, smallint,
 revoke all on function ehr.prescription_refills_end_on(timestamptz, smallint, integer, text, date) from public;
 revoke all on pharmacy.refill_scans from public;
 grant execute on function pharmacy.refill_scan_open() to public;
+
+-- Notices to the ordering doctor (0159, ORD-11: owner decision Q128 A of 19
+-- November 2026; the clinical owner's design note on hid-system#258, 26
+-- November 2026), exactly as 0159 grants them: the summary, the list, mark
+-- read, Seen and the sweep to the EHR runtime only. No runtime has a
+-- privilege on the notices, the gaps or the switch (the owner's only), on the
+-- four trigger functions and their two helpers (the triggers run them as
+-- their owner) or on the session check; the hold test is platform.legal_holds'
+-- owner's, with EXECUTE for 0159's owner alone.
+grant execute on function ehr.order_notice_summary(), ehr.list_order_notices(text, uuid, integer),
+  ehr.mark_order_notices_read(uuid[], bigint[]), ehr.mark_order_notice_seen(uuid), ehr.sweep_order_notices(integer)
+  to hid_ehr_runtime;
+revoke all on function ehr.order_notice_summary(), ehr.list_order_notices(text, uuid, integer),
+  ehr.mark_order_notices_read(uuid[], bigint[]), ehr.mark_order_notice_seen(uuid), ehr.sweep_order_notices(integer),
+  ehr.order_notice_session(), ehr.order_notice_gap(text, uuid, text, text, text, text),
+  ehr.order_notice_write(text, uuid, uuid, uuid, text, timestamptz, text, uuid, uuid, bigint, uuid, uuid, uuid),
+  ehr.order_notice_from_release(), ehr.order_notice_from_invalidation(), ehr.order_notice_from_dispensing(),
+  ehr.order_notice_from_reversal(), ehr.order_notice_held(uuid, uuid, uuid) from public;
+revoke all on ehr.order_notices, ehr.order_notice_gaps, ehr.order_notice_switch from public;

@@ -231,3 +231,28 @@ test('0154\'s two busy refusals, read from the file, are ones the dry run retrie
     assert.equal(isBusyRefusal(new MigrationFileError(file, databaseError('57014', message))), false);
   }
 });
+
+// ORD-11 (0159, number booked; the final number is given at integration): the file's two busy refusals, read from the
+// file itself, are ones the dry run retries.
+test('0159\'s two busy refusals, read from the file, are ones the dry run retries', async () => {
+  const file = '0159_order_notices.sql';
+  const sql = await readFile(path.join(scripts, '../database/migrations', file), 'utf8');
+  const messages = [];
+  for (const raised of sql.split("errcode = '55P03',").slice(1)) {
+    const literals = /^\s*message\s*=\s*((?:'(?:[^']|'')*'\s*(?:\|\|\s*)?)+)/.exec(raised);
+    assert.ok(literals, `a 55P03 in ${file} has no literal message`);
+    messages.push([...literals[1].matchAll(/'((?:[^']|'')*)'/g)].map((part) => part[1].replaceAll("''", "'")).join(''));
+  }
+  const tables = 'a lab result, dispensing or patient table, or a table 0159 reads (the order routes, their reports or '
+    + 'the permissions)';
+  assert.deepEqual(messages, [
+    `0159: ${tables}, is busy, and this transaction already holds an earlier migration's locks, so it does not wait; `
+      + `nothing applied; ${tail}`,
+    `0159: ${tables}, stayed busy for 5 seconds; nothing applied; ${tail}`,
+  ]);
+  for (const message of messages) {
+    assert.equal(isBusyRefusal(new MigrationFileError(file, databaseError('55P03', message))), true, message);
+    assert.equal(isBusyRefusal(new MigrationFileError('0154_prescription_refills.sql', databaseError('55P03', message))), false);
+    assert.equal(isBusyRefusal(new MigrationFileError(file, databaseError('57014', message))), false);
+  }
+});
