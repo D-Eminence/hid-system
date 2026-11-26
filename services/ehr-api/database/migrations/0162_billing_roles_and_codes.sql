@@ -151,9 +151,13 @@
 --    a. markers of the earlier files whose objects it uses only: 0123 (the
 --       sealed QA tenant) and 0150 (doctor's ocr.job.start, one of the codes
 --       d requires); c, d and e check everything else it reads exactly;
---    b. not applied yet ("0162: already applied" when every object is exactly
---       as this file leaves it; "0162: ... not in the reviewed state" when
---       any of its objects exists otherwise);
+--    b. not applied yet: "0162: already applied" when its own rows are there
+--       (the two roles and the 17 codes active, schema commercial, each of
+--       its 58 role rows, its 77 audit rows), whatever other files have added
+--       since (other roles' codes, other rows of these codes, later changes
+--       to the role functions), so a re-run on an integrated database says
+--       so (Rahman, #258, 25 November 2026, 21:48 UTC); "0162: ... not in the
+--       reviewed state" when any of them exists otherwise;
 --    c. the eight role functions and the two checks exactly as Release C
 --       leaves them (md5 of pg_proc.prosrc, SECURITY DEFINER, search_path
 --       and grants, and the check definitions); these
@@ -263,7 +267,31 @@ declare
       "identity.patient.read", "identity.registration.write", "ocr.job.read-own", "ocr.job.start", "ocr.job.write",
       "outreach.campaign.read", "outreach.campaign.write", "outreach.registration.read",
       "outreach.registration.write"]}';
-  -- The 58 rows this file adds: md5 of "role code" pairs in byte order (collate "C"), joined by ','.
+  -- The 58 rows this file adds (B4), by role. B4 inserts exactly these; the "already applied" check (1b) looks for
+  -- exactly these (its own rows only, so rows other files add to any role, these codes included, never change its
+  -- answer); the post-check pins their md5.
+  own_rows constant jsonb := '{
+    "admin": ["billing.settings.manage", "billing.catalogue.read", "billing.catalogue.manage", "billing.bill.read",
+      "billing.bill.adjust", "billing.payment.confirm", "billing.payment.void", "billing.payment.waive",
+      "billing.shift.manage", "billing.report.read"],
+    "billing_officer": ["billing.catalogue.read", "billing.bill.read", "billing.bill.create", "billing.payment.record",
+      "billing.shift.own", "billing.bill.adjust", "billing.bill.defer", "billing.payment.confirm",
+      "billing.payment.void", "billing.payment.waive", "billing.shift.manage", "billing.catalogue.manage",
+      "billing.report.read"],
+    "cashier": ["billing.catalogue.read", "billing.bill.read", "billing.bill.create", "billing.payment.record",
+      "billing.shift.own"],
+    "clinician": ["billing.bill.defer"],
+    "doctor": ["billing.bill.defer"],
+    "lab": ["billing.catalogue.read", "billing.bill.read", "billing.payment.record", "billing.shift.own"],
+    "nurse": ["billing.bill.defer"],
+    "org_admin": ["billing.settings.manage", "billing.catalogue.read", "billing.catalogue.manage", "billing.bill.read",
+      "billing.bill.adjust", "billing.payment.confirm", "billing.payment.void", "billing.payment.waive",
+      "billing.shift.manage", "billing.report.read"],
+    "pharmacist": ["billing.catalogue.read", "billing.bill.read", "billing.bill.create", "billing.payment.record",
+      "billing.shift.own", "pharmacy.stock.read", "pharmacy.stock.manage", "pharmacy.walk-in.create"],
+    "receptionist": ["billing.catalogue.read", "billing.bill.read", "billing.bill.create", "billing.payment.record",
+      "billing.shift.own"]}';
+  -- The same 58 rows: md5 of "role code" pairs in byte order (collate "C"), joined by ','.
   rows_md5 constant text := 'd73e63d61ea5cc52bbf1bcd56fa69304';
   -- The eight role functions' SECURITY DEFINER, search_path and grants (to roles other than the owner), as Release C
   -- leaves them and as they must be after CREATE OR REPLACE: "definer|search_path|grantee:privilege,...".
@@ -326,13 +354,6 @@ declare
      "membership": "c0a00005-0000-4000-8000-0000000000b1",
      "subject": "sealed-qa:c0a00003-0000-4000-8000-00000000000b",
      "email": "billing@healthidentitydirectory.com", "name": "QA Billing Officer", "role": "billing_officer"}]';
-  role_rows constant jsonb := '{
-    "cashier": ["billing.catalogue.read", "billing.bill.read", "billing.bill.create", "billing.payment.record",
-      "billing.shift.own"],
-    "billing_officer": ["billing.catalogue.read", "billing.bill.read", "billing.bill.create", "billing.payment.record",
-      "billing.shift.own", "billing.bill.adjust", "billing.bill.defer", "billing.payment.confirm",
-      "billing.payment.void", "billing.payment.waive", "billing.shift.manage", "billing.catalogue.manage",
-      "billing.report.read"]}';
   found_absent boolean;
   missing text;
   applier oid := (select role_row.oid from pg_roles role_row where role_row.rolname = current_user);
@@ -408,15 +429,9 @@ begin
        and (select count(*) from auth.permissions
              where code in (select value->>0 from jsonb_array_elements(new_codes)) and active) = 17
        and to_regnamespace('commercial') is not null
-       and (select md5(string_agg(grant_row.role_code || ' ' || grant_row.permission_code, ','
-                                  order by grant_row.role_code collate "C", grant_row.permission_code collate "C"))
-              from auth.role_permissions grant_row
-             where grant_row.permission_code in (select value->>0 from jsonb_array_elements(new_codes))) = rows_md5
-       and (select md5(proc.prosrc) from pg_proc proc
-             where proc.oid = to_regprocedure('identity.staff_invitable_roles(text,text)')) = invitable_after_md5
-       and not exists (select 1 from jsonb_array_elements(role_functions) fn
-                        where (select md5(proc.prosrc) from pg_proc proc
-                                where proc.oid = to_regprocedure(fn.value->>'f')) is distinct from fn.value->>'after')
+       and (select count(*) from jsonb_each(own_rows) owned, jsonb_array_elements_text(owned.value) owned_code(code)
+             where exists (select 1 from auth.role_permissions grant_row
+                            where grant_row.role_code = owned.key and grant_row.permission_code = owned_code.code)) = 58
        and (select count(*) from audit.events event_row where event_row.correlation_id = correlation) = 77 then
       raise exception using errcode = '55000', message = '0162: already applied';
     end if;
@@ -555,33 +570,10 @@ begin
   insert into auth.roles (code, description) values
     ('cashier', 'Cashier: takes payments, prints receipts and closes the till day; sees only what a bill shows'),
     ('billing_officer', 'Billing officer: the cashier''s work plus the price list, voids, waivers, transfers and reports');
-  insert into auth.role_permissions (role_code, permission_code) values
-    ('cashier', 'billing.catalogue.read'), ('cashier', 'billing.bill.read'), ('cashier', 'billing.bill.create'),
-    ('cashier', 'billing.payment.record'), ('cashier', 'billing.shift.own'),
-    ('billing_officer', 'billing.catalogue.read'), ('billing_officer', 'billing.bill.read'),
-    ('billing_officer', 'billing.bill.create'), ('billing_officer', 'billing.payment.record'),
-    ('billing_officer', 'billing.shift.own'), ('billing_officer', 'billing.bill.adjust'),
-    ('billing_officer', 'billing.bill.defer'), ('billing_officer', 'billing.payment.confirm'),
-    ('billing_officer', 'billing.payment.void'), ('billing_officer', 'billing.payment.waive'),
-    ('billing_officer', 'billing.shift.manage'), ('billing_officer', 'billing.catalogue.manage'),
-    ('billing_officer', 'billing.report.read'),
-    ('admin', 'billing.settings.manage'), ('admin', 'billing.catalogue.read'), ('admin', 'billing.catalogue.manage'),
-    ('admin', 'billing.bill.read'), ('admin', 'billing.bill.adjust'), ('admin', 'billing.payment.confirm'),
-    ('admin', 'billing.payment.void'), ('admin', 'billing.payment.waive'), ('admin', 'billing.shift.manage'),
-    ('admin', 'billing.report.read'),
-    ('org_admin', 'billing.settings.manage'), ('org_admin', 'billing.catalogue.read'),
-    ('org_admin', 'billing.catalogue.manage'), ('org_admin', 'billing.bill.read'), ('org_admin', 'billing.bill.adjust'),
-    ('org_admin', 'billing.payment.confirm'), ('org_admin', 'billing.payment.void'),
-    ('org_admin', 'billing.payment.waive'), ('org_admin', 'billing.shift.manage'), ('org_admin', 'billing.report.read'),
-    ('receptionist', 'billing.catalogue.read'), ('receptionist', 'billing.bill.read'),
-    ('receptionist', 'billing.bill.create'), ('receptionist', 'billing.payment.record'),
-    ('receptionist', 'billing.shift.own'),
-    ('pharmacist', 'billing.catalogue.read'), ('pharmacist', 'billing.bill.read'), ('pharmacist', 'billing.bill.create'),
-    ('pharmacist', 'billing.payment.record'), ('pharmacist', 'billing.shift.own'), ('pharmacist', 'pharmacy.stock.read'),
-    ('pharmacist', 'pharmacy.stock.manage'), ('pharmacist', 'pharmacy.walk-in.create'),
-    ('lab', 'billing.catalogue.read'), ('lab', 'billing.bill.read'), ('lab', 'billing.payment.record'),
-    ('lab', 'billing.shift.own'),
-    ('doctor', 'billing.bill.defer'), ('nurse', 'billing.bill.defer'), ('clinician', 'billing.bill.defer');
+  insert into auth.role_permissions (role_code, permission_code)
+  select owned.key, owned_code.code
+    from jsonb_each(own_rows) owned, jsonb_array_elements_text(owned.value) owned_code(code)
+   order by owned.key collate "C", owned_code.code collate "C";
 
   -- B5 the roles are given like any staff role.
   create or replace function identity.staff_invitable_roles(target_organization_type text, target_product_code text)

@@ -104,15 +104,21 @@
 --
 -- 0. Locks and preconditions (55000 and nothing applied; "0167: already
 --    applied" when every function and trigger this file makes is there
---    exactly as made). Each of the six tables must still have every trigger
---    Release C gave it (name and type); triggers other release lanes add are
---    accepted (coordinator, #258, 25 November 2026: wave 1 releases in order
---    of readiness; 0168 adds two to ehr.visit_queue, which fire before this
+--    exactly as made). Each of the six tables must have exactly the triggers
+--    Release C gave it (name, type and function; 0152-0153 add none), and
+--    ehr.visit_queue may also have, both or neither, exactly the Emergency
+--    board's two (0168): visit_queue_ed_close_mirror (type 17, AFTER UPDATE,
+--    ehr.visit_queue_ed_close_mirror()) and visit_queue_ed_guard (type 19,
+--    BEFORE UPDATE, ehr.visit_queue_ed_guard()), which fire before this
 --    file's zz_billing_* triggers of the same timing and event, as triggers
---    fire in name order). 1. Helpers. 2. Hook functions. 3. Triggers.
+--    fire in name order. Any other trigger on them is refused (coordinator,
+--    #258, 25 November 2026, extending the wave 1 decision to the trigger
+--    pins exactly as Rahman worded it at 21:48 UTC). 1. Helpers. 2. Hook
+--    functions. 3. Triggers.
 -- 4. Post-checks: function owners, SECURITY DEFINER, search_path, ACLs, md5,
---    and the seven triggers' tables, timing, events, UPDATE OF column,
---    functions, enabled state, no arguments and no WHEN condition.
+--    the seven triggers' tables, timing, events, UPDATE OF column,
+--    functions, enabled state, no arguments and no WHEN condition, and the
+--    six tables' other triggers as the precondition found them.
 
 do $pre$
 declare
@@ -137,14 +143,18 @@ declare
     "commercial.hook_triage()": "226774711ee8bb5a8496c50f9027feab",
     "commercial.pay_before_refusal(uuid,text,uuid)": "221e77c9fa06bab796189469f4e38c99",
     "commercial.work_item_line(uuid,uuid,text,uuid,text,text,text,numeric,text)": "086363b9a7c85a1f131ae7b3026f34ff"}';
-  -- The triggers Release C gives the six tables (name:tgtype); each must still be there.
+  -- The six tables' triggers before this file, exactly (name:tgtype:function, in name order): Release C's, which
+  -- 0152-0153 do not change; on ehr.visit_queue also, both or neither, exactly the Emergency board's two (0168,
+  -- ed_triggers). Any other trigger is refused (coordinator, #258, 25 November 2026, after Rahman's 21:48 UTC check).
   live_triggers constant jsonb := '{
     "ehr.visit_queue": "",
-    "pharmacy.work_item_acceptances": "pharmacy_work_item_acceptance_validate:7,pharmacy_work_item_acceptances_immutable:27",
-    "lab.work_items": "lab_work_item_validate:7,lab_work_items_immutable:27,work_items_own_work_patient_listed:21",
-    "pharmacy.dispensings": "dispensings_claim_prescription:5,dispensings_order_route_return:5,pharmacy_dispensing_validate:7,pharmacy_dispensings_immutable:27,prescription_claim_key_immutable:19",
-    "pharmacy.dispensing_reversals": "dispensing_reversals_order_route_return:5,pharmacy_dispensing_reversal_validate:7,pharmacy_dispensing_reversals_immutable:27",
-    "lab.specimens": "lab_specimen_parent_validate:7,lab_specimen_transition:19,lab_specimens_no_delete:11"}';
+    "pharmacy.work_item_acceptances": "pharmacy_work_item_acceptance_validate:7:pharmacy.validate_work_item_acceptance,pharmacy_work_item_acceptances_immutable:27:pharmacy.reject_immutable_evidence",
+    "lab.work_items": "lab_work_item_validate:7:lab.validate_work_item,lab_work_items_immutable:27:lab.reject_immutable_evidence,work_items_own_work_patient_listed:21:identity.list_own_work_patient",
+    "pharmacy.dispensings": "dispensings_claim_prescription:5:pharmacy.claim_prescription_dispensing,dispensings_order_route_return:5:pharmacy.return_order_route_dispensing,pharmacy_dispensing_validate:7:pharmacy.validate_dispensing,pharmacy_dispensings_immutable:27:pharmacy.reject_immutable_evidence,prescription_claim_key_immutable:19:pharmacy.refuse_claim_key_change",
+    "pharmacy.dispensing_reversals": "dispensing_reversals_order_route_return:5:pharmacy.return_order_route_reversal,pharmacy_dispensing_reversal_validate:7:pharmacy.validate_dispensing_reversal,pharmacy_dispensing_reversals_immutable:27:pharmacy.reject_immutable_evidence",
+    "lab.specimens": "lab_specimen_parent_validate:7:lab.validate_specimen_parent,lab_specimen_transition:19:lab.validate_specimen_transition,lab_specimens_no_delete:11:lab.reject_immutable_evidence"}';
+  ed_triggers constant text :=
+    'visit_queue_ed_close_mirror:17:ehr.visit_queue_ed_close_mirror,visit_queue_ed_guard:19:ehr.visit_queue_ed_guard';
   present integer;
   differing text;
 begin
@@ -200,16 +210,21 @@ begin
       message = '0167: an object this file makes exists with other content: ' || coalesce(differing, 'a trigger');
   end if;
 
-  -- The six tables still have every trigger Release C gave them (others' triggers accepted).
-  select string_agg(target.key, ', ') into differing
+  -- The six tables' triggers exactly as Release C leaves them, with the Emergency board's two on ehr.visit_queue
+  -- accepted (both or neither, by name, type and function); nothing else.
+  select string_agg(target.key, ', ' order by target.key) into differing
     from jsonb_each_text(live_triggers) target
-   where exists (select 1 from regexp_split_to_table(nullif(target.value, ''), ',') wanted(entry)
-                  where not exists (select 1 from pg_trigger trigger_row
-                                     where trigger_row.tgrelid = to_regclass(target.key) and not trigger_row.tgisinternal
-                                       and trigger_row.tgname || ':' || trigger_row.tgtype = wanted.entry));
+   where coalesce((select string_agg(trigger_row.tgname || ':' || trigger_row.tgtype || ':' || namespace.nspname || '.'
+                                       || proc.proname, ',' order by trigger_row.tgname collate "C")
+                     from pg_trigger trigger_row
+                     join pg_proc proc on proc.oid = trigger_row.tgfoid
+                     join pg_namespace namespace on namespace.oid = proc.pronamespace
+                    where trigger_row.tgrelid = to_regclass(target.key) and not trigger_row.tgisinternal), '')
+         not in (target.value, case when target.key = 'ehr.visit_queue' then ed_triggers else target.value end);
   if differing is not null then
     raise exception using errcode = '55000',
-      message = '0167: these tables lack a trigger Release C gives them: ' || differing || '; nothing applied';
+      message = '0167: these tables'' triggers are not exactly Release C''s (with, on ehr.visit_queue, the Emergency '
+        || 'board''s visit_queue_ed_close_mirror and visit_queue_ed_guard): ' || differing || '; nothing applied';
   end if;
   if (select md5(proc.prosrc) from pg_proc proc where proc.oid = to_regprocedure('platform.current_facility_id()')) is null
      or to_regprocedure('identity.patient_record_kind(uuid)') is null
@@ -601,6 +616,17 @@ declare
   definers constant text[] := array['commercial.hook_check_in()', 'commercial.hook_triage()',
     'commercial.hook_pharmacy_acceptance()', 'commercial.hook_lab_work_item()', 'commercial.hook_dispensing()',
     'commercial.hook_dispensing_reversal()', 'commercial.hook_specimen_collected()'];
+  -- The six tables' other triggers, as the precondition found them (Release C's, and on ehr.visit_queue the Emergency
+  -- board's two or none): unchanged, beside this file's seven.
+  live_triggers constant jsonb := '{
+    "ehr.visit_queue": "",
+    "pharmacy.work_item_acceptances": "pharmacy_work_item_acceptance_validate:7:pharmacy.validate_work_item_acceptance,pharmacy_work_item_acceptances_immutable:27:pharmacy.reject_immutable_evidence",
+    "lab.work_items": "lab_work_item_validate:7:lab.validate_work_item,lab_work_items_immutable:27:lab.reject_immutable_evidence,work_items_own_work_patient_listed:21:identity.list_own_work_patient",
+    "pharmacy.dispensings": "dispensings_claim_prescription:5:pharmacy.claim_prescription_dispensing,dispensings_order_route_return:5:pharmacy.return_order_route_dispensing,pharmacy_dispensing_validate:7:pharmacy.validate_dispensing,pharmacy_dispensings_immutable:27:pharmacy.reject_immutable_evidence,prescription_claim_key_immutable:19:pharmacy.refuse_claim_key_change",
+    "pharmacy.dispensing_reversals": "dispensing_reversals_order_route_return:5:pharmacy.return_order_route_reversal,pharmacy_dispensing_reversal_validate:7:pharmacy.validate_dispensing_reversal,pharmacy_dispensing_reversals_immutable:27:pharmacy.reject_immutable_evidence",
+    "lab.specimens": "lab_specimen_parent_validate:7:lab.validate_specimen_parent,lab_specimen_transition:19:lab.validate_specimen_transition,lab_specimens_no_delete:11:lab.reject_immutable_evidence"}';
+  ed_triggers constant text :=
+    'visit_queue_ed_close_mirror:17:ehr.visit_queue_ed_close_mirror,visit_queue_ed_guard:19:ehr.visit_queue_ed_guard';
   -- table, trigger, tgtype, function, the column of UPDATE OF (none: every column)
   expected constant text[] := array[
     'ehr.visit_queue|zz_billing_check_in|5|commercial.hook_check_in|',
@@ -647,6 +673,19 @@ begin
   if (select count(*) from pg_trigger trigger_row where not trigger_row.tgisinternal
        and trigger_row.tgname like 'zz\_billing\_%') <> 7 then
     raise exception using errcode = '55000', message = '0167: post-check failed: an unexpected billing trigger';
+  end if;
+  select string_agg(target.key, ', ' order by target.key) into differing
+    from jsonb_each_text(live_triggers) target
+   where coalesce((select string_agg(trigger_row.tgname || ':' || trigger_row.tgtype || ':' || namespace.nspname || '.'
+                                       || proc.proname, ',' order by trigger_row.tgname collate "C")
+                     from pg_trigger trigger_row
+                     join pg_proc proc on proc.oid = trigger_row.tgfoid
+                     join pg_namespace namespace on namespace.oid = proc.pronamespace
+                    where trigger_row.tgrelid = to_regclass(target.key) and not trigger_row.tgisinternal
+                      and trigger_row.tgname not like 'zz\_billing\_%'), '')
+         not in (target.value, case when target.key = 'ehr.visit_queue' then ed_triggers else target.value end);
+  if differing is not null then
+    raise exception using errcode = '55000', message = '0167: post-check failed: the other triggers of ' || differing;
   end if;
 end
 $post$;

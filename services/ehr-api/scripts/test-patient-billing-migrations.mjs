@@ -15,9 +15,15 @@
 //      of 0163-0167 refuses 55000 with a message that begins with its number,
 //      and nothing is applied;
 //   1b. other release lanes first: with another lane's code on shared roles
-//      and its trigger on ehr.visit_queue, all six apply and keep them; with
-//      a code 0001-0151 gave a role gone 0162 refuses, and with a trigger
-//      Release C gave a table gone 0167 refuses;
+//      and the Emergency board's two triggers on ehr.visit_queue, all six
+//      apply and keep them, and 0162 run again after later files add rows
+//      (a Billing code on another role, another code on a Billing role) and
+//      change a role function still answers "already applied"; 0167 refuses
+//      any other trigger on the six tables (another lane's on ehr.visit_queue
+//      or pharmacy.dispensings, one of the Emergency board's two alone, either
+//      of them with another function or type); with a code 0001-0151 gave a
+//      role gone 0162 refuses, and with a trigger Release C gave a table gone
+//      0167 refuses;
 //   2. locks first, NOWAIT: with a second session holding a table the file
 //      locks, the file refuses 55P03 with a message that begins with its
 //      number, and nothing is applied;
@@ -100,8 +106,9 @@ for (const file of files.slice(1)) {
 await drop('hid_bill_pre');
 
 // 1b. Other release lanes first (coordinator, #258, 25 November 2026: wave 1 releases in order of readiness). A
-// code another lane gave the shared roles and a trigger another lane put on ehr.visit_queue are accepted; a code
-// 0001-0151 gave a role, or a trigger Release C gave a table, that is gone is refused (fictional names).
+// code another lane gave the shared roles is accepted; on ehr.visit_queue exactly the Emergency board's two triggers
+// (0168: name, type and function) are accepted, and any other trigger is refused; a code 0001-0151 gave a role, or a
+// trigger Release C gave a table, that is gone is refused (fictional names and bodies).
 const asOwner = async (database, sql) => {
   const connection = await client(database);
   try {
@@ -111,25 +118,101 @@ const asOwner = async (database, sql) => {
     await connection.query('commit');
   } finally { await connection.end(); }
 };
+const emergencyTriggers = `
+  create function ehr.visit_queue_ed_close_mirror() returns trigger language plpgsql set search_path = pg_catalog, pg_temp
+    as $f$ begin return null; end $f$;
+  create function ehr.visit_queue_ed_guard() returns trigger language plpgsql set search_path = pg_catalog, pg_temp
+    as $f$ begin return new; end $f$;
+  create trigger visit_queue_ed_close_mirror after update of closed_at on ehr.visit_queue for each row
+    when (old.closed_at is null and new.closed_at is not null) execute function ehr.visit_queue_ed_close_mirror();
+  create trigger visit_queue_ed_guard before update of stage, triage_level, assigned_membership_id, closed_at
+    on ehr.visit_queue for each row execute function ehr.visit_queue_ed_guard();`;
 await copy('hid_bill_lanes');
 await asOwner('hid_bill_lanes', `
   insert into auth.permissions (code, description) values ('ehr.other-lane.read', 'Another lane''s code (fictional)');
   insert into auth.role_permissions (role_code, permission_code) values ('receptionist', 'ehr.other-lane.read'),
     ('doctor', 'ehr.other-lane.read'), ('admin', 'ehr.other-lane.read'), ('pharmacist', 'ehr.other-lane.read');
-  create function ehr.other_lane_mirror() returns trigger language plpgsql set search_path = pg_catalog, pg_temp
-    as $f$ begin return null; end $f$;
-  create trigger other_lane_mirror after update on ehr.visit_queue for each row
-    execute function ehr.other_lane_mirror();`);
+  ${emergencyTriggers}`);
 for (const file of files) {
   const [status, , failure] = apply('hid_bill_lanes', file);
-  assert.equal(status, 0, `${file.slice(0, 4)} refused another lane's code or trigger: ${failure}`);
+  assert.equal(status, 0, `${file.slice(0, 4)} refused another lane's code or the Emergency board's triggers: ${failure}`);
 }
 const kept = await client('hid_bill_lanes');
 assert.equal((await kept.query(`select count(*)::int as n from auth.role_permissions
   where permission_code = 'ehr.other-lane.read'`)).rows[0].n, 4, 'another lane\'s rows are kept');
+assert.equal((await kept.query(`select string_agg(tgname, ',' order by tgname) as names from pg_trigger
+  where tgrelid = 'ehr.visit_queue'::regclass and not tgisinternal`)).rows[0].names,
+'visit_queue_ed_close_mirror,visit_queue_ed_guard,zz_billing_check_in,zz_billing_triage');
 await kept.end();
+// Integrated: later files give a Billing code to another role, another code to a Billing role and change a role
+// function; 0162 run again still answers "already applied" (its own rows only).
+await asOwner('hid_bill_lanes', `
+  insert into auth.permissions (code, description) values ('ehr.later-lane.read', 'A later lane''s code (fictional)');
+  insert into auth.role_permissions (role_code, permission_code) values ('nurse', 'billing.bill.read'),
+    ('cashier', 'ehr.later-lane.read');
+  create or replace function identity.staff_invitable_roles(target_organization_type text, target_product_code text)
+  returns text[] language sql immutable parallel safe set search_path = pg_catalog, pg_temp
+  as $f$ select array['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist', 'cashier', 'billing_officer',
+    'later_lane_role'] $f$;`);
+{
+  const [status, sqlstate, message] = apply('hid_bill_lanes', files[0]);
+  assert.notEqual(status, 0);
+  assert.deepEqual([sqlstate, message], ['55000', '0162: already applied'], '0162 re-run on an integrated database');
+  results.integrated_rerun_0162 = message;
+}
 await drop('hid_bill_lanes');
-results.other_lanes_first = 'applied with another lane\'s code on four shared roles and its trigger on ehr.visit_queue';
+results.other_lanes_first = 'applied with another lane\'s code on four shared roles and the Emergency board\'s two '
+  + 'triggers on ehr.visit_queue';
+const refusedTrigger = async (label, sql) => {
+  const database = `hid_bill_${label}`;
+  await copy(database);
+  await asOwner(database, sql);
+  for (const file of files.slice(0, 5)) {
+    const [status, , failure] = apply(database, file);
+    assert.equal(status, 0, `${file.slice(0, 4)} did not apply: ${failure}`);
+  }
+  const [status, sqlstate, message] = apply(database, files[5]);
+  await drop(database);
+  assert.notEqual(status, 0, `0167 applied with ${label}`);
+  assert.equal(sqlstate, '55000', `0167 with ${label}: ${sqlstate} ${message}`);
+  return message;
+};
+results.other_trigger = await refusedTrigger('other_trigger', `
+  create function ehr.other_lane_mirror() returns trigger language plpgsql set search_path = pg_catalog, pg_temp
+    as $f$ begin return null; end $f$;
+  create trigger other_lane_mirror after update on ehr.visit_queue for each row
+    execute function ehr.other_lane_mirror();`);
+assert.equal(results.other_trigger, '0167: these tables\' triggers are not exactly Release C\'s (with, on '
+  + 'ehr.visit_queue, the Emergency board\'s visit_queue_ed_close_mirror and visit_queue_ed_guard): ehr.visit_queue; '
+  + 'nothing applied');
+results.one_emergency_trigger = await refusedTrigger('one_ed_trigger', `
+  create function ehr.visit_queue_ed_guard() returns trigger language plpgsql set search_path = pg_catalog, pg_temp
+    as $f$ begin return new; end $f$;
+  create trigger visit_queue_ed_guard before update of stage on ehr.visit_queue for each row
+    execute function ehr.visit_queue_ed_guard();`);
+results.emergency_name_other_function = await refusedTrigger('ed_other_function', `
+  create function ehr.other_lane_mirror() returns trigger language plpgsql set search_path = pg_catalog, pg_temp
+    as $f$ begin return null; end $f$;
+  create function ehr.visit_queue_ed_guard() returns trigger language plpgsql set search_path = pg_catalog, pg_temp
+    as $f$ begin return new; end $f$;
+  create trigger visit_queue_ed_close_mirror after update of closed_at on ehr.visit_queue for each row
+    execute function ehr.other_lane_mirror();
+  create trigger visit_queue_ed_guard before update of stage on ehr.visit_queue for each row
+    execute function ehr.visit_queue_ed_guard();`);
+results.emergency_name_other_type = await refusedTrigger('ed_other_type', `
+  create function ehr.visit_queue_ed_close_mirror() returns trigger language plpgsql set search_path = pg_catalog, pg_temp
+    as $f$ begin return null; end $f$;
+  create function ehr.visit_queue_ed_guard() returns trigger language plpgsql set search_path = pg_catalog, pg_temp
+    as $f$ begin return new; end $f$;
+  create trigger visit_queue_ed_close_mirror after update of closed_at on ehr.visit_queue for each row
+    execute function ehr.visit_queue_ed_close_mirror();
+  create trigger visit_queue_ed_guard after update of stage on ehr.visit_queue for each row
+    execute function ehr.visit_queue_ed_guard();`);
+results.other_dispensing_trigger = await refusedTrigger('dispensing_trigger', `
+  create function pharmacy.other_lane_dispensing() returns trigger language plpgsql set search_path = pg_catalog, pg_temp
+    as $f$ begin return new; end $f$;
+  create trigger other_lane_dispensing before insert on pharmacy.dispensings for each row
+    execute function pharmacy.other_lane_dispensing();`);
 await copy('hid_bill_lost');
 await asOwner('hid_bill_lost', `delete from auth.role_permissions
   where role_code = 'receptionist' and permission_code = 'identity.registration.write'`);
@@ -151,7 +234,8 @@ await asOwner('hid_bill_lost', 'drop trigger lab_specimens_no_delete on lab.spec
   const [status, sqlstate, message] = apply('hid_bill_lost', files[5]);
   assert.notEqual(status, 0, '0167 applied with a Release C trigger gone');
   assert.deepEqual([sqlstate, message],
-    ['55000', '0167: these tables lack a trigger Release C gives them: lab.specimens; nothing applied']);
+    ['55000', '0167: these tables\' triggers are not exactly Release C\'s (with, on ehr.visit_queue, the Emergency '
+      + 'board\'s visit_queue_ed_close_mirror and visit_queue_ed_guard): lab.specimens; nothing applied']);
   results.trigger_gone = message;
 }
 await drop('hid_bill_lost');
