@@ -5349,6 +5349,8 @@ per role:
 | `outreach@healthidentitydirectory.com` | no membership: starts the QA Outreach group |
 | `frontdesk@healthidentitydirectory.com` | receptionist (front desk) at QA Hospital; added by 0151 (QA-2, below) |
 | `nurse@healthidentitydirectory.com` | nurse at QA Hospital; added by 0151 (QA-2, below) |
+| `cashier@healthidentitydirectory.com` | cashier at QA Hospital; added by 0162 (BILL-1, below; the owner confirms the mailbox before signing) |
+| `billing@healthidentitydirectory.com` | billing_officer at QA Hospital; added by 0162 (BILL-1, below; the owner confirms the mailbox before signing) |
 
 Two patient logins: `patient1@healthidentitydirectory.com` (`HID-ZQAAAAA2`, QA
 Patient One) and `patient2@healthidentitydirectory.com` (`HID-ZQAAAAA3`, QA Patient
@@ -12423,3 +12425,125 @@ when `dateOfBirthEstimated`, and "NIN Not Verified". On `sent_for_review`
 show the message and nobody else's details. After `identified`, offer
 "Verify NIN" (ID-6). Never show `firstName`/`lastName` of a record whose
 `recordKind` is `unknown`.
+
+## BILL-1. Patient billing release 1, with pharmacy point-of-care stock (Release D, migrations 0162-0167; not live until signed)
+
+The backend of `docs/EHR_PLANNED_CONTRACT.md` section "BILL-1" (its routes,
+shapes, errors, codes and roles are the contract; this section records what is
+built and how it is switched). Owner sprint approval of 25 November 2026; the
+decisions BILL-7 to BILL-17 are built at their recommended options and are not
+yet answered. Numbers 0162-0167 are provisional (0152-0161 are booked).
+
+**Switches (environment, default `false`).** `COMMERCIAL_BILLING_ENABLED`
+(ehr-api, pharmacy-api): every route below answers 404 `BILLING_NOT_AVAILABLE`
+at a real facility while it is false; the sealed QA and the four demo
+facilities are on regardless (`commercial.billing_switched_on`).
+`COMMERCIAL_PAY_BEFORE_ENABLED` (ehr-api): saving pay-before is refused
+`PAY_BEFORE_NOT_AVAILABLE` until the clinical lead signs BILL-3.
+`COMMERCIAL_ONLINE_PAYMENT_ENABLED` (ehr-api): the online-payment link and the
+Paystack webhook answer 404 `ONLINE_PAYMENT_NOT_AVAILABLE`; with it on, a link
+still needs the facility's Paystack secret, which release 1 has no reader for
+(the Secrets Manager reader is the step before switching it on).
+
+**Routes.** ehr-api `/api/v1/commercial/`: `payment-settings` (GET, PUT),
+`catalogue-items` (GET, POST, PATCH `:itemId`, GET `unpriced-codes`), `bills`
+(GET, GET `summary`, POST, GET `:billId`, POST `:billId/lines`,
+`lines/:lineId/cancel`, `payments`, `payments/:paymentId/confirm`,
+`payments/:paymentId/void`, `hmo-covers/:coverId/cancel`, `defer`, `patient`,
+`void`, `online-payment-links`, GET `:billId/receipt`), `outstanding`,
+`hmo-receivables`, `shifts` (GET, POST, GET `current`, POST `:shiftId/close`),
+`paystack/webhook`. pharmacy-api `/api/v1/pharmacy/`: `stock` (GET),
+`stock/receipts`, `stock/adjustments`, `stock/:catalogueItemId/movements`,
+`stock/:catalogueItemId/settings` (PUT), `walk-in-orders` (counter sales only),
+`sales/:billId/hand-over`. The gateway sends the seven billing prefixes to
+ehr-api; `pricing` and `demo-requests` stay on identity-api.
+
+- Every route is one SECURITY DEFINER function of the `commercial` (or, for
+  stock, `pharmacy`) schema in one transaction with the request's context. The
+  function checks the member's code at the session facility, locks, writes and
+  writes its audit row; the service checks the code first too, so a missing
+  code answers 403 `BILLING_NOT_ALLOWED` ("Your role here does not include
+  this. Ask a billing officer or administrator."), never "permission" words.
+  A refusal rolls back and is then audited (`commercial.audit_refusal`: the
+  action, the code and the resource id only).
+- Writes need `Idempotency-Key`; a replay answers the same resource with
+  `replayed: true`; the same key with another body is 409
+  `IDEMPOTENCY_KEY_REUSED`. Routes that show patients need
+  `X-Purpose-Of-Use: healthcare-operations` (or `purpose` in the body).
+- `q` shaped like a Health ID or an 11-digit NIN is refused 400
+  `BILLING_SEARCH_TEXT_NOT_ALLOWED` before any search, by the service and again
+  by the database; `q` is never logged or audited. A patient on a bill or
+  receipt carries `healthIdLast4` only.
+- A database without 0162-0167, or any other database failure: 503
+  `BILLING_UNAVAILABLE`, logged with its SQLSTATE only.
+
+**Changed routes.** `POST /pharmacy/work-items/:workItemId/dispensings` takes
+an optional `batchId`; a stock-kept item is taken expiry-first (409
+`OUT_OF_STOCK` with `onHand`, `unit`, `expiredOnHand`; 409
+`STOCK_UNIT_MISMATCH`), and with pay-before on, 409 `PAYMENT_REQUIRED` or
+`PAYMENT_PENDING_CHECK`; an ORD-12 refill of a work item with a line on a
+bill, 409 `REFILL_BILLING_NOT_AVAILABLE` until refills are billed (each
+audited as the dispensing's denied row); the
+dispensing's audit row gains `stockTaken` (batch ids and counts). When that
+dispensing would have accepted the item (ORD-4), the acceptance is recorded on
+its own after the pay-before refusal (audited `pharmacy.work-item.pharmacist-accept`
+with `forPayment: true`), so its bill line stays for the cashier and the next
+Dispense after payment goes through. A dispensing reversal moves no stock; the
+line that bills the reversed dispensing (its work item's first) is always
+cancelled ("Dispensing reversed"), unpaid, part paid or paid, so its unpaid
+balance is never asked for; a reversal of another dispensing changes no bill. What was collected
+beyond the bill's new total is the bill's `refundDueKobo` (the patient's money
+first) and `coverOverKobo` (waiver or HMO cover to cancel and record again);
+while a refund is due the work item's `bill` keeps `dispensingReversed: true`
+with `refundDueKobo` ("Refund due"). Own pharmacy
+work items (list and read) gain `bill` and `stock` when the facility uses
+billing (nothing otherwise, as before). Lab specimen collection answers 409
+`PAYMENT_REQUIRED` or `PAYMENT_PENDING_CHECK` with pay-before on for lab. The
+check-in answer is unchanged (0167 opens the visit bill with the check-in
+charge when one is set).
+
+**Database (0162-0167).** 0162: the 17 codes, roles `cashier` and
+`billing_officer` (no licence; invitable at hospitals and clinics, `cashier` at
+laboratories and pharmacies; given and removed through SX-4), the role rows of
+the planned contract's table, schema `commercial`, and the two sealed QA logins
+(BILL-17; only where 0123 installed the QA tenant). 0163: payment settings,
+HMOs, tills, the one item master `commercial.catalogue_items` (BILL-7) with
+prices, events, gap-free number counters, commands and unpriced codes. 0164:
+bills, lines, payments, HMO covers (BILL-8: owed, never paid) and bill events.
+0165: till days (BILL-10) and the money commands (a payment, void or online
+payment locks its open day FOR SHARE, so one taken while the day closes is
+refused `TILL_DAY_NOT_OPEN` and a closed day's expected cash counts every
+payment in it). 0166: pharmacy stock (batches, receipts, adjustments, the
+append-only movement ledger, `pharmacy.take_stock_expiry_first`) and counter
+sales (the outside prescriber kept on the bill; the hand-over refuses a
+prescription-only line without one, 422 `PRESCRIPTION_REQUIRED`). On a counter
+sale, `POST /commercial/bills` and `POST .../lines` take no prescription-only
+medicine (422 `PRESCRIPTION_REQUIRED`) and no line after the hand-over (409
+`ALREADY_HANDED_OVER`). A bill whose live lines leave nothing to pay is `paid`
+(a sale of free programme medicines is handed over at once). 0167: seven triggers
+(`zz_billing_*`) on the waiting list, the pharmacist acceptance, own lab work
+items, dispensings, reversals and specimen collection; each returns at once
+where the facility does not use billing. Every new table: `facility_id` on
+every row, RLS forced (the owner at the session's facility), no privilege for
+any runtime, no DELETE or TRUNCATE. Each file takes its locks first, NOWAIT
+(busy refusals begin with its number), checks its preconditions, re-runs as
+"016n: already applied", post-checks its objects (md5 pinned) and has an undo
+in `docs/rollback/`. `runtime-grants.sql` gains the same grants (signed with
+the files).
+
+**SX-1 areas.** `billing` (Payments and receipts: show `billing.bill.read`,
+act `billing.payment.record`), `priceList` (show `billing.catalogue.read`,
+act `billing.catalogue.manage`), `endOfDay` (`billing.shift.own`),
+`pharmacyStock` (show `pharmacy.stock.read`, act `pharmacy.stock.manage`).
+The role-matrix fixture gains the Cashier and Billing officer columns and the
+four rows (derived: not rows of Akos's table).
+
+Tests: `services/ehr-api/test/database/patient-billing.integration.sql` (161
+cases), `services/ehr-api/scripts/test-patient-billing-migrations.mjs` (each
+file's precondition, busy and re-run refusals; two sessions paying at once;
+numbers without gaps; a payment while the day closes), ehr-api
+`src/commercial/commercial.spec.ts`, pharmacy-api
+`src/pharmacy/stock/stock.spec.ts` and `src/pharmacy/pharmacist-acceptance.spec.ts`
+(the acceptance kept after a pay-before refusal), lab-api
+`src/lab/lab-pay-before.spec.ts`, and the role-matrix and facility-module
+specs.

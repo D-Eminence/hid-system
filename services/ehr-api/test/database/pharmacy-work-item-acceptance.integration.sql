@@ -173,7 +173,9 @@ begin
   if (select string_agg(pg_get_triggerdef(trigger_row.oid) || ' ' || trigger_row.tgenabled::text, '; '
             order by trigger_row.tgname::text collate "C")
         from pg_trigger trigger_row
-       where trigger_row.tgrelid = 'pharmacy.work_item_acceptances'::regclass and not trigger_row.tgisinternal)
+       where trigger_row.tgrelid = 'pharmacy.work_item_acceptances'::regclass and not trigger_row.tgisinternal
+         -- BILL-1's 0167 adds its billing hook (zz_billing_acceptance), checked by its own suite (patient-billing).
+         and trigger_row.tgname::text not like 'zz\_billing\_%')
      is distinct from 'CREATE TRIGGER pharmacy_work_item_acceptance_validate BEFORE INSERT ON '
        || 'pharmacy.work_item_acceptances FOR EACH ROW EXECUTE FUNCTION pharmacy.validate_work_item_acceptance() O; '
        || 'CREATE TRIGGER pharmacy_work_item_acceptances_immutable BEFORE DELETE OR UPDATE ON '

@@ -316,7 +316,11 @@ describe('Q132 A: changedAfterDispensing on the work list', () => {
       'savepoint pharmacy_own_work_states', 'steps', 'release savepoint pharmacy_own_work_states', 'audit', 'audit',
       'savepoint pharmacy_prescription_details', 'details', 'release savepoint pharmacy_prescription_details',
       'savepoint pharmacy_changes_after_dispensing', 'changes', 'release savepoint pharmacy_changes_after_dispensing',
-      'savepoint pharmacy_order_route_receives', 'receiving', 'release savepoint pharmacy_order_route_receives', 'COMMIT']);
+      'savepoint pharmacy_order_route_receives', 'receiving', 'release savepoint pharmacy_order_route_receives',
+      // BILL-1 (0164-0166): the bills and stock of the own rows, in their own savepoint (none here).
+      "savepoint work_item_billing",
+      "select work_item_id::text as work_item_id, bill from commercial.work_item_bills('pharmacy', $1::uuid[])",
+      "rollback to savepoint work_item_billing", 'COMMIT']);
     // Before the projection: the answer carries what the reader answered.
     expect(Object.fromEntries(items.filter((item) => 'changedAfterDispensing' in item)
       .map((item) => [item.id, item.changedAfterDispensing]))).toEqual(Object.fromEntries(Object.keys(NOTICES)
@@ -403,7 +407,11 @@ describe('Q132 A: changedAfterDispensing on a single read and the hand-off repla
       'work item', 'route access', 'savepoint pharmacy_own_work_access', 'own-work basis',
       'release savepoint pharmacy_own_work_access', 'audit', 'savepoint pharmacy_own_work_states', 'steps',
       'release savepoint pharmacy_own_work_states', 'savepoint pharmacy_changes_after_dispensing', 'changes',
-      'release savepoint pharmacy_changes_after_dispensing', 'COMMIT']);
+      'release savepoint pharmacy_changes_after_dispensing',
+      // BILL-1 (0164-0166): the own item's bill and stock, in its own savepoint (none here).
+      "savepoint work_item_billing",
+      "select work_item_id::text as work_item_id, bill from commercial.work_item_bills('pharmacy', $1::uuid[])",
+      "rollback to savepoint work_item_billing", 'COMMIT']);
     expect(kinds(h.transactions[2]!)).toEqual(['BEGIN', 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED', 'session',
       'work item', 'route access', 'audit', 'savepoint pharmacy_order_route_cards', 'cards',
       'release savepoint pharmacy_order_route_cards', 'savepoint pharmacy_changes_after_dispensing', 'changes',

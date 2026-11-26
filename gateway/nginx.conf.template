@@ -74,6 +74,15 @@ server {
   location ^~ /api/v1/audit/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
   location = /api/v1/admin { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
   location ^~ /api/v1/admin/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
+  # BILL-1 (BILL-9): patient billing is ehr-api's (the commercial schema, 0162-0167); the longer prefixes win.
+  location ^~ /api/v1/commercial/payment-settings { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_ehr_upstream; }
+  location ^~ /api/v1/commercial/catalogue-items { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_ehr_upstream; }
+  location ^~ /api/v1/commercial/bills { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_ehr_upstream; }
+  location ^~ /api/v1/commercial/outstanding { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_ehr_upstream; }
+  location ^~ /api/v1/commercial/hmo-receivables { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_ehr_upstream; }
+  location ^~ /api/v1/commercial/shifts { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_ehr_upstream; }
+  location ^~ /api/v1/commercial/paystack { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_ehr_upstream; }
+  # Pricing and demo requests stay on identity-api.
   location = /api/v1/commercial { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
   location ^~ /api/v1/commercial/ { include /etc/nginx/hid-proxy-headers.conf; proxy_pass $hid_identity_upstream; }
 

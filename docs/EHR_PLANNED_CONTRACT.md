@@ -1,4 +1,4 @@
-# HID planned contract for the rest of Akos's EHR list (Release B and C, not live)
+# HID planned contract for the rest of Akos's EHR list (Release B, C and D, not live)
 
 This file lists the API that Akos's EHR frontend will need but that is not built yet. With it, he can build each screen once: the shape now, and the fallback he shows until the route ships.
 
@@ -44,6 +44,7 @@ Rules that hold in every section:
 | [ORD-6: Several tests in one lab request](#ord-6-several-tests-in-one-lab-request-planned-release-c-needs-a-migration-yes) | N-7 | C | yes | M |
 | [ORD-8: Order sets, favourites, and note and visit templates](#ord-8-order-sets-favourites-and-note-and-visit-templates-planned-release-c-needs-a-migration-yes) | P0-5, P1-13, P1-12 | C | yes | L |
 | [ORD-11: Result and dispensed notices to the ordering doctor](#ord-11-result-and-dispensed-notices-to-the-ordering-doctor-planned-release-c-needs-a-migration-yes) | P1-6 | C | yes | L |
+| [BILL-1: Patient billing release 1, with pharmacy point-of-care stock](#bill-1-patient-billing-release-1-with-pharmacy-point-of-care-stock-planned-release-d-needs-a-migration-yes) | Finance group, point-of-care pages, Service catalogue | D | yes (0162-0167, provisional) | XL |
 | [ORD-13: No drug-interaction checks](#ord-13-no-drug-interaction-checks-not-planned-no-release-needs-a-migration-no) | P0-5, N-9 (interactions) | not planned | no | — |
 | [P2-1: National ID type per country and a neutral company number](#p2-1-national-id-type-per-country-and-a-neutral-company-number-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-1 | after C | yes, when designed | M |
 | [P2-2: Interface translations and language](#p2-2-interface-translations-and-language-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-2, P1-8 (language) | after C | yes, when designed | L |
@@ -51,7 +52,7 @@ Rules that hold in every section:
 | [P2-4: Time zone, date and phone formats](#p2-4-time-zone-date-and-phone-formats-not-planned-yet-after-release-c-needs-a-migration-yes-when-designed) | P2-4 | after C | yes, when designed | M |
 | [QA-2: Migrate account test pass and one real save of every drawer form](#qa-2-migrate-account-test-pass-and-one-real-save-of-every-drawer-form-planned-before-the-release-a-go-live-needs-a-migration-no) | R-4, QA question | before A go-live | no | S |
 
-Owner answers of 19 Nov 2026, and the sections that rest on them: Q124 A (ORD-7, ORD-8, ORD-9, ORD-10 phase 2, ORD-6, VIT-1), Q125 B (ORD-4, now planned for Release B), Q126 A (EHR-C6, ORD-8), Q127 A (ID-8, ORD-11), Q128 A (ORD-11, SX-7), Q129 A (SX-4, CHW-1), Q130 A (CHW-1), Q131 A (ORD-12, ORD-13, ORD-10 phase 2, P2-1 to P2-4), Q132 A (Q132 A, now planned for Release B; ORD-4 refers to it). No owner question for these sections is waiting for an answer.
+Owner answers of 19 Nov 2026, and the sections that rest on them: Q124 A (ORD-7, ORD-8, ORD-9, ORD-10 phase 2, ORD-6, VIT-1), Q125 B (ORD-4, now planned for Release B), Q126 A (EHR-C6, ORD-8), Q127 A (ID-8, ORD-11), Q128 A (ORD-11, SX-7), Q129 A (SX-4, CHW-1), Q130 A (CHW-1), Q131 A (ORD-12, ORD-13, ORD-10 phase 2, P2-1 to P2-4), Q132 A (Q132 A, now planned for Release B; ORD-4 refers to it). No owner question for the Release B and C sections is waiting for an answer. Release D's open questions are listed in its own sections.
 
 Open points with no decision yet, each to be decided before that section is built:
 
@@ -59,6 +60,7 @@ Open points with no decision yet, each to be decided before that section is buil
 - ORD-8: who keeps a facility's order sets and templates (and so who holds `ehr.order-set.manage`).
 - ORD-7 and ORD-10 phase 2: the WHOCC terms for using ATC codes in a commercial product (until then `atcCode` stays `null`).
 - CHW-1: whether to record a community health worker's registration number.
+- BILL-1 (Release D): BILL-7 to BILL-17 are built at the recommended option and are not yet answered by the owner (see the section's decision table). BILL-3 and pay-before need the clinical lead; retention, Paystack and line names need the DPO.
 
 # Release B
 
@@ -3712,6 +3714,498 @@ Release C (lane D). Size **L**:
 - four routes;
 - audit;
 - a runtime check across Lab, Pharmacy and EHR.
+
+# Release D
+
+Release D holds the departments of the two-week sprint the owner approved on 25 Nov 2026: every department ships a first working version on Akos's blue design, anything that needs approval from outside the team is built but switched off, every change gets an independent agent review plus Rahman's final database check, and real patients come only after the clinical lead's checklist and the owner's go-live. **"(owner sprint approval, 25 Nov 2026)"** marks a line that rests on that approval. **"(recommended option, not yet answered)"** marks a line built on the recommended answer to a question the owner has not answered yet; the owner can still change it before the section's migrations are signed.
+
+Migration numbers in Release D are provisional. 0152 and 0153 (ORD-9, #320 and #321) and 0154 (ORD-12 refills) are booked by Ola. Each department section names the block it was given; the real numbers are given in merge order at the cut.
+
+## BILL-1: Patient billing release 1, with pharmacy point-of-care stock (planned, Release D, needs a migration: yes)
+
+Akos items and design: the Finance group (Patient billing sample, Service catalogue sample, Home billing cards) and the point-of-care pages already built against `docs/POINT_OF_CARE_SPEC.md` sections 1, 2, 3, 5 and 7 in the health repo (Payments, Take payment, Receipt, Price list, End of day, Payment setup, Bill badge, Pharmacy Sell, Sales, Stock and Receive stock). Department survey "Patient billing, insurance and claims" (Phase 1), with the challenger's corrections.
+
+Status: planned, not live.
+
+This section is the backend for those pages. Release 2 (insurance claims, policies, claim batches and remittances) is a later section and is not described here.
+
+### What staff get
+
+- **A price list for the whole facility.** One list holds medicines, lab tests, and services such as the consultation fee, the registration fee and procedures. Each item has a cash price and, if the facility wants, a price for each HMO it accepts. The same list replaces the Service catalogue sample (owner decision B2 A, renamed BILL-2).
+- **One bill per visit, or per counter sale.** A patient checked in on the waiting list (0135) gets one bill for that visit. The visit's consultation or registration charge, the medicines the pharmacy accepts and the tests the lab accepts are added to it automatically. Staff add procedures and other services by hand. A sale across the pharmacy counter gets its own bill, with or without a Health ID.
+- **Taking money.** Cash (change worked out on screen), POS (with its RRN), bank transfer (waiting until a second person checks it arrived), and waiver (with a reason, by a manager). Every payment prints a numbered receipt. Overpaying is refused.
+- **HMO cover recorded, not counted as paid.** When an HMO is to pay part of a bill, the cashier records the HMO and its approval code. That amount is owed by the HMO. It is not money received, it is not in the day's cash, and it waits for the claim in Release 2.
+- **Outstanding balances.** A list of patients and bills with money still due, oldest first, and a list of what each HMO owes.
+- **End of day.** The facility chooses how the day is closed: one day for the whole facility, one per cashier, or one per till. Closing the day records the counted cash and the difference.
+- **Emergencies are never held up by a bill.** Unknown patients (ID-7) and patients the waiting list marks as an emergency are always served first, and their bill follows. Nobody can switch that off.
+- **Pharmacy stock.** Goods received by batch and expiry, adjustments with a reason, low and expiring lists, and a movement history. Dispensing and counter sales take from the batch that expires first, and refuse to give more than is on hand.
+- **Two new staff roles,** cashier and billing officer, added and removed like any other role (SX-4).
+- **Built but switched off:** paying online through the facility's own Paystack account; "pay before" for pharmacy and lab (until the clinical lead signs it); the whole department at real facilities (until the clinical lead's checklist and the owner's go-live). The sealed QA facility and the four demo facilities have it on.
+
+### Decisions this section is built on
+
+The billing decisions are renamed BILL-n, because the roadmap's B1-B6 also name blood-bank questions (challenger correction). Every BILL decision below is built at the recommended option and says so; the owner can change any of them before the migrations are signed.
+
+| Id | Decision | Built as |
+|---|---|---|
+| BILL-1 (was B1, corrected) | Bill scope | **A, corrected:** one bill per visit (one waiting-list entry), or per counter sale or walk-in. A bill's `source` is `visit`, `pharmacy` or `lab`. A visit bill gathers the visit's pharmacy and lab lines too. The built pages' `pharmacy` and `lab` sources stay as they are. (owner sprint approval, 25 Nov 2026, with the challenger's correction) |
+| BILL-2 (was B2) | Price list is also the Service catalogue | **A.** (owner sprint approval, 25 Nov 2026) |
+| BILL-3 (was B3) | Emergency and unknown patients served now, billed later, always | **A.** Built, and needs the clinical lead's sign-off before pay-before is switched on anywhere real. (owner sprint approval, 25 Nov 2026) |
+| BILL-4 (was B4) | Refund or void only by a manager who did not take the payment | **A.** (owner sprint approval, 25 Nov 2026) |
+| BILL-5 (was B5) | New roles cashier and billing_officer | **A.** Approved in principle (owner sprint approval, 25 Nov 2026); each migration still needs the owner's verbatim signature. |
+| BILL-6 (was B6) | Online only | **A,** plus a written paper downtime procedure (receipt book, entered later with its paper number). (owner sprint approval, 25 Nov 2026) |
+| BILL-7 (S3, brought forward) | One item master | **A:** the facility price list is the one item master for prices, services and stock. Medicines and tests link to the ORD-7 national lists by their fixed code. See "One item master" below. (recommended option, not yet answered) |
+| BILL-8 (C2, corrected) | HMO shares | **Receivable, not payment:** an HMO's share is an "HMO cover" that is owed until a claim is accepted (Release 2). It never counts as money received. (challenger correction; recommended option, not yet answered) |
+| BILL-9 | Which service serves billing | **A:** a new `commercial` module in ehr-api and a new `commercial` database schema. The gateway sends the patient-billing paths to ehr-api; `/api/v1/commercial/pricing` and demo requests stay on identity-api. Stock, counter sales and hand-over are in pharmacy-api. (recommended option, not yet answered) |
+| BILL-10 | Name of the cashier's day | **"Till day"** in the database and in this text, so that "shift" stays free for the clinical rota (challenger correction). The built pages' routes `/commercial/shifts` keep their path. (recommended option, not yet answered) |
+| BILL-11 | A transfer still waiting to be checked | It lowers what the patient owes, so nobody is charged twice, but it does not meet "pay before" until it is checked. (recommended option, not yet answered) |
+| BILL-12 | Stock units and batches | Whole units of the item's base unit (tablet, bottle, vial). Expiry-first. An expired batch is never given out. A dispensing for an item that is not on the price list, or not stock-kept, is not counted against stock. (recommended option, not yet answered) |
+| BILL-13 | Walk-ins in release 1 | Counter sales only (`counter: true`). Queuing an outside prescription for dispensing, and lab walk-ins, come with Ola's pharmacy and lab stream. (recommended option, not yet answered) |
+| BILL-14 | Online payment | Through the facility's own Paystack account, so Health ID never holds money. Built, switched off until legal, DPO and owner approval. (recommended option, not yet answered) |
+| BILL-15 | HMO prices on bills | Release 1 prices every line at the cash price. HMO prices are kept on the price list and shown to the cashier as a guide; Release 2 claims use them. (recommended option, not yet answered) |
+| BILL-16 | Receipts | One receipt number per payment, numbered without gaps per facility and year (`R-2026-000123`). A voided payment keeps its number and prints "Cancelled". (recommended option, not yet answered) |
+| BILL-17 | QA logins for the new roles | One fictional cashier and one fictional billing officer at QA Hospital, sealed QA only (0151 pattern), at `cashier@healthidentitydirectory.com` and `billing@healthidentitydirectory.com`. The owner must confirm both mailboxes receive mail before signing; if not, that step is left out of the signed file. (recommended option, not yet answered) |
+
+### One item master (BILL-7)
+
+Today there are three lists that could each be "the" list: the price list the commerce pages were built against, ORD-7's national medicine and lab-test lists (0149, empty until the clinical lead signs a version), and ORD-7's planned facility items (not built). The billing schema fixes the answer, so it is decided here.
+
+- `commercial.catalogue_items` is the facility's one list of things it charges for and keeps in stock. Every price, every bill line and every stock batch points at a row of it.
+- A `drug` or `lab_test` item may carry a link to the national list: `nationalCodeSystem` and `nationalCode` (`HID-MED` with `MED-nnnnn`; `LOINC` or `HID-LAB` with the test's code). The link is by fixed code, not by row id, because ORD-7 rows are per version and 0149 guarantees a code is never changed or reused. When the link is set, the code must exist in the active version and not be withdrawn (checked at write time only, so a later withdrawal does not break the price).
+- At most one active item per facility may carry the same national code (a unique partial index). That is what lets a prescription or lab request find its price: the work item's code system and code are matched to that item.
+- A prescription or lab request with no code, or with a code the facility has not priced, gets no automatic line. Its badge shows "Not billed", the cashier adds the line by hand, and the billing officer's "Not on the price list" view counts those codes so the list can be completed.
+- ORD-7's facility items (`HID-FACILITY`, 0155) are priced the same way (coordinator decision, option 2, #258, 25 November 2026): a `drug` or `lab_test` item may carry `HID-FACILITY` with the id of one of this facility's own items as its code (36 characters, lower case, as the facility item search answers it). The pair is checked at write time against 0155's items: it must be this facility's, active and of the same kind (a `drug` is a `medicine`); another facility's item, a withdrawn one or a lab test's id on a `drug` is `NATIONAL_CODE_NOT_FOUND`. Before 0155 is applied there is no facility item, so every `HID-FACILITY` code is `NATIONAL_CODE_NOT_FOUND`; neither release waits for the other. A prescription or lab request of a facility item then finds its price, its line and its stock by the code pair, exactly as a national code does. A routed prescription of another facility's item names none of this facility's items, so it is not counted in "Not on the price list".
+- Supply items (consumables, equipment) are the Phase 4 stock ledger's; it will add a `supply` kind to this same table (survey S3 A).
+
+### Routes
+
+All routes are under `/api/v1`, need a staff session at the `X-Facility-Id` facility, and act on that facility only. Another facility's bill, item or day, or a missing one, answers 404 with the reason kept in the audit row. Every POST, PUT and PATCH needs `Idempotency-Key` (16-128 URL-safe characters); a replay with the same key and body gives the same answer with `replayed: true`; the same key with a different body is 409 `IDEMPOTENCY_KEY_REUSED`. Money is a whole number of kobo (`…Kobo`), currency `NGN`. Times are ISO 8601 UTC; "day" means the Lagos day.
+
+No Health ID or NIN is ever in a path or query. Search text `q` shaped like a Health ID or an 11-digit NIN is refused before any search, as ORD-7's search is (`BILLING_SEARCH_TEXT_NOT_ALLOWED`), and `q` is never written to a log or audit row.
+
+Reads that show patients are audited per patient shown (see Audit). Routes that answer with patient data take `X-Purpose-Of-Use: healthcare-operations` (GET) or `purpose: "healthcare-operations"` (body), as ID-7's do.
+
+While `COMMERCIAL_BILLING_ENABLED` is `false` (the production default until go-live), every route below answers 404 `BILLING_NOT_AVAILABLE` at real facilities, which the pages already show as "not switched on yet". It is on at the sealed QA facility and the four demo facilities. (owner sprint approval, 25 Nov 2026)
+
+| Method and path | Service | Code needed |
+|---|---|---|
+| `GET /commercial/payment-settings` | ehr-api | `billing.bill.read` |
+| `PUT /commercial/payment-settings` | ehr-api | `billing.settings.manage` |
+| `GET /commercial/catalogue-items?kind=&q=&active=&page=` | ehr-api | `billing.catalogue.read` |
+| `POST /commercial/catalogue-items` | ehr-api | `billing.catalogue.manage` |
+| `PATCH /commercial/catalogue-items/:itemId` | ehr-api | `billing.catalogue.manage` |
+| `GET /commercial/catalogue-items/unpriced-codes` | ehr-api | `billing.catalogue.manage` |
+| `GET /commercial/bills?status=&source=&q=&date=&page=` | ehr-api | `billing.bill.read` |
+| `GET /commercial/bills/summary?date=` | ehr-api | `billing.bill.read` |
+| `POST /commercial/bills` | ehr-api | `billing.bill.create` |
+| `GET /commercial/bills/:billId` | ehr-api | `billing.bill.read` |
+| `POST /commercial/bills/:billId/lines` | ehr-api | `billing.bill.create` |
+| `POST /commercial/bills/:billId/lines/:lineId/cancel` | ehr-api | `billing.bill.adjust` |
+| `POST /commercial/bills/:billId/payments` | ehr-api | `billing.payment.record` (a waiver also `billing.payment.waive`) |
+| `POST /commercial/bills/:billId/payments/:paymentId/confirm` | ehr-api | `billing.payment.confirm` |
+| `POST /commercial/bills/:billId/payments/:paymentId/void` | ehr-api | `billing.payment.void` |
+| `POST /commercial/bills/:billId/hmo-covers/:coverId/cancel` | ehr-api | `billing.payment.void` |
+| `POST /commercial/bills/:billId/defer` | ehr-api | `billing.bill.defer` |
+| `POST /commercial/bills/:billId/patient` | ehr-api | `billing.bill.create` |
+| `POST /commercial/bills/:billId/void` | ehr-api | `billing.bill.adjust` |
+| `GET /commercial/bills/:billId/receipt?paymentId=` | ehr-api | `billing.bill.read` |
+| `GET /commercial/outstanding?olderThanDays=&page=` | ehr-api | `billing.report.read` |
+| `GET /commercial/hmo-receivables?hmoId=&page=` | ehr-api | `billing.report.read` |
+| `GET /commercial/shifts/current?tillId=` | ehr-api | `billing.shift.own` |
+| `POST /commercial/shifts` | ehr-api | `billing.shift.own` |
+| `POST /commercial/shifts/:shiftId/close` | ehr-api | `billing.shift.own` (own day or till), else `billing.shift.manage` |
+| `GET /commercial/shifts?date=` or `?status=open` | ehr-api | `billing.shift.manage` |
+| `GET /pharmacy/stock?q=&filter=low\|expiring&page=` | pharmacy-api | `pharmacy.stock.read` |
+| `POST /pharmacy/stock/receipts` | pharmacy-api | `pharmacy.stock.manage` |
+| `POST /pharmacy/stock/adjustments` | pharmacy-api | `pharmacy.stock.manage` |
+| `GET /pharmacy/stock/:catalogueItemId/movements?page=` | pharmacy-api | `pharmacy.stock.read` |
+| `PUT /pharmacy/stock/:catalogueItemId/settings` | pharmacy-api | `pharmacy.stock.manage` |
+| `POST /pharmacy/walk-in-orders` (counter sales only) | pharmacy-api | `pharmacy.walk-in.create` |
+| `POST /pharmacy/sales/:billId/hand-over` | pharmacy-api | `pharmacy.dispensing.create` |
+| `POST /commercial/bills/:billId/online-payment-links` | ehr-api | `billing.payment.record` (switched off) |
+| `POST /commercial/paystack/webhook` | ehr-api | none; Paystack's signature (switched off) |
+
+Gateway (BILL-9): `gateway/nginx.conf.template` gains `location ^~` blocks sending `/api/v1/commercial/payment-settings`, `catalogue-items`, `bills`, `outstanding`, `hmo-receivables`, `shifts` and `paystack` to ehr-api. `location ^~ /api/v1/commercial/` stays on identity-api for `pricing` and `demo-requests`. Changed: the existing pharmacy and lab routes listed under "Changed routes" below.
+
+#### 1. Payment settings
+
+`GET` answers the built page's `PaymentSettings` shape (POC section 1 and 7), plus three fields:
+
+```json
+{ "wherePaid": "both", "methods": ["cash", "pos", "transfer", "hmo", "waiver"],
+  "payBefore": { "pharmacy": false, "lab": false }, "allowDeferredFor": ["emergency", "inpatient"],
+  "transferAccount": { "bankName": "Test Bank", "accountName": "Demo Hospital", "accountNumber": "0000000000" },
+  "hmos": [{ "id": "uuid", "name": "Demo HMO", "active": true }],
+  "receiptFooter": "Thank you", "dayCloseBy": "cashier", "tills": [{ "id": "uuid", "name": "Front till", "active": true }],
+  "checkInChargeItemId": "uuid-or-null", "payBeforeAvailable": false, "onlinePaymentAvailable": false,
+  "version": 3 }
+```
+
+| Field | Rule |
+|---|---|
+| `wherePaid` | `cashier`, `counter` or `both`. With `cashier`, pharmacy and lab staff can see bills but their payment record is refused `PAYMENT_AT_CASHIER_ONLY`. |
+| `methods` | a non-empty subset of `cash`, `pos`, `transfer`, `hmo`, `waiver` (and `online` once switched on). |
+| `payBefore` | per department. Saving `true` is refused `PAY_BEFORE_NOT_AVAILABLE` while `payBeforeAvailable` is `false` (the server setting `COMMERCIAL_PAY_BEFORE_ENABLED`, off until the clinical lead signs BILL-3). |
+| `allowDeferredFor` | must contain `emergency`. Removing it is refused `EMERGENCY_DEFERRAL_REQUIRED` (BILL-3: cannot be switched off). |
+| `transferAccount` | bank name 1-100, account name 1-100, account number exactly 10 digits (NUBAN), or `null`. |
+| `hmos` | up to 200. A new entry has no `id`; a name is 2-120 characters and unique per facility (any case). An HMO is never deleted: `active: false` hides it from Take payment and keeps its history. |
+| `tills` | up to 50, same rules as `hmos`. A till with an open day cannot be made inactive (`TILL_DAY_OPEN`). |
+| `dayCloseBy` | `facility`, `cashier` or `till`. It cannot change while any day is open (`TILL_DAY_OPEN`). |
+| `checkInChargeItemId` | an active `other` item, or `null`. When set, every check-in on the waiting list opens the visit bill with that line (see Automatic lines). |
+| `receiptFooter` | up to 300 characters. |
+| `version` | `PUT` sends the whole object with `expectedVersion`; a stale one is 412 `VERSION_CONFLICT`. |
+
+A facility with no settings row answers defaults: `wherePaid: "cashier"`, `methods: ["cash","pos","transfer"]`, both `payBefore` off, `allowDeferredFor: ["emergency"]`, `dayCloseBy: "facility"`, nothing else, `version: 0`.
+
+#### 2. Price list
+
+The built page's `CatalogueItem` shape (POC section 2), plus the national link and `orderable`:
+
+```json
+{ "id": "uuid", "kind": "drug", "name": "Amoxicillin 500 mg capsule", "strength": "500 mg", "form": "capsule",
+  "packSize": "21 capsules", "imageUrl": null, "prescriptionOnly": true,
+  "nationalCodeSystem": "HID-MED", "nationalCode": "MED-00042", "orderable": false,
+  "prices": { "cashKobo": 150000, "hmo": [{ "hmoId": "uuid", "amountKobo": 120000 }] },
+  "stockKept": true, "active": true, "version": 2 }
+```
+
+- `kind`: `drug`, `lab_test` or `other` (services: consultation, registration, procedures; the screen says "Service"). Fixed at creation.
+- `name` 1-200 characters, unique among the facility's active items of a kind (any case). `strength` up to 80, `form` section 46's values, `packSize` up to 80; these three only for `drug`.
+- `prescriptionOnly` is required for `drug` and always `false` otherwise.
+- `nationalCodeSystem` and `nationalCode`: both or neither; `HID-MED` for a drug, `LOINC` or `HID-LAB` for a test, or `HID-FACILITY` with a facility item's id for either, never for `other`. Checked at write time against the active ORD-7 version, or for `HID-FACILITY` against this facility's active facility items of the kind (`NATIONAL_CODE_NOT_FOUND`). A second active item with the same code is `NATIONAL_CODE_ALREADY_PRICED`. While ORD-7's lists are empty (no signed version), the link stays empty.
+- `prices.cashKobo` 0 to 100,000,000 (₦1,000,000). Each HMO price names an active HMO of this facility, at most once.
+- A price change applies to lines added after it. Lines already on a bill keep the price they were added at.
+- `stockKept` (drugs only) says whether pharmacy stock is counted for the item. It is set by the stock settings route, not here.
+- `PATCH` sends only changed fields with `expectedVersion`. An item is withdrawn with `active: false` and never deleted. `imageFileId` is not accepted yet (pictures wait for the order-photo upload, which is not in this section): `VALIDATION_FAILED`.
+- At most 5,000 active items per facility (`CATALOGUE_LIMIT`).
+- `q` matches the start of any word of the name, at least 2 characters.
+
+`GET .../unpriced-codes` answers, for the last 30 days, each national code that reached this facility's pharmacy or lab with no priced item, with a count only: `{ "items": [{ "codeSystem": "HID-MED", "code": "MED-00113", "display": "Paracetamol 500 mg tablet", "count": 14 }] }`. No patient, no person.
+
+#### 3. Bills
+
+The built page's `Bill` shape (POC section 3), with these additions and one widened field:
+
+```json
+{ "id": "uuid", "number": "B-000412", "source": "visit", "status": "part_paid",
+  "patient": { "patientId": "uuid", "displayName": "Ada Test", "healthIdLast4": "7Q2K" },
+  "visit": { "visitQueueEntryId": "uuid", "queueDay": "2026-11-26" },
+  "lines": [ { "id": "uuid", "catalogueItemId": "uuid", "name": "Consultation", "kind": "other", "quantity": 1,
+               "unitKobo": 500000, "totalKobo": 500000, "workItemId": null, "origin": "check_in",
+               "cancelled": false, "dispensingReversed": false } ],
+  "totalKobo": 650000, "paidKobo": 300000, "waivedKobo": 0, "hmoCoveredKobo": 200000, "pendingCheckKobo": 0,
+  "dueKobo": 150000, "refundDueKobo": 0, "coverOverKobo": 0, "payments": [ ], "hmoCovers": [ ],
+  "deferred": null, "receiptNumber": "R-2026-000123", "handedOverAt": null,
+  "createdAt": "2026-11-26T08:10:00.000Z", "version": 5 }
+```
+
+- `source` is widened to `visit`, `pharmacy` or `lab` (BILL-1). The built pages' type adds `visit`; `SOURCE_LABEL.visit` is "Visit".
+- `patient` never carries a full Health ID: `healthId` from the POC shape is replaced by `healthIdLast4`. `patient` is `null` for an anonymous counter sale or walk-in lab bill, with `displayName` taken from the optional name the customer gave (or "Counter sale", or "Walk-in" for a lab bill).
+- `origin` of a line: `check_in`, `pharmacy`, `lab`, `counter`, `manual`.
+- `dispensingReversed` of a line: the dispensing the line bills (its work item's first) was reversed (section 9). The server always cancels such a line ("Dispensing reversed"), whether it was unpaid, part paid or paid, so its unpaid balance is never asked for and pay-before never holds up the corrected medicine for it.
+- `refundDueKobo` and `coverOverKobo`: what a reversal left collected beyond the bill's new total. The patient's money (paid and pending check) is given back first: `refundDueKobo = min(over, paidKobo + pendingCheckKobo)`, where `over = paidKobo + pendingCheckKobo + waivedKobo + hmoCoveredKobo − totalKobo` (never below 0). `coverOverKobo = over − refundDueKobo` is a waiver or HMO cover now larger than the bill: cancel it and record the right amount. A refund is given by voiding the payment with "Refund: …" (take the rest again if the payment was larger). A later line on the same bill (the corrected medicine) uses what is over first. Both are 0 on any other bill.
+- Sums: `paidKobo` is money received and not voided (cash, POS, confirmed transfer, online). `pendingCheckKobo` is transfers not yet checked. `waivedKobo` is waivers not voided. `hmoCoveredKobo` is HMO covers not cancelled. `dueKobo = totalKobo − paidKobo − pendingCheckKobo − waivedKobo − hmoCoveredKobo`, never below 0.
+- `status`: `void` when the bill is voided; else `deferred` while deferred and something is due; else `paid` when `dueKobo` is 0 and at least one line is live (a bill of free items only, such as free programme medicines, is `paid` as made) or a reversal left money over; `part_paid` when something has been paid, waived or covered; `unpaid` otherwise. A bill with every line cancelled and nothing paid is `void`.
+- `deferred`: `{ "reason": "emergency" | "inpatient" | "unknown_patient", "by": "system" | "staff", "at": "..." }` or `null`. A deferred bill can still be paid.
+- `receiptNumber` is the latest receipt of a payment not voided (BILL-16).
+
+**List** (`GET /commercial/bills`): newest first, 25 per page. `status` is one of the five, `open` (unpaid, part paid or deferred), or `money_over` (a bill, not void, with money collected beyond its total after a reversal: `refundDueKobo` or `coverOverKobo` above 0). `source=pharmacy` lists bills that have any pharmacy line, so the pharmacy sees visit bills with its medicines. `date` is a Lagos day. `q` (2-60 characters) matches a bill or receipt number, or the start of a word of the patient's display name, among this facility's bills only. It is not a patient search: it never finds someone who has no bill here. A Health ID or NIN in `q` is refused.
+
+**Summary** (`GET /commercial/bills/summary?date=`): the Home billing card. `{ "date": "2026-11-26", "billedKobo": ..., "collectedKobo": ..., "waivedKobo": ..., "hmoCoveredKobo": ..., "outstandingKobo": ..., "billCount": 41, "moneyOver": { "billCount": 1, "refundDueKobo": ..., "coverOverKobo": ... } }`. Numbers only, no patient. `moneyOver` is the whole facility's (not the day's), like `outstandingKobo`: bills with a refund due or cover over the bill, to be found with `status=money_over`.
+
+**Create** (`POST /commercial/bills`): for a manual bill.
+
+```json
+{ "source": "visit", "patient": { "visitQueueEntryId": "uuid" },
+  "lines": [{ "catalogueItemId": "uuid", "quantity": 1 }], "purpose": "healthcare-operations" }
+```
+
+- `patient` is `{ "visitQueueEntryId": "uuid" }` (a waiting-list entry of this facility, open or closed today), or `{ "anonymous": true, "name": "optional, up to 120" }` for `pharmacy` and `lab` only. A bill never takes a free patient id: the waiting-list entry is the access basis the front desk already used at check-in (0135).
+- If the entry already has a bill that is not void, the lines are added to it and the answer is that bill (`200`, `merged: true`). One bill per visit.
+- `lines`: 1-50, each an active item of this facility, `quantity` a whole number 1-10,000.
+- An anonymous `pharmacy` bill is a counter sale. It never takes a prescription-only medicine (422 `PRESCRIPTION_REQUIRED`): those are sold through `POST /pharmacy/walk-in-orders` with the outside prescriber (section 8).
+- An anonymous `lab` bill is a walk-in lab bill: `counter: false`, the name only, no hand-over, and it cannot be put on a Health ID (`BILL_NOT_A_COUNTER_SALE`).
+
+**Add a line** (`POST .../lines`): `{ "catalogueItemId", "quantity", "note" (optional, up to 200), "expectedVersion" }`. Not on a `void` bill. On a counter sale: never after its hand-over (409 `ALREADY_HANDED_OVER`: the goods have gone, and the new line could never be handed over), and never a prescription-only medicine (422 `PRESCRIPTION_REQUIRED`).
+
+**Cancel a line** (`POST .../lines/:lineId/cancel`): `{ "reason" (8-500), "expectedVersion" }`. Refused when the bill's total would drop below what has already been paid, waived or covered (`LINE_CANCEL_BELOW_PAID`): void a payment first. A line from a work item can be cancelled; the work item's badge then shows "Not billed".
+
+**Void a bill** (`POST .../void`): `{ "reason" (8-500), "expectedVersion" }`. Only when nothing is paid, pending, waived or covered (`BILL_HAS_PAYMENTS`). A voided bill keeps its number.
+
+**Defer** (`POST .../defer`): the POC body `{ "reason": "emergency" | "inpatient" }`, plus optional `note` (up to 200). `inpatient` is refused until the Inpatient department ships (`DEFERRAL_REASON_NOT_AVAILABLE`). The server also defers on its own (BILL-3): a bill for an unknown patient (ID-7, `record_kind = 'unknown'`) is deferred with reason `unknown_patient` when it is made; a visit bill is deferred with reason `emergency` when its waiting-list entry has triage level 1 or 2 (0135's live scale; which levels count is a clinical-lead item). Clinical staff can defer (doctor, nurse and clinician hold `billing.bill.defer`).
+
+**Put it on a Health ID** (`POST .../patient`): the POC body `{ "healthId": "HID-..." }`, plus `purpose`. Only for an anonymous counter-sale bill. The Health ID is resolved exactly as the pharmacy's walk-in does (a patient lookup, audited), and only the bill moves: no clinical record is written. Answers the bill with `patient`.
+
+#### 4. Payments and HMO cover
+
+`POST .../payments`, the built drawer's `PaymentInput`, plus two optional fields:
+
+```json
+{ "method": "pos", "amountKobo": 150000, "reference": "123456789012", "tillId": null,
+  "paperReceiptNumber": null, "expectedVersion": 5 }
+```
+
+| Method | Rule |
+|---|---|
+| `cash` | `amountKobo` 1 to `dueKobo`. No reference. |
+| `pos` | `reference` is the RRN, 6-20 characters, letters and digits. |
+| `transfer` | `reference` 4-60 characters. Recorded as `pending_check` until a second person confirms it (route below). |
+| `waiver` | `reason` 8-500 characters. Needs `billing.payment.waive`. Status `recorded`. |
+| `hmo` | `hmoId` (an active HMO of this facility) and `reference` (the approval code, 3-60). **Recorded as an HMO cover, not a payment** (BILL-8): it appears in `hmoCovers`, never in `payments`, never in `paidKobo` or the day's totals, and it gets no receipt number. The built drawer sends this method unchanged. |
+
+- Every method must be in the settings' `methods`, else `PAYMENT_METHOD_NOT_ACCEPTED`.
+- More than `dueKobo` is refused 409 `OVERPAYMENT`. Change for cash is worked out on screen and never stored.
+- A payment needs an open till day for its scope (section 7), else `TILL_DAY_NOT_OPEN`. The payment records the day it was taken in (`tillDayId`). A waiver and an HMO cover need no open day.
+- A payment (or a void, or an online payment) taken while its day is being closed waits for the close and is then refused `TILL_DAY_NOT_OPEN`: the payment holds its day until it commits, so a closed day's expected cash always counts every payment recorded in it.
+- `paperReceiptNumber` (1-30 characters): the number from the paper receipt book when the payment was taken while the system was down (BILL-6). The payment still lands in today's open day and gets its own receipt number; the receipt prints both.
+- On a `void` bill, `BILL_VOID`.
+- The answer is the bill. A payment entry is the POC `Payment` plus `status` (`recorded`, `pending_check`, `confirmed`), `receiptNumber`, `tillDayId`, `voidedBy`, `voidedAt`, `voidReason` and `paperReceiptNumber`. `receivedBy` and `voidedBy` are staff display names (SX-9's names), never account ids.
+
+An HMO cover entry: `{ "id", "hmoId", "hmoName", "amountKobo", "approvalCode", "status": "pending_claim" | "cancelled", "recordedBy", "recordedAt" }`. Release 2 adds `claimed`, `accepted` and `rejected`; a rejected cover will put its amount back on what the patient owes.
+
+**Confirm a transfer** (`POST .../payments/:paymentId/confirm`, body `{ "expectedVersion" }`): by someone other than the person who recorded it (`SECOND_PERSON_REQUIRED`). A payment that is not `pending_check` is `PAYMENT_NOT_PENDING`.
+
+**Void a payment** (`POST .../payments/:paymentId/void`, body `{ "reason" (8-500), "expectedVersion" }`): refund means void with a reason ("Refund: …"). Refused to the person who took the payment (`SECOND_PERSON_REQUIRED`, BILL-4). The void is recorded in the voider's open till day as a negative entry, so a closed day never changes; voiding cash needs that open day (`TILL_DAY_NOT_OPEN`). Its receipt number stays used.
+
+**Cancel an HMO cover** (`POST .../hmo-covers/:coverId/cancel`, `{ "reason", "expectedVersion" }`): by someone other than the person who recorded it. The amount goes back on what the patient owes.
+
+**Receipt** (`GET .../receipt?paymentId=`): the built `ReceiptData` shape. With `paymentId`, that payment's receipt; without, the latest. `bill.patient` carries `healthIdLast4` only. Printing writes an audit row (it is a patient document). A receipt for an HMO cover does not exist: `RECEIPT_NOT_FOUND`.
+
+#### 5. Outstanding and HMO receivables
+
+- `GET /commercial/outstanding`: bills with `dueKobo` above 0 that are not void, grouped by patient, oldest bill first: `{ "items": [{ "patient": { "patientId", "displayName", "healthIdLast4" } | null, "bills": [{ "billId", "number", "createdAt", "dueKobo", "deferred" }], "dueKobo": 0, "oldestDays": 12 }], "totalDueKobo": 0 }`. `olderThanDays` 0-365.
+- `GET /commercial/hmo-receivables`: HMO covers in `pending_claim`, by HMO: `{ "items": [{ "hmoId", "hmoName", "count", "amountKobo", "oldestDays", "overBillCount", "overBillKobo" }] }`, and with `hmoId` the covers themselves with bill number, patient display name, approval code and `overBill`. A cover on a bill with cover over the bill (after a reversal) is marked (`overBill: true`, counted in `overBillCount` and `overBillKobo`, and still in `count` and `amountKobo`): cancel it and record the right amount before it is claimed. This is the list Release 2's claim batches are built from.
+
+#### 6. End of day (till days)
+
+The built page's `Shift` shape and routes (POC section 7), with these rules:
+- One open day per scope: per facility, per cashier (membership) or per till, as `dayCloseBy` says. A second open is 409 `SHIFT_ALREADY_OPEN`.
+- `openingCashKobo` 0 to 100,000,000,000 (₦1,000,000,000). `tillId` is required in till mode and refused otherwise.
+- `totals` are by method, counting payments taken in that day minus voids recorded in it. Waivers are listed with their count and amount but are never part of `expectedCashKobo`. HMO covers are not in `totals`; the day carries `hmoCovered: { count, amountKobo }` for information.
+- `expectedCashKobo = openingCashKobo + cash taken − cash voided`.
+- Close: `{ countedCashKobo (0 to 100,000,000,000: ₦1,000,000,000, so a busy day's true count always closes it), note (up to 500; required when the difference is not 0), expectedVersion }`. A closed day never changes. A day left open over midnight stays open and is marked `overdue: true` from 06:00 Lagos.
+- `unpaidBills` and `deferredBills` are the facility's open bills at the time of reading.
+
+#### 7. Pharmacy stock (POC section 5)
+
+The built page's `StockLine`, `StockReceipt`, `StockAdjustment` and `StockMovement` shapes.
+
+- An item is stock-kept once it has stock settings: `PUT /pharmacy/stock/:catalogueItemId/settings` `{ "unit": "tablet", "reorderLevel": 100, "expectedVersion" }` (unit 1-40 characters, reorder level 0-1,000,000). Only `drug` items. The unit cannot change while any batch holds stock (`STOCK_UNIT_LOCKED`).
+- **Receipts:** 1-100 lines. `batchNumber` 1-60, `expiresOn` a date after today (Lagos), `quantity` a whole number 1-1,000,000, `unitCostKobo` optional 0-100,000,000. The same item, batch number and expiry adds to the batch; the same batch number with a different expiry is refused `BATCH_EXPIRY_MISMATCH`. `supplier` up to 120, `invoiceNumber` up to 60. A line for an item that is not stock-kept is refused `STOCK_NOT_KEPT`. Answers the stock lines.
+- **Adjustments:** `change` a non-zero whole number; never below zero (`STOCK_BELOW_ZERO`). `reason` `damaged`, `expired`, `count` or `returned`; `note` 0-500 (required for `count`).
+- **Issue order (expiry first):** dispensing and hand-over take from the batch with the earliest expiry that has not expired (expiry on or after today, Lagos), then the next, until the quantity is met. A body may name `batchId` to take from that batch only. Expired batches are never given out; they wait for an `expired` adjustment.
+- **Out of stock:** when the non-expired batches hold less than asked, 409 `OUT_OF_STOCK` with `{ "onHand": 12, "unit": "tablet", "expiredOnHand": 30 }`, and nothing is taken.
+- **List:** `filter=low` is on hand at or below the reorder level; `filter=expiring` has a batch expiring within 90 days (BILL-12). `onHand` counts non-expired batches; `batches` lists all batches with stock, with `expired: true` where it applies.
+- **Movements:** append-only: `receipt`, `adjustment`, `dispensing`, `counter_sale` (a dispensing reversal moves no stock), newest first, 50 per page. `by` is a staff display name. Patient-linked movements show no patient.
+
+#### 8. Counter sales and hand-over (POC section 4, counter only)
+
+`POST /pharmacy/walk-in-orders` with `counter: true` (BILL-13):
+
+```json
+{ "patient": { "kind": "anonymous", "name": "optional", "phone": "optional E.164" }, "counter": true,
+  "outside": { "prescriberName": "Dr Test", "facilityName": "Test Clinic", "writtenOn": "2026-11-25" },
+  "items": [{ "catalogueItemId": "uuid", "quantity": 2 }], "purpose": "healthcare-operations" }
+```
+
+- `patient` may also be `{ "kind": "health_id", "healthId": "HID-..." }`: resolved as a patient lookup (audited), and only the bill is put on that patient. No dispensing record is written to their chart in release 1.
+- An item with `prescriptionOnly: true` needs `outside` (`prescriberName` 2-120 required), else 422 `PRESCRIPTION_REQUIRED`. The prescriber's name is kept on the bill. `photoFileId` is refused until the order-photo upload ships.
+- `counter: false` or left out is refused 409 `WALK_IN_QUEUE_NOT_AVAILABLE`.
+- Answers `{ "workItemIds": [], "bill": Bill }` with a new `pharmacy` bill.
+
+`POST /pharmacy/sales/:billId/hand-over` `{ "expectedVersion" }`: for a counter-sale bill only. Takes every drug line from stock (section 7; items not stock-kept are handed over without a count). Refused 409 `PAYMENT_REQUIRED` when the bill is not `paid` (a counter sale is always paid first, whatever `payBefore` says, because there is no patient to bill later; a sale of free items only is `paid` as made), 409 `OUT_OF_STOCK`, 409 `ALREADY_HANDED_OVER`, and 422 `PRESCRIPTION_REQUIRED` when a line is a prescription-only medicine and the sale has no outside prescriber. Answers `{ handedOverAt, bill }`.
+
+#### 9. Changed routes and automatic lines
+
+| Route (existing) | Change |
+|---|---|
+| `POST /api/v1/ehr/visit-queue/check-in` (0135) | When `checkInChargeItemId` is set, the check-in opens the visit's bill with that line (`origin: check_in`). The answer is unchanged. Turned off by setting the item to `null`. |
+| own pharmacy work items (`GET /pharmacy/work-items`, `/:workItemId`) | Gain `bill: WorkItemBill` and `stock: { onHand, unit } \| null` (POC sections 3 and 5). |
+| pharmacy acceptance (ORD-4, 0144) | When the prescription's code matches a priced drug, a line is added to the patient's visit bill (see below) with the prescription's `quantityToDispense` when it is in the item's stock unit, else quantity 1 and a "check quantity" mark for the cashier. |
+| `POST /pharmacy/work-items/:workItemId/dispensings` | Body gains optional `batchId`. For a stock-kept item, takes stock expiry-first; refuses 409 `OUT_OF_STOCK`, and 409 `STOCK_UNIT_MISMATCH` when `quantityUnit` is not the item's stock unit or the quantity is not whole. Refuses 409 `PAYMENT_REQUIRED` or `PAYMENT_PENDING_CHECK` when pay-before is on for pharmacy and the bill is not paid or deferred. |
+| dispensing reversal | Moves no stock: a reversal corrects the record, and the medicine may never have come back (a wrong-patient report's reversal certainly did not). What does come back to the shelf is counted back with a `count` adjustment. The automatic line that bills the reversed dispensing (the work item's first: the database records it on the line when that dispensing is made) is marked `dispensingReversed` and always cancelled ("Dispensing reversed", by the reversing pharmacist), unpaid, part paid or paid: its unpaid balance comes off what is due, so pay-before never holds up the corrected medicine for it. What was collected beyond the bill's new total is the bill's `refundDueKobo` (the patient's money first) and `coverOverKobo` (a waiver or HMO cover to cancel and record again); while the bill has a refund due, the work item's badge stays (`WorkItemBill.dispensingReversed: true`, `refundDueKobo`) and reads "Refund due". An ORD-12 refill (a later dispensing of the same work item) of a work item with a line on a bill is refused 409 `REFILL_BILLING_NOT_AVAILABLE` and takes no stock, until refills are billed (ORD-12's follow-up); a work item with no line is never refused. A reversal of a dispensing the line does not bill changes no bill. |
+| own lab work items (`GET /lab/work-items`, `/:workItemId`) | Gain `bill: WorkItemBill`. |
+| lab acceptance of own work (0133) | Adds a line for a priced test to the visit bill. |
+| lab specimen collection | Refuses 409 `PAYMENT_REQUIRED` or `PAYMENT_PENDING_CHECK` when pay-before is on for lab and the bill is not paid or deferred. |
+
+Which bill an automatic line joins: the bill of the patient's open waiting-list entry at this facility; else the bill of the patient's most recent entry closed today; else a new bill with source `pharmacy` or `lab`. A work item gets at most one automatic line (ORD-12's refills, when they ship, add one per fill).
+
+Pay-before is decided only on the server and never refuses when the bill is deferred, the patient is an unknown record, or no line was added for the work item ("Not billed" is never blocked; the cashier is shown the gap).
+
+A Dispense of an item sent automatically and not yet accepted accepts it first (ORD-4), which adds its line. When pay-before then refuses the dispensing, pharmacy-api records that acceptance on its own, so the line stays on the bill for the cashier to collect, and the next Dispense after payment goes through.
+
+#### 10. Online payment (built, switched off)
+
+While `COMMERCIAL_ONLINE_PAYMENT_ENABLED` is `false` (the default everywhere, including QA), both routes answer 404 `ONLINE_PAYMENT_NOT_AVAILABLE` and `onlinePaymentAvailable` is `false`.
+
+- `POST .../online-payment-links` `{ "amountKobo", "email" (optional) }` starts a Paystack transaction with the facility's own Paystack secret key (BILL-14), so the money goes straight to the facility. It answers `{ "authorizationUrl", "reference", "expiresAt" }` for the screen to show as a QR code. The patient's name, Health ID and lines are never sent to Paystack: only the amount, a bill reference and, if given, an email.
+- `POST /commercial/paystack/webhook` checks Paystack's `x-paystack-signature` (HMAC-SHA512 of the body with the facility's secret), then verifies the transaction with Paystack's verify call before recording an `online` payment in the facility's open day (or the next one opened). Duplicates are ignored by reference.
+- The facility's secret key is stored encrypted in AWS Secrets Manager per facility (key name only in the database), set by Health ID support. There is no screen to enter it in release 1.
+
+### Errors
+
+Messages are what the screen shows. None says "permission".
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | "Check the highlighted fields." |
+| 400 | `BILLING_SEARCH_TEXT_NOT_ALLOWED` | "Search by bill number, receipt number or name. Do not type a Health ID or NIN here." |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED`, `PURPOSE_OF_USE_REQUIRED` | as ID-6 |
+| 403 | `BILLING_NOT_ALLOWED` | "Your role here does not include this. Ask a billing officer or administrator." |
+| 403 | `SECOND_PERSON_REQUIRED` | "Another member of staff must do this, not the person who recorded the payment." |
+| 403 | `PAYMENT_AT_CASHIER_ONLY` | "Payments here are taken at the cashier." |
+| 404 | `BILLING_NOT_AVAILABLE` | "Billing is not switched on at this facility yet." |
+| 404 | `BILL_NOT_FOUND`, `CATALOGUE_ITEM_NOT_FOUND`, `PAYMENT_NOT_FOUND`, `SHIFT_NOT_FOUND`, `RECEIPT_NOT_FOUND`, `PATIENT_NOT_FOUND` | "This was not found at this facility." |
+| 404 | `ONLINE_PAYMENT_NOT_AVAILABLE` | "Online payment is not switched on." |
+| 409 | `OVERPAYMENT` | "That is more than is due. Enter the amount due or less." |
+| 409 | `PAYMENT_METHOD_NOT_ACCEPTED` | "This facility does not take that payment method." |
+| 409 | `PAYMENT_NOT_PENDING` | "This transfer has already been checked or cancelled." |
+| 409 | `PAYMENT_ALREADY_VOIDED` | "This payment was already cancelled." |
+| 409 | `PAYMENT_REQUIRED` | "This bill must be paid first." |
+| 409 | `PAYMENT_PENDING_CHECK` | "A transfer on this bill is waiting to be checked." |
+| 409 | `BILL_VOID` | "This bill was cancelled." |
+| 409 | `BILL_HAS_PAYMENTS` | "This bill has payments. Cancel them first." |
+| 409 | `LINE_CANCEL_BELOW_PAID` | "More has been paid than the bill would total. Cancel a payment first." |
+| 409 | `BILL_NOT_A_COUNTER_SALE` | "Only a counter sale can be put on a Health ID or handed over here." |
+| 409 | `TILL_DAY_NOT_OPEN` / `SHIFT_ALREADY_OPEN` / `TILL_DAY_OPEN` | "Open your day first." / "A day is already open here." / "Close the open day first." |
+| 409 | `PAY_BEFORE_NOT_AVAILABLE` | "Pay before is not switched on yet." |
+| 409 | `EMERGENCY_DEFERRAL_REQUIRED` | "Emergency patients are always served first. This cannot be switched off." |
+| 409 | `DEFERRAL_REASON_NOT_AVAILABLE` | "Inpatient billing is not available yet." |
+| 409 | `NATIONAL_CODE_NOT_FOUND` / `NATIONAL_CODE_ALREADY_PRICED` | "This code is not on the national list." / "Another item already has this code." |
+| 409 | `CATALOGUE_ITEM_EXISTS` / `CATALOGUE_LIMIT` | "An active item already has this name." / "This facility has 5,000 items. Withdraw one first." |
+| 409 | `OUT_OF_STOCK` | "Not enough in stock." (with `onHand`, `unit`, `expiredOnHand`) |
+| 409 | `STOCK_BELOW_ZERO`, `STOCK_NOT_KEPT`, `STOCK_UNIT_LOCKED`, `STOCK_UNIT_MISMATCH`, `BATCH_EXPIRY_MISMATCH` | "Stock cannot go below zero." / "Stock is not counted for this item." / "The unit cannot change while there is stock." / "Dispense in the item's stock unit." / "This batch number already has another expiry date." |
+| 409 | `ALREADY_HANDED_OVER` | "These items were already handed over." |
+| 409 | `WALK_IN_QUEUE_NOT_AVAILABLE` | "Sell it at the counter. Queuing outside prescriptions is not available yet." |
+| 409 | `REFILL_BILLING_NOT_AVAILABLE` | "Refills of a billed medicine cannot be recorded yet. Ask the prescriber for a new prescription." (pharmacy-api's dispensing: an ORD-12 refill of a work item with a line on a bill, until refills are billed) |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | as ID-6 |
+| 412 | `VERSION_CONFLICT` | "Someone else changed this. Reload it and try again." |
+| 422 | `PRESCRIPTION_REQUIRED` | "This medicine needs a doctor's prescription." |
+| 503 | `BILLING_UNAVAILABLE` | "Billing is not available right now." (a database without these migrations, or any other database failure, logged with its SQLSTATE only) |
+
+### Codes and roles
+
+New codes (`auth.permissions`): the point-of-care spec's list, less its two lab codes, plus two new ones:
+
+`billing.settings.manage`, `billing.catalogue.read`, `billing.catalogue.manage`, `billing.bill.read`, `billing.bill.create`, `billing.bill.adjust` (new), `billing.bill.defer`, `billing.payment.record`, `billing.payment.confirm`, `billing.payment.void`, `billing.payment.waive`, `billing.shift.own`, `billing.shift.manage`, `billing.report.read` (new), `pharmacy.walk-in.create`, `pharmacy.stock.read`, `pharmacy.stock.manage`. (`lab.walk-in.create` and `lab.result.share` are not added here; they come with the lab stream.)
+
+New roles (BILL-5), added the 0136 way (rows in `auth.roles` and `auth.role_permissions`) and given to staff through SX-4 (0139) like any role. No licence (like the front desk). `identity.staff_invitable_roles` gains both for hospital and clinic, and `cashier` for pharmacy and laboratory organisations.
+
+| Role | Codes |
+|---|---|
+| `cashier` (new) | `billing.catalogue.read`, `billing.bill.read`, `billing.bill.create`, `billing.payment.record`, `billing.shift.own` |
+| `billing_officer` (new) | the cashier's, plus `billing.bill.adjust`, `billing.bill.defer`, `billing.payment.confirm`, `billing.payment.void`, `billing.payment.waive`, `billing.shift.manage`, `billing.catalogue.manage`, `billing.report.read` |
+| `admin`, `org_admin` | `billing.settings.manage`, `billing.catalogue.read`, `billing.catalogue.manage`, `billing.bill.read`, `billing.bill.adjust`, `billing.payment.confirm`, `billing.payment.void`, `billing.payment.waive`, `billing.shift.manage`, `billing.report.read` |
+| `receptionist` | `billing.catalogue.read`, `billing.bill.read`, `billing.bill.create`, `billing.payment.record`, `billing.shift.own` (small clinics take money at the desk) |
+| `pharmacist` | `billing.catalogue.read`, `billing.bill.read`, `billing.bill.create`, `billing.payment.record`, `billing.shift.own`, `pharmacy.stock.read`, `pharmacy.stock.manage`, `pharmacy.walk-in.create` |
+| `lab` | `billing.catalogue.read`, `billing.bill.read`, `billing.payment.record`, `billing.shift.own` |
+| `doctor`, `nurse`, `clinician` | `billing.bill.defer` only |
+
+Neither new role gets any `ehr.*`, `identity.patient.read` or clinical code: a cashier sees only what a bill shows. 0131's own-facility opening is not given to them.
+
+SX-1 module keys (`facility-modules.ts`): `billing` ("Payments and receipts": show `billing.bill.read`, act `billing.payment.record`), `priceList` ("Price list": show `billing.catalogue.read`, act `billing.catalogue.manage`), `endOfDay` (show `billing.shift.own`), `pharmacyStock` (show `pharmacy.stock.read`, act `pharmacy.stock.manage`). The role-matrix fixture (`services/identity-api/test/role-matrix.json`) gains the two roles and every changed row, in the same pull request.
+
+### Database design: migrations 0162-0167 (provisional)
+
+All six are written on staging-novu-ci-20261005 at 95fa1e52 (0001-0151 live) and need 0152-0154 applied first only where they say so. Each:
+
+- **takes its locks first, NOWAIT**, and a busy lock is refused 55P03 with a message that begins with its own number ("0163: a table 0163 writes or checks … is busy; nothing was applied"), as 0151 does;
+- **checks preconditions** (earlier migrations applied, the columns, functions and triggers it relies on exist with the expected shape and md5, role codes as Release C left them) and refuses 55000 "016n: …" with nothing applied;
+- **re-runs idempotently:** applied a second time it finds every object exactly as it made it and raises "016n: already applied" (55000), changing nothing; a partly different object is refused by name;
+- **checks itself after:** row counts, grants, RLS forced on every new table, policies, function owners and `search_path`, and the md5 of every function it made;
+- **writes audit rows** in `audit.events` as the system actor for what it changes in data (roles and codes added, sealed QA logins), with the migration number and the owner's decision, never a name or address;
+- **is rehearsed** by `scripts/tuf-staging-migration-rehearsal.mjs` with `HID_REHEARSAL_LIVE_POINTS=0162,0163,0164,0165,0166,0167`, so Release C's live runtime verifiers (the live tree's `verify-*-runtime.mjs` set, today 12 scripts in identity-api and ehr-api) pass after each one, plus this section's own verifier `services/ehr-api/scripts/verify-patient-billing-runtime.mjs` after 0167;
+- comes with a rollback file in `docs/rollback/` that is not in the ledger.
+
+Every new table: `facility_id` on every row, RLS enabled and forced, no runtime role reads or writes the table directly (definer functions do, as 0135's do), `row_version`, `created_at`, idempotency key and `request_sha256` on every command row, and no `DELETE` or `TRUNCATE` (refused by `platform.reject_mutation()`). Money is `bigint` kobo with `check (… >= 0)`.
+
+| No. | Name | What it does |
+|---|---|---|
+| **0162** | `billing_roles_and_codes` | Creates schema `commercial`. Adds the 17 codes, roles `cashier` and `billing_officer`, and the role rows in the table above. Replaces `identity.staff_invitable_roles` (md5 pinned before and after). Prints, 0136-style, the count of active memberships at real facilities that gain each code (numbers only); there is no stop, because it only adds and every route stays switched off until go-live. Sealed QA step (BILL-17, only where 0123 installed QA Hospital, as 0151): two fictional logins, cashier and billing officer, `pending_reset`, no password. Locks: SHARE ROW EXCLUSIVE on `auth.roles`, `auth.permissions`, `auth.role_permissions`; the 0151 set for the QA step. |
+| **0163** | `billing_settings_and_price_list` | `commercial.payment_settings` (one row per facility), `commercial.facility_hmos`, `commercial.tills`, `commercial.catalogue_items` (with the national link and a unique partial index on `(facility_id, national_code_system, national_code) where active`), `commercial.catalogue_item_prices` (cash and per HMO), `commercial.catalogue_events` (every change, append-only), `commercial.number_counters` (`facility_id`, `kind` `bill`/`receipt`, `year`, `next_value`, taken `FOR UPDATE`, so numbers have no gaps). Definer functions for settings and price list. The national-code check reads `ehr.catalog_medicines` and `ehr.catalog_lab_tests` (0149) through a definer function. |
+| **0164** | `bills_payments_and_hmo_cover` | `commercial.bills` (`visit_queue_entry_id` unique where not void, `source`, `patient_id` nullable, `deferred_reason`), `commercial.bill_lines` (`work_item_kind` + `work_item_id` unique where not cancelled), `commercial.payments` (method `cash`, `pos`, `transfer`, `waiver`, `online`; `status`; `receipt_number` unique per facility; `till_day_id`; void columns), `commercial.hmo_covers`, `commercial.bill_events` (append-only: every create, line, payment, confirm, void, defer, attach). Totals are kept on `commercial.bills` by the definer functions in the same transaction, under `FOR UPDATE` on the bill, and a post-check function `commercial.bill_totals_agree(bill)` is used by the tests and the rehearsal. Checks: `dueKobo` never below 0, a void row has a reason and a different actor from the recorder, a waiver has a reason. |
+| **0165** | `till_days_and_end_of_day` | `commercial.till_days` (scope, membership or till, opened and closed, opening and counted cash, difference, note), a unique partial index for one open day per scope, the void-as-negative entry rule, and the read functions for totals. `payments.till_day_id` gets its foreign key here (added `NOT VALID`, then validated). |
+| **0166** | `pharmacy_point_of_care_stock` | `pharmacy.stock_items` (per facility and catalogue item: unit, reorder level), `pharmacy.stock_batches` (batch number, expiry, on hand, unit cost; unique `(facility_id, catalogue_item_id, batch_number)`), `pharmacy.stock_receipts` and lines, `pharmacy.stock_movements` (append-only ledger, signed change, kind, batch, reference to the receipt, adjustment, dispensing or bill line). A definer function `pharmacy.take_stock_expiry_first(...)` locks the item's batches `FOR UPDATE` in expiry order and either takes the whole quantity or refuses `OUT_OF_STOCK`. A post-check proves each batch's on-hand equals the sum of its movements. Counter-sale functions (walk-in counter bill, hand-over). |
+| **0167** | `billing_and_stock_hooks` | Triggers, not edits of the applied functions: AFTER INSERT on `ehr.visit_queue` (check-in charge and emergency deferral by triage level, also AFTER UPDATE OF `triage_level`), on `pharmacy.work_item_acceptances` and own `lab.work_items` (automatic lines); BEFORE INSERT on `pharmacy.dispensings` (pay-before gate and expiry-first stock) and on `pharmacy.dispensing_reversals` (the line that bills the reversed dispensing, its work item's first, always cancelled, what was collected for it left as the bill's refund due; a later dispensing's reversal changes no bill; no stock moves); BEFORE UPDATE OF `status` on `lab.specimens` to `collected` (pay-before gate). Each trigger function is SECURITY DEFINER, owned by the migration owner, `search_path = pg_catalog, pg_temp`, and returns at once when the facility has no settings row, so a facility that never uses billing sees no change. Takes ROW EXCLUSIVE NOWAIT on each table it puts a trigger on, then SHARE ROW EXCLUSIVE for `CREATE TRIGGER`, both NOWAIT. Needs 0144 applied; does not need ORD-12's 0154 (with it, a work item's line bills its first fill only, and a refill of a billed work item is refused `REFILL_BILLING_NOT_AVAILABLE`). |
+
+Ola reviews 0166 and 0167 (the pharmacy and lab hooks), and Rahman gives each file the final database check (owner sprint approval, 25 Nov 2026). Each needs the owner's verbatim signature.
+
+### Audit
+
+One row per success or refusal, in `audit.events`, as the codes below. Rows hold ids (bill, line, payment, cover, item, day, batch, patient), amounts in kobo, method, status and outcome. They never hold a name, Health ID, phone, POS RRN, transfer reference, HMO approval code, waiver or void reason text, or `q`.
+
+- Settings and price list: `commercial.settings.read`, `.settings.update`, `commercial.catalogue-item.create`, `.update`, `commercial.catalogue.unpriced.read`.
+- Bills: `commercial.bill.list` plus one `commercial.bill.list.shown` per patient shown (as ID-7's lists), `commercial.bill.read`, `.create`, `.line-add`, `.line-cancel`, `.void`, `.defer` (with `by: system` for automatic deferral), `.attach-patient` (the Health ID lookup itself is audited by Identity as a patient lookup), `commercial.receipt.print`, `commercial.bill.summary.read`.
+- Money: `commercial.payment.record`, `.confirm`, `.void`, `commercial.hmo-cover.record`, `.cancel`, `commercial.online-payment.link`, `.webhook` (accepted or refused, with the reference's sha256 only).
+- Lists: `commercial.outstanding.read` plus `.shown` per patient, `commercial.hmo-receivables.read` plus `.shown` per patient when covers are listed.
+- Days: `commercial.till-day.open`, `.close`, `.read`.
+- Stock: `pharmacy.stock.read`, `.receipt`, `.adjustment`, `.settings`, `.movements.read`, `pharmacy.sale.counter-create`, `.hand-over`, and the existing `pharmacy.dispensing.create` row gains `stockTaken` (batch ids and counts).
+- Automatic lines and gates: `commercial.bill.line-add` with `origin`, and a refused dispensing or collection writes the existing refusal row with `PAYMENT_REQUIRED`.
+
+### Notifications
+
+None to patients in release 1: no SMS or email receipts (they wait for the SMS budget and a DPO check). Staff see counts on their pages, not messages: transfers waiting to be checked (Payments), days left open (End of day), low and expiring stock (Stock). A day closed with a cash difference over ₦5,000 logs `commercial.till_day.difference_high` with the facility id and the amount only. When the staff inbox exists (ORD-11 or its successor), these become inbox notices.
+
+### Website screens (health repo, Akos's design)
+
+The pages already exist. Lekan wires them; nothing is designed from scratch. Paths are under `apps/patient-web/src/ehr-blue/`.
+
+| Design screen (existing) | Live page after this ships | Routes | Change |
+|---|---|---|---|
+| Finance › Patient billing sample (`departments/sample/finance.tsx`, catalogue `frame/sample/catalog.ts` billing module) | Payments (`departments/commerce/Payments.tsx`) with Take payment and Receipt | bills, payments, receipt, defer, void | Replace the sample's Issue invoice, Record simulated payment, Refund and Void invoice with the live page. "Refund" is Void payment with "Refund: …". The sample's "Insurance" payment becomes HMO cover. Add a source filter value "Visit" and the "HMO to pay" line. |
+| Take payment drawer (`TakePayment.tsx`) | as built | `POST .../payments` | HMO: show "Recorded as owed by the HMO, not paid" and the item's HMO price as a guide. Add the optional paper receipt number. Hide methods not in settings (as built). |
+| Receipt (`Receipt.tsx`) | as built | `GET .../receipt` | Show `healthIdLast4` only; print "Cancelled" on a voided payment; print the paper receipt number when present. |
+| Bill badge (`BillBadge.tsx`) on pharmacy and lab queues | as built | work items' `bill` | Add "Bill follows" for `unknown_patient`. |
+| Settings › Service catalogue sample (`departments/sample/admin.ts`, `servicesSample`) | Price list (`PriceList.tsx`) | catalogue items | Remove the sample; Service catalogue opens the Price list filtered to Services (BILL-2). Add the national-code picker (ORD-7 search) and "Not on the price list". |
+| Finance › End of day (`EndOfDay.tsx`) | as built | shifts | Show waivers and HMO cover apart from cash; require a note when the difference is not 0. |
+| Settings › Payment setup (`PaymentSetup.tsx`) | as built | payment settings | Add the check-in charge item; show pay-before switches disabled with "Not switched on yet" while `payBeforeAvailable` is false; keep Emergency always ticked and disabled. |
+| Outstanding balances (no screen yet) | a new tab on Payments, built from the Payments list design | outstanding, hmo-receivables | Two tables: "Patients who owe" and "HMOs that owe". |
+| Home billing cards (`home/dashboardCards.tsx` PatientBillingCard, `home/adminCards.tsx` HomeBillingCard) | live | bills/summary | Read the summary instead of sample totals, for the roles in `RoleDashboard.tsx` `BILLING_ROLES`. |
+| Pharmacy Sell and Sales (`departments/pharmacy/Sell.tsx`, `Sales.tsx`) | as built | walk-in orders (counter), hand-over, bills `date=` | Disable "Send to the queue" with the 409 text; remove the photo upload until it ships. |
+| Pharmacy Stock and Receive stock (`Stock.tsx`, `ReceiveStock.tsx`) | as built | stock routes | Add "Stock settings" (unit, reorder level) per item, and the expired count. |
+| Roles (`frame/sampleAccess.ts`, `onboarding/roleTemplates.ts`) | SX-4 Staff page | SX-4 | Map the design's Cashier and Billing Officer to `cashier` and `billing_officer`. |
+| Insurance & Claims and Policies samples | stay samples | none | Release 2. |
+
+`commerce/served.ts` opens the pages at a facility when the bills route answers anything but 404; `packages/contracts/src/registry.ts` moves the served entries from proposed to served. Staff words: "NIN Verified" / "NIN Not Verified" where a patient card shows; no "permission" wording; Lagos time on every date.
+
+**Before this ships:** the pages stay at the four demo facilities only, as `served.ts` already does, and show `NotSwitchedOn` on 404.
+
+### Tests
+
+- **Database suite** `services/ehr-api/test/database/patient-billing.integration.sql` on a throwaway local PostgreSQL cluster with fictional data: every refusal above; totals agree after every command (`bill_totals_agree`); concurrent payments on one bill (two sessions) never overpay; receipt and bill numbers have no gaps under concurrency and across a year change; a void by the recorder is refused; HMO cover never reaches paid or the day's totals; one open day per scope; closed days never change; expiry-first across three batches, expired batches skipped, `OUT_OF_STOCK` takes nothing; batch on-hand equals the sum of movements; a reversal moves no stock and always takes its line off the bill (never-paid, part-paid, paid, HMO-covered and waived), leaving only what was collected beyond the bill as refund due or cover over the bill, and pay-before lets the corrected medicine through once its own price is paid; a refill of a billed work item is refused and takes no stock, and a second dispensing that is not the line's changes no bill when reversed; an anonymous walk-in lab bill; a temporary table the runtime made first with the outstanding list's old name fires nothing; a prescription-only medicine never leaves through the bill routes or a hand-over without its prescriber; no line on a sale handed over; a sale of free items is paid as made and handed over; a payment during a day close is refused (two sessions); triggers do nothing at a facility with no settings; emergency (triage 1-2) and unknown patients are deferred and never gated; RLS: another facility's bill is invisible; each migration's NOWAIT refusal, precondition refusal and "already applied" re-run.
+- **Role matrix:** `role-matrix.spec.ts` and `facility-modules.spec.ts` with the two roles and the four module keys.
+- **Service specs:** ehr-api `commercial` module (routes, validation, idempotency, purpose, `q` refusals, audit rows), pharmacy-api stock, counter sale and the dispensing changes.
+- **Runtime verifier** `services/ehr-api/scripts/verify-patient-billing-runtime.mjs` (boots ehr-api and pharmacy-api as their runtime roles): a QA cashier opens a day, a check-in makes a visit bill, a pharmacist accepts a priced prescription, the cashier takes POS and cash, a billing officer voids one, an HMO cover is recorded, the pharmacist dispenses expiry-first, a counter sale is handed over, the day closes with a difference and a note. Added to the rehearsal after 0167.
+- **Rehearsal:** `HID_REHEARSAL_LIVE_POINTS=0162,0163,0164,0165,0166,0167` with Release C's live tree: every live verifier passes at every point.
+- **Health repo:** the commerce pages' tests against the served shapes (Lekan), including the HMO cover and `visit` source.
+
+### Clinical lead items (before real patients)
+
+- BILL-3: serve emergency and unknown patients now, bill later, always; and which of 0135's five triage levels count as an emergency (built as 1 and 2).
+- Switching pay-before on for pharmacy and lab at any real facility (`COMMERCIAL_PAY_BEFORE_ENABLED`).
+- That a dispensing in a unit other than the stock unit is refused rather than converted (BILL-12).
+- The department's checklist before the owner's go-live (owner sprint approval, 25 Nov 2026).
+
+### DPO and legal items
+
+- How long bills, receipts and payment records are kept, under NDPA minimisation against tax-record retention [verify the period]. Built as: never deleted; to be decided before go-live.
+- Cashiers see bill line names, which can reveal a test or medicine. Recommended: show the names (patients need their charges explained), list cashiers under the facility's staff notice, and review the sensitive-test list (the patient record chat's) for masking on lists in a later release.
+- Receipts print the patient's name and the last four characters of the Health ID only.
+- A counter sale put on a Health ID: a patient lookup, audited; no clinical record is made.
+- Paystack (BILL-14): the facility's own merchant agreement; Health ID sends only the amount, a bill reference and an optional email; a data-processing note for the facility. Needed before `COMMERCIAL_ONLINE_PAYMENT_ENABLED` is switched on anywhere.
+- Release 2 (claims to HMOs and NHIA) needs its own DPIA addendum and patient notice; nothing in release 1 sends anything to an HMO.
+
+### Depends on
+
+- 0135 (waiting list: the visit), 0144 (ORD-4 acceptance), 0145 (ID-7 unknown patients), 0133 (own pharmacy and lab work), 0149 (ORD-7 lists, for the national link; empty until signed), 0139 (SX-4, to give the new roles), 0136 and SX-1 (role table, module keys, fixture), SX-9 (staff names on payments).
+- 0151 and 0123 (sealed QA logins).
+- 0154 (ORD-12 refills), if merged first: lines by fill.
+- The Appointments department (Phase 1): its check-in calls 0135, so the check-in charge works for booked patients too.
+- Ola: pharmacy and lab hooks review; Lekan: the screens; Rahman: final database check of 0162-0167.
+
+### Target
+
+Release D, Phase 1. Size **XL**: six migrations (0162-0167, provisional), about 35 routes across ehr-api and pharmacy-api, the gateway change, and the screens' wiring.
 
 # Not planned yet
 

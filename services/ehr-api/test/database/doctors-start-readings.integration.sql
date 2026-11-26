@@ -54,7 +54,6 @@ create extension dblink with schema public;
 \endif
 
 begin;
-
 -- Runs 0150 as written and keeps what it answered (SQLSTATE and message, or
 -- 'applied'). 0150 is one statement, so when it raises, ON_ERROR_ROLLBACK
 -- undoes all of it, as the runner's transaction does.
@@ -133,6 +132,13 @@ set local session_replication_role = replica;
 delete from audit.events where correlation_id = '0150-doctors-start-readings-q141b';
 set local session_replication_role = origin;
 delete from auth.role_permissions where role_code = 'doctor' and permission_code = 'ocr.job.start';
+-- BILL-1 (0162) adds the billing and pharmacy-stock codes to these roles. This
+-- suite checks 0150 against the role table as Release C leaves it, so its
+-- rolled-back transaction takes 0162's rows out here (after case 1's second
+-- session) where 0162 is applied (the patient-billing suite checks them).
+delete from auth.role_permissions
+ where permission_code like 'billing.%'
+    or permission_code in ('pharmacy.walk-in.create', 'pharmacy.stock.read', 'pharmacy.stock.manage');
 select pg_temp.expect('2a the state before 0150, for this transaction', '0 rows, 0 audit rows', pg_temp.made());
 select pg_temp.expect('2b the doctor''s codes as Release C leaves them (0150''s pin)', '35 186a1ece641bffd2be5ebb05b80479b2',
   (select count(*) || ' ' || md5(string_agg(permission_code, ',' order by permission_code collate "C"))

@@ -32,7 +32,11 @@ export type FacilityModuleKey =
   | 'migrate'
   | 'outreach'
   | 'admin'
-  | 'audit';
+  | 'audit'
+  | 'billing'
+  | 'priceList'
+  | 'endOfDay'
+  | 'pharmacyStock';
 
 export interface FacilityModuleRule {
   key: FacilityModuleKey;
@@ -81,6 +85,11 @@ export const FACILITY_MODULE_RULES: readonly FacilityModuleRule[] = Object.freez
   rule('admin', 'Facility profile and staff', ['workforce.manage'], ['organization.manage']),
   // The facility's audit trail (Akos's "View (audit)" cells).
   rule('audit', 'Audit trail', ['audit.read']),
+  // BILL-1 (0162): the Finance group and the pharmacy's stock (ehr-api's commercial routes, pharmacy-api's stock routes).
+  rule('billing', 'Payments and receipts', ['billing.bill.read'], ['billing.payment.record']),
+  rule('priceList', 'Price list', ['billing.catalogue.read'], ['billing.catalogue.manage']),
+  rule('endOfDay', 'End of day', ['billing.shift.own']),
+  rule('pharmacyStock', 'Pharmacy stock', ['pharmacy.stock.read'], ['pharmacy.stock.manage']),
 ]);
 
 /** How far a set of permission codes can use one area. */

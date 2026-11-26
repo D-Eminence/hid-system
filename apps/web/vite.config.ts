@@ -151,6 +151,11 @@ export default defineConfig({
         target: `http://127.0.0.1:${ports.identityApi}`,
         changeOrigin: true,
       },
+      // BILL-1 (BILL-9): patient billing is ehr-api's, as the gateway routes it; pricing and demo requests stay on identity-api.
+      '^/api/v1/commercial/(payment-settings|catalogue-items|bills|outstanding|hmo-receivables|shifts|paystack)': {
+        target: `http://127.0.0.1:${ports.ehrApi}`,
+        changeOrigin: true,
+      },
       '/api/v1/commercial': {
         target: `http://127.0.0.1:${ports.identityApi}`,
         changeOrigin: true,

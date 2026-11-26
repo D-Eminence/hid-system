@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0153",
-    "count": 154,
+    "last": "0167",
+    "count": 160,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -713,6 +713,30 @@
       {
         "name": "0153_clinician_recent_diagnoses.sql",
         "sha256": "45faa6a739056cc07426fdb5363b58c7dda1dbcbc096fb6d1769ae746798500b"
+      },
+      {
+        "name": "0162_billing_roles_and_codes.sql",
+        "sha256": "1106c58b8ea9d5a402711643cd0f3b8f32d18a74c60c3c24bdb6f48ea7e3b913"
+      },
+      {
+        "name": "0163_billing_settings_and_price_list.sql",
+        "sha256": "1f9634f112d5265867509495cfd23afd960e9dc4569a74ccbddd03e2bbe72bde"
+      },
+      {
+        "name": "0164_bills_payments_and_hmo_cover.sql",
+        "sha256": "1997a0ccd72d6504ce2522afd61f41d9d47ce22c6babb81715957576aefe5be5"
+      },
+      {
+        "name": "0165_till_days_and_end_of_day.sql",
+        "sha256": "b223862f98d18f43475c279f371bc33fb15732316494b381e994a5dc8b1caef6"
+      },
+      {
+        "name": "0166_pharmacy_point_of_care_stock.sql",
+        "sha256": "3441e248f685947a9ffa3477fbefe9132aef846cd4c33b100f5589f2848a369f"
+      },
+      {
+        "name": "0167_billing_and_stock_hooks.sql",
+        "sha256": "269bc3971851b4e0add7089fbe466d64827ce3257b3e2b8edcfd9581ef612eab"
       }
     ]
   },

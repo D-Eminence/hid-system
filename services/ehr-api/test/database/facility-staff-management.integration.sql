@@ -119,7 +119,7 @@ begin
   if state.review_state <> 'pending' or state.on_probation or state.probation_ends_at is not null
      or not state.invitations_open or state.reviewable_licence_bodies <> array['MDCN', 'NMCN']
      or state.administrator_licence_body is not null or state.organization_type <> 'hospital'
-     or state.invitable_roles <> array['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist']
+     or state.invitable_roles <> array['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist', 'cashier', 'billing_officer']
      or state.attestation_version <> 'facility-staff-attestation-v1'
      or state.attestation_text not like 'I confirm that {name} works at {facility}%'
      or state.pending_limit <> 100 or state.invitations_per_day <> 30 or state.emails_per_day <> 60
@@ -349,7 +349,7 @@ begin
   end if;
   perform pg_temp.as_admin(2, 'manage-reads-2');
   select * into state from identity.facility_staff_management_state();
-  if state.invitable_roles <> array['lab', 'receptionist'] or state.reviewable_licence_bodies <> array['MLSCN']
+  if state.invitable_roles <> array['lab', 'receptionist', 'cashier'] or state.reviewable_licence_bodies <> array['MLSCN']
      or (select count(*) from identity.list_facility_staff_invitations()) <> 1 then
     raise exception 'The laboratory''s page state is wrong: %', row_to_json(state);
   end if;

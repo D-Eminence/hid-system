@@ -2065,3 +2065,38 @@ grant execute on function ehr.record_recent_diagnosis(text, text, text), ehr.rec
   to hid_ehr_runtime, hid_schema_test_runtime;
 revoke all on function ehr.record_recent_diagnosis(text, text, text), ehr.recent_diagnoses(integer) from public;
 revoke all on ehr.clinician_recent_diagnoses from public;
+
+-- Patient billing release 1 with pharmacy point-of-care stock (BILL-1,
+-- 0162-0167), exactly as those files grant and revoke them: the commercial
+-- schema's command and read functions (SECURITY DEFINER; each checks the
+-- member's code at the session facility) to the EHR runtime and the schema
+-- test runtime; the work items' bills to the Lab and Pharmacy runtimes; the
+-- stock and counter-sale functions to the Pharmacy runtime. No runtime holds
+-- any privilege on a commercial table or on the pharmacy stock tables, the
+-- helpers or the hook functions of 0167, which their triggers run as their
+-- owner.
+grant usage on schema commercial to hid_ehr_runtime, hid_pharmacy_runtime, hid_lab_runtime, hid_schema_test_runtime;
+grant execute on function commercial.billing_switched_on(boolean),
+  commercial.audit_refusal(text, text, text, uuid, text), commercial.settings_get(),
+  commercial.settings_put(jsonb, bigint, boolean, boolean, text, text),
+  commercial.catalogue_list(text, text, boolean, integer), commercial.catalogue_create(jsonb, text, text),
+  commercial.catalogue_update(uuid, jsonb, bigint, text, text), commercial.catalogue_unpriced_codes(),
+  commercial.bill_list(text, text, text, date, integer), commercial.bill_summary(date), commercial.bill_get(uuid),
+  commercial.bill_create(jsonb, text, text), commercial.bill_line_add(uuid, jsonb, bigint, text, text),
+  commercial.bill_line_cancel(uuid, uuid, text, bigint, text, text), commercial.bill_void(uuid, text, bigint, text, text),
+  commercial.bill_defer(uuid, text, text, text, text), commercial.bill_attach_patient(uuid, text, text, text),
+  commercial.hmo_cover_cancel(uuid, uuid, text, bigint, text, text), commercial.outstanding(integer, integer),
+  commercial.hmo_receivables(uuid, integer), commercial.work_item_bills(text, uuid[]),
+  commercial.day_current(uuid), commercial.day_open(uuid, bigint, text, text),
+  commercial.day_close(uuid, bigint, text, bigint, text, text), commercial.day_list(date, boolean),
+  commercial.payment_record(uuid, jsonb, bigint, text, text), commercial.payment_confirm(uuid, uuid, bigint, text, text),
+  commercial.payment_void(uuid, uuid, text, bigint, uuid, text, text), commercial.receipt(uuid, uuid),
+  commercial.payment_record_online(uuid, bigint, text) to hid_ehr_runtime, hid_schema_test_runtime;
+grant execute on function commercial.work_item_bills(text, uuid[]) to hid_pharmacy_runtime, hid_lab_runtime;
+grant execute on function commercial.billing_switched_on(boolean), commercial.audit_refusal(text, text, text, uuid, text)
+  to hid_pharmacy_runtime;
+grant execute on function pharmacy.stock_list(text, text, integer),
+  pharmacy.stock_settings_put(uuid, text, integer, bigint, text, text), pharmacy.stock_receive(jsonb, text, text),
+  pharmacy.stock_adjust(jsonb, text, text), pharmacy.stock_movement_list(uuid, integer),
+  pharmacy.counter_sale_create(jsonb, text, text), pharmacy.sale_hand_over(uuid, bigint, text, text),
+  pharmacy.stock_for_codes(jsonb) to hid_pharmacy_runtime, hid_schema_test_runtime;

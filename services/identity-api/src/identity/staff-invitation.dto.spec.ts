@@ -34,20 +34,21 @@ const token = 'Ab3_-Zx9Qw8Er7Ty6Ui5Op4As3Df2Gh1Jk0LzXcVbNm';
 const invitationId = '3f2a9c1b-7d4e-4a5b-8c6d-0e1f2a3b4c5d';
 
 describe('staff vocabulary (SPEC 3.6, 4.2)', () => {
+  // BILL-5 (0162): cashier and billing_officer for hospitals and clinics; cashier for laboratories and pharmacies.
   it('invitable roles by organization type and product', () => {
     for (const type of ['hospital', 'clinic']) {
       for (const product of ['ehr', 'migrate', 'laboratory', 'pharmacy']) {
-        expect(staffInvitableRoles(type, product)).toEqual(['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist']);
+        expect(staffInvitableRoles(type, product)).toEqual(['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist', 'cashier', 'billing_officer']);
       }
     }
     for (const product of ['ehr', 'migrate', 'laboratory', 'pharmacy']) {
-      expect(staffInvitableRoles('laboratory', product)).toEqual(['lab', 'receptionist']);
-      expect(staffInvitableRoles('pharmacy', product)).toEqual(['pharmacist', 'receptionist']);
+      expect(staffInvitableRoles('laboratory', product)).toEqual(['lab', 'receptionist', 'cashier']);
+      expect(staffInvitableRoles('pharmacy', product)).toEqual(['pharmacist', 'receptionist', 'cashier']);
     }
-    expect(staffInvitableRoles('other', 'ehr')).toEqual(['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist']);
-    expect(staffInvitableRoles('other', 'migrate')).toEqual(['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist']);
-    expect(staffInvitableRoles('other', 'laboratory')).toEqual(['lab', 'receptionist']);
-    expect(staffInvitableRoles('other', 'pharmacy')).toEqual(['pharmacist', 'receptionist']);
+    expect(staffInvitableRoles('other', 'ehr')).toEqual(['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist', 'cashier', 'billing_officer']);
+    expect(staffInvitableRoles('other', 'migrate')).toEqual(['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist', 'cashier', 'billing_officer']);
+    expect(staffInvitableRoles('other', 'laboratory')).toEqual(['lab', 'receptionist', 'cashier']);
+    expect(staffInvitableRoles('other', 'pharmacy')).toEqual(['pharmacist', 'receptionist', 'cashier']);
     expect(staffInvitableRoles('dental', 'ehr')).toEqual([]);
   });
 
@@ -69,10 +70,11 @@ describe('staff vocabulary (SPEC 3.6, 4.2)', () => {
   });
 
   it('licence body and labels by role; no clinician, admin or platform role', () => {
-    expect(['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist', 'clinician', 'org_admin'].map(staffRoleLicenceBody))
-      .toEqual(['MDCN', 'NMCN', 'MLSCN', 'PCN', null, null, null]);
+    expect(['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist', 'cashier', 'billing_officer', 'clinician', 'org_admin']
+      .map(staffRoleLicenceBody)).toEqual(['MDCN', 'NMCN', 'MLSCN', 'PCN', null, null, null, null, null]);
     expect(Object.fromEntries(Object.entries(STAFF_ROLE_LABELS).map(([role, label]) => [role, label.lower]))).toEqual({
-      doctor: 'doctor', nurse: 'nurse', lab: 'laboratory scientist', pharmacist: 'pharmacist', receptionist: 'receptionist' });
+      doctor: 'doctor', nurse: 'nurse', lab: 'laboratory scientist', pharmacist: 'pharmacist', receptionist: 'receptionist',
+      cashier: 'cashier', billing_officer: 'billing officer' });
   });
 
   // Owner decision Q137 B (0147): two narrow roles a staff profile names, which nobody invites, grants at review or

@@ -861,7 +861,9 @@ describe('ORD-4: dispensing a received item accepts it first', () => {
       'C17', 'savepoint pharmacy_own_work_access', 'own-work basis', 'release savepoint pharmacy_own_work_access',
       'dispensing replay', 'savepoint pharmacy_own_work_steps', 'steps', 'release savepoint pharmacy_own_work_steps',
       'savepoint pharmacy_dispensing_acceptance', 'insert acceptance', 'insert event',
-      'release savepoint pharmacy_dispensing_acceptance', 'insert dispensing', 'outbox', 'audit', 'COMMIT']);
+      'release savepoint pharmacy_dispensing_acceptance', 'session', 'insert dispensing',
+      // BILL-1 (0167): the batch setting before the insert ('session') and the stock it took after.
+      "select current_setting('hid.stock_taken', true) as taken", 'outbox', 'audit', 'COMMIT']);
     expect(h.audited()).toEqual([{ action: 'pharmacy.dispensing.create', patientId: ada, resourceType: 'medication-dispensing',
       resourceId: '65000000-0000-4000-8000-0000000000ff', outcome: 'success', details: { workItemId: id(1),
         workItemVersion: 1, status: 'dispensed', basis: 'own-work', acceptedWithDispensing: true } }]);
@@ -997,6 +999,67 @@ describe('ORD-4: dispensing a received item accepts it first', () => {
     await h.service.dispense(pharmacist, id(1), dispenseInput, dispenseKey);
     expect(h.last().some((sql) => /own_work_item_steps|pharmacy_dispensing_acceptance|work_item_acceptances/.test(sql)))
       .toBe(false);
+  });
+});
+
+describe('BILL-1 (0167) with ORD-4: a pay-before refusal of a dispensing that accepts the item', () => {
+  const dispensingDigest = (n: number) => requestDigest('pharmacy.dispensing.create', { workItemId: id(n), ...dispenseInput });
+  const billingRefusal = (code: string) => Object.assign(new Error(code), { code: 'HB409' });
+
+  it('keeps the acceptance (and so the line the cashier collects), and the next Dispense after payment goes through '
+    + 'with no second acceptance', async () => {
+    const h = harness({ dispensingErrors: [billingRefusal('PAYMENT_REQUIRED')] });
+    await expect(h.service.dispense(pharmacist, id(1), dispenseInput, dispenseKey)).rejects.toMatchObject({
+      status: 409, code: 'PAYMENT_REQUIRED', message: 'This bill must be paid first.' });
+    expect(h.committed.dispensings).toHaveLength(0);
+    expect(h.committed.acceptances.filter((row) => row.work_item_id === id(1))).toEqual([expect.objectContaining({
+      accepted_with: 'dispensing', accepted_by: pharmacistAccount, accepted_by_membership_id: pharmacistMembership,
+      idempotency_key: dispenseKey, request_sha256: dispensingDigest(1) })]);
+    expect(h.committed.events).toEqual([[id(1), ada, facilityId, pharmacistAccount, pharmacistMembership,
+      PHARMACIST_ACCEPTED_REASON, pharmacist.correlationId]]);
+    expect(h.audited().map((row) => [row.action, row.outcome, row.details])).toEqual([
+      ['pharmacy.dispensing.create', 'denied', { code: 'PAYMENT_REQUIRED' }],
+      ['pharmacy.work-item.pharmacist-accept', 'success', { outcome: 'accepted', acceptedWith: 'dispensing',
+        forPayment: true, basis: 'own-work' }]]);
+    // Paid at the cashier: the same Dispense again finds the item accepted and records no second acceptance.
+    await expect(h.service.dispense(pharmacist, id(1), dispenseInput, dispenseKey)).resolves.toMatchObject({
+      status: 'dispensed' });
+    expect(h.last()).not.toContain(INSERT_ACCEPTANCE.trim());
+    expect(h.committed.acceptances.filter((row) => row.work_item_id === id(1))).toHaveLength(1);
+    expect(h.committed.dispensings).toHaveLength(1);
+    expect(h.audited().at(-1)!.details).not.toHaveProperty('acceptedWithDispensing');
+  });
+
+  it('keeps it for a transfer waiting to be checked too (PAYMENT_PENDING_CHECK)', async () => {
+    const h = harness({ dispensingErrors: [billingRefusal('PAYMENT_PENDING_CHECK')] });
+    await expect(h.service.dispense(pharmacist, id(1), dispenseInput, dispenseKey)).rejects.toMatchObject({
+      code: 'PAYMENT_PENDING_CHECK' });
+    expect(h.committed.acceptances.filter((row) => row.work_item_id === id(1))).toHaveLength(1);
+  });
+
+  it.each(['OUT_OF_STOCK', 'STOCK_UNIT_MISMATCH', 'REFILL_BILLING_NOT_AVAILABLE'])('keeps nothing for a stock or '
+    + 'refill refusal (%s): the dispensing and its acceptance stay one step', async (code) => {
+    const h = harness({ dispensingErrors: [billingRefusal(code)] });
+    await expect(h.service.dispense(pharmacist, id(1), dispenseInput, dispenseKey)).rejects.toMatchObject({ code });
+    expect(h.committed.acceptances.filter((row) => row.work_item_id === id(1))).toEqual([]);
+    expect(h.audited().map((row) => row.action)).toEqual(['pharmacy.dispensing.create']);
+  });
+
+  it('records nothing new for an item already accepted (its line is already on the bill)', async () => {
+    const h = harness({ dispensingErrors: [billingRefusal('PAYMENT_REQUIRED')] });
+    await expect(h.service.dispense(pharmacist, id(2), dispenseInput, dispenseKey)).rejects.toMatchObject({
+      code: 'PAYMENT_REQUIRED' });
+    expect(h.transactions).toHaveLength(2);
+    expect(h.committed.acceptances.filter((row) => row.work_item_id === id(2))).toHaveLength(1);
+    expect(h.audited().map((row) => row.action)).toEqual(['pharmacy.dispensing.create']);
+  });
+
+  it('records nothing with own work off', async () => {
+    const h = harness({ ownWork: false, dispensingErrors: [billingRefusal('PAYMENT_REQUIRED')] });
+    await expect(h.service.dispense(pharmacist, id(1), dispenseInput, dispenseKey)).rejects.toMatchObject({
+      code: 'PAYMENT_REQUIRED' });
+    expect(h.transactions).toHaveLength(2);
+    expect(h.committed.acceptances.filter((row) => row.work_item_id === id(1))).toEqual([]);
   });
 });
 

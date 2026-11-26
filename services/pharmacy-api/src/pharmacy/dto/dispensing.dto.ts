@@ -1,5 +1,5 @@
 import { Transform } from 'class-transformer';
-import { IsInt, IsNumber, IsString, Length, Min } from 'class-validator';
+import { IsInt, IsNumber, IsOptional, IsString, IsUUID, Length, Min } from 'class-validator';
 
 const trim = ({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() : value;
 
@@ -8,6 +8,8 @@ export class CreateDispensingDto {
   @IsNumber({ maxDecimalPlaces: 4 }) @Min(0.0001) quantityDispensed!: number;
   @Transform(trim) @IsString() @Length(1, 80) quantityUnit!: string;
   @Transform(trim) @IsString() @Length(8, 500) reason!: string;
+  /** BILL-1 (0167): take a stock-kept item from this batch only (else expiry first). */
+  @IsOptional() @IsUUID() batchId?: string;
 }
 
 export class ReverseDispensingDto {

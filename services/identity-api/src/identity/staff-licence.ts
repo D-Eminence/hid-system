@@ -8,7 +8,8 @@
  * choices to the browser.
  */
 
-export const STAFF_ROLES = ['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist'] as const;
+// BILL-5 (0162): cashier and billing_officer are staff roles too, with no licence (like the front desk).
+export const STAFF_ROLES = ['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist', 'cashier', 'billing_officer'] as const;
 export type StaffRole = typeof STAFF_ROLES[number];
 
 export const LICENCE_BODIES = ['MDCN', 'NMCN', 'MLSCN', 'PCN'] as const;
@@ -33,6 +34,8 @@ const LICENCE_BODY_BY_ROLE: Readonly<Record<StaffRole, LicenceBody | null>> = Ob
   lab: 'MLSCN',
   pharmacist: 'PCN',
   receptionist: null,
+  cashier: null,
+  billing_officer: null,
 });
 
 /** The role's labels: the title the page shows and the lower-case word the email uses. */
@@ -42,6 +45,8 @@ export const STAFF_ROLE_LABELS: Readonly<Record<StaffRole, { title: string; lowe
   lab: { title: 'Laboratory scientist', lower: 'laboratory scientist' },
   pharmacist: { title: 'Pharmacist', lower: 'pharmacist' },
   receptionist: { title: 'Receptionist', lower: 'receptionist' },
+  cashier: { title: 'Cashier', lower: 'cashier' },
+  billing_officer: { title: 'Billing officer', lower: 'billing officer' },
 });
 
 /**
@@ -63,7 +68,7 @@ export const NARROW_ROLE_LABELS: Readonly<Record<NarrowRole, { title: string; lo
   reading_starter: { title: 'Start a paper reading', lower: 'start a paper reading' },
 });
 
-/** The licence body a role needs, or null (receptionist: no licence). */
+/** The licence body a role needs, or null (receptionist, cashier and billing officer: no licence). */
 export function staffRoleLicenceBody(role: string): LicenceBody | null {
   return (STAFF_ROLES as readonly string[]).includes(role) ? LICENCE_BODY_BY_ROLE[role as StaffRole] : null;
 }
@@ -85,9 +90,9 @@ function family(organizationType: string, productCode: string): Family | null {
 /** The roles a reviewed self-signed-up facility may invite (S9, Q5; SPEC 4.2). */
 export function staffInvitableRoles(organizationType: string, productCode: string): StaffRole[] {
   switch (family(organizationType, productCode)) {
-    case 'clinical': return ['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist'];
-    case 'laboratory': return ['lab', 'receptionist'];
-    case 'pharmacy': return ['pharmacist', 'receptionist'];
+    case 'clinical': return ['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist', 'cashier', 'billing_officer'];
+    case 'laboratory': return ['lab', 'receptionist', 'cashier'];
+    case 'pharmacy': return ['pharmacist', 'receptionist', 'cashier'];
     default: return [];
   }
 }
