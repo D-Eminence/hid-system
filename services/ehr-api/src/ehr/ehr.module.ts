@@ -35,6 +35,8 @@ import { CatalogModule } from './catalog/catalog.module';
 
 import { ConsultationDraftsModule } from './consultation-drafts/consultation-drafts.module';
 import { MyOrdersModule } from './my-orders/my-orders.module';
+// DEN-1 (0194, 0195): the dental clinic, behind DENTAL_ENABLED.
+import { DentalModule } from './dental/dental.module';
 @Module({
   imports: [
     ClinicalInfrastructureModule,
@@ -55,6 +57,8 @@ import { MyOrdersModule } from './my-orders/my-orders.module';
     VisitQueueModule,
     // ORD-7 (0149): the medicine and lab-test lists.
     CatalogModule,
+    // DEN-1 (0194, 0195): the dental clinic, behind DENTAL_ENABLED.
+    DentalModule,
   ],
   controllers: [PatientRecordsController,StaffPatientChatController,HealthProfileController],
   providers: [StaffChatScopeService,StaffEvidenceService,StaffChatHistoryService,PatientRecordsService, ImportedAttachmentService, BedrockAiService, ClaudeAiService, PatientAttachmentTextService,PatientEvidenceService, PatientChatService, PatientChatHistoryService, PatientChatSourceService,

@@ -294,6 +294,10 @@ const environmentSchema = z.object({
   // time, only once 0140 is applied: with it on, Identity refuses to start
   // while the table or one of its grants is missing (OpenPatientStartupCheck).
   STAFF_OPEN_PATIENT_ENABLED: booleanString,
+  // DEN-1 (0194, Q149 A): the dental clinic. While off (the default), the dentist role is neither offered nor accepted
+  // for invitations and SX-4 (409 STAFF_ROLE_NOT_AVAILABLE). On in staging; in production only after the clinical
+  // lead's sign-off and the owner's go-live (Q160 A).
+  DENTAL_ENABLED: booleanString,
 }).superRefine((environment, context) => {
   if (environment.AUTH_MODE === 'local') {
     if (!environment.AUTH_SIGNING_SECRET || environment.AUTH_SIGNING_SECRET.length < 32) {

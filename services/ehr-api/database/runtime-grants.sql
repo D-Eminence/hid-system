@@ -2065,3 +2065,56 @@ grant execute on function ehr.record_recent_diagnosis(text, text, text), ehr.rec
   to hid_ehr_runtime, hid_schema_test_runtime;
 revoke all on function ehr.record_recent_diagnosis(text, text, text), ehr.recent_diagnoses(integer) from public;
 revoke all on ehr.clinician_recent_diagnoses from public;
+
+-- The dental clinic (0195, DEN-1 of Release D; built at the recommended
+-- options Q-DEN-1 A to Q-DEN-6 A, not yet answered by the owner), exactly as
+-- 0195 grants and revokes them: the lists, the visit start, read, follow-up
+-- and list, the chart read, save and entered-in-error mark, the procedure
+-- record, done, cancel, entered-in-error mark and list, and the summary's
+-- dental part to the EHR runtime only. No privilege for any runtime on the
+-- seven dental tables (only these functions read and write them, as their
+-- owner), and none on the caller and cards helpers or the four guard
+-- functions. 0194 (the dentist role and codes) and 0196 (held: the dentist's
+-- own-facility opening) add no grant.
+grant execute on function
+  ehr.dental_lists(),
+  ehr.dental_visit_start(uuid, uuid, text, text),
+  ehr.dental_visit_read(uuid, uuid),
+  ehr.dental_visit_follow_up(uuid, uuid, bigint, boolean, date, boolean, text, text, text),
+  ehr.dental_visits_list(integer),
+  ehr.dental_chart_read(uuid, uuid),
+  ehr.dental_chart_save(uuid, uuid, uuid, text, jsonb, text, text, text),
+  ehr.dental_chart_entered_in_error(uuid, uuid, text, text, text),
+  ehr.dental_procedure_record(uuid, uuid, text, text, text, text, smallint, text, smallint, text, timestamptz, text,
+    text, text, numeric, text, text, text),
+  ehr.dental_procedure_done(uuid, uuid, uuid, bigint, timestamptz, text, text, text, numeric, boolean, text, boolean,
+    text, text, text),
+  ehr.dental_procedure_cancel(uuid, uuid, bigint, text, text, text),
+  ehr.dental_procedure_entered_in_error(uuid, uuid, bigint, text, text, text),
+  ehr.dental_procedures_list(uuid, text),
+  ehr.dental_summary_read(uuid, uuid) to hid_ehr_runtime;
+revoke all on function
+  ehr.dental_lists(),
+  ehr.dental_visit_start(uuid, uuid, text, text),
+  ehr.dental_visit_read(uuid, uuid),
+  ehr.dental_visit_follow_up(uuid, uuid, bigint, boolean, date, boolean, text, text, text),
+  ehr.dental_visits_list(integer),
+  ehr.dental_chart_read(uuid, uuid),
+  ehr.dental_chart_save(uuid, uuid, uuid, text, jsonb, text, text, text),
+  ehr.dental_chart_entered_in_error(uuid, uuid, text, text, text),
+  ehr.dental_procedure_record(uuid, uuid, text, text, text, text, smallint, text, smallint, text, timestamptz, text,
+    text, text, numeric, text, text, text),
+  ehr.dental_procedure_done(uuid, uuid, uuid, bigint, timestamptz, text, text, text, numeric, boolean, text, boolean,
+    text, text, text),
+  ehr.dental_procedure_cancel(uuid, uuid, bigint, text, text, text),
+  ehr.dental_procedure_entered_in_error(uuid, uuid, bigint, text, text, text),
+  ehr.dental_procedures_list(uuid, text),
+  ehr.dental_summary_read(uuid, uuid),
+  ehr.dental_caller(text),
+  ehr.dental_cards(text, uuid[], uuid),
+  ehr.dental_list_versions_guard(),
+  ehr.dental_chart_versions_guard(),
+  ehr.dental_visits_guard(),
+  ehr.dental_procedures_guard() from public;
+revoke all on ehr.dental_list_versions, ehr.dental_list_items, ehr.dental_visits, ehr.dental_chart_versions,
+  ehr.dental_chart_findings, ehr.dental_procedures, ehr.dental_events from public;

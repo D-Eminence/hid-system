@@ -8,7 +8,9 @@
  * choices to the browser.
  */
 
-export const STAFF_ROLES = ['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist'] as const;
+// DEN-1 (0194, Q155 A): dentist is a staff role, licensed by the MDCN (which keeps the dental register), invitable at
+// hospitals and clinics only. While DENTAL_ENABLED is off it is neither offered nor accepted (staffRoleAvailable).
+export const STAFF_ROLES = ['doctor', 'dentist', 'nurse', 'lab', 'pharmacist', 'receptionist'] as const;
 export type StaffRole = typeof STAFF_ROLES[number];
 
 export const LICENCE_BODIES = ['MDCN', 'NMCN', 'MLSCN', 'PCN'] as const;
@@ -29,6 +31,7 @@ export type OrganizationType = typeof ORGANIZATION_TYPES[number];
 
 const LICENCE_BODY_BY_ROLE: Readonly<Record<StaffRole, LicenceBody | null>> = Object.freeze({
   doctor: 'MDCN',
+  dentist: 'MDCN',
   nurse: 'NMCN',
   lab: 'MLSCN',
   pharmacist: 'PCN',
@@ -38,6 +41,7 @@ const LICENCE_BODY_BY_ROLE: Readonly<Record<StaffRole, LicenceBody | null>> = Ob
 /** The role's labels: the title the page shows and the lower-case word the email uses. */
 export const STAFF_ROLE_LABELS: Readonly<Record<StaffRole, { title: string; lower: string }>> = Object.freeze({
   doctor: { title: 'Doctor', lower: 'doctor' },
+  dentist: { title: 'Dentist', lower: 'dentist' },
   nurse: { title: 'Nurse', lower: 'nurse' },
   lab: { title: 'Laboratory scientist', lower: 'laboratory scientist' },
   pharmacist: { title: 'Pharmacist', lower: 'pharmacist' },
@@ -85,7 +89,7 @@ function family(organizationType: string, productCode: string): Family | null {
 /** The roles a reviewed self-signed-up facility may invite (S9, Q5; SPEC 4.2). */
 export function staffInvitableRoles(organizationType: string, productCode: string): StaffRole[] {
   switch (family(organizationType, productCode)) {
-    case 'clinical': return ['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist'];
+    case 'clinical': return ['doctor', 'dentist', 'nurse', 'lab', 'pharmacist', 'receptionist'];
     case 'laboratory': return ['lab', 'receptionist'];
     case 'pharmacy': return ['pharmacist', 'receptionist'];
     default: return [];
@@ -118,4 +122,19 @@ export const LICENCE_NUMBER = /^[A-Z0-9][A-Z0-9/. -]{1,98}[A-Z0-9]$/;
 
 export function licenceNumberAcceptable(normalized: string): boolean {
   return LICENCE_NUMBER.test(normalized) && !normalized.includes('  ');
+}
+
+/**
+ * DEN-1 (Q149 A): the roles a department switch holds back. While the switch is off the role is not offered for
+ * invitations and SX-4, and an invitation, role change or role add naming it answers 409 STAFF_ROLE_NOT_AVAILABLE, so
+ * no real facility gains a dentist before the dental clinic's go-live. The database accepts the role once 0194 is
+ * applied; Identity is the gate. Removing the role is always allowed.
+ */
+export const SWITCHED_STAFF_ROLES: Readonly<Partial<Record<StaffRole, { message: string }>>> = Object.freeze({
+  dentist: { message: 'Dentists can be added once the dental clinic is switched on.' },
+});
+
+/** Whether a role may be offered and given now: every role but a switched one whose switch is off. */
+export function staffRoleAvailable(role: string, switches: { dentalEnabled: boolean }): boolean {
+  return role !== 'dentist' || switches.dentalEnabled;
 }

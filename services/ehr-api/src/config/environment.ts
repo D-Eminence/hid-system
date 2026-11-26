@@ -111,6 +111,13 @@ const environmentSchema = z
     OFFLINE_ESCROW_KEYS: optionalString,
     // Prescription strength, form, duration, quantity and priority (0125): off by default, off is exactly as before.
     PRESCRIPTION_DISPENSING_DETAILS_ENABLED: booleanString,
+    // DEN-1 (0194, 0195): the dental clinic. Off by default; every dental route answers 503 DENTAL_NOT_AVAILABLE.
+    // On in staging (the sealed QA dentist); in production only after the clinical lead's sign-off and the owner's
+    // go-live (Q160 A).
+    DENTAL_ENABLED: booleanString,
+    // DEN-1: intraoral and facial photos on the dental page. Off everywhere until the DPO agrees; the lists answer
+    // photosAvailable false and the page offers X-ray images only.
+    DENTAL_PHOTOS_ENABLED: booleanString,
   })
   .superRefine((environment, context) => {
     if (environment.AI_ENABLED) {
