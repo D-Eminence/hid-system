@@ -2,7 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadConfiguration, verifyMachineConfiguration } from '../scripts/verify-release-contract.mjs';
 
-test('release accepts 160 retained filenames through 0167, including duplicate prefixes, the unused 0065 slot and the booked 0154-0161', async () => {
+// BILL-1's files carry provisional numbers (0162-0167) on this department branch, so 0154-0161 are absent here and
+// this test (with the two machine-configuration tests of release-contract.test.mjs) refuses "missing migration prefix"
+// until the coordinator closes the numbers up at integration, in release order. No booked-number exception: one
+// would conflict with the other departments' and hide a missing file (Rahman, #258, 25 November 2026, 21:48 UTC).
+test('release accepts 160 retained filenames through 0167, including duplicate prefixes and the unused 0065 slot', async () => {
   const configuration = await loadConfiguration();
   assert.equal(configuration.components.migration.count, 160);
   assert.equal(configuration.components.migration.last, '0167');
