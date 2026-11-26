@@ -25,6 +25,7 @@ import { DomainProblem } from '../common/problem';
 import type { ActorContext, HidRequest } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
+import { rolePermissionPairs } from '../../test/role-matrix.fixtures';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import type { AuthSessionAuditService } from './auth-session-audit.service';
@@ -78,8 +79,8 @@ function seededRolePermissions(): Map<string, Set<string>> {
     for (const statement of text.matchAll(statements)) {
       const removing = statement[2] !== undefined;
       if (removing) deletesRead += 1;
-      for (const pair of (statement[1] ?? statement[2] ?? '').matchAll(/\(\s*'([a-z_]+)'\s*,\s*'([a-z0-9.-]+)'\s*\)/g)) {
-        const [, role, permission] = pair as unknown as [string, string, string];
+      // 0155 names its code by a constant ('admin', new_code); rolePermissionPairs reads that form too.
+      for (const [role, permission] of rolePermissionPairs(file, text, statement.index ?? 0, statement[1] ?? statement[2] ?? '')) {
         const set = grants.get(role) ?? new Set<string>();
         if (removing) set.delete(permission); else set.add(permission);
         grants.set(role, set);
@@ -337,6 +338,8 @@ describe('the permission codes the gate reads are the database seeds\' (auth.rol
     expect(holders('ocr.job.read-own')).toEqual(['receptionist']);
     expect(holders('ehr.document.read')).toEqual(['clinician', 'doctor', 'lab', 'nurse']);
     expect(holders('ocr.job.read')).toEqual(['admin', 'clinician', 'doctor', 'nurse']);
+    // 0155 (ORD-7): the facility's own medicines and lab tests, admin only (written as ('admin', new_code)).
+    expect(holders('ehr.catalog.facility-item.write')).toEqual(['admin']);
   });
 
   it('admits by exactly these codes on each site (Q97: lab., pharmacy. and outreach. take organization.manage, not ehr.encounter.write)', () => {

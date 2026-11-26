@@ -472,6 +472,7 @@
     ],
     "admin": [
       "audit.read",
+      "ehr.catalog.facility-item.write",
       "identity.registration.approve",
       "identity.registration.write",
       "lab.accession.read",
@@ -525,6 +526,7 @@
     "pharmacist (Pharmacy), Access requests and PIN: wider. Today shown, without identity.patient-access-pin.verify; Akos's table hidden.",
     "admin (Facility admin), Register and check in: wider. Today full; Akos's table hidden.",
     "admin (Facility admin), Lab results: wider. Today shown, without lab.result.enter; Akos's table hidden.",
-    "org_admin (Facility admin), Register and check in: wider. Today full; Akos's table hidden."
+    "org_admin (Facility admin), Register and check in: wider. Today full; Akos's table hidden.",
+    "org_admin (Facility admin), Facility profile and staff: narrower. Today shown, without ehr.catalog.facility-item.write; Akos's table full."
   ]
 }
