@@ -271,13 +271,16 @@ describe('ORD-11 the client refuses a broken answer (502)', () => {
     expect(await problemOf(offline.markOrderNoticeSeen(lettered.toUpperCase(), context))).toMatchObject({ status: 502 });
   });
 
-  it('keeps a kind it does not know; refuses a patient shown on a notice whose access ended', async () => {
+  it('keeps a kind it does not know; refuses a patient, display or visit on a notice whose access ended', async () => {
     respond({ items: [{ ...notice, kind: 'a_later_kind' }], nextCursor: null });
     expect((await offline.listOrderNotices({ state: 'all' }, context)).items[0]!.kind).toBe('a_later_kind');
     respond({ items: [{ ...notice, patient: { patientId: 'p', fullName: 'Ada Notice', sex: null, dateOfBirth: null,
       healthIdLast4: null } }], nextCursor: null });
     expect(await problemOf(offline.listOrderNotices({ state: 'all' }, context))).toMatchObject({ status: 502 });
     respond({ items: [{ ...notice, order: { ...notice.order, display: 'Synthetic potassium' } }], nextCursor: null });
+    expect(await problemOf(offline.listOrderNotices({ state: 'all' }, context))).toMatchObject({ status: 502 });
+    respond({ items: [{ ...notice, order: { ...notice.order, encounterId: 'a0000000-0000-4000-8000-000000000001' } }],
+      nextCursor: null });
     expect(await problemOf(offline.listOrderNotices({ state: 'all' }, context))).toMatchObject({ status: 502 });
   });
 

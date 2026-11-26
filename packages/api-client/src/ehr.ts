@@ -308,7 +308,7 @@ function parseOrderNoticeSummary(payload: unknown): EhrOrderNoticeSummary {
  * One notice. Strict for a type, refused with 502 like any broken answer;
  * a kind or order type this client does not know is kept as sent. Keys the
  * contract does not define are dropped. A notice whose access has ended
- * must carry no patient and no display (never passed on to a screen).
+ * must carry no patient, visit or display (never passed on to a screen).
  */
 function parseOrderNotice(payload: unknown): EhrOrderNotice {
   const value = record(payload);
@@ -328,7 +328,8 @@ function parseOrderNotice(payload: unknown): EhrOrderNotice {
       dateOfBirth: nullableText(card, 'dateOfBirth'), healthIdLast4: nullableText(card, 'healthIdLast4') };
   }
   const display = nullableText(order, 'display');
-  if (value.accessEnded && (patient !== null || display !== null)) {
+  const encounterId = nullableText(order, 'encounterId');
+  if (value.accessEnded && (patient !== null || display !== null || encounterId !== null)) {
     throw new EhrApiProblem(502, { detail: 'EHR order notice shows a patient whose access has ended.' });
   }
   return {
@@ -336,7 +337,7 @@ function parseOrderNotice(payload: unknown): EhrOrderNotice {
     lastEventAt: text(value, 'lastEventAt'), count, readAt: nullableText(value, 'readAt'), needsSeen: value.needsSeen,
     seenAt: nullableText(value, 'seenAt'),
     order: { type: text(order, 'type'), id: text(order, 'id'), routeId: nullableText(order, 'routeId'),
-      encounterId: nullableText(order, 'encounterId'), display },
+      encounterId, display },
     patient, accessEnded: value.accessEnded, message: text(value, 'message'),
   };
 }
