@@ -716,11 +716,11 @@
       },
       {
         "name": "0160_appointments.sql",
-        "sha256": "f850d3af28488838a219662115aeb89000d4b52c8e2cd4802782ad54dc58ac14"
+        "sha256": "cece2bf38a4c4159ad3032c7ad7c67eb6ac2ed40897577f39acd6d8dca17ff68"
       },
       {
         "name": "0161_appointment_notices_and_call_list.sql",
-        "sha256": "a9703e87d3555a85d8c3e900715405d37621c35a9ae8a5b1b2143bc91df58f2c"
+        "sha256": "04d84233fa71e4f45feeafb1ec634a67e1d5a0a1af62968da5300edf6aee789a"
       }
     ]
   },
