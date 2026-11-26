@@ -6,7 +6,9 @@
 -- reversals run as the exact Lab and Pharmacy runtimes, in the sessions the
 -- services set; the notices are read through the EHR runtime. It passes on
 -- a superuser owner and on a NOSUPERUSER NOBYPASSRLS one (production's);
--- 17a shows the difference that matters.
+-- 17a shows the difference that matters. It passes too in the rehearsal's
+-- copy given to a new NOSUPERUSER owner, where 17 first points 0096's holds
+-- policy at that owner.
 -- Cases (the labels start with their number):
 --   1. EXECUTE on the five definers for the EHR runtime only; no runtime
 --      role reads or writes the three tables; each zz_order_notice fires
@@ -1837,6 +1839,29 @@ begin
     || (select count(*) from ehr.order_notice_gaps gap where gap.source_table = 'order-notices-suite');
 end
 $f$;
+-- 0096 wrote legal_holds_owner naming the holds' owner at the time. The
+-- rehearsal's re-owned copy gives every object to a new owner but keeps that
+-- policy, so the holds' new owner, and with it ehr.order_notice_held, reads
+-- no hold, and 0159's post-check refuses when case 18 runs the file again. A
+-- database built by its own owner never looks like that. There, and only
+-- there, the policy is pointed at the holds' current owner, as 0096 would
+-- have written it; the transaction's ROLLBACK undoes it.
+do $$
+declare
+  holds_owner text := (select pg_get_userbyid(relation.relowner) from pg_class relation
+                        where relation.oid = 'platform.legal_holds'::regclass);
+begin
+  if not (select role_row.rolsuper or role_row.rolbypassrls from pg_roles role_row where role_row.rolname = holds_owner)
+     and not exists (select 1 from pg_policy policy_row
+                      where policy_row.polrelid = 'platform.legal_holds'::regclass
+                        and policy_row.polname = 'legal_holds_owner'
+                        and pg_get_expr(policy_row.polqual, policy_row.polrelid)
+                            = format('(CURRENT_USER = %L::name)', holds_owner)) then
+    execute format('alter policy legal_holds_owner on platform.legal_holds using (current_user = %L) '
+      || 'with check (current_user = %L)', holds_owner, holds_owner);
+    raise notice 'ORD-11 order notices suite: legal_holds_owner pointed at the holds'' owner % for this run', holds_owner;
+  end if;
+end $$;
 select pg_temp.as_system('order-notices-owner-read');
 select pg_temp.same('17a in the sweep''s session the table owner reads P''s lab requests only when it bypasses '
     || 'row-level security (a superuser owner); production''s NOBYPASSRLS owner reads none',
