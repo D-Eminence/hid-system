@@ -1,5 +1,5 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
@@ -30,8 +30,12 @@ const NOTICE_COLUMNS = `notice_id::text as notice_id, kind, order_kind, order_id
        order_route_id::text as order_route_id, encounter_id::text as encounter_id, display, event_count,
        first_event_at, last_event_at, read_at, needs_seen, seen_at, version::text as version, access_ended,
        patient_id::text as patient_id, full_name, sex, date_of_birth::text as date_of_birth, health_id_last4`;
-export const ORDER_NOTICES_LIST_SQL = `select ${NOTICE_COLUMNS}, has_more
-  from ehr.list_order_notices($1::text, $2::uuid, $3::integer)`;
+// The list also answers where its page was cut (the last row's tier, last
+// event time at the microsecond and id), from which the next cursor is made.
+export const ORDER_NOTICES_LIST_SQL = `select ${NOTICE_COLUMNS}, has_more, resume_tier,
+       to_char(resume_event_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as resume_at,
+       resume_notice_id::text as resume_id
+  from ehr.list_order_notices($1::text, $2::integer, $3::timestamptz, $4::uuid, $5::integer)`;
 export const ORDER_NOTICES_READ_SQL = 'select ehr.mark_order_notices_read($1::uuid[], $2::bigint[]) as updated';
 export const ORDER_NOTICE_SEEN_SQL = `select ${NOTICE_COLUMNS}
   from ehr.mark_order_notice_seen($1::uuid)`;
@@ -75,6 +79,9 @@ interface NoticeRow {
   date_of_birth: string | null;
   health_id_last4: string | null;
   has_more?: boolean | null;
+  resume_tier?: number | string | null;
+  resume_at?: string | null;
+  resume_id?: string | null;
 }
 
 export interface OrderNoticeCounts {
@@ -143,13 +150,25 @@ export class OrderNoticesService {
     return { unread, criticalNotSeen, byKind };
   }
 
+  /**
+   * A page, and where the next one starts. The cursor carries the position
+   * the page was cut at, as it was then, so a notice Seen or merged between
+   * pages neither hides nor repeats the rest. It is valid only for the
+   * member, facility and state it was issued for.
+   */
   async list(context: DataAccessContext, query: ListOrderNoticesQueryDto): Promise<OrderNoticePage> {
     this.requireEnabled();
+    const scope = cursorScope(context, query.state);
+    const cursor = query.cursor === undefined ? undefined : decodeCursor(query.cursor, scope);
     const rows = await this.run(context, async (client) => (await client.query<NoticeRow>(ORDER_NOTICES_LIST_SQL,
-      [query.state, query.cursor ?? null, query.limit ?? 20])).rows);
-    const items = rows.map(noticeAnswer);
-    const last = items[items.length - 1];
-    return { items, nextCursor: rows[0]?.has_more === true && last ? last.noticeId : null };
+      [query.state, cursor?.tier ?? null, cursor?.at ?? null, cursor?.id ?? null, query.limit ?? 20])).rows);
+    const first = rows[0];
+    const tier = first?.resume_tier === null || first?.resume_tier === undefined ? undefined : Number(first.resume_tier);
+    return {
+      items: rows.map(noticeAnswer),
+      nextCursor: first?.has_more === true && (tier === 0 || tier === 1) && first.resume_at && first.resume_id
+        ? encodeCursor({ scope, tier, at: first.resume_at, id: first.resume_id }) : null,
+    };
   }
 
   /**
@@ -276,6 +295,54 @@ export function noticeMessage(kind: string, display: string | null, count: numbe
   }
 }
 
+const CURSOR_VERSION = 1;
+const CURSOR_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
+const CURSOR_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Where the next page starts, and the member, facility and state it was issued for (hashed). */
+interface OrderNoticesCursor {
+  scope: string;
+  /** 1 for a critical notice not Seen, else 0, as the page's last notice was when the page was cut. */
+  tier: 0 | 1;
+  /** That notice's last event time, UTC at the microsecond. */
+  at: string;
+  id: string;
+}
+
+function cursorScope(context: DataAccessContext, state: string): string {
+  return createHash('sha256').update(JSON.stringify(['ehr.order-notices', context.membershipId, context.facilityId,
+    state]), 'utf8').digest('base64url').slice(0, 22);
+}
+
+function encodeCursor(cursor: OrderNoticesCursor): string {
+  return Buffer.from(JSON.stringify({ v: CURSOR_VERSION, f: cursor.scope, r: cursor.tier, t: cursor.at, i: cursor.id }),
+    'utf8').toString('base64url');
+}
+
+/** The position a cursor names, or 400 INVALID_CURSOR: another member, facility or state, or not as issued. */
+function decodeCursor(value: string, scope: string): OrderNoticesCursor {
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
+  } catch {
+    throw invalidCursor();
+  }
+  if (typeof decoded !== 'object' || decoded === null || Array.isArray(decoded)) throw invalidCursor();
+  const { v, f, r, t, i } = decoded as Record<string, unknown>;
+  if (v !== CURSOR_VERSION || f !== scope || (r !== 0 && r !== 1) || typeof t !== 'string' || !CURSOR_TIME.test(t)
+    || typeof i !== 'string' || !CURSOR_ID.test(i)) {
+    throw invalidCursor();
+  }
+  const cursor: OrderNoticesCursor = { scope, tier: r, at: t, id: i };
+  // Only the exact issued encoding is accepted.
+  if (encodeCursor(cursor) !== value) throw invalidCursor();
+  return cursor;
+}
+
+function invalidCursor(): DomainProblem {
+  return new DomainProblem(400, 'INVALID_CURSOR', ORDER_NOTICE_MESSAGES.invalidCursor);
+}
+
 function unavailable(): DomainProblem {
   return new DomainProblem(503, 'ORDER_NOTICES_UNAVAILABLE', ORDER_NOTICE_MESSAGES.unavailable);
 }
@@ -305,10 +372,8 @@ export function translate(error: unknown): DomainProblem {
   if (code === '22023' && message === 'ORDER_NOTICES_DIRECT_CARE_ONLY') {
     return new DomainProblem(400, 'PURPOSE_OF_USE_REQUIRED', 'X-Purpose-Of-Use must be direct-care for clinical access');
   }
-  // A cursor that is not one of this doctor's notices here (another facility's page, or a notice swept since).
-  if (code === '22023' && message === 'ORDER_NOTICES_CURSOR_INVALID') {
-    return new DomainProblem(400, 'INVALID_CURSOR', ORDER_NOTICE_MESSAGES.invalidCursor);
-  }
+  // A cursor position the definer refuses (decodeCursor refuses the rest first).
+  if (code === '22023' && message === 'ORDER_NOTICES_CURSOR_INVALID') return invalidCursor();
   if (code === '22023' && message === 'ORDER_NOTICES_LIST_INVALID') return invalid('state', 'state must be unread or all');
   if (code === '22023' && message === 'ORDER_NOTICES_READ_INVALID') {
     return invalid('notices', 'notices must be 1-100 pairs of noticeId and version');

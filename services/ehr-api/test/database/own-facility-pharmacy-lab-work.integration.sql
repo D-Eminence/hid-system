@@ -524,7 +524,8 @@ begin
        where proc.prosecdef and proc.prosrc ~* 'ehr\.prescriptions'
          and proc.proowner = (select proowner from pg_proc where oid = 'pharmacy.validate_dispensing()'::regprocedure))
      is distinct from 'ehr.list_my_orders(text[],boolean,date,timestamp with time zone,text,uuid,integer) '
-       || 'ehr.list_order_notices(text,uuid,integer) ehr.mark_order_notice_seen(uuid) '
+       || 'ehr.list_order_notices(text,integer,timestamp with time zone,uuid,integer) '
+       || 'ehr.mark_order_notice_seen(uuid) '
        || 'ehr.patient_list_order_routes() ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,'
        || 'character) ehr.send_prescription_to_own_pharmacy(uuid,bigint) ehr.withdraw_own_pharmacy_send(uuid) '
        || 'identity.decide_unknown_patient(uuid,text,bigint,text,text,text) '
@@ -2285,7 +2286,7 @@ select pg_temp.expect('DR has notices by now (the dispensings of his own orders)
 set local role hid_ehr_api_runtime;
 select pg_temp.as_member(2);
 select pg_temp.expect('PH: the notice list and summary answer nothing of DR''s; Seen and mark read do not find DR''s notice',
-  pg_temp.rows_of('select * from ehr.list_order_notices(''all'', null, 50)') || ' | '
+  pg_temp.rows_of('select * from ehr.list_order_notices(''all'', null, null, null, 50)') || ' | '
   || pg_temp.rows_of('select * from ehr.order_notice_summary()') || ' | '
   || pg_temp.try(format('select * from ehr.mark_order_notice_seen(%L)', current_setting('own_work.dr_notice')))
   || ' | ' || pg_temp.rows_of(format('select 1 where ehr.mark_order_notices_read(array[%L]::uuid[], '

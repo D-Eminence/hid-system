@@ -91,12 +91,16 @@ export interface EhrOrderNotice {
 
 export interface EhrOrderNoticePage {
   items: EhrOrderNotice[];
-  /** The last notice id of this page, sent back as `cursor`; null on the last page. */
+  /**
+   * Where the next page starts, sent back as `cursor` with the same state;
+   * null on the last page. Opaque: do not read or build it.
+   */
   nextCursor: string | null;
 }
 
 export interface EhrOrderNoticeListQuery {
   state: 'unread' | 'all';
+  /** The page before's `nextCursor`, as sent. */
   cursor?: string;
   /** 1-50; ehr-api's default is 20. */
   limit?: number;
@@ -168,7 +172,7 @@ export class EhrApiClient {
       context, undefined, signal, null));
     if (!Array.isArray(value.items) || value.items.length > EHR_ORDER_NOTICES_PAGE_MAX) throw new EhrApiProblem(502, value);
     const items = value.items.map(parseOrderNotice);
-    if (value.nextCursor !== null && (typeof value.nextCursor !== 'string' || !UUID.test(value.nextCursor))) {
+    if (value.nextCursor !== null && (typeof value.nextCursor !== 'string' || !CURSOR.test(value.nextCursor))) {
       throw new EhrApiProblem(502, value);
     }
     return { items, nextCursor: value.nextCursor };
@@ -255,6 +259,8 @@ function unwrap(value: unknown): unknown {
 export const EHR_ORDER_NOTICES_PAGE_MAX = 50;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** An opaque page cursor, as ehr-api's query takes it. */
+const CURSOR = /^[A-Za-z0-9_-]{16,512}$/;
 
 function record(value: unknown): Record<string, unknown> {
   const unwrapped = unwrap(value);

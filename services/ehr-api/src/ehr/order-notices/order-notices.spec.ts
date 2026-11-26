@@ -43,7 +43,9 @@ const row = (overrides: Record<string, unknown> = {}) => ({ notice_id: noticeA, 
   display: 'Synthetic blood count', event_count: 1, first_event_at: new Date('2026-11-26T09:00:00.123Z'),
   last_event_at: new Date('2026-11-26T09:30:00.456Z'), read_at: null, needs_seen: false, seen_at: null, version: '1',
   access_ended: false, patient_id: patientId, full_name: 'Ada Notice', sex: 'female', date_of_birth: '1984-04-04',
-  health_id_last4: 'A2B3', has_more: false, ...overrides });
+  health_id_last4: 'A2B3', has_more: false, resume_tier: null, resume_at: null, resume_id: null, ...overrides });
+/** Where a page of two was cut: at noticeA, a ready notice (tier 0), at this microsecond. */
+const cut = { has_more: true, resume_tier: 0, resume_at: '2026-11-26T09:30:00.456789Z', resume_id: noticeA };
 
 function databaseError(code: string, message: string): Error {
   return Object.assign(new Error(message), { code });
@@ -251,10 +253,10 @@ describe('ORD-11 GET summary', () => {
 });
 
 describe('ORD-11 GET list', () => {
-  it('passes the state, cursor and limit to the definer (20 by default) and answers the contract\'s shape', async () => {
+  it('passes the state, no cursor and the limit to the definer (20 by default) and answers the contract\'s shape', async () => {
     const { service, calls, options } = harness([row({ event_count: 3, version: '4' })]);
     const page = await service.list(context, await validate(ListOrderNoticesQueryDto, { state: 'unread' }, 'query'));
-    expect(calls).toEqual([{ sql: ORDER_NOTICES_LIST_SQL, values: ['unread', null, 20] }]);
+    expect(calls).toEqual([{ sql: ORDER_NOTICES_LIST_SQL, values: ['unread', null, null, null, 20] }]);
     expect(options).toEqual([{}]);
     expect(page).toEqual({ nextCursor: null, items: [{ noticeId: noticeA, kind: 'lab_result_ready', version: 4,
       createdAt: '2026-11-26T09:00:00.123Z', lastEventAt: '2026-11-26T09:30:00.456Z', count: 3, readAt: null,
@@ -262,21 +264,57 @@ describe('ORD-11 GET list', () => {
       order: { type: 'lab_request', id: orderId, routeId: null, encounterId, display: 'Synthetic blood count' },
       patient: { patientId, fullName: 'Ada Notice', sex: 'female', dateOfBirth: '1984-04-04', healthIdLast4: 'A2B3' },
       accessEnded: false, message: '3 results ready: Synthetic blood count.' }] });
-    await service.list(context, await validate(ListOrderNoticesQueryDto, { state: 'all', cursor: noticeB, limit: '50' },
-      'query'));
-    expect(calls[1]!.values).toEqual(['all', noticeB, 50]);
   });
 
-  it('keeps the database\'s order (critical not Seen first) and pages by the last notice id', async () => {
-    const { service } = harness([
-      row({ notice_id: noticeB, kind: 'lab_result_critical', needs_seen: true, order_route_id: routeId, has_more: true }),
-      row({ has_more: true }),
+  it('keeps the database\'s order (critical not Seen first); the next page starts where this one was cut', async () => {
+    const { service, calls } = harness([
+      row({ notice_id: noticeB, kind: 'lab_result_critical', needs_seen: true, order_route_id: routeId, ...cut }),
+      row(cut),
     ]);
     const page = await service.list(context, listQuery({ state: 'unread', limit: 2 }));
     expect(page.items.map((item) => [item.noticeId, item.kind, item.order.routeId])).toEqual([
       [noticeB, 'lab_result_critical', routeId], [noticeA, 'lab_result_ready', null]]);
     expect(page.items[0]!.message).toBe('Critical result: Synthetic blood count. Open it and mark it Seen.');
-    expect(page.nextCursor).toBe(noticeA);
+    // Opaque, and not a notice id: it carries the tier, the microsecond and the id the page was cut at.
+    expect(page.nextCursor).toMatch(/^[A-Za-z0-9_-]{16,512}$/);
+    expect(page.nextCursor).not.toBe(noticeA);
+    await service.list(context, await validate(ListOrderNoticesQueryDto, { state: 'unread', cursor: page.nextCursor,
+      limit: '50' }, 'query'));
+    expect(calls[1]!.values).toEqual(['unread', 0, '2026-11-26T09:30:00.456789Z', noticeA, 50]);
+  });
+
+  it('the cut is the database\'s, not the rows\': a critical notice cut at tier 1 keeps tier 1 in the cursor', async () => {
+    const { service, calls } = harness([row({ notice_id: noticeB, kind: 'lab_result_critical', needs_seen: true,
+      seen_at: new Date('2026-11-26T09:40:00Z'), ...cut, resume_tier: 1, resume_id: noticeB })]);
+    const page = await service.list(context, listQuery({ state: 'unread', limit: 1 }));
+    await service.list(context, listQuery({ state: 'unread', limit: 1, cursor: page.nextCursor! }));
+    expect(calls[1]!.values).toEqual(['unread', 1, '2026-11-26T09:30:00.456789Z', noticeB, 1]);
+  });
+
+  it('a cursor is good only for the member, facility and state it was issued for, exactly as issued', async () => {
+    const issued = (await harness([row(cut)]).service.list(context, listQuery({ state: 'unread', limit: 1 }))).nextCursor!;
+    const decoded = JSON.parse(Buffer.from(issued, 'base64url').toString('utf8')) as Record<string, unknown>;
+    const reencode = (value: unknown) => Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
+    const sibling = { ...context, membershipId: '123e4567-e89b-42d3-a456-426614174005' } as DataAccessContext;
+    const elsewhere = { ...context, facilityId: '123e4567-e89b-42d3-a456-426614174003' } as DataAccessContext;
+    const { service, database } = harness([row()]);
+    const refusals = await Promise.all([
+      refusal(service.list(context, listQuery({ state: 'all', cursor: issued }))),
+      refusal(service.list(sibling, listQuery({ state: 'unread', cursor: issued }))),
+      refusal(service.list(elsewhere, listQuery({ state: 'unread', cursor: issued }))),
+      refusal(service.list(context, listQuery({ state: 'unread', cursor: reencode({ ...decoded, r: 2 }) }))),
+      refusal(service.list(context, listQuery({ state: 'unread', cursor: reencode({ ...decoded, t: '2026-11-26T09:30:00Z' }) }))),
+      refusal(service.list(context, listQuery({ state: 'unread', cursor: reencode({ ...decoded, x: 1 }) }))),
+      refusal(service.list(context, listQuery({ state: 'unread', cursor: noticeA }))),
+    ]);
+    for (const problem of refusals) expect([problem.getStatus(), problem.code]).toEqual([400, 'INVALID_CURSOR']);
+    expect(database.withTransaction).not.toHaveBeenCalled();
+  });
+
+  it('no cursor on the last page, nor when the database gives no cut', async () => {
+    expect((await harness([row()]).service.list(context, listQuery({ state: 'all' }))).nextCursor).toBeNull();
+    expect((await harness([row({ has_more: true })]).service.list(context, listQuery({ state: 'all' }))).nextCursor)
+      .toBeNull();
   });
 
   it('accessEnded: no patient, visit or display, whatever the row holds, and the ended words', async () => {
@@ -305,7 +343,8 @@ describe('ORD-11 GET list', () => {
     ['no state', {}, ['state']], ['another state', { state: 'read' }, ['state']],
     ['limit 0', { state: 'all', limit: '0' }, ['limit']], ['limit 51', { state: 'all', limit: '51' }, ['limit']],
     ['a limit that is not a whole number', { state: 'all', limit: '2.5' }, ['limit']],
-    ['a cursor that is not a UUID', { state: 'all', cursor: 'abc' }, ['cursor']],
+    ['a cursor too short', { state: 'all', cursor: 'abc' }, ['cursor']],
+    ['a cursor with a character outside base64url', { state: 'all', cursor: 'abcdefghijklmnop+' }, ['cursor']],
     ['an unknown parameter', { state: 'all', kind: 'lab' }, ['kind']],
   ])('the query refuses %s (400 VALIDATION_FAILED, naming it)', async (_label, values, fields) => {
     expect(await validationErrors(ListOrderNoticesQueryDto, values, 'query')).toEqual(fields);

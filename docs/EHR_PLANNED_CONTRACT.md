@@ -3667,7 +3667,7 @@ So no notice is lost, and no event bus is needed. This works for the hospital's 
 
 | Method | Path | Who | Permission |
 |---|---|---|---|
-| GET | `/api/v1/ehr/me/order-notices?state=unread\|all[&cursor=<noticeId>][&limit=1-50]` | the recipient, at the session facility | `ehr.lab-request.read` or `ehr.prescription.read` |
+| GET | `/api/v1/ehr/me/order-notices?state=unread\|all[&cursor=<nextCursor>][&limit=1-50]` | the recipient, at the session facility | `ehr.lab-request.read` or `ehr.prescription.read` |
 | GET | `/api/v1/ehr/me/order-notices/summary` | the recipient | as above |
 | POST | `/api/v1/ehr/me/order-notices/read` | the recipient | as above |
 | POST | `/api/v1/ehr/me/order-notices/:noticeId/seen` | the recipient | as above |
@@ -3712,10 +3712,11 @@ Notice:
 | `prescription_dispensed` | "Dispensed: Amoxicillin 500 mg." | "A prescription was dispensed for a patient whose access has ended. Ask the patient for access to see it." |
 | `dispensing_reversed` | "Dispensing reversed: Amoxicillin 500 mg." / "2 dispensings reversed: Amoxicillin 500 mg." | "A dispensing was reversed for a patient whose access has ended. Ask the patient for access to see it." |
 
-List answer: `{ "items": [notice], "nextCursor": "uuid or null" }`.
+List answer: `{ "items": [notice], "nextCursor": "opaque string or null" }`.
 - Critical notices not yet Seen are always on top, read or not. Then newest first.
 - `state=unread` lists unread notices and critical notices not yet Seen. `state=all` lists every notice. `state` is required.
-- `cursor` is `nextCursor` from the page before: the last notice id of that page. A cursor that is not one of the recipient's notices here is 400 `INVALID_CURSOR`; load the list from the start.
+- `cursor` is `nextCursor` from the page before, sent back as it came, with the same `state`. It is opaque: it records where that page was cut (whether its last notice was a critical one not Seen, that notice's `lastEventAt` to the microsecond, and its id), as it was then. So a notice marked Seen, or merged with a new event, between pages does not make the next page skip or repeat the rest. A notice that changed may show again higher up on a fresh list; load the list from the start to see the order now.
+- A cursor is good only for the member, facility and `state` it was issued with, exactly as issued. Any other is 400 `INVALID_CURSOR`; load the list from the start.
 - `limit` defaults to 20.
 
 Summary answer:

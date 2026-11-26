@@ -87,8 +87,8 @@
 --    written (SQLSTATE x, kind y)" with no ids. Each firing opens one
 --    subtransaction, and a gap one more.
 -- N5 The definers, for hid_ehr_runtime only, plpgsql, SECURITY DEFINER:
---    ehr.order_notice_summary(), ehr.list_order_notices(state, cursor,
---    limit), ehr.mark_order_notices_read(ids, versions) and
+--    ehr.order_notice_summary(), ehr.list_order_notices(state, cursor tier,
+--    time and id, limit), ehr.mark_order_notices_read(ids, versions) and
 --    ehr.mark_order_notice_seen(id). Each uses the session's account
 --    (auth.account_id_for_subject), facility and membership, needs that
 --    membership active and unheld at that facility, direct care, and the
@@ -101,7 +101,11 @@
 --      (a critical notice read but not Seen still counts). It reads the
 --      unread index only: no order read, no audit row.
 --    - List: critical notices not Seen first, then newest first (last
---      event, id), 1-50 a page (20 by default), keyset by notice id. state
+--      event, id), 1-50 a page (20 by default). A page that has more answers
+--      where it was cut (its last row's tier, last event and id, as they
+--      were then, on every row as resume_*); ehr-api carries that in an
+--      opaque cursor, and the next page starts after it, so a notice Seen or
+--      merged between pages neither hides nor repeats the rest. state
 --      'unread' lists unread notices and critical ones not Seen; 'all' every
 --      notice. For each row it reads the order by id under the order
 --      table's row-level security in this session and asks
@@ -1200,11 +1204,16 @@ $$;
 
 -- N5: the list. Critical not Seen first, then newest; each order read by id
 -- under its table's row-level security and the session's own consent test.
-create function ehr.list_order_notices(requested_state text, cursor_notice_id uuid, requested_limit integer)
+-- The next page starts after the position the page before was cut at (its
+-- last row's tier, last event and id, as they were then), so a notice Seen
+-- or merged in between does not move it.
+create function ehr.list_order_notices(requested_state text, cursor_tier integer, cursor_event_at timestamptz,
+  cursor_notice_id uuid, requested_limit integer)
 returns table (notice_id uuid, kind text, order_kind text, order_id uuid, order_route_id uuid, encounter_id uuid,
   display text, event_count integer, first_event_at timestamptz, last_event_at timestamptz, read_at timestamptz,
   needs_seen boolean, seen_at timestamptz, version bigint, access_ended boolean, patient_id uuid, full_name text,
-  sex text, date_of_birth date, health_id_last4 text, has_more boolean)
+  sex text, date_of_birth date, health_id_last4 text, has_more boolean, resume_tier integer,
+  resume_event_at timestamptz, resume_notice_id uuid)
 language plpgsql
 volatile
 security definer
@@ -1214,12 +1223,15 @@ as $$
 declare
   actor record;
   page_limit integer;
-  cursor_tier integer;
-  cursor_at timestamptz;
   page_ids uuid[];
   page_order_kinds text[];
   page_order_ids uuid[];
+  page_tiers integer[];
+  page_times timestamptz[];
   more boolean := false;
+  resume_tier_value integer;
+  resume_at_value timestamptz;
+  resume_id_value uuid;
   position_index integer;
   order_patient uuid;
   order_facility uuid;
@@ -1237,26 +1249,26 @@ begin
   if requested_state is null or requested_state not in ('unread', 'all') then
     raise exception using errcode = '22023', message = 'ORDER_NOTICES_LIST_INVALID';
   end if;
+  -- A cursor is a position, not a notice: all three parts or none, the tier
+  -- 0 or 1. It need not name a notice that is still there.
+  if num_nulls(cursor_tier, cursor_event_at, cursor_notice_id) not in (0, 3)
+     or coalesce(cursor_tier, 0) not in (0, 1) then
+    raise exception using errcode = '22023', message = 'ORDER_NOTICES_CURSOR_INVALID';
+  end if;
   select * into actor from ehr.order_notice_session();
   page_limit := least(greatest(coalesce(requested_limit, 20), 1), 50);
-  if cursor_notice_id is not null then
-    select case when cursor_row.needs_seen and cursor_row.seen_at is null then 1 else 0 end, cursor_row.last_event_at
-      into cursor_tier, cursor_at
-      from ehr.order_notices cursor_row
-     where cursor_row.id = cursor_notice_id and cursor_row.ordering_facility_id = actor.actor_facility
-       and cursor_row.recipient_account_id = actor.actor_account;
-    if not found then
-      raise exception using errcode = '22023', message = 'ORDER_NOTICES_CURSOR_INVALID';
-    end if;
-  end if;
   -- The page: one statement per state, so 'unread' reads the unread index.
   if requested_state = 'unread' then
     select coalesce(array_agg(page.id order by page.tier desc, page.last_event_at desc, page.id desc), array[]::uuid[]),
            coalesce(array_agg(page.order_kind order by page.tier desc, page.last_event_at desc, page.id desc),
              array[]::text[]),
            coalesce(array_agg(page.order_id order by page.tier desc, page.last_event_at desc, page.id desc),
-             array[]::uuid[])
-      into page_ids, page_order_kinds, page_order_ids
+             array[]::uuid[]),
+           coalesce(array_agg(page.tier order by page.tier desc, page.last_event_at desc, page.id desc),
+             array[]::integer[]),
+           coalesce(array_agg(page.last_event_at order by page.tier desc, page.last_event_at desc, page.id desc),
+             array[]::timestamptz[])
+      into page_ids, page_order_kinds, page_order_ids, page_tiers, page_times
       from (select notice.id, notice.order_kind, notice.order_id, notice.last_event_at,
                    case when notice.needs_seen and notice.seen_at is null then 1 else 0 end as tier
               from ehr.order_notices notice
@@ -1267,7 +1279,7 @@ begin
                  or (notice.order_kind = 'prescription' and actor.prescription_allowed))
                and (cursor_notice_id is null
                     or (case when notice.needs_seen and notice.seen_at is null then 1 else 0 end, notice.last_event_at,
-                        notice.id) < (cursor_tier, cursor_at, cursor_notice_id))
+                        notice.id) < (cursor_tier, cursor_event_at, cursor_notice_id))
              order by 5 desc, notice.last_event_at desc, notice.id desc
              limit page_limit + 1) page;
   else
@@ -1275,8 +1287,12 @@ begin
            coalesce(array_agg(page.order_kind order by page.tier desc, page.last_event_at desc, page.id desc),
              array[]::text[]),
            coalesce(array_agg(page.order_id order by page.tier desc, page.last_event_at desc, page.id desc),
-             array[]::uuid[])
-      into page_ids, page_order_kinds, page_order_ids
+             array[]::uuid[]),
+           coalesce(array_agg(page.tier order by page.tier desc, page.last_event_at desc, page.id desc),
+             array[]::integer[]),
+           coalesce(array_agg(page.last_event_at order by page.tier desc, page.last_event_at desc, page.id desc),
+             array[]::timestamptz[])
+      into page_ids, page_order_kinds, page_order_ids, page_tiers, page_times
       from (select notice.id, notice.order_kind, notice.order_id, notice.last_event_at,
                    case when notice.needs_seen and notice.seen_at is null then 1 else 0 end as tier
               from ehr.order_notices notice
@@ -1286,7 +1302,7 @@ begin
                  or (notice.order_kind = 'prescription' and actor.prescription_allowed))
                and (cursor_notice_id is null
                     or (case when notice.needs_seen and notice.seen_at is null then 1 else 0 end, notice.last_event_at,
-                        notice.id) < (cursor_tier, cursor_at, cursor_notice_id))
+                        notice.id) < (cursor_tier, cursor_event_at, cursor_notice_id))
              order by 5 desc, notice.last_event_at desc, notice.id desc
              limit page_limit + 1) page;
   end if;
@@ -1295,6 +1311,9 @@ begin
     page_ids := page_ids[1:page_limit];
     page_order_kinds := page_order_kinds[1:page_limit];
     page_order_ids := page_order_ids[1:page_limit];
+    resume_tier_value := page_tiers[page_limit];
+    resume_at_value := page_times[page_limit];
+    resume_id_value := page_ids[page_limit];
   end if;
   -- Each order, by id, as the session may read it now. Not readable: the
   -- row is access_ended, with no patient, visit or display.
@@ -1367,7 +1386,8 @@ begin
     select notice.id, notice.kind, notice.order_kind, notice.order_id, notice.order_route_id,
            listed.encounter_id, listed.display, notice.event_count, notice.first_event_at, notice.last_event_at,
            notice.read_at, notice.needs_seen, notice.seen_at, notice.row_version, listed.patient_id is null,
-           listed.patient_id, patient.full_name, patient.gender, patient.dob, right(patient.hid_code, 4), more
+           listed.patient_id, patient.full_name, patient.gender, patient.dob, right(patient.hid_code, 4), more,
+           resume_tier_value, resume_at_value, resume_id_value
       from unnest(page_ids, shown_patients, shown_encounters, shown_displays)
            with ordinality listed(id, patient_id, encounter_id, display, position)
       join ehr.order_notices notice on notice.id = listed.id
@@ -1590,7 +1610,7 @@ revoke all on function ehr.order_notice_gap(text, uuid, text, text, text, text),
   ehr.order_notice_write(text, uuid, uuid, uuid, text, timestamptz, text, uuid, uuid, bigint, uuid, uuid, uuid),
   ehr.order_notice_from_release(), ehr.order_notice_from_invalidation(), ehr.order_notice_from_dispensing(),
   ehr.order_notice_from_reversal(), ehr.order_notice_session(), ehr.order_notice_summary(),
-  ehr.list_order_notices(text, uuid, integer), ehr.mark_order_notices_read(uuid[], bigint[]),
+  ehr.list_order_notices(text, integer, timestamptz, uuid, integer), ehr.mark_order_notices_read(uuid[], bigint[]),
   ehr.mark_order_notice_seen(uuid), ehr.order_notice_held(uuid, uuid, uuid), ehr.sweep_order_notices(integer)
   from public;
 do $$
@@ -1603,7 +1623,8 @@ begin
     execute format('grant execute on function ehr.order_notice_held(uuid, uuid, uuid) to %I', current_user);
   end if;
   if exists (select 1 from pg_roles where rolname = 'hid_ehr_runtime') then
-    grant execute on function ehr.order_notice_summary(), ehr.list_order_notices(text, uuid, integer),
+    grant execute on function ehr.order_notice_summary(),
+      ehr.list_order_notices(text, integer, timestamptz, uuid, integer),
       ehr.mark_order_notices_read(uuid[], bigint[]), ehr.mark_order_notice_seen(uuid),
       ehr.sweep_order_notices(integer) to hid_ehr_runtime;
   end if;
@@ -1618,8 +1639,8 @@ comment on table ehr.order_notice_switch is
   '0159 ORD-11: one row. Off (enabled false), the zz_order_notice triggers write no notice and no gap. The owner''s only.';
 comment on function ehr.order_notice_summary() is
   '0159 ORD-11: per kind, the session''s unread notices and critical notices not Seen at the session facility (a critical notice read but not Seen still counts). Needs ehr.lab-request.read for lab notices and ehr.prescription.read for dispensing notices. Not audited.';
-comment on function ehr.list_order_notices(text, uuid, integer) is
-  '0159 ORD-11: the session''s notices at the session facility (state unread or all), critical not Seen first, then newest; 1-50 a page, keyset by notice id. The patient card, visit and display come from the order, read now under its row-level security and ehr.context_allows; when the session may not read it, access_ended and no patient. Audited: ehr.order-notice.list and one .list.shown row per patient shown.';
+comment on function ehr.list_order_notices(text, integer, timestamptz, uuid, integer) is
+  '0159 ORD-11: the session''s notices at the session facility (state unread or all), critical not Seen first, then newest; 1-50 a page. The next page starts after the position (tier, last event, id) the page before was cut at, which each row of a page that has more answers as resume_*. The patient card, visit and display come from the order, read now under its row-level security and ehr.context_allows; when the session may not read it, access_ended and no patient. Audited: ehr.order-notice.list and one .list.shown row per patient shown.';
 comment on function ehr.mark_order_notices_read(uuid[], bigint[]) is
   '0159 ORD-11: marks the session''s notices read, for 1-100 (notice id, version) pairs; only rows at that version and unread change. Never needs access; never clears needs_seen. Answers how many changed. Audited: one ehr.order-notice.read row per patient.';
 comment on function ehr.mark_order_notice_seen(uuid) is
@@ -1660,12 +1681,14 @@ begin
            || 'prescription_allowed boolean)', 'none'),
          ('order_notice_summary', '', 'cd91cf17fc21fb79cc69cb8606f120b7', 's',
            'TABLE(kind text, unread_count integer, critical_not_seen_count integer)', 'runtime'),
-         ('list_order_notices', 'text, uuid, integer', 'd2909ddb4f8f81d2608e86d46b83d26e', 'v',
+         ('list_order_notices', 'text, integer, timestamp with time zone, '
+           || 'uuid, integer', '77acb39a9641a5cd47d61ec973834afa', 'v',
            'TABLE(notice_id uuid, kind text, order_kind text, order_id uuid, order_route_id uuid, encounter_id uuid, '
            || 'display text, event_count integer, first_event_at timestamp with time zone, last_event_at timestamp '
            || 'with time zone, read_at timestamp with time zone, needs_seen boolean, seen_at timestamp with time '
            || 'zone, version bigint, access_ended boolean, patient_id uuid, full_name text, sex text, date_of_birth '
-           || 'date, health_id_last4 text, has_more boolean)', 'runtime'),
+           || 'date, health_id_last4 text, has_more boolean, resume_tier integer, resume_event_at timestamp with '
+           || 'time zone, resume_notice_id uuid)', 'runtime'),
          ('mark_order_notices_read', 'uuid[], bigint[]', 'bdb2c8ede0e823b2d562f5203485a87c', 'v', 'integer',
            'runtime'),
          ('mark_order_notice_seen', 'uuid', '5e2695adee178d8c35e4c608ac295b91', 'v',

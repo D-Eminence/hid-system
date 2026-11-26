@@ -51,7 +51,10 @@
 --      records the account and membership (version 3, read time kept); Seen
 --      again changes nothing; Seen through the sibling membership; Seen on
 --      an ordinary notice that merged an event since the list showed it
---      leaves it unread (only mark read, with the version, reads it);
+--      leaves it unread (only mark read, with the version, reads it); a page
+--      cut at a critical notice then Seen, or at a notice that then merges
+--      an event: the next page starts where the page before was cut, so
+--      nothing is skipped or shown again;
 --  13. access ended (DA's consents for Q end): Q's notices are listed with
 --      no patient, card, visit or display, the critical one in its place;
 --      mark read works; Seen is refused (42501 ORDER_NOTICE_CONSENT_REQUIRED);
@@ -384,23 +387,33 @@ end
 $f$;
 -- Every page of the session's list, followed by its cursor: the ids in
 -- order, then the has_more flag of each page.
-create function pg_temp.pages(wanted_state text, page_size integer) returns text language plpgsql as $f$
+create function pg_temp.pages(wanted_state text, page_size integer, start_tier integer default null,
+  start_at timestamptz default null, start_id uuid default null) returns text language plpgsql as $f$
 declare
-  cursor_id uuid;
+  cursor_tier integer := start_tier;
+  cursor_at timestamptz := start_at;
+  cursor_id uuid := start_id;
   listed uuid[] := array[]::uuid[];
   flags text := '';
   page_ids uuid[];
   page_more boolean;
+  next_tier integer;
+  next_at timestamptz;
+  next_id uuid;
 begin
   loop
-    select array_agg(listing.notice_id order by listing.ordinality), bool_or(listing.has_more)
-      into page_ids, page_more
-      from ehr.list_order_notices(wanted_state, cursor_id, page_size) with ordinality listing;
+    select array_agg(listing.notice_id order by listing.ordinality), bool_or(listing.has_more),
+           min(listing.resume_tier), min(listing.resume_event_at), (array_agg(listing.resume_notice_id))[1]
+      into page_ids, page_more, next_tier, next_at, next_id
+      from ehr.list_order_notices(wanted_state, cursor_tier, cursor_at, cursor_id, page_size) with ordinality listing;
     exit when page_ids is null;
     listed := listed || page_ids;
     flags := flags || case when page_more then 'm' else '.' end;
     exit when not page_more;
-    cursor_id := page_ids[cardinality(page_ids)];
+    -- The next page starts where this one was cut, as the definer answers it.
+    cursor_tier := next_tier;
+    cursor_at := next_at;
+    cursor_id := next_id;
   end loop;
   return array_to_string(listed, ',') || ' ' || flags;
 end
@@ -1430,26 +1443,26 @@ select pg_temp.same('9c every notice, one page', pg_temp.pages('all', 50),
   pg_temp.expected_order('all', 'e4c10000-0000-4000-8000-000000000011') || ' .');
 select pg_temp.same('9d the first four are the four critical notices',
   (select string_agg(listing.kind, ' ' order by listing.ordinality)
-     from ehr.list_order_notices('unread', null, 5) with ordinality listing),
+     from ehr.list_order_notices('unread', null, null, null, 5) with ordinality listing),
   'lab_result_critical lab_result_critical lab_result_critical lab_result_critical '
-  || (select listing.kind from ehr.list_order_notices('unread', null, 5) with ordinality listing
+  || (select listing.kind from ehr.list_order_notices('unread', null, null, null, 5) with ordinality listing
        where listing.ordinality = 5));
 select pg_temp.same('9e a routed critical notice as listed: its route, the order''s visit and test, the patient''s card',
   (select format('%s %s %s %s %s %s %s %s %s %s %s %s', listing.order_route_id = pg_temp.id('route_r5'),
      listing.encounter_id, listing.display, listing.patient_id, listing.full_name, listing.sex, listing.date_of_birth,
      listing.health_id_last4, listing.access_ended, listing.needs_seen, listing.version, listing.event_count)
-     from ehr.list_order_notices('all', null, 50) listing where listing.order_id = pg_temp.id('lr_r5')),
+     from ehr.list_order_notices('all', null, null, null, 50) listing where listing.order_id = pg_temp.id('lr_r5')),
   't e4c50000-0000-4000-8000-000000000001 Haemoglobin e4c30000-0000-4000-8000-000000000001 Patience Okafor female '
   || '1990-04-12 PATP f t 1 1');
 select pg_temp.same('9f an own reversal notice as listed: no route, the medicine, two events at version 2',
   (select format('%s %s %s %s %s', listing.order_route_id is null, listing.display, listing.event_count,
      listing.version, listing.kind)
-     from ehr.list_order_notices('all', null, 50) listing
+     from ehr.list_order_notices('all', null, null, null, 50) listing
     where listing.order_id = pg_temp.id('rx_a') and listing.kind = 'dispensing_reversed'),
   't Amoxicillin 500 mg 2 2 dispensing_reversed');
 select pg_temp.as_member(11);
 select set_config('hid.test.c9_list', current_setting('app.correlation_id'), true);
-select count(*) from ehr.list_order_notices('unread', null, 50);
+select count(*) from ehr.list_order_notices('unread', null, null, null, 50);
 select pg_temp.as_member(11);
 select set_config('hid.test.c9_summary', current_setting('app.correlation_id'), true);
 select count(*) from ehr.order_notice_summary();
@@ -1483,36 +1496,36 @@ select pg_temp.same('10a DA''s sibling membership at GH (clinician) reads the sa
 select pg_temp.as_member(55);
 select pg_temp.same('10b DA''s pharmacist membership at GH: the prescription notices only',
   pg_temp.summary() || ' | ' || (select count(*) || ' ' || string_agg(distinct listing.order_kind, ',')
-    from ehr.list_order_notices('all', null, 50) listing)
+    from ehr.list_order_notices('all', null, null, null, 50) listing)
   || ' | ' || pg_temp.try(format('select * from ehr.mark_order_notice_seen(%L)', pg_temp.id('n_b1')))
   || ' | ' || pg_temp.value_of(format('select ehr.mark_order_notices_read(array[%L]::uuid[], array[1]::bigint[])',
        pg_temp.id('n_r1_ready'))),
   'dispensing_reversed 4/0, prescription_dispensed 5/0 | 9 prescription | P0002 ORDER_NOTICE_NOT_FOUND | 0');
 select pg_temp.as_member(52);
 select pg_temp.same('10c D2, another doctor at GH with P''s and Q''s consent: nothing of DA''s',
-  pg_temp.summary() || ' | ' || (select count(*) from ehr.list_order_notices('all', null, 50))
+  pg_temp.summary() || ' | ' || (select count(*) from ehr.list_order_notices('all', null, null, null, 50))
   || ' | ' || pg_temp.try(format('select * from ehr.mark_order_notice_seen(%L)', pg_temp.id('n_b1')))
   || ' | ' || pg_temp.value_of(format('select ehr.mark_order_notices_read(array[%L]::uuid[], array[1]::bigint[])',
        pg_temp.id('n_rx_a_dispensed')))
-  || ' | ' || pg_temp.try(format('select * from ehr.list_order_notices(''all'', %L, 5)', pg_temp.id('n_b1'))),
-  'none | 0 | P0002 ORDER_NOTICE_NOT_FOUND | 0 | 22023 ORDER_NOTICES_CURSOR_INVALID');
+  || ' | ' || (select count(*) from ehr.list_order_notices('all', 1, clock_timestamp(), pg_temp.id('n_b1'), 5)),
+  'none | 0 | P0002 ORDER_NOTICE_NOT_FOUND | 0 | 0');
 select pg_temp.as_member(54);
 select pg_temp.same('10d DA at H3 (another facility, P''s consent there): nothing',
-  pg_temp.summary() || ' | ' || (select count(*) from ehr.list_order_notices('all', null, 50))
+  pg_temp.summary() || ' | ' || (select count(*) from ehr.list_order_notices('all', null, null, null, 50))
   || ' | ' || pg_temp.try(format('select * from ehr.mark_order_notice_seen(%L)', pg_temp.id('n_r5'))),
   'none | 0 | P0002 ORDER_NOTICE_NOT_FOUND');
 select pg_temp.as_member(26);
 select pg_temp.same('10e D3 at H3: nothing', pg_temp.summary(), 'none');
 select pg_temp.as_member(15);
 select pg_temp.same('10f PA, GH''s pharmacist (own work switched on): nothing, and DA''s notice is not found',
-  pg_temp.summary() || ' | ' || (select count(*) from ehr.list_order_notices('all', null, 50))
+  pg_temp.summary() || ' | ' || (select count(*) from ehr.list_order_notices('all', null, null, null, 50))
   || ' | ' || pg_temp.try(format('select * from ehr.mark_order_notice_seen(%L)', pg_temp.id('n_rx_a_dispensed'))),
   'none | 0 | P0002 ORDER_NOTICE_NOT_FOUND');
 select pg_temp.as_member(14);
 select pg_temp.same('10g LA, GH''s laboratory: nothing', pg_temp.summary(), 'none');
 select pg_temp.as_member(16);
 select pg_temp.same('10h RA, a receptionist (neither read permission): refused',
-  pg_temp.summary() || ' | ' || pg_temp.try('select * from ehr.list_order_notices(''all'', null, 50)')
+  pg_temp.summary() || ' | ' || pg_temp.try('select * from ehr.list_order_notices(''all'', null, null, null, 50)')
   || ' | ' || pg_temp.try(format('select * from ehr.mark_order_notice_seen(%L)', pg_temp.id('n_b1')))
   || ' | ' || pg_temp.try(format('select ehr.mark_order_notices_read(array[%L]::uuid[], array[1]::bigint[])',
        pg_temp.id('n_b1'))),
@@ -1520,7 +1533,7 @@ select pg_temp.same('10h RA, a receptionist (neither read permission): refused',
   || '42501 ORDER_NOTICES_NOT_PERMITTED');
 select pg_temp.as_member(11, 'emergency');
 select pg_temp.same('10i DA in an emergency session: direct care only',
-  pg_temp.summary() || ' | ' || pg_temp.try('select * from ehr.list_order_notices(''unread'', null, 5)'),
+  pg_temp.summary() || ' | ' || pg_temp.try('select * from ehr.list_order_notices(''unread'', null, null, null, 5)'),
   '22023 ORDER_NOTICES_DIRECT_CARE_ONLY | 22023 ORDER_NOTICES_DIRECT_CARE_ONLY');
 select pg_temp.as_member(11);
 select set_config('app.membership_id', '', true);
@@ -1528,9 +1541,11 @@ select pg_temp.same('10j DA without a membership in the session: refused', pg_te
   '42501 ORDER_NOTICES_NOT_PERMITTED');
 select pg_temp.as_member(11);
 select pg_temp.same('10k bad arguments',
-  pg_temp.try('select * from ehr.list_order_notices(''bogus'', null, 5)') || ' | '
-  || pg_temp.try('select * from ehr.list_order_notices(null, null, 5)') || ' | '
-  || pg_temp.try(format('select * from ehr.list_order_notices(''unread'', %L, 5)', gen_random_uuid())) || ' | '
+  pg_temp.try('select * from ehr.list_order_notices(''bogus'', null, null, null, 5)') || ' | '
+  || pg_temp.try('select * from ehr.list_order_notices(null, null, null, null, 5)') || ' | '
+  || pg_temp.try(format('select * from ehr.list_order_notices(''unread'', null, null, %L, 5)', gen_random_uuid()))
+  || ' | ' || pg_temp.try(format('select * from ehr.list_order_notices(''unread'', 2, clock_timestamp(), %L, 5)',
+       gen_random_uuid())) || ' | '
   || pg_temp.try('select ehr.mark_order_notices_read(array[]::uuid[], array[]::bigint[])') || ' | '
   || pg_temp.try('select ehr.mark_order_notices_read(array(select gen_random_uuid() from generate_series(1, 101)), '
        || 'array(select 1::bigint from generate_series(1, 101)))') || ' | '
@@ -1540,7 +1555,7 @@ select pg_temp.same('10k bad arguments',
        pg_temp.id('n_b1'))) || ' | '
   || pg_temp.try(format('select * from ehr.mark_order_notice_seen(%L)', gen_random_uuid())),
   '22023 ORDER_NOTICES_LIST_INVALID | 22023 ORDER_NOTICES_LIST_INVALID | 22023 ORDER_NOTICES_CURSOR_INVALID | '
-  || '22023 ORDER_NOTICES_READ_INVALID | 22023 ORDER_NOTICES_READ_INVALID | 22023 ORDER_NOTICES_READ_INVALID | '
+  || '22023 ORDER_NOTICES_CURSOR_INVALID | 22023 ORDER_NOTICES_READ_INVALID | 22023 ORDER_NOTICES_READ_INVALID | 22023 ORDER_NOTICES_READ_INVALID | '
   || '22023 ORDER_NOTICES_READ_INVALID | P0002 ORDER_NOTICE_NOT_FOUND');
 reset role;
 select pg_temp.same('10l none of case 10 changed a notice', pg_temp.fingerprint(),
@@ -1603,8 +1618,8 @@ select pg_temp.same('12a it is no longer unread, but still counted as not Seen',
      from ehr.order_notice_summary() summary_row where summary_row.kind = 'lab_result_critical'), '3/4');
 select pg_temp.same('12b and still on top of the unread list, read',
   (select string_agg(listing.kind || ':' || (listing.read_at is not null), ' ' order by listing.ordinality)
-     from ehr.list_order_notices('unread', null, 4) with ordinality listing)
-  || ' | ' || (select listing.ordinality <= 4 from ehr.list_order_notices('unread', null, 50) with ordinality listing
+     from ehr.list_order_notices('unread', null, null, null, 4) with ordinality listing)
+  || ' | ' || (select listing.ordinality <= 4 from ehr.list_order_notices('unread', null, null, null, 50) with ordinality listing
                 where listing.notice_id = pg_temp.id('n_b1'))
   || ' | ' || (pg_temp.pages('unread', 50) = pg_temp.expected_order('unread', 'e4c10000-0000-4000-8000-000000000011')
                || ' .'),
@@ -1626,7 +1641,7 @@ select pg_temp.as_member(11);
 select pg_temp.same('12e no longer counted or listed as unread',
   (select summary_row.unread_count || '/' || summary_row.critical_not_seen_count from ehr.order_notice_summary() summary_row
     where summary_row.kind = 'lab_result_critical')
-  || ' | ' || (select count(*) from ehr.list_order_notices('unread', null, 50) listing
+  || ' | ' || (select count(*) from ehr.list_order_notices('unread', null, null, null, 50) listing
                 where listing.notice_id = pg_temp.id('n_b1')),
   '3/3 | 0');
 reset role;
@@ -1685,6 +1700,90 @@ select pg_temp.same('12h mark read with the version the list showed (1): nothing
     'select ehr.mark_order_notices_read(array[%L]::uuid[], array[3]::bigint[])', pg_temp.id('n_a_ready_new'))), '0 1');
 reset role;
 rollback to savepoint seen_ordinary;
+-- 12i. A page cut at a critical notice that is then Seen. DA's unread list,
+-- one a page: page 1 is a critical notice not Seen (R5 or Q1), and the page
+-- answers where it was cut. DA marks it Seen. Page 2 starts after the cut
+-- (tier 1), so it starts with the other critical notice not Seen; the rest
+-- pages on to every unread notice now, each once. Undone.
+savepoint paging_seen;
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(11);
+select set_config('hid.test.cut_id', page.notice_id::text, true), set_config('hid.test.cut_tier', page.resume_tier::text, true),
+  set_config('hid.test.cut_at', page.resume_event_at::text, true),
+  set_config('hid.test.cut_resume', page.resume_notice_id::text, true)
+  from ehr.list_order_notices('unread', null, null, null, 1) page;
+select pg_temp.same('12i page 1 (one a page) is R5 or Q1, cut there at tier 1',
+  (current_setting('hid.test.cut_id') in (pg_temp.id('n_r5')::text, pg_temp.id('n_q1')::text)
+   and current_setting('hid.test.cut_resume') = current_setting('hid.test.cut_id'))::text
+  || ' ' || current_setting('hid.test.cut_tier'), 'true 1');
+select pg_temp.as_member(11);
+select pg_temp.same('12i DA marks it Seen', (select (seen.seen_at is not null)::text
+  from ehr.mark_order_notice_seen(current_setting('hid.test.cut_id')::uuid) seen), 'true');
+select pg_temp.as_member(11);
+select pg_temp.same('12i page 2 starts with the other critical notice not Seen; then every unread notice, each once',
+  (select page.notice_id::text from ehr.list_order_notices('unread', current_setting('hid.test.cut_tier')::integer,
+     current_setting('hid.test.cut_at')::timestamptz, current_setting('hid.test.cut_id')::uuid, 1) page)
+  || ' | ' || split_part(pg_temp.pages('unread', 5, current_setting('hid.test.cut_tier')::integer,
+                current_setting('hid.test.cut_at')::timestamptz, current_setting('hid.test.cut_id')::uuid), ' ', 1),
+  case when current_setting('hid.test.cut_id') = pg_temp.id('n_r5')::text then pg_temp.id('n_q1')::text
+       else pg_temp.id('n_r5')::text end
+  || ' | ' || pg_temp.expected_order('unread', 'e4c10000-0000-4000-8000-000000000011'));
+reset role;
+rollback to savepoint paging_seen;
+-- 12j. A page cut at an ordinary unread notice that then merges an event
+-- (the trigger's own write, as owner SQL): it moves to the top, but page 2
+-- starts after where page 1 was cut, so no notice of page 1 shows again and
+-- every notice is listed once. The cut is DA's second newest unread ordinary
+-- notice, so page 1 holds a newer ordinary one too. Undone.
+savepoint paging_merge;
+select set_config('hid.test.newest_id', (select notice.id::text from ehr.order_notices notice
+  where notice.recipient_account_id = 'e4c10000-0000-4000-8000-000000000011'
+    and notice.ordering_facility_id = 'e4c21000-0000-4000-8000-000000000001'
+    and notice.read_at is null and not notice.needs_seen
+  order by notice.last_event_at desc, notice.id desc limit 1), true),
+  set_config('hid.test.cut_id', (select notice.id::text from ehr.order_notices notice
+  where notice.recipient_account_id = 'e4c10000-0000-4000-8000-000000000011'
+    and notice.ordering_facility_id = 'e4c21000-0000-4000-8000-000000000001'
+    and notice.read_at is null and not notice.needs_seen
+  order by notice.last_event_at desc, notice.id desc offset 1 limit 1), true);
+select set_config('hid.test.cut_size', array_position(string_to_array(pg_temp.expected_order('all',
+  'e4c10000-0000-4000-8000-000000000011'), ','), current_setting('hid.test.cut_id'))::text, true);
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(11);
+select set_config('hid.test.page_one', string_agg(page.notice_id::text, ',' order by page.ordinality), true),
+  set_config('hid.test.cut_tier', min(page.resume_tier)::text, true),
+  set_config('hid.test.cut_at', min(page.resume_event_at)::text, true),
+  set_config('hid.test.cut_resume', min(page.resume_notice_id::text), true)
+  from ehr.list_order_notices('all', null, null, null, current_setting('hid.test.cut_size')::integer)
+       with ordinality page;
+reset role;
+select pg_temp.same('12j page 1 ends at the chosen notice, cut there at tier 0, the newest unread ordinary one above it',
+  (current_setting('hid.test.cut_resume') = current_setting('hid.test.cut_id'))::text || ' '
+  || current_setting('hid.test.cut_tier') || ' '
+  || (current_setting('hid.test.newest_id') = any (string_to_array(current_setting('hid.test.page_one'), ',')))::text,
+  'true 0 true');
+select ehr.order_notice_write(notice.order_kind, notice.order_id, notice.patient_id, notice.order_route_id, notice.kind,
+  clock_timestamp(), notice.source_table, notice.source_row_id, notice.result_id, notice.result_version,
+  notice.dispensing_id, notice.recipient_account_id, notice.ordering_facility_id)
+  from ehr.order_notices notice where notice.id = current_setting('hid.test.cut_id')::uuid;
+select pg_temp.same('12j it merged an event and moved to the newest ordinary place',
+  (select (notice.event_count >= 2 and notice.last_event_at = (select max(other.last_event_at) from ehr.order_notices other
+     where other.recipient_account_id = notice.recipient_account_id))::text
+     from ehr.order_notices notice where notice.id = current_setting('hid.test.cut_id')::uuid), 'true');
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(11);
+select set_config('hid.test.page_rest', split_part(pg_temp.pages('all', 7, current_setting('hid.test.cut_tier')::integer,
+  current_setting('hid.test.cut_at')::timestamptz, current_setting('hid.test.cut_id')::uuid), ' ', 1), true);
+reset role;
+select pg_temp.same('12j the pages after it: no notice of page 1 again, every notice once',
+  (select count(*) from unnest(string_to_array(current_setting('hid.test.page_rest'), ',')) rest(id)
+    where rest.id = any (string_to_array(current_setting('hid.test.page_one'), ',')))
+  || ' again, ' || (select count(distinct listed.id) from unnest(string_to_array(current_setting('hid.test.page_one')
+       || ',' || current_setting('hid.test.page_rest'), ',')) listed(id))
+  || ' of ' || cardinality(string_to_array(pg_temp.expected_order('all', 'e4c10000-0000-4000-8000-000000000011'), ',')),
+  '0 again, ' || cardinality(string_to_array(pg_temp.expected_order('all', 'e4c10000-0000-4000-8000-000000000011'), ','))
+  || ' of ' || cardinality(string_to_array(pg_temp.expected_order('all', 'e4c10000-0000-4000-8000-000000000011'), ',')));
+rollback to savepoint paging_merge;
 
 -- 13. Access ended: DA's consents for Q end (each of DA's memberships;
 -- owner SQL, ended before this transaction began, since the consent test
@@ -1700,7 +1799,7 @@ select pg_temp.same('13a Q''s two notices are listed with access ended: no patie
   (select string_agg(format('%s:%s:%s', listing.kind, listing.access_ended, num_nulls(listing.patient_id,
      listing.full_name, listing.sex, listing.date_of_birth, listing.health_id_last4, listing.encounter_id,
      listing.display)), ' ' order by listing.ordinality)
-     from ehr.list_order_notices('unread', null, 50) with ordinality listing
+     from ehr.list_order_notices('unread', null, null, null, 50) with ordinality listing
     where listing.notice_id in (pg_temp.id('n_q1'), pg_temp.id('n_rx_q'))),
   'lab_result_critical:t:7 prescription_dispensed:t:7');
 reset role;
@@ -1714,7 +1813,7 @@ set local role hid_ehr_api_runtime;
 select pg_temp.as_member(11);
 select pg_temp.same('13c Q''s critical notice is second (R5 and Q1 are the critical notices not Seen)',
   (select string_agg(listing.notice_id::text, ' ' order by listing.ordinality)
-     from ehr.list_order_notices('unread', null, 2) with ordinality listing),
+     from ehr.list_order_notices('unread', null, null, null, 2) with ordinality listing),
   pg_temp.id('n_r5') || ' ' || pg_temp.id('n_q1'));
 select pg_temp.same('13d mark read needs no access; Seen does',
   pg_temp.value_of(format('select ehr.mark_order_notices_read(array[%L]::uuid[], array[1]::bigint[])',
@@ -2110,9 +2209,9 @@ select pg_temp.same('18h 0159 is back as it was', pg_temp.made_0159(), '3 tables
 
 do $$
 begin
-  if currval('pg_temp.order_notices_passed') is distinct from 117 then
+  if currval('pg_temp.order_notices_passed') is distinct from 123 then
     raise exception 'ORD-11 order notices suite failed: % cases ran in the first transaction, % expected',
-      currval('pg_temp.order_notices_passed'), 117;
+      currval('pg_temp.order_notices_passed'), 123;
   end if;
   raise notice 'ORD-11 order notices suite: % cases passed (READ COMMITTED)', currval('pg_temp.order_notices_passed');
 end $$;

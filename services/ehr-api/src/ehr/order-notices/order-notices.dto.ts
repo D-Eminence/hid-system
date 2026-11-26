@@ -1,6 +1,6 @@
 import { Type } from 'class-transformer';
 import {
-  ArrayMaxSize, ArrayMinSize, ArrayUnique, IsArray, IsIn, IsInt, IsUUID, Max, Min, ValidateNested,
+  ArrayMaxSize, ArrayMinSize, ArrayUnique, IsArray, IsIn, IsInt, IsString, IsUUID, Matches, Max, Min, ValidateNested,
 } from 'class-validator';
 import { IsOptionalButNotNull } from '../../common/validation';
 
@@ -11,15 +11,16 @@ export const ORDER_NOTICES_READ_MAX = 100;
 
 /**
  * ORD-11: GET /ehr/me/order-notices's query. `state` is required: `unread`
- * (unread notices and critical ones not Seen) or `all`. `cursor` is the last
- * notice id of the page before.
+ * (unread notices and critical ones not Seen) or `all`. `cursor` is the page
+ * before's `nextCursor`, as sent (opaque).
  */
 export class ListOrderNoticesQueryDto {
   @IsIn(['unread', 'all'])
   state!: 'unread' | 'all';
 
   @IsOptionalButNotNull()
-  @IsUUID()
+  @IsString()
+  @Matches(/^[A-Za-z0-9_-]{16,512}$/)
   cursor?: string;
 
   @IsOptionalButNotNull()

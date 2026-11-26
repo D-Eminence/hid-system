@@ -2109,10 +2109,11 @@ grant execute on function pharmacy.refill_scan_open() to public;
 -- four trigger functions and their two helpers (the triggers run them as
 -- their owner) or on the session check; the hold test is platform.legal_holds'
 -- owner's, with EXECUTE for 0159's owner alone.
-grant execute on function ehr.order_notice_summary(), ehr.list_order_notices(text, uuid, integer),
-  ehr.mark_order_notices_read(uuid[], bigint[]), ehr.mark_order_notice_seen(uuid), ehr.sweep_order_notices(integer)
+grant execute on function ehr.order_notice_summary(),
+  ehr.list_order_notices(text, integer, timestamptz, uuid, integer), ehr.mark_order_notices_read(uuid[], bigint[]),
+  ehr.mark_order_notice_seen(uuid), ehr.sweep_order_notices(integer)
   to hid_ehr_runtime;
-revoke all on function ehr.order_notice_summary(), ehr.list_order_notices(text, uuid, integer),
+revoke all on function ehr.order_notice_summary(), ehr.list_order_notices(text, integer, timestamptz, uuid, integer),
   ehr.mark_order_notices_read(uuid[], bigint[]), ehr.mark_order_notice_seen(uuid), ehr.sweep_order_notices(integer),
   ehr.order_notice_session(), ehr.order_notice_gap(text, uuid, text, text, text, text),
   ehr.order_notice_write(text, uuid, uuid, uuid, text, timestamptz, text, uuid, uuid, bigint, uuid, uuid, uuid),

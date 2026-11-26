@@ -135,13 +135,20 @@ describe('ORD-11 client and routes over HTTP', () => {
 
   it('the list: the query sent, a routed critical notice and one whose access ended, the next cursor; audited', async () => {
     await start(true);
-    answers.set(ORDER_NOTICES_LIST_SQL, [noticeRow({ has_more: true }), noticeRow({ notice_id: noticeB,
+    const cut = { has_more: true, resume_tier: 0, resume_at: '2026-11-26T09:00:00.123456Z', resume_id: noticeB };
+    answers.set(ORDER_NOTICES_LIST_SQL, [noticeRow(cut), noticeRow({ notice_id: noticeB,
       kind: 'prescription_dispensed', order_kind: 'prescription', order_route_id: null, needs_seen: false,
       access_ended: true, patient_id: null, full_name: null, sex: null, date_of_birth: null, health_id_last4: null,
-      encounter_id: null, display: null, has_more: true })]);
-    const page: EhrOrderNoticePage = await client.listOrderNotices({ state: 'unread', cursor: noticeA, limit: 2 }, context);
-    expect(sent).toEqual([{ sql: ORDER_NOTICES_LIST_SQL, values: ['unread', noticeA, 2] }]);
-    expect(page.nextCursor).toBe(noticeB);
+      encounter_id: null, display: null, ...cut })]);
+    const page: EhrOrderNoticePage = await client.listOrderNotices({ state: 'unread', limit: 2 }, context);
+    expect(sent).toEqual([{ sql: ORDER_NOTICES_LIST_SQL, values: ['unread', null, null, null, 2] }]);
+    expect(page.nextCursor).toMatch(/^[A-Za-z0-9_-]{16,512}$/);
+    await client.listOrderNotices({ state: 'unread', cursor: page.nextCursor!, limit: 2 }, context);
+    expect(sent[1]).toEqual({ sql: ORDER_NOTICES_LIST_SQL, values: ['unread', 0, '2026-11-26T09:00:00.123456Z', noticeB, 2] });
+    quiet();
+    expect(await problemOf(client.listOrderNotices({ state: 'all', cursor: page.nextCursor!, limit: 2 }, context)))
+      .toEqual({ status: 400, code: 'INVALID_CURSOR' });
+    expect(sent).toHaveLength(2);
     expect(page.items[0]).toEqual({ noticeId: noticeA, kind: 'lab_result_critical', version: 1,
       createdAt: '2026-11-26T09:00:00.000Z', lastEventAt: '2026-11-26T09:00:00.000Z', count: 1, readAt: null,
       needsSeen: true, seenAt: null, order: { type: 'lab_request', id: orderId, routeId,
@@ -150,7 +157,9 @@ describe('ORD-11 client and routes over HTTP', () => {
         dateOfBirth: '1984-04-04', healthIdLast4: 'A2B3' }, accessEnded: false,
       message: 'Critical result: Synthetic potassium. Open it and mark it Seen.' } satisfies EhrOrderNotice);
     expect(page.items[1]).toMatchObject({ accessEnded: true, patient: null, order: { display: null, encounterId: null } });
-    expect(audited).toEqual([{ action: 'api.get./api/v1/ehr/me/order-notices', outcome: 'success' }]);
+    expect(audited).toEqual([{ action: 'api.get./api/v1/ehr/me/order-notices', outcome: 'success' },
+      { action: 'api.get./api/v1/ehr/me/order-notices', outcome: 'success' },
+      { action: 'api.get./api/v1/ehr/me/order-notices', outcome: 'failure' }]);
   });
 
   it('mark read: the pairs sent as the route takes them; a stale version is updated 0', async () => {
@@ -270,11 +279,13 @@ describe('ORD-11 the client refuses a broken answer (502)', () => {
     expect(await problemOf(offline.listOrderNotices({ state: 'all' }, context))).toMatchObject({ status: 502 });
   });
 
-  it('a page over 50, a cursor that is not a UUID, counts that are not whole, more updated than sent, a Seen without seenAt',
+  it('a page over 50, a cursor that is not one, counts that are not whole, more updated than sent, a Seen without seenAt',
     async () => {
       respond({ items: Array.from({ length: 51 }, () => notice), nextCursor: null });
       expect(await problemOf(offline.listOrderNotices({ state: 'all' }, context))).toMatchObject({ status: 502 });
       respond({ items: [], nextCursor: 'next' });
+      expect(await problemOf(offline.listOrderNotices({ state: 'all' }, context))).toMatchObject({ status: 502 });
+      respond({ items: [], nextCursor: 'eyJ2IjoxLCJmIjoi+/=' });
       expect(await problemOf(offline.listOrderNotices({ state: 'all' }, context))).toMatchObject({ status: 502 });
       respond({ unread: 1.5, criticalNotSeen: 0, byKind: {} });
       expect(await problemOf(offline.orderNoticeSummary(context))).toMatchObject({ status: 502 });
