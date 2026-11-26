@@ -28,6 +28,15 @@
 --    active items (a partial unique index), so a prescription or lab request
 --    finds its price by its code. Name unique among the active items of a
 --    kind, in any case. stock_kept is set only by 0166's stock settings.
+--    The link is HID-MED (MED-nnnnn) for a drug, LOINC or HID-LAB for a test,
+--    or, for either, HID-FACILITY with the id of one of this facility's own
+--    items (ORD-7's facility items, 0155; coordinator decision, option 2, #258,
+--    25 November 2026, 23:10 UTC): 0166's stock and 0167's hooks then match a
+--    facility item by its code pair exactly as a national code. A
+--    HID-FACILITY code is accepted only for an active item of this facility
+--    and of that kind in 0155's table (read when 0155 is applied; before it
+--    there is none, NATIONAL_CODE_NOT_FOUND), so neither file needs the
+--    other first.
 -- T5 commercial.catalogue_item_prices: the cash price (hmo_id null) and one
 --    price per HMO; a removed HMO price is kept with active false.
 -- T6 commercial.catalogue_events: every create and change of an item, with
@@ -53,7 +62,9 @@
 --    (commercial.command_replay, commercial.command_record), the next number
 --    (commercial.next_number), the Lagos day (commercial.lagos_day), the
 --    search-text check (commercial.search_text), the national-code check
---    (commercial.national_code_ok, reading 0149's lists), the staff display
+--    (commercial.national_code_ok, reading 0149's lists), the facility-item
+--    check (commercial.facility_item_ok, reading 0155's items when 0155 is
+--    applied), the staff display
 --    name (commercial.member_name) and the JSON of settings and items.
 -- F2 For the EHR runtime and the schema test runtime (SECURITY DEFINER,
 --    search_path pg_catalog, pg_temp): commercial.billing_switched_on,
@@ -109,7 +120,7 @@ declare
     "commercial.audit_refusal(text,text,text,uuid,text)": "f7c90746caf878a5c41e000cc514fc04",
     "commercial.billing_switched_on(boolean)": "135a2fe7750e58aff64ead86315851bc",
     "commercial.caller(text)": "16752b295365f4e33ed9119f55c2175f",
-    "commercial.catalogue_check(uuid,uuid,text,text,text,text,text,jsonb,text,text,jsonb)": "35923f90f6ac1d99c7422161be5417f8",
+    "commercial.catalogue_check(uuid,uuid,text,text,text,text,text,jsonb,text,text,jsonb)": "550eaa024526a9dbe11caff467b19e2f",
     "commercial.catalogue_create(jsonb,text,text)": "8ee22c59496b27af1fd92c288d770494",
     "commercial.catalogue_item_json(uuid)": "48d74947f4016ebc645dc0d0cfea281b",
     "commercial.catalogue_list(text,text,boolean,integer)": "f562b9ae15cd9fdc292cb3d284207bec",
@@ -118,6 +129,7 @@ declare
     "commercial.catalogue_write_prices(uuid,uuid,jsonb)": "8fa7f007675931a209e32a9c9b632afc",
     "commercial.command_record(text,text,text,uuid)": "84e04cc81ba491a39773741ce8e26274",
     "commercial.command_replay(text,text,text)": "e7c1ff69e15ec0ca75b1c624355d163a",
+    "commercial.facility_item_ok(text,text)": "57eeb29c858d2d7c47549ff8a452aac1",
     "commercial.holds(text)": "4ee831ae9d72455e1cdeb1d4661aac69",
     "commercial.lagos_day(timestampwithtimezone)": "08620d6c3114df8123f496d76238763f",
     "commercial.member_name(uuid)": "50f7c6db29a6b99ee94973b373ed57cd",
@@ -274,7 +286,9 @@ create table commercial.catalogue_items (
     (national_code_system is null) = (national_code is null)
     and (national_code_system is null
          or (kind = 'drug' and national_code_system = 'HID-MED' and national_code ~ '^MED-[0-9]{5}$')
-         or (kind = 'lab_test' and national_code_system in ('LOINC', 'HID-LAB'))))
+         or (kind = 'lab_test' and national_code_system in ('LOINC', 'HID-LAB'))
+         or (kind in ('drug', 'lab_test') and national_code_system = 'HID-FACILITY'
+             and national_code ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')))
 );
 create unique index catalogue_items_name_uq on commercial.catalogue_items (facility_id, kind, lower(name)) where active;
 create unique index catalogue_items_national_uq
@@ -599,6 +613,43 @@ as $$
        where version_row.active and version_row.kind = 'lab_test' and not test.withdrawn
          and test.code_system = requested_system and test.code = requested_code)
     else false end
+$$;
+
+-- This facility's own item (ORD-7's facility items, 0155: code system
+-- HID-FACILITY, the code the item's id as PostgreSQL writes it), active and of
+-- the kind (a drug is 0155's medicine), at the session's facility (never an
+-- argument's). Coordinator decision, option 2 (#258, 25 November 2026, 23:10
+-- UTC): Billing prices facility items by their code pair, exactly as national
+-- codes, and neither file waits for the other. So 0155's table is read only
+-- when it exists, through one constant, schema-qualified query with bound
+-- values (its name and the four columns 0155 keeps stable for Billing: id,
+-- facility_id, kind and active; Ola, #258, 26 November 2026, 12:44 UTC),
+-- matching facility_id because 0155's owner read policy shows every facility.
+-- Without 0155 there is no facility item, so no such code is found.
+create function commercial.facility_item_ok(requested_kind text, requested_code text)
+returns boolean
+language plpgsql
+stable
+set search_path = pg_catalog, pg_temp
+as $$
+declare
+  found_item boolean;
+begin
+  if requested_kind is null or requested_kind not in ('drug', 'lab_test') or requested_code is null
+     or requested_code !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+     or platform.current_facility_id() is null or to_regclass('ehr.catalog_facility_items') is null then
+    return false;
+  end if;
+  execute 'select exists (select 1 from ehr.catalog_facility_items item where item.id = $1 and item.facility_id = $2 '
+    || 'and item.kind::text = $3 and item.active)'
+    into found_item
+    using requested_code::uuid, platform.current_facility_id(),
+      case when requested_kind = 'drug' then 'medicine' else 'lab_test' end;
+  return coalesce(found_item, false);
+exception when undefined_table or undefined_column or undefined_function or datatype_mismatch
+  or insufficient_privilege then
+  return false;
+end
 $$;
 
 -- A staff member's display name (SX-9's name: the staff record's full name), never an account id.
@@ -1038,10 +1089,14 @@ begin
      or (system_value is not null
          and not ((kind_value = 'drug' and system_value = 'HID-MED' and code_value ~ '^MED-[0-9]{5}$')
                   or (kind_value = 'lab_test' and system_value in ('LOINC', 'HID-LAB')
-                      and char_length(code_value) between 1 and 100))) then
+                      and char_length(code_value) between 1 and 100)
+                  or (kind_value in ('drug', 'lab_test') and system_value = 'HID-FACILITY'
+                      and code_value ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'))) then
     raise exception using errcode = 'HB400', message = 'VALIDATION_FAILED', detail = '{"field": "nationalCode"}';
   end if;
-  if system_value is not null and not commercial.national_code_ok(system_value, code_value) then
+  if system_value is not null
+     and not (case when system_value = 'HID-FACILITY' then commercial.facility_item_ok(kind_value, code_value)
+                   else commercial.national_code_ok(system_value, code_value) end) then
     raise exception using errcode = 'HB409', message = 'NATIONAL_CODE_NOT_FOUND';
   end if;
   if system_value is not null and exists (
@@ -1215,7 +1270,8 @@ revoke all on function commercial.lagos_day(timestamptz), commercial.caller(text
   commercial.audit(text, text, text, text, uuid, jsonb, text), commercial.command_replay(text, text, text),
   commercial.command_record(text, text, text, uuid), commercial.next_number(uuid, text, integer),
   commercial.search_text(text), commercial.name_matches(text, text), commercial.national_code_ok(text, text),
-  commercial.member_name(uuid), commercial.settings_json(uuid), commercial.catalogue_item_json(uuid),
+  commercial.facility_item_ok(text, text), commercial.member_name(uuid), commercial.settings_json(uuid),
+  commercial.catalogue_item_json(uuid),
   commercial.catalogue_write_prices(uuid, uuid, jsonb),
   commercial.catalogue_check(uuid, uuid, text, text, text, text, text, jsonb, text, text, jsonb),
   commercial.billing_switched_on(boolean), commercial.audit_refusal(text, text, text, uuid, text),
@@ -1249,7 +1305,7 @@ $grants$;
 comment on table commercial.payment_settings is
   '0163 (BILL-1): one row per facility: where money is taken, the methods, pay-before per department (off until the clinical lead signs BILL-3), deferral reasons (emergency always), transfer account, receipt footer, how the day is closed, the check-in charge item. No row: defaults, and no automatic line or gate.';
 comment on table commercial.catalogue_items is
-  '0163 (BILL-7, recommended option): the facility''s one item master for prices, services and stock (drug, lab_test, other). A drug or test may link to ORD-7''s national list by fixed code, unique among the facility''s active items. Never deleted.';
+  '0163 (BILL-7, recommended option): the facility''s one item master for prices, services and stock (drug, lab_test, other). A drug or test may link to ORD-7''s national list by fixed code, or to one of this facility''s own items (HID-FACILITY, its id), unique among the facility''s active items. Never deleted.';
 comment on table commercial.number_counters is
   '0163 (BILL-16): gap-free numbers per facility: bills (year 0) and receipts per year, taken FOR UPDATE.';
 comment on table commercial.commands is
@@ -1265,7 +1321,7 @@ declare
     "commercial.audit_refusal(text,text,text,uuid,text)": "f7c90746caf878a5c41e000cc514fc04",
     "commercial.billing_switched_on(boolean)": "135a2fe7750e58aff64ead86315851bc",
     "commercial.caller(text)": "16752b295365f4e33ed9119f55c2175f",
-    "commercial.catalogue_check(uuid,uuid,text,text,text,text,text,jsonb,text,text,jsonb)": "35923f90f6ac1d99c7422161be5417f8",
+    "commercial.catalogue_check(uuid,uuid,text,text,text,text,text,jsonb,text,text,jsonb)": "550eaa024526a9dbe11caff467b19e2f",
     "commercial.catalogue_create(jsonb,text,text)": "8ee22c59496b27af1fd92c288d770494",
     "commercial.catalogue_item_json(uuid)": "48d74947f4016ebc645dc0d0cfea281b",
     "commercial.catalogue_list(text,text,boolean,integer)": "f562b9ae15cd9fdc292cb3d284207bec",
@@ -1274,6 +1330,7 @@ declare
     "commercial.catalogue_write_prices(uuid,uuid,jsonb)": "8fa7f007675931a209e32a9c9b632afc",
     "commercial.command_record(text,text,text,uuid)": "84e04cc81ba491a39773741ce8e26274",
     "commercial.command_replay(text,text,text)": "e7c1ff69e15ec0ca75b1c624355d163a",
+    "commercial.facility_item_ok(text,text)": "57eeb29c858d2d7c47549ff8a452aac1",
     "commercial.holds(text)": "4ee831ae9d72455e1cdeb1d4661aac69",
     "commercial.lagos_day(timestampwithtimezone)": "08620d6c3114df8123f496d76238763f",
     "commercial.member_name(uuid)": "50f7c6db29a6b99ee94973b373ed57cd",

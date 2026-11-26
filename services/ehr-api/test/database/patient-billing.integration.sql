@@ -52,6 +52,9 @@
 --      as it was (no refund due, on the bill, its log, the audit rows or the
 --      badge); the first one's own reversal makes what was paid the refund.
 --  12. bill and receipt numbers past 999999 have seven digits.
+--  13. facility items (ORD-7's 0155, HID-FACILITY): priced by this
+--      facility's own active item of the kind only; the hooks and the stock
+--      match them by code pair; another facility's code is not counted here.
 --
 -- Each case records its outcome; the suite fails at the end listing every
 -- case whose outcome differs.
@@ -1367,6 +1370,178 @@ select pg_temp.check_case('12 the receipt numbers', '999999/1000000',
   (select string_agg(split_part(receipt_number, '-', 3), '/' order by receipt_number collate "C" desc)
      from commercial.payments where bill_id = (pg_temp.v('n7')->'bill'->>'id')::uuid));
 select pg_temp.check_case('12 every bill''s totals agree', '0', pg_temp.agree());
+
+-- 13. Facility items (ORD-7's 0155, HID-FACILITY and the item's id; coordinator decision, option 2, #258, 25 November
+-- 2026): a drug or a test is priced by one of this facility's own active items of its kind, never another facility's
+-- or a withdrawn one; the accepted prescription and the own lab work item find their price by the code pair, the
+-- dispensing takes the facility item's stock; another facility's facility code (a routed prescription) is not counted
+-- as unpriced here, this facility's own unpriced one is. Without 0155 its table is made here (rolled back), with the
+-- four columns 0155 keeps for Billing and its owner read policy (every facility), owned by the schema owner.
+select pg_temp.check_case('13 a facility code must be an item id', 'HB400 VALIDATION_FAILED',
+  pg_temp.ehr('x', 2, $s$select commercial.catalogue_create('{"kind":"drug","name":"Facility mixture","prescriptionOnly":false,"nationalCodeSystem":"HID-FACILITY","nationalCode":"MIXTURE-1","prices":{"cashKobo":5000,"hmo":[]}}', 'kbillingfacility000001', repeat('1', 64))$s$));
+select pg_temp.check_case('13 a facility code is never for an other item', 'HB400 VALIDATION_FAILED',
+  pg_temp.ehr('x', 2, $s$select commercial.catalogue_create('{"kind":"other","name":"Facility dressing","nationalCodeSystem":"HID-FACILITY","nationalCode":"b1621300-0000-4000-8000-000000000001","prices":{"cashKobo":5000,"hmo":[]}}', 'kbillingfacility000002', repeat('2', 64))$s$));
+select pg_temp.check_case('13 a facility code that names no item', 'HB409 NATIONAL_CODE_NOT_FOUND',
+  pg_temp.ehr('x', 2, $s$select commercial.catalogue_create('{"kind":"drug","name":"Facility mixture","prescriptionOnly":false,"nationalCodeSystem":"HID-FACILITY","nationalCode":"b1621300-0000-4000-8000-0000000000ff","prices":{"cashKobo":5000,"hmo":[]}}', 'kbillingfacility000003', repeat('3', 64))$s$));
+do $$
+declare
+  owner_name text := (select pg_get_userbyid(nspowner) from pg_namespace where nspname = 'commercial');
+begin
+  if to_regclass('ehr.catalog_facility_items') is null then
+    create table ehr.catalog_facility_items (id uuid primary key, facility_id uuid not null, kind text not null,
+      active boolean not null);
+    execute format('alter table ehr.catalog_facility_items owner to %I', owner_name);
+    alter table ehr.catalog_facility_items enable row level security;
+    alter table ehr.catalog_facility_items force row level security;
+    execute format('create policy catalog_facility_items_owner_read on ehr.catalog_facility_items for select '
+      || 'using (current_user = %L::name)', owner_name);
+    execute format('create policy catalog_facility_items_owner_write on ehr.catalog_facility_items for insert '
+      || 'with check (current_user = %L::name)', owner_name);
+  end if;
+  execute format('set local role %I', owner_name);
+  insert into ehr.catalog_facility_items (id, facility_id, kind, active) values
+    ('b1621300-0000-4000-8000-000000000001', 'b1620000-0000-4000-8000-000000000002', 'medicine', true),
+    ('b1621300-0000-4000-8000-000000000002', 'b1620000-0000-4000-8000-000000000002', 'lab_test', true),
+    ('b1621300-0000-4000-8000-000000000003', 'b1620000-0000-4000-8000-000000000002', 'medicine', false),
+    ('b1621300-0000-4000-8000-000000000004', 'b1620000-0000-4000-8000-000000000012', 'medicine', true),
+    ('b1621300-0000-4000-8000-000000000005', 'b1620000-0000-4000-8000-000000000002', 'medicine', true);
+  reset role;
+end $$;
+select pg_temp.check_case('13 a drug priced by this facility''s own medicine', 'ok',
+  pg_temp.ehr('fmed', 2, $s$select commercial.catalogue_create('{"kind":"drug","name":"Facility mixture","form":"liquid","prescriptionOnly":false,"nationalCodeSystem":"HID-FACILITY","nationalCode":"b1621300-0000-4000-8000-000000000001","prices":{"cashKobo":5000,"hmo":[]}}', 'kbillingfacility000004', repeat('4', 64))$s$));
+select pg_temp.check_case('13 the item answers its facility link', 'HID-FACILITY/b1621300-0000-4000-8000-000000000001/5000',
+  (select format('%s/%s/%s', v->>'nationalCodeSystem', v->>'nationalCode', v->'prices'->>'cashKobo')
+     from pg_temp.v('fmed') v));
+select pg_temp.check_case('13 a test priced by this facility''s own lab test', 'ok',
+  pg_temp.ehr('flab', 2, $s$select commercial.catalogue_create('{"kind":"lab_test","name":"Facility malaria smear","nationalCodeSystem":"HID-FACILITY","nationalCode":"b1621300-0000-4000-8000-000000000002","prices":{"cashKobo":80000,"hmo":[]}}', 'kbillingfacility000005', repeat('5', 64))$s$));
+select pg_temp.check_case('13 the same facility item twice', 'HB409 NATIONAL_CODE_ALREADY_PRICED',
+  pg_temp.ehr('x', 2, $s$select commercial.catalogue_create('{"kind":"drug","name":"Facility mixture again","prescriptionOnly":false,"nationalCodeSystem":"HID-FACILITY","nationalCode":"b1621300-0000-4000-8000-000000000001","prices":{"cashKobo":1,"hmo":[]}}', 'kbillingfacility000006', repeat('6', 64))$s$));
+select pg_temp.check_case('13 a drug with a lab test''s id', 'HB409 NATIONAL_CODE_NOT_FOUND',
+  pg_temp.ehr('x', 2, $s$select commercial.catalogue_create('{"kind":"drug","name":"Wrong kind","prescriptionOnly":false,"nationalCodeSystem":"HID-FACILITY","nationalCode":"b1621300-0000-4000-8000-000000000002","prices":{"cashKobo":1,"hmo":[]}}', 'kbillingfacility000007', repeat('7', 64))$s$));
+select pg_temp.check_case('13 a withdrawn facility item', 'HB409 NATIONAL_CODE_NOT_FOUND',
+  pg_temp.ehr('x', 2, $s$select commercial.catalogue_create('{"kind":"drug","name":"Withdrawn mixture","prescriptionOnly":false,"nationalCodeSystem":"HID-FACILITY","nationalCode":"b1621300-0000-4000-8000-000000000003","prices":{"cashKobo":1,"hmo":[]}}', 'kbillingfacility000008', repeat('8', 64))$s$));
+select pg_temp.check_case('13 another facility''s item', 'HB409 NATIONAL_CODE_NOT_FOUND',
+  pg_temp.ehr('x', 2, $s$select commercial.catalogue_create('{"kind":"drug","name":"Other facility mixture","prescriptionOnly":false,"nationalCodeSystem":"HID-FACILITY","nationalCode":"b1621300-0000-4000-8000-000000000004","prices":{"cashKobo":1,"hmo":[]}}', 'kbillingfacility000009', repeat('9', 64))$s$));
+select pg_temp.check_case('13 the facility item is kept in stock (bottle)', 'ok',
+  pg_temp.pharm('fstk', 3, format($s$select pharmacy.stock_settings_put('%s', 'bottle', 2, 0, 'kbillingfacility000010', repeat('a', 64))$s$, pg_temp.ids('fmed'))));
+select pg_temp.check_case('13 ten bottles are received', 'ok',
+  pg_temp.pharm('frcv', 3, format($s$select pharmacy.stock_receive(jsonb_build_object('lines', jsonb_build_array(
+      jsonb_build_object('catalogueItemId', '%1$s', 'batchNumber', 'FAC-1', 'expiresOn', (clock_timestamp() at time zone 'Africa/Lagos')::date + 200, 'quantity', 10))), 'kbillingfacility000011', repeat('b', 64))$s$, pg_temp.ids('fmed'))));
+-- p9's prescriptions 13 (this facility's mixture, 2 bottles) and 14 (another facility's, routed here; no price here),
+-- and p9's own lab work item for the facility smear.
+set local session_replication_role = replica;
+insert into ehr.prescriptions (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  medication_code_system, medication_code, medication_display, frequency, instructions, status, quantity_to_dispense,
+  quantity_unit)
+values
+  ('b1620610-0000-4000-8000-000000000013', 'b1620600-0000-4000-8000-000000000009', pg_temp.patient(9),
+   'b1620000-0000-4000-8000-000000000002', 'b1620100-0000-4000-8000-000000000004', pg_temp.member(4), 'HID-FACILITY',
+   'b1621300-0000-4000-8000-000000000001', 'Facility mixture', 'twice a day', 'After food', 'active', 2, 'Bottle'),
+  ('b1620610-0000-4000-8000-000000000014', 'b1620600-0000-4000-8000-000000000009', pg_temp.patient(9),
+   'b1620000-0000-4000-8000-000000000002', 'b1620100-0000-4000-8000-000000000004', pg_temp.member(4), 'HID-FACILITY',
+   'b1621300-0000-4000-8000-000000000004', 'Other facility mixture', 'daily', 'At night', 'active', 1, 'Bottle');
+insert into ehr.lab_requests (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  test_code_system, test_code, test_display, status)
+values ('b1620630-0000-4000-8000-000000000013', 'b1620600-0000-4000-8000-000000000009', pg_temp.patient(9),
+  'b1620000-0000-4000-8000-000000000002', 'b1620100-0000-4000-8000-000000000004', pg_temp.member(4), 'HID-FACILITY',
+  'b1621300-0000-4000-8000-000000000002', 'Facility malaria smear', 'active');
+set local session_replication_role = origin;
+select set_config('app.facility_id', 'b1620000-0000-4000-8000-000000000002', true),
+  set_config('app.correlation_id', 'billing-suite-fixture', true);
+insert into pharmacy.work_items (id, patient_id, facility_id, ordering_facility_id, source_ehr_prescription_id,
+  source_ehr_prescription_version, source_encounter_id, source_status, status, medication_code_system, medication_code,
+  medication_display, frequency, instructions, prescribed_by, prescribed_at, accepted_by, accepted_by_membership_id,
+  accepted_at, acceptance_reason, idempotency_key, request_sha256, correlation_id)
+select ('b1620620-0000-4000-8000-0000000000' || n)::uuid, pg_temp.patient(9), 'b1620000-0000-4000-8000-000000000002',
+  'b1620000-0000-4000-8000-000000000002', ('b1620610-0000-4000-8000-0000000000' || n)::uuid, 1,
+  'b1620600-0000-4000-8000-000000000009', 'active', 'accepted', 'HID-FACILITY', code, display, 'daily', 'As directed',
+  'b1620100-0000-4000-8000-000000000004', clock_timestamp(), 'b1620100-0000-4000-8000-000000000004', pg_temp.member(4),
+  clock_timestamp(), 'Sent automatically when the prescription was activated', 'own-pharmacy-send:billing-' || n,
+  repeat('0', 64), 'billing-suite-correlation'
+from (values (13, 'b1621300-0000-4000-8000-000000000001', 'Facility mixture'),
+             (14, 'b1621300-0000-4000-8000-000000000004', 'Other facility mixture')) listed(n, code, display);
+do $$ begin
+  perform pg_temp.as_member(3, 'direct-care');
+  insert into pharmacy.work_item_acceptances (work_item_id, patient_id, facility_id, accepted_by, accepted_by_membership_id,
+    accepted_with, idempotency_key, request_sha256, correlation_id)
+  select ('b1620620-0000-4000-8000-0000000000' || n)::uuid, pg_temp.patient(9), 'b1620000-0000-4000-8000-000000000002',
+    'b1620100-0000-4000-8000-000000000003', pg_temp.member(3), 'accept', 'billing-accept-key-10' || n, repeat('0', 64),
+    'billing-suite-correlation'
+  from generate_series(13, 14) n;
+end $$;
+select pg_temp.check_case('13 the accepted facility medicine has its line', 'pharmacy/2/10000/f',
+  (select format('%s/%s/%s/%s', origin, quantity, total_kobo, check_quantity) from commercial.bill_lines
+    where work_item_id = 'b1620620-0000-4000-8000-000000000013'));
+select pg_temp.check_case('13 another facility''s facility code: no line, not counted here', '0/0',
+  (select format('%s/%s',
+     (select count(*) from commercial.bill_lines where work_item_id = 'b1620620-0000-4000-8000-000000000014'),
+     (select count(*) from commercial.unpriced_code_hits where code = 'b1621300-0000-4000-8000-000000000004'))));
+do $$ begin
+  perform pg_temp.as_member(3, 'direct-care');
+  insert into pharmacy.dispensings (id, work_item_id, work_item_version, patient_id, facility_id, medication_code_system,
+    medication_code, medication_display, quantity_dispensed, quantity_unit, status, dispensed_by, dispensed_by_membership_id,
+    reason, idempotency_key, request_sha256, correlation_id)
+  values ('b1620640-0000-4000-8000-000000000013', 'b1620620-0000-4000-8000-000000000013', 1, pg_temp.patient(9),
+    'b1620000-0000-4000-8000-000000000002', 'HID-FACILITY', 'b1621300-0000-4000-8000-000000000001', 'Facility mixture',
+    2, 'bottle', 'dispensed', 'b1620100-0000-4000-8000-000000000003', pg_temp.member(3), 'Dispensed as prescribed',
+    'billing-dispense-key-1013', repeat('0', 64), 'billing-suite-correlation');
+end $$;
+select pg_temp.check_case('13 the dispensing took two bottles of the facility item', '8',
+  (select sum(on_hand)::text from pharmacy.stock_batches where catalogue_item_id = (pg_temp.ids('fmed'))::uuid));
+select pg_temp.check_case('13 and the line bills it', 'b1620640-0000-4000-8000-000000000013',
+  (select dispensing_id::text from commercial.bill_lines where work_item_id = 'b1620620-0000-4000-8000-000000000013'));
+do $$ begin
+  perform pg_temp.as_member(8, 'direct-care');
+  insert into lab.work_items (id, patient_id, facility_id, ordering_facility_id, source_ehr_order_id, source_ehr_order_version,
+    source_encounter_id, status, priority, test_code_system, test_code, test_name, requested_by, requested_at, accepted_by,
+    accepted_by_membership_id, accepted_at, idempotency_key, request_sha256, correlation_id)
+  values ('b1620650-0000-4000-8000-000000000013', pg_temp.patient(9), 'b1620000-0000-4000-8000-000000000002',
+    'b1620000-0000-4000-8000-000000000002', 'b1620630-0000-4000-8000-000000000013', 1,
+    'b1620600-0000-4000-8000-000000000009', 'accepted', 'routine', 'HID-FACILITY', 'b1621300-0000-4000-8000-000000000002',
+    'Facility malaria smear', 'b1620100-0000-4000-8000-000000000004', clock_timestamp(),
+    'b1620100-0000-4000-8000-000000000008', pg_temp.member(8), clock_timestamp(), 'billing-lab-key-000013', repeat('0', 64),
+    'billing-suite-correlation');
+end $$;
+select pg_temp.check_case('13 the own lab work item for the facility test has its line', 'lab/1/80000',
+  (select format('%s/%s/%s', origin, quantity, total_kobo) from commercial.bill_lines
+    where work_item_id = 'b1620650-0000-4000-8000-000000000013'));
+-- This facility's own medicine, not on the price list: counted for "Not on the price list".
+set local session_replication_role = replica;
+insert into ehr.prescriptions (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  medication_code_system, medication_code, medication_display, frequency, instructions, status, quantity_to_dispense,
+  quantity_unit)
+values ('b1620610-0000-4000-8000-000000000015', 'b1620600-0000-4000-8000-000000000009', pg_temp.patient(9),
+  'b1620000-0000-4000-8000-000000000002', 'b1620100-0000-4000-8000-000000000004', pg_temp.member(4), 'HID-FACILITY',
+  'b1621300-0000-4000-8000-000000000005', 'Facility tonic', 'daily', 'At night', 'active', 1, 'Bottle');
+set local session_replication_role = origin;
+select set_config('app.facility_id', 'b1620000-0000-4000-8000-000000000002', true),
+  set_config('app.correlation_id', 'billing-suite-fixture', true);
+insert into pharmacy.work_items (id, patient_id, facility_id, ordering_facility_id, source_ehr_prescription_id,
+  source_ehr_prescription_version, source_encounter_id, source_status, status, medication_code_system, medication_code,
+  medication_display, frequency, instructions, prescribed_by, prescribed_at, accepted_by, accepted_by_membership_id,
+  accepted_at, acceptance_reason, idempotency_key, request_sha256, correlation_id)
+values ('b1620620-0000-4000-8000-000000000015', pg_temp.patient(9), 'b1620000-0000-4000-8000-000000000002',
+  'b1620000-0000-4000-8000-000000000002', 'b1620610-0000-4000-8000-000000000015', 1,
+  'b1620600-0000-4000-8000-000000000009', 'active', 'accepted', 'HID-FACILITY', 'b1621300-0000-4000-8000-000000000005',
+  'Facility tonic', 'daily', 'As directed', 'b1620100-0000-4000-8000-000000000004', clock_timestamp(),
+  'b1620100-0000-4000-8000-000000000004', pg_temp.member(4), clock_timestamp(),
+  'Sent automatically when the prescription was activated', 'own-pharmacy-send:billing-15', repeat('0', 64),
+  'billing-suite-correlation');
+do $$ begin
+  perform pg_temp.as_member(3, 'direct-care');
+  insert into pharmacy.work_item_acceptances (work_item_id, patient_id, facility_id, accepted_by, accepted_by_membership_id,
+    accepted_with, idempotency_key, request_sha256, correlation_id)
+  values ('b1620620-0000-4000-8000-000000000015', pg_temp.patient(9), 'b1620000-0000-4000-8000-000000000002',
+    'b1620100-0000-4000-8000-000000000003', pg_temp.member(3), 'accept', 'billing-accept-key-1015', repeat('0', 64),
+    'billing-suite-correlation');
+end $$;
+select pg_temp.check_case('13 this facility''s own unpriced item is counted', '0/1',
+  (select format('%s/%s',
+     (select count(*) from commercial.bill_lines where work_item_id = 'b1620620-0000-4000-8000-000000000015'),
+     (select count(*) from commercial.unpriced_code_hits where code = 'b1621300-0000-4000-8000-000000000005'))));
+select pg_temp.check_case('13 the stock ledger agrees', 'true',
+  (select pharmacy.stock_ledger_agrees('b1620000-0000-4000-8000-000000000002')::text));
+select pg_temp.check_case('13 every bill''s totals agree', '0', pg_temp.agree());
 
 do $$
 declare

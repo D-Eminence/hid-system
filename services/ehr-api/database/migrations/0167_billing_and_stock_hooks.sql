@@ -41,7 +41,13 @@
 --    visit bill (0164's commercial.bill_for_work) with the prescription's
 --    quantity to dispense when it is a whole number in the item's stock unit,
 --    else quantity 1 and "check quantity". No match: the code is counted in
---    commercial.unpriced_code_hits (no patient, no person), and no line.
+--    commercial.unpriced_code_hits (no patient, no person), and no line. The
+--    match is by the code pair exactly, so ORD-7's facility items (0155,
+--    HID-FACILITY and the item's id) are priced and stock-kept as national
+--    codes are (coordinator decision, option 2, #258, 25 November 2026); a
+--    HID-FACILITY code that is not one of this facility's own items (another
+--    facility's, on a routed prescription) is not counted, as no one here
+--    can price it.
 -- H4 lab.work_items AFTER INSERT (zz_billing_lab_work_item): the same for an
 --    own lab work item (no order route) and a priced lab_test item, quantity 1.
 -- H5 pharmacy.dispensings BEFORE INSERT (zz_billing_stock_and_gate), after
@@ -142,7 +148,7 @@ declare
     "commercial.hook_specimen_collected()": "2a1a70525c2c308fbc6017243a0c8529",
     "commercial.hook_triage()": "226774711ee8bb5a8496c50f9027feab",
     "commercial.pay_before_refusal(uuid,text,uuid)": "221e77c9fa06bab796189469f4e38c99",
-    "commercial.work_item_line(uuid,uuid,text,uuid,text,text,text,numeric,text)": "086363b9a7c85a1f131ae7b3026f34ff"}';
+    "commercial.work_item_line(uuid,uuid,text,uuid,text,text,text,numeric,text)": "1581e7e1a65cfed432a050b654fe9c15"}';
   -- The six tables' triggers before this file, exactly (name:tgtype:function, in name order): Release C's, which
   -- 0152-0153 do not change; on ehr.visit_queue also, both or neither, exactly the Emergency board's two (0168,
   -- ed_triggers). Any other trigger is refused (coordinator, #258, 25 November 2026, after Rahman's 21:48 UTC check).
@@ -189,7 +195,8 @@ begin
      or to_regprocedure('commercial.bill_recompute(uuid)') is null
      or to_regprocedure('commercial.bill_for_work(uuid,uuid,text)') is null
      or to_regprocedure('commercial.bill_line_put(uuid,uuid,integer,text,text,uuid,boolean,text,uuid,text,text)') is null
-     or to_regprocedure('commercial.bill_defer_put(uuid,text,text,text,uuid)') is null then
+     or to_regprocedure('commercial.bill_defer_put(uuid,text,text,text,uuid)') is null
+     or to_regprocedure('commercial.facility_item_ok(text,text)') is null then
     raise exception using errcode = '55000', message = '0167: 0001-0151 and 0162-0166 must be applied first';
   end if;
 
@@ -291,8 +298,9 @@ begin
 end
 $$;
 
--- The automatic line of a work item: its priced item by national code, else a
--- count of the unpriced code. At most one line per work item.
+-- The automatic line of a work item: its priced item by its code pair (a
+-- national code, or HID-FACILITY and one of this facility's own items, 0163),
+-- else a count of the unpriced code. At most one line per work item.
 create function commercial.work_item_line(requested_facility uuid, requested_patient uuid, requested_kind text,
   requested_work uuid, code_system text, code text, display text, quantity_value numeric, quantity_unit text)
 returns uuid
@@ -321,7 +329,12 @@ begin
                     where price.catalogue_item_id = item.id and price.hmo_id is null);
   end if;
   if item_id is null then
-    if code_system is not null and code is not null then
+    -- Counted for "Not on the price list" when this facility could price it: a national code, or one of its own
+    -- facility items (another facility's HID-FACILITY code, on a routed prescription, names none of its items).
+    if code_system is not null and code is not null
+       and (btrim(code_system) <> 'HID-FACILITY'
+            or commercial.facility_item_ok(case when requested_kind = 'pharmacy' then 'drug' else 'lab_test' end,
+                 btrim(code))) then
       insert into commercial.unpriced_code_hits (facility_id, work_kind, code_system, code, display)
       values (requested_facility, requested_kind, left(btrim(code_system), 255), left(btrim(code), 100),
         left(coalesce(nullif(btrim(display), ''), btrim(code)), 500));
@@ -605,7 +618,7 @@ declare
     "commercial.hook_specimen_collected()": "2a1a70525c2c308fbc6017243a0c8529",
     "commercial.hook_triage()": "226774711ee8bb5a8496c50f9027feab",
     "commercial.pay_before_refusal(uuid,text,uuid)": "221e77c9fa06bab796189469f4e38c99",
-    "commercial.work_item_line(uuid,uuid,text,uuid,text,text,text,numeric,text)": "086363b9a7c85a1f131ae7b3026f34ff"}';
+    "commercial.work_item_line(uuid,uuid,text,uuid,text,text,text,numeric,text)": "1581e7e1a65cfed432a050b654fe9c15"}';
   owner_oid oid := (select nspowner from pg_namespace where nspname = 'commercial');
   computed jsonb;
   differing text;
