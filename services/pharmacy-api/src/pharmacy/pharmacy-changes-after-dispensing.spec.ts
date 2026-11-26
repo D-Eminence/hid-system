@@ -555,10 +555,11 @@ describe('Q132 A: wiring', () => {
     ...others.map((entry) => (entry.provide === 'IdentityService' ? { ...entry, provide: identityToken() } : entry)),
     ...extra] as never[] }).compile();
 
-  it('is provided always on by PharmacyModule (no environment setting), as the service\'s last parameter', () => {
+  it('is provided always on by PharmacyModule (no environment setting), as the service\'s ninth parameter', () => {
     expect(provider().useFactory().enabled).toBe(true);
     const types = Reflect.getMetadata('design:paramtypes', PharmacyService) as unknown[];
-    expect(types).toHaveLength(9);
+    // ORD-12's refills (PharmacyRefills, behind its own setting) come after it, last.
+    expect(types).toHaveLength(10);
     expect(types[8]).toBe(PharmacyChangesAfterDispensing);
   });
 

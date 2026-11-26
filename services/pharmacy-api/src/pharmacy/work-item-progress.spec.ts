@@ -6,6 +6,7 @@ import type { DataAccessContext } from '../common/request-context';
 import { WORK_ITEM_PROGRESS_MAX_IDS, WorkItemProgressDto } from './dto/work-item-progress.dto';
 import { PharmacyWorkItemProgressController } from './work-item-progress.controller';
 import { PharmacyOwnWork } from './own-work-access';
+import { PharmacyRefills } from './prescription-refills';
 import { OWN_PROGRESS_ACCEPTED_HEADER, OWN_PROGRESS_ACCEPTED_VERSION, OWN_PROGRESS_HEADER, OWN_PROGRESS_VERSION,
   PharmacyWorkItemProgressService, WORK_ITEM_PROGRESS_QUERY } from './work-item-progress.service';
 
@@ -431,5 +432,113 @@ describe('ORD-4: accepted in the prescriber\'s progress', () => {
     expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), context, 'pharmacy.work-item.progress.read',
       { patientId: ids.patient, resourceType: 'pharmacy-work-item-collection', resourceId: ids.facility },
       { requestedCount: 11, foundCount: 10, workItemIds: rows.map((row) => row.work_item_id), breakGlass: false });
+  });
+});
+
+/*
+ * ORD-12 (refills, 0154): an item may have several fills. The progress reads
+ * each item once (WORK_ITEM_PROGRESS_QUERY, setting on or off), and as few of
+ * its fills as it can, as many whatever their number: `dispensedAt`
+ * the first fill (0133's claim time); 'dispensed' while any fill stands (is
+ * not reversed), and 'dispensing_reversed' with `reversedAt` (the latest
+ * fill's reversal) only once every fill is reversed; and while
+ * PRESCRIPTION_REFILLS_ENABLED is on `lastFilledAt`, the latest fill's time.
+ * (The same statement was run against PostgreSQL 16 with 0154: one row for an
+ * item with two fills, the first and the latest times; the verifier reads it
+ * through ehr-api after a refill is reversed.)
+ */
+describe('ORD-12: refills in the prescriber\'s progress', () => {
+  const first = new Date('2026-11-18T11:05:00Z');
+  const latest = new Date('2026-11-21T09:30:00Z');
+  const rows = [
+    { work_item_id: ids.workA, source_ehr_prescription_id: ids.rxA, accepted_at: new Date('2026-11-18T10:40:00Z'),
+      dispensed_at: first, last_filled_at: latest, reversed_at: null },
+    { work_item_id: ids.workB, source_ehr_prescription_id: ids.rxB, accepted_at: new Date('2026-11-18T10:41:00Z'),
+      dispensed_at: first, last_filled_at: latest, reversed_at: new Date('2026-11-21T10:00:00Z'), fill_standing: false },
+    { work_item_id: ids.workC, source_ehr_prescription_id: ids.rxC, accepted_at: new Date('2026-11-18T10:42:00Z'),
+      dispensed_at: null, last_filled_at: null, reversed_at: null },
+  ];
+  const asked = { patientId: ids.patient, sourceEhrPrescriptionIds: [ids.rxA, ids.rxB, ids.rxC, ids.rxD] };
+  const build = (on: boolean) => {
+    const built = harness(rows);
+    const service = new PharmacyWorkItemProgressService(built.database as never, built.identity as never,
+      built.audit as never, undefined, new PharmacyRefills(on));
+    return { ...built, service };
+  };
+
+  it('PR1 reads the latest fill and its reversal first, fill 1 by its number and an earlier standing fill only when '
+    + 'the latest fill does not answer them, so it reads as many fills whatever the number of fills', () => {
+    const flat = WORK_ITEM_PROGRESS_QUERY.replace(/\s+/g, ' ');
+    // The latest fill and its reversal: one row, by fill number.
+    expect(flat).toContain('left join lateral (select df.id, df.fill_number, df.dispensed_at, rs.id as reversal_id, '
+      + 'rs.reversed_at from pharmacy.dispensings df left join pharmacy.dispensing_reversals rs on rs.dispensing_id=df.id '
+      + 'where df.work_item_id=w.id order by df.fill_number desc limit 1) l on true');
+    // Fill 1 by its number (an equality on the key, at most one row), only when the latest fill is not fill 1; the
+    // first fill the session may read only when fill 1 is hidden from it.
+    expect(flat).toContain('case when l.id is null then null when l.fill_number=1 then l.dispensed_at else coalesce('
+      + '(select f1.dispensed_at from pharmacy.dispensings f1 where f1.work_item_id=w.id and f1.fill_number=1), '
+      + '(select fv.dispensed_at from pharmacy.dispensings fv where fv.work_item_id=w.id order by fv.fill_number asc '
+      + 'limit 1)) end as dispensed_at');
+    // Whether a fill stands: the latest one's reversal answers it, unless it is reversed.
+    expect(flat).toContain('case when l.id is null then false when l.reversal_id is null then true else exists '
+      + '(select 1 from pharmacy.dispensings fe where fe.work_item_id=w.id and fe.fill_number<l.fill_number and not '
+      + 'exists (select 1 from pharmacy.dispensing_reversals re where re.dispensing_id=fe.id)) end as fill_standing');
+    expect(flat).toContain('l.dispensed_at as last_filled_at, l.reversed_at,');
+    // No aggregate over every fill of an item.
+    expect(flat).not.toMatch(/array_agg|bool_or|count\(/);
+  });
+
+  it('PR2 setting off: today\'s fields; dispensedAt the first fill; every fill reversed reads the latest reversal', async () => {
+    const { service } = build(false);
+    const answer = await service.read(context, asked, true, true);
+    expect(answer.items).toEqual([
+      { sourceEhrPrescriptionId: ids.rxA, status: 'dispensed', receivedAt: '2026-11-18T10:40:00.000Z',
+        dispensedAt: first.toISOString(), reversedAt: null, acceptedAt: null },
+      { sourceEhrPrescriptionId: ids.rxB, status: 'dispensing_reversed', receivedAt: '2026-11-18T10:41:00.000Z',
+        dispensedAt: first.toISOString(), reversedAt: '2026-11-21T10:00:00.000Z', acceptedAt: null },
+      { sourceEhrPrescriptionId: ids.rxC, status: 'received', receivedAt: '2026-11-18T10:42:00.000Z',
+        dispensedAt: null, reversedAt: null, acceptedAt: null },
+      { sourceEhrPrescriptionId: ids.rxD, status: 'not_received', receivedAt: null, dispensedAt: null, reversedAt: null,
+        acceptedAt: null }]);
+  });
+
+  it('PR3 setting on: lastFilledAt after today\'s fields, the latest fill\'s time, null before the first fill', async () => {
+    const { service } = build(true);
+    const answer = await service.read(context, asked, true, true);
+    expect(answer.items.map((item) => [item.status, item.dispensedAt, item.lastFilledAt])).toEqual([
+      ['dispensed', first.toISOString(), latest.toISOString()],
+      ['dispensing_reversed', first.toISOString(), latest.toISOString()],
+      ['received', null, null], ['not_received', null, null]]);
+    expect(Object.keys(answer.items[0]!)).toEqual(['sourceEhrPrescriptionId', 'status', 'receivedAt', 'dispensedAt',
+      'reversedAt', 'acceptedAt', 'lastFilledAt']);
+  });
+
+  it('PR4 an older ehr-api (no headers) gets the same times, with the statuses it knows', async () => {
+    const { service } = build(true);
+    const answer = await service.read(context, asked);
+    expect(answer.items.map((item) => [item.status, item.lastFilledAt])).toEqual([['dispensed', latest.toISOString()],
+      ['dispensing_reversed', latest.toISOString()], ['received', null], ['not_received', null]]);
+  });
+
+  it('PR5 a refill reversed while an earlier fill stands reads dispensed, without reversedAt; so does a fill after a '
+    + 'reversed one', async () => {
+    const refillReversed = { work_item_id: ids.workA, source_ehr_prescription_id: ids.rxA,
+      accepted_at: new Date('2026-11-18T10:40:00Z'), dispensed_at: first, last_filled_at: latest,
+      reversed_at: new Date('2026-11-21T10:00:00Z'), fill_standing: true };
+    const fillAfterReversal = { work_item_id: ids.workB, source_ehr_prescription_id: ids.rxB,
+      accepted_at: new Date('2026-11-18T10:41:00Z'), dispensed_at: first, last_filled_at: latest, reversed_at: null,
+      fill_standing: true };
+    for (const on of [false, true]) {
+      const built = harness([refillReversed, fillAfterReversal]);
+      const service = new PharmacyWorkItemProgressService(built.database as never, built.identity as never,
+        built.audit as never, undefined, new PharmacyRefills(on));
+      const answer = await service.read(context, { patientId: ids.patient, sourceEhrPrescriptionIds: [ids.rxA, ids.rxB] },
+        true, true);
+      expect(answer.items.map((item) => [item.status, item.dispensedAt, item.reversedAt])).toEqual([
+        ['dispensed', first.toISOString(), null], ['dispensed', first.toISOString(), null]]);
+      // An ehr-api from before 0133 (no headers) reads the same.
+      const older = await service.read(context, { patientId: ids.patient, sourceEhrPrescriptionIds: [ids.rxA] });
+      expect(older.items.map((item) => [item.status, item.reversedAt])).toEqual([['dispensed', null]]);
+    }
   });
 });

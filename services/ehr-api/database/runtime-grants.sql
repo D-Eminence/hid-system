@@ -2065,3 +2065,38 @@ grant execute on function ehr.record_recent_diagnosis(text, text, text), ehr.rec
   to hid_ehr_runtime, hid_schema_test_runtime;
 revoke all on function ehr.record_recent_diagnosis(text, text, text), ehr.recent_diagnoses(integer) from public;
 revoke all on ehr.clinician_recent_diagnoses from public;
+
+-- Prescription refills (0154, ORD-12: owner decision Q131 A of 19 November
+-- 2026; the clinical owner's answers to Rahman's review on hid-system#258,
+-- 23 November 2026), exactly as 0154 grants it: the reader of an own work
+-- item's refills, pharmacy.work_item_refills (refills allowed, fills
+-- recorded, whether a refill is open and why not, for the own items the
+-- session may read), and the reader of the own items whose refill is open
+-- now, pharmacy.open_refill_work_items (their ids, for the work list), to
+-- the Pharmacy runtime and the schema test runtime; nothing to the EHR, Lab,
+-- Identity, OCR, Outreach or Notification runtimes (they read
+-- pharmacy.work_items, ehr.prescriptions and pharmacy.dispensings as their
+-- owner, the owner of pharmacy.validate_dispensing). The two new columns
+-- (ehr.prescriptions.refills_allowed, pharmacy.dispensings.fill_number) need
+-- no grant: the table privileges above are table-wide.
+-- The replaced pharmacy.validate_dispensing and
+-- pharmacy.claim_prescription_dispensing keep their ACLs (executed by no
+-- role).
+grant execute on function pharmacy.work_item_refills(uuid[]), pharmacy.open_refill_work_items()
+  to hid_pharmacy_runtime, hid_schema_test_runtime;
+revoke all on function pharmacy.work_item_refills(uuid[]), pharmacy.open_refill_work_items() from public;
+-- The refills' last day (0154 R8, the clinical owner's decision D9 of 24
+-- November 2026), ehr.prescription_refills_end_on: to the two runtimes that
+-- may write ehr.prescriptions (the EHR runtime and the schema test runtime),
+-- because PostgreSQL runs the expression of the open refills' index
+-- (ehr.prescriptions_refills_facility_idx) as the role that inserts or
+-- updates a prescription with refills; nothing to PUBLIC. The refill scan
+-- marker (0154 R9, decision D8), as 0143's: the table pharmacy.refill_scans
+-- is the owner's only; its test pharmacy.refill_scan_open() is run by every
+-- role that reads ehr.prescriptions (the policy prescriptions_scan_refills
+-- calls it), so PUBLIC may execute it.
+grant execute on function ehr.prescription_refills_end_on(timestamptz, smallint, integer, text, date)
+  to hid_ehr_runtime, hid_schema_test_runtime;
+revoke all on function ehr.prescription_refills_end_on(timestamptz, smallint, integer, text, date) from public;
+revoke all on pharmacy.refill_scans from public;
+grant execute on function pharmacy.refill_scan_open() to public;

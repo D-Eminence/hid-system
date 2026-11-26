@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import type { QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
 import { DomainProblem } from '../common/problem';
@@ -7,6 +7,7 @@ import { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
 import type { WorkItemProgressBatchDto, WorkItemProgressDto } from './dto/work-item-progress.dto';
 import { OWN_WORK_OFF, PharmacyOwnWork, type OwnWorkState } from './own-work-access';
+import { PharmacyRefills, REFILLS_OFF } from './prescription-refills';
 
 /**
  * Where a prescription is in this facility's own pharmacy (ORD-3):
@@ -17,6 +18,10 @@ import { OWN_WORK_OFF, PharmacyOwnWork, type OwnWorkState } from './own-work-acc
  *   (accept-ehr-prescription), when it was accepted as it was made;
  * - dispensed: it was dispensed (dispensedAt);
  * - dispensing_reversed: it was dispensed and the dispensing was reversed;
+ *   with refills (ORD-12, 0154), 'dispensed' while any fill of the item stands
+ *   (is not reversed), and 'dispensing_reversed', with `reversedAt` (the
+ *   latest fill's reversal), only once every fill is reversed; `dispensedAt`
+ *   stays the first fill's (0133's claim time);
  * - withdrawn (0133): sent by itself to the pharmacy, then held, cancelled,
  *   entered in error, edited or resumed before it was dispensed; the pharmacy
  *   holds the version sent, which it can no longer dispense;
@@ -66,11 +71,21 @@ export interface PharmacyProgressItem {
    * elsewhere), or null (none yet, or it cannot be read).
    */
   acceptedAt?: string | null;
+  /**
+   * ORD-12, only while PRESCRIPTION_REFILLS_ENABLED is on: the latest fill's
+   * time (null before the first). `dispensedAt` stays the first fill's;
+   * `reversedAt` is the latest fill's reversal, and only once every fill is
+   * reversed. An ehr-api that does not read it drops it (its parser keeps the
+   * fields it names).
+   */
+  lastFilledAt?: string | null;
 }
 
 interface ProgressRow extends QueryResultRow {
   work_item_id: string; source_ehr_prescription_id: string; accepted_at: Date;
-  dispensed_at: Date | null; reversed_at: Date | null;
+  dispensed_at: Date | null; reversed_at: Date | null; last_filled_at: Date | null;
+  /** ORD-12: a fill of the item is not reversed (false, or absent, when none is recorded). */
+  fill_standing?: boolean | null;
 }
 
 /**
@@ -79,16 +94,62 @@ interface ProgressRow extends QueryResultRow {
  * order route to another facility are not this facility's own and are left
  * out (their progress is on the route). Row-level security applies as well:
  * the clinician reads under their own consent grant (pharmacy.work_item_allows
- * and pharmacy.context_allows), never the pharmacist's. A work item takes one
- * dispensing and a dispensing one reversal (0023), so the joins add no rows.
+ * and pharmacy.context_allows), never the pharmacist's. One row per work
+ * item, whatever its number of fills (ORD-12, 0154, setting on or off): the
+ * first fill's time (`dispensed_at`, 0133's claim time), the latest fill's
+ * (`last_filled_at`) and the latest fill's reversal (one per dispensing,
+ * 0023), each by fill number, and whether any fill of the item stands (has no
+ * reversal), so that a refill reversed after an earlier fill that stands
+ * still reads dispensed (false when none is recorded). Every row read runs
+ * the clinician's read policies (the consent test, about 1.5 ms), so the
+ * statement reads as few fills as it can, and as many whatever the number of
+ * fills (Rahman's review of 25 November 2026: reading every fill and
+ * reversal grew about 1.5 ms per fill per item): first the latest fill and
+ * its reversal (the lateral, by fill number, one row); then, only when the
+ * latest is not fill 1, fill 1 by its number (an equality on the key
+ * (work_item_id, fill_number), so at most one row, whatever plan is chosen;
+ * the first fill the session may read when fill 1 is hidden from it, as
+ * before); and only when the latest fill is reversed, whether an earlier
+ * fill stands. So an item reads one fill (one fill recorded), or two
+ * (refills), and an earlier fill's reversal only when its latest is
+ * reversed. The answers are the ones the earlier statement gave (every fill
+ * and reversal read in one lateral). Measured on a throwaway production-kind
+ * copy (0001-0154 by a NOSUPERUSER NOBYPASSRLS migrator, the union grants),
+ * as hid_pharmacy_api_runtime in a doctor's session on consent, 100 ids,
+ * medians of 5 (consent-test calls, pharmacy.context_allows, in brackets),
+ * Release E's statement (one row per fill, a cost baseline only) / the one
+ * before (every fill and reversal in one lateral) / this one: 1 fill 190 /
+ * 190 / 188 ms (100 / 100 / 100); 2 fills 281 / 282 / 283 ms (200 each); 3
+ * fills 376 / 374 / 282 ms (300 / 300 / 200); 6 fills 651 / 658 / 283 ms
+ * (600 / 600 / 200); 12 fills 1,207 / 1,211 / 284 ms (1,200 / 1,200 / 200);
+ * 12 fills, 1-11 reversed, 2,238 / 2,232 / 285 ms (2,300 / 2,300 / 200); 12
+ * fills, the 12th reversed, 1,301 / 1,318 / 478 ms (1,300 / 1,300 / 400).
+ * The one case it does not keep flat is an item whose every fill is
+ * reversed, where it must read each fill and its reversal to know that none
+ * stands: 12 fills, all reversed, 2,356 / 2,352 / 2,442 ms (2,400 / 2,400 /
+ * 2,500). The same answers as the one before, row for row, in all of these
+ * and with a random set of reversals on 100 items and with fills hidden from
+ * the session by row-level security. It needs 0154's `fill_number`.
  * Exported for the tests.
  */
 export const WORK_ITEM_PROGRESS_QUERY = `select w.id::text as work_item_id,
   w.source_ehr_prescription_id::text as source_ehr_prescription_id, w.accepted_at,
-  d.dispensed_at, r.reversed_at
+  case when l.id is null then null when l.fill_number=1 then l.dispensed_at
+    else coalesce((select f1.dispensed_at from pharmacy.dispensings f1
+        where f1.work_item_id=w.id and f1.fill_number=1),
+      (select fv.dispensed_at from pharmacy.dispensings fv
+        where fv.work_item_id=w.id order by fv.fill_number asc limit 1)) end as dispensed_at,
+  l.dispensed_at as last_filled_at, l.reversed_at,
+  case when l.id is null then false when l.reversal_id is null then true
+    else exists (select 1 from pharmacy.dispensings fe
+      where fe.work_item_id=w.id and fe.fill_number<l.fill_number
+        and not exists (select 1 from pharmacy.dispensing_reversals re where re.dispensing_id=fe.id)) end
+    as fill_standing
   from pharmacy.work_items w
-  left join pharmacy.dispensings d on d.work_item_id=w.id
-  left join pharmacy.dispensing_reversals r on r.dispensing_id=d.id
+  left join lateral (select df.id, df.fill_number, df.dispensed_at, rs.id as reversal_id, rs.reversed_at
+    from pharmacy.dispensings df
+    left join pharmacy.dispensing_reversals rs on rs.dispensing_id=df.id
+    where df.work_item_id=w.id order by df.fill_number desc limit 1) l on true
   where w.patient_id=$1::uuid and w.facility_id=$2::uuid and w.order_route_id is null
     and w.source_ehr_prescription_id=any($3::uuid[])`;
 
@@ -135,7 +196,10 @@ export class PharmacyWorkItemProgressService {
   private readonly logger = new Logger(PharmacyWorkItemProgressService.name);
 
   constructor(private readonly database: DatabaseService, private readonly identity: IdentityService,
-    private readonly audit: AuditService, private readonly ownWork: PharmacyOwnWork = OWN_WORK_OFF) {}
+    private readonly audit: AuditService, private readonly ownWork: PharmacyOwnWork = OWN_WORK_OFF,
+    // ORD-12: `lastFilledAt` while PRESCRIPTION_REFILLS_ENABLED is on; off by default, so every existing caller is
+    // unchanged. @Optional, as PharmacyService's last parameters are.
+    @Optional() private readonly refills: PharmacyRefills = REFILLS_OFF) {}
 
   /**
    * `current`: the caller sent OWN_PROGRESS_HEADER (it reads 'withdrawn' and
@@ -177,7 +241,8 @@ export class PharmacyWorkItemProgressService {
       // 0133: whether each item was withdrawn before it was dispensed, and why (no flag when it cannot be read);
       // ORD-4: in the same reader statement, its pharmacist's acceptance (none when it cannot be read).
       const states = await this.ownWork.states(client, rows.map((row) => row.work_item_id), context.correlationId, 'flag');
-      return { items: progressItems(input.sourceEhrPrescriptionIds, rows, states, current, accepted) };
+      return { items: progressItems(input.sourceEhrPrescriptionIds, rows, states, current, accepted,
+        this.refills.enabled) };
     });
   }
 
@@ -241,7 +306,7 @@ export class PharmacyWorkItemProgressService {
         const states = await this.ownWork.states(client, found.flatMap(({ rows }) => rows.map((row) => row.work_item_id)),
           context.correlationId, 'flag');
         return found.map(({ entry, rows }) =>
-          progressItems(entry.sourceEhrPrescriptionIds, rows, states, current, accepted));
+          progressItems(entry.sourceEhrPrescriptionIds, rows, states, current, accepted, this.refills.enabled));
       });
       allowed.forEach(({ index }, position) => answered.set(index, items[position]!));
     }
@@ -350,19 +415,25 @@ async function withinBudget<T>(check: Promise<T>, signal: AbortSignal): Promise<
  * Each id asked, in the order asked, from this patient's own rows only (ids
  * matched without regard to letter case and answered as sent); shared by
  * read() and readBatch(), so a batch entry is exactly the one-patient answer.
+ * `refills` (ORD-12, PRESCRIPTION_REFILLS_ENABLED on): each item also carries
+ * `lastFilledAt`, the latest fill's time, null whenever `dispensedAt` is; off,
+ * no item carries it.
  */
 function progressItems(ids: readonly string[], rows: readonly ProgressRow[], states: Map<string, OwnWorkState>,
-  current: boolean, accepted: boolean): PharmacyProgressItem[] {
+  current: boolean, accepted: boolean, refills: boolean): PharmacyProgressItem[] {
   const found = new Map(rows.map((row) => [row.source_ehr_prescription_id.toLowerCase(), row]));
   return ids.map((id) => {
     const row = found.get(id.toLowerCase());
-    return project(id, row, row ? states.get(row.work_item_id) : undefined, current, current && accepted);
+    const item = project(id, row, row ? states.get(row.work_item_id) : undefined, current, current && accepted);
+    return refills
+      ? { ...item, lastFilledAt: item.dispensedAt === null ? null : iso(row?.last_filled_at ?? null) } : item;
   });
 }
 
 /**
- * The status, in this order: a reversal, a dispensing, sent elsewhere,
- * withdrawn, accepted (ORD-4), else received. To a caller without
+ * The status, in this order: a reversal of every fill (ORD-12: while any fill
+ * stands the item reads dispensed, and `reversedAt` is null), a dispensing,
+ * sent elsewhere, withdrawn, accepted (ORD-4), else received. To a caller without
  * OWN_PROGRESS_HEADER, 'withdrawn' is 'received' (times kept) and
  * 'sent_elsewhere' 'not_received' (times null), the statuses an ehr-api from
  * before 0133 knows. To a caller without both headers (`accepted` false),
@@ -375,7 +446,8 @@ function project(id: string, row: ProgressRow | undefined, state: OwnWorkState |
     dispensedAt: null, reversedAt: null, ...(accepted ? { acceptedAt: null } : {}) };
   if (!row) return notReceived;
   const acceptedAt = acceptedTime(row, state);
-  const status: PharmacyProgressStatus = row.reversed_at ? 'dispensing_reversed'
+  const reversedAt = row.reversed_at && row.fill_standing !== true ? row.reversed_at : null;
+  const status: PharmacyProgressStatus = reversedAt ? 'dispensing_reversed'
     : row.dispensed_at ? 'dispensed'
       : state?.withdrawn === true && state.withdrawnReason === 'sent_elsewhere' ? 'sent_elsewhere'
         : state?.withdrawn === true ? 'withdrawn'
@@ -384,7 +456,7 @@ function project(id: string, row: ProgressRow | undefined, state: OwnWorkState |
   const answered: PharmacyProgressStatus = (!current && status === 'withdrawn') || (!accepted && status === 'accepted')
     ? 'received' : status;
   return { sourceEhrPrescriptionId: id, status: answered, receivedAt: iso(row.accepted_at),
-    dispensedAt: iso(row.dispensed_at), reversedAt: iso(row.reversed_at),
+    dispensedAt: iso(row.dispensed_at), reversedAt: iso(reversedAt),
     ...(accepted ? { acceptedAt: iso(acceptedAt) } : {}) };
 }
 

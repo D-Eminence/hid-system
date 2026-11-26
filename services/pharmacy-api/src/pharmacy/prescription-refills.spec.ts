@@ -1,0 +1,1262 @@
+import 'reflect-metadata';
+import { Logger } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
+import { AuditService } from '../audit/audit.service';
+import { requestDigest } from '../common/idempotency';
+import { DomainProblem } from '../common/problem';
+import type { DataAccessContext } from '../common/request-context';
+import { getEnvironment, resetEnvironmentForTests } from '../config/environment';
+import { DatabaseService } from '../database/database.service';
+import type { IdentityService } from '../identity/identity.service';
+import { CHANGES_AFTER_DISPENSING_QUERY, PharmacyChangesAfterDispensing } from './changes-after-dispensing';
+import { PharmacyOrderRouteAccess } from './order-route-access';
+import { PharmacyOrderRouteCards } from './order-route-cards';
+import { OWN_WORK_STATES_QUERY, OWN_WORK_STEPS_QUERY, PharmacyOwnWork } from './own-work-access';
+import { OWN_WORK_PATIENT_CARDS_OFF, PharmacyOwnWorkPatientCards } from './own-work-patient-cards';
+import { PharmacyModule } from './pharmacy.module';
+import { DISPENSING_REPLAY_QUERY, INSERT_DISPENSING, LATER_FILL_QUERY, PharmacyService, WORK_ITEM_SELECT,
+  WORK_LIST_QUERY, WORK_LIST_QUERY_0133 } from './pharmacy.service';
+import { PharmacyPrescriptionDetails, PRESCRIPTION_DETAILS_OFF } from './prescription-dispensing-details';
+import { CreateDispensingBodyPipe, DISPENSING_KEY_CONSTRAINT, FILL_KEY_CONSTRAINT, OPEN_REFILLS_QUERY,
+  OPEN_REFILLS_TIMEOUT_MS, OPEN_REFILLS_TIMEOUT_QUERY, PharmacyRefills, REFILLS_OFF, WORK_ITEM_REFILLS_QUERY,
+  dispensingDigestInput, refillPrescriptionEnded } from './prescription-refills';
+import { workListSince } from './work-list-window';
+
+/*
+ * ORD-12 (refills; owner decision Q131 A, 19 November 2026; the clinical
+ * owner's design note on hid-system#258, Rahman's review and the clinical
+ * owner's answers, 23 November 2026; migration 0154) in pharmacy-api. The
+ * database is faked with tables (work items, fills, reversals, the outbox and
+ * the audit rows) and answers each of pharmacy-api's statements as PostgreSQL
+ * answers it on a database with 0154 (the same statements were run against
+ * PostgreSQL 16 with 0154, under a superuser and a NOSUPERUSER NOBYPASSRLS
+ * owner, through the Pharmacy runtime); every statement runs through the real
+ * DatabaseService (its SERIALIZABLE retry) and the real AuditService. 0154's
+ * reader answers what each fictional prescription allows. Fictional ids and
+ * names only.
+ */
+
+const facilityId = '10000000-0000-4000-8000-000000000152';
+const orderingFacilityId = '10000000-0000-4000-8000-000000000252';
+const pharmacistAccount = '20000000-0000-4000-8000-0000000002a1';
+const pharmacistMembership = '40000000-0000-4000-8000-0000000002a1';
+const colleagueAccount = '20000000-0000-4000-8000-0000000002a2';
+const doctorAccount = '20000000-0000-4000-8000-0000000002d1';
+const routeId = '80000000-0000-4000-8000-0000000002c1';
+const ada = '50000000-0000-4000-8000-0000000002e1';
+const id = (n: number) => `15200000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+const fillId = (n: number, fill: number) => `65200000-0000-4000-8${String(fill).padStart(3, '0')}-${String(n).padStart(12, '0')}`;
+const DAY = 86_400_000;
+const NOW = Date.now();
+const ago = (days: number, minute = 0) => new Date(NOW - days * DAY + minute * 60_000);
+/** The Lagos day (UTC+1, no daylight saving) of a moment, YYYY-MM-DD. */
+const lagosDay = (at: Date) => new Date(at.getTime() + 3_600_000).toISOString().slice(0, 10);
+const plusDays = (day: string, days: number) => new Date(Date.parse(`${day}T00:00:00Z`) + days * DAY).toISOString().slice(0, 10);
+const LAGOS_TODAY = lagosDay(new Date(NOW));
+
+const pharmacist: DataAccessContext = { correlationId: 'ord12-correlation-0001', facilityId,
+  membershipId: pharmacistMembership, purposeOfUse: 'direct-care', authorization: 'Bearer pharmacist', actor: {
+    id: pharmacistAccount, subject: 'staff:pharmacist-ord12', accountId: pharmacistAccount, authenticationMethod: 'local',
+    roles: ['pharmacist'], permissions: ['pharmacy.work-item.read', 'pharmacy.dispensing.create',
+      'pharmacy.dispensing.reverse'], facilityIds: [facilityId], facilities: [],
+    facility: { id: facilityId, membershipId: pharmacistMembership, organizationId: facilityId,
+      name: 'Fictional Riverside Hospital', roles: ['pharmacist'], permissions: [], isPrimary: true } } };
+
+/** A fictional work item: who sent it, when it was received, what its prescription allows (0154's reader). */
+interface Item {
+  n: number;
+  /** Another facility's prescription, accepted with its order route (one fill). */
+  routed?: boolean;
+  /** Days since it was received (`accepted_at`). */
+  received?: number;
+  /** The refills the prescription allows (null as 0). */
+  refills?: number;
+  /** Why the reader says no fill is open after the first, when it is not `none_left`. */
+  closed?: 'changed' | 'stopped' | 'ended';
+  /** The fills already recorded: their age in days, and whether each was reversed. */
+  fills?: { days: number; reversed?: boolean; by?: string; key?: string; body?: Record<string, unknown> }[];
+  /** `ends_on` (YYYY-MM-DD), the prescription's as accepted. */
+  endsOn?: string;
+  /**
+   * The refills' last day as 0154's reader gives it (`refills_end_on`, YYYY-MM-DD: ehr.prescription_refills_end_on,
+   * the clinical owner's D9); before today in Lagos, the refills read `ended`. Left out, the reader gives null.
+   */
+  refillsEndOn?: string;
+  /**
+   * The refill interval in days (3/4 of the prescription's duration, rounded up, at least 1; the clinical owner's
+   * rule of 24 November 2026): a refill opens on the Lagos day of the latest fill not reversed plus this. Default 1.
+   */
+  interval?: number;
+}
+
+interface FillRow {
+  id: string; work_item_id: string; work_item_version: string; patient_id: string; facility_id: string;
+  medication_code_system: null; medication_code: null; medication_display: string; quantity_dispensed: string;
+  quantity_unit: string; status: 'dispensed'; dispensed_by: string; dispensed_by_membership_id: string;
+  dispensed_at: Date; reason: string; idempotency_key: string; request_sha256: string; correlation_id: string;
+  row_version: string; created_at: Date; fill_number: number;
+}
+interface ReversalRow {
+  id: string; dispensing_id: string; dispensing_version: string; work_item_id: string; patient_id: string;
+  facility_id: string; status: 'reversed'; reversed_by: string; reversed_at: Date; row_version: string;
+  created_at: Date; idempotency_key: string; request_sha256: string;
+}
+interface State { fills: FillRow[]; reversals: ReversalRow[]; outbox: { type: string; payload: unknown }[]; audits: unknown[][] }
+
+const body = { expectedWorkItemVersion: 1, quantityDispensed: 30, quantityUnit: 'tablet',
+  reason: 'Handed to the patient with counselling' };
+const digestOf = (n: number, input: Record<string, unknown>) =>
+  requestDigest('pharmacy.dispensing.create', { workItemId: id(n), ...dispensingDigestInput(input as never) });
+
+const sqlError = (code: string, extra: Record<string, unknown> = {}) =>
+  Object.assign(new Error(`synthetic ${code}`), { code }, extra);
+
+interface Options {
+  items: Item[];
+  /** PRESCRIPTION_REFILLS_ENABLED. */
+  on?: boolean;
+  /** Raised by 0154's reader, one per statement, then it answers. */
+  readerErrors?: Error[];
+  /** Raised by 0154's open refills (pharmacy.open_refill_work_items). */
+  openError?: Error;
+  /** Raised by the next dispensing INSERTs (the database's own refusals), in order. */
+  insertErrors?: Error[];
+  /**
+   * A fill another request commits while this request's INSERT runs (the race of two fills): the INSERT then fails
+   * 23505 on the key it meets, as PostgreSQL answers once the winner commits.
+   */
+  race?: { n: number; fill: number; by?: string; key?: string; body?: Record<string, unknown>; hidden?: boolean };
+  /** A fill row-level security hides from this member (its key still taken in the index). */
+  hiddenFills?: { n: number; fill: number; key?: string }[];
+}
+
+function harness(options: Options) {
+  const items = options.items;
+  const itemOf = new Map(items.map((item) => [id(item.n), item]));
+  const fillRow = (item: Item, fill: number, entry: NonNullable<Item['fills']>[number]): FillRow => ({
+    id: fillId(item.n, fill), work_item_id: id(item.n), work_item_version: '1', patient_id: ada, facility_id: facilityId,
+    medication_code_system: null, medication_code: null, medication_display: 'Amlodipine 5 mg tablet',
+    quantity_dispensed: '30', quantity_unit: 'tablet', status: 'dispensed', dispensed_by: entry.by ?? pharmacistAccount,
+    dispensed_by_membership_id: pharmacistMembership, dispensed_at: ago(entry.days), reason: 'Handed over',
+    idempotency_key: entry.key ?? `ord12-seeded-key-${item.n}-${fill}-000000`,
+    request_sha256: digestOf(item.n, { ...body, ...(entry.body ?? {}), ...(fill > 1 ? { fillNumber: fill } : {}) }),
+    correlation_id: 'ord12-seeded-0001', row_version: '1', created_at: ago(entry.days), fill_number: fill });
+  const committed: State = { fills: [], reversals: [], outbox: [], audits: [] };
+  for (const item of items) {
+    for (const [index, entry] of (item.fills ?? []).entries()) {
+      const row = fillRow(item, index + 1, entry);
+      committed.fills.push(row);
+      if (entry.reversed) committed.reversals.push({ id: `66200000-0000-4000-8000-${String(item.n * 100 + index + 1)
+        .padStart(12, '0')}`, dispensing_id: row.id, dispensing_version: '1', work_item_id: row.work_item_id,
+      patient_id: ada, facility_id: facilityId, status: 'reversed', reversed_by: pharmacistAccount,
+      reversed_at: ago(entry.days, 5), row_version: '1', created_at: ago(entry.days, 5),
+      idempotency_key: `ord12-seeded-reversal-${item.n}-${index + 1}`, request_sha256: 'e'.repeat(64) });
+    }
+  }
+  const hidden = new Set((options.hiddenFills ?? []).map((entry) => fillId(entry.n, entry.fill)));
+  for (const entry of options.hiddenFills ?? []) {
+    committed.fills.push(fillRow(itemOf.get(id(entry.n))!, entry.fill, { days: 0, key: entry.key, by: colleagueAccount }));
+  }
+  const copy = (state: State): State => ({ fills: [...state.fills], reversals: [...state.reversals],
+    outbox: [...state.outbox], audits: [...state.audits] });
+  const statements: { sql: string; values: unknown[] }[] = [];
+  const readerErrors = [...(options.readerErrors ?? [])];
+  const insertErrors = [...(options.insertErrors ?? [])];
+  let race = options.race;
+  let inserts = 0;
+
+  const visible = (state: State) => state.fills.filter((row) => !hidden.has(row.id));
+  const fillsOf = (state: State, workItemId: string) => visible(state).filter((row) => row.work_item_id === workItemId)
+    .sort((a, b) => a.fill_number - b.fill_number);
+  const reversalOf = (state: State, dispensingId: string) => state.reversals.find((row) => row.dispensing_id === dispensingId);
+  /** WORK_ITEM_SELECT's row: the item once, with its latest fill (0154: by fill number) and its count. */
+  const workRow = (state: State, item: Item) => {
+    const fills = fillsOf(state, id(item.n));
+    const latest = fills[fills.length - 1];
+    return { id: id(item.n), patient_id: ada, facility_id: facilityId,
+      ordering_facility_id: item.routed ? orderingFacilityId : facilityId, source_ehr_prescription_id: `30000000-0000-4000-8000-${String(item.n).padStart(12, '0')}`,
+      source_ehr_prescription_version: '1', source_encounter_id: '70000000-0000-4000-8000-0000000002b1',
+      source_status: 'active', status: 'accepted', medication_code_system: null, medication_code: null,
+      medication_display: 'Amlodipine 5 mg tablet', dose_quantity: '1', dose_unit: 'tablet', route_code: 'oral',
+      frequency: 'Once daily', instructions: 'In the morning', starts_on: null, ends_on: item.endsOn ?? null,
+      prescribed_by: doctorAccount, prescribed_at: ago(item.received ?? 1), accepted_by: doctorAccount,
+      accepted_by_membership_id: '40000000-0000-4000-8000-0000000002d1', accepted_at: ago(item.received ?? 1, item.n),
+      row_version: '1', created_at: ago(item.received ?? 1), order_route_id: item.routed ? routeId : null,
+      dispensing_id: latest?.id ?? null, dispensing_status: latest ? 'dispensed' : null,
+      reversal_id: latest ? reversalOf(state, latest.id)?.id ?? null : null,
+      dispensing_fill_number: latest?.fill_number ?? null, last_filled_at: latest?.dispensed_at ?? null,
+      fills_recorded: fills.length };
+  };
+  /**
+   * What 0154's reader answers for an own item, by its rule: a refill may be recorded while fills < 1 + allowed, the
+   * prescription is as accepted (`closed` otherwise) and its refills' last day is not past (`ended`), from the Lagos
+   * day of the latest fill not reversed plus the interval (every fill reversed: the latest reversal's day, no wait);
+   * before that day not_yet. It gives the refills' last day whatever the state.
+   */
+  const refillsRow = (state: State, item: Item) => {
+    const allowed = item.refills ?? 0;
+    const fills = state.fills.filter((row) => row.work_item_id === id(item.n));
+    const recorded = fills.length;
+    const latest = (dates: Date[]) => dates.reduce<Date | undefined>((a, b) => (a && a > b ? a : b), undefined);
+    const standing = latest(fills.filter((row) => !reversalOf(state, row.id)).map((row) => row.dispensed_at));
+    const reversed = latest(fills.map((row) => reversalOf(state, row.id)?.reversed_at).filter((at): at is Date => Boolean(at)));
+    const opensOn = standing ? plusDays(lagosDay(standing), item.interval ?? 1) : reversed ? lagosDay(reversed) : null;
+    // Ended: the last day has passed, or the next refill would open only after it (a late fill; 0154's R6).
+    const ended = item.refillsEndOn !== undefined
+      && (item.refillsEndOn < LAGOS_TODAY || (opensOn !== null && opensOn > item.refillsEndOn));
+    const mayFill = recorded >= 1 && recorded < 1 + allowed && !item.closed && !ended;
+    const closed = recorded === 0 ? null : recorded >= 1 + allowed ? 'none_left' : item.closed
+      ?? (ended ? 'ended' : opensOn !== null && opensOn > LAGOS_TODAY ? 'not_yet' : null);
+    return { work_item_id: id(item.n), refills_allowed: allowed, fills_recorded: recorded,
+      refill_open: mayFill && closed === null, closed_reason: closed, next_fill_on: mayFill ? opensOn : null,
+      refills_end_on: item.refillsEndOn ?? null };
+  };
+  const today = new Date(NOW).toISOString().slice(0, 10);
+
+  const answer = (sql: string, values: unknown[], working: State): unknown[] => {
+    if (sql === WORK_LIST_QUERY || sql === WORK_LIST_QUERY_0133) {
+      const since = new Date(`${values[0] as string}T00:00:00+01:00`);
+      const opened = values[1] as string[];
+      const refillOpen = new Set(opened);
+      const rows = items.map((item) => workRow(working, item)).map((row) => ({ row,
+        open: row.dispensing_id === null || refillOpen.has(row.id),
+        refill: row.dispensing_id !== null && refillOpen.has(row.id) }))
+        .filter((entry) => entry.open || entry.row.accepted_at >= since);
+      // WORK_LIST_ORDER: open work first; among it the first fills, then the refills in $2's order.
+      rows.sort((a, b) => Number(b.open) - Number(a.open) || Number(a.refill) - Number(b.refill)
+        || (a.refill ? opened.indexOf(a.row.id) - opened.indexOf(b.row.id) : 0)
+        || (a.open ? a.row.accepted_at.getTime() - b.row.accepted_at.getTime() : b.row.accepted_at.getTime() - a.row.accepted_at.getTime()));
+      return rows.slice(0, 200).map((entry) => entry.row);
+    }
+    if (sql === `${WORK_ITEM_SELECT} where w.id=$1`) {
+      const item = itemOf.get(values[0] as string);
+      return item ? [workRow(working, item)] : [];
+    }
+    if (sql === OPEN_REFILLS_QUERY) {
+      // 0154's open refills: the own items the per-item reader calls open now (an ended prescription is closed, a
+      // refill not yet due is not open), the refill that opened first first, then by id, 200 at most.
+      if (options.openError) throw options.openError;
+      return items.filter((item) => !item.routed && (item.endsOn === undefined || item.endsOn >= today))
+        .map((item) => ({ item, row: refillsRow(working, item) })).filter((entry) => entry.row.refill_open)
+        .sort((a, b) => a.row.next_fill_on!.localeCompare(b.row.next_fill_on!) || id(a.item.n).localeCompare(id(b.item.n)))
+        .slice(0, 200).map((entry) => ({ work_item_id: id(entry.item.n) }));
+    }
+    if (sql === WORK_ITEM_REFILLS_QUERY) {
+      const injected = readerErrors.shift();
+      if (injected) throw injected;
+      const asked = values[0] as string[];
+      if (asked.length > 200) throw sqlError('22023', { message: 'WORK_ITEM_REFILLS_INVALID' });
+      return asked.map((workItemId) => itemOf.get(workItemId)).filter((item): item is Item => Boolean(item && !item.routed))
+        .map((item) => refillsRow(working, item));
+    }
+    if (sql === DISPENSING_REPLAY_QUERY) {
+      const [facility, account, key, workItemId, fill] = values as [string, string, string, string, number];
+      return visible(working).filter((row) => (row.facility_id === facility && row.dispensed_by === account
+        && row.idempotency_key === key) || (row.work_item_id === workItemId && row.fill_number === fill))
+        .map((row) => ({ ...row, reversal_id: reversalOf(working, row.id)?.id ?? null,
+          reversed_at: reversalOf(working, row.id)?.reversed_at ?? null,
+          by_key: row.facility_id === facility && row.dispensed_by === account && row.idempotency_key === key }))
+        .sort((a, b) => Number(b.by_key) - Number(a.by_key));
+    }
+    if (sql === INSERT_DISPENSING) {
+      inserts += 1;
+      const [rowId, workItemId,,,,,,, quantity, unit, account,,reason, key, digest, correlation, fill] = values as
+        [string, string, number, string, string, null, null, string, number, string, string, string, string, string,
+          string, string, number];
+      if (race) {
+        const item = itemOf.get(id(race.n))!;
+        const winner = fillRow(item, race.fill, { days: 0, by: race.by ?? colleagueAccount, key: race.key, body: race.body });
+        committed.fills.push(winner);
+        if (race.hidden) hidden.add(winner.id);
+        const conflict = race.key === key && (race.by ?? colleagueAccount) === account;
+        race = undefined;
+        throw sqlError('23505', { constraint: conflict ? DISPENSING_KEY_CONSTRAINT : FILL_KEY_CONSTRAINT });
+      }
+      const injected = insertErrors.shift();
+      if (injected) throw injected;
+      if (working.fills.some((row) => row.work_item_id === workItemId && row.fill_number === fill)) {
+        throw sqlError('23505', { constraint: FILL_KEY_CONSTRAINT });
+      }
+      if (working.fills.some((row) => row.facility_id === facilityId && row.dispensed_by === account
+        && row.idempotency_key === key)) throw sqlError('23505', { constraint: DISPENSING_KEY_CONSTRAINT });
+      const row: FillRow = { id: rowId, work_item_id: workItemId, work_item_version: '1', patient_id: ada,
+        facility_id: facilityId, medication_code_system: null, medication_code: null,
+        medication_display: 'Amlodipine 5 mg tablet', quantity_dispensed: String(quantity), quantity_unit: unit,
+        status: 'dispensed', dispensed_by: account, dispensed_by_membership_id: pharmacistMembership,
+        dispensed_at: new Date(), reason, idempotency_key: key, request_sha256: digest, correlation_id: correlation,
+        row_version: '1', created_at: new Date(), fill_number: fill };
+      working.fills.push(row);
+      return [row];
+    }
+    if (/from pharmacy\.dispensings d left join pharmacy\.dispensing_reversals r on r\.dispensing_id=d\.id\s+where d\.id=\$1$/.test(sql)) {
+      const row = visible(working).find((entry) => entry.id === values[0]);
+      return row ? [{ ...row, reversal_id: reversalOf(working, row.id)?.id ?? null,
+        reversed_at: reversalOf(working, row.id)?.reversed_at ?? null }] : [];
+    }
+    if (sql === LATER_FILL_QUERY) {
+      return [{ later: working.fills.some((row) => row.work_item_id === values[0] && row.fill_number > (values[1] as number)) }];
+    }
+    if (/^select \* from pharmacy\.dispensing_reversals/.test(sql)) {
+      return working.reversals.filter((row) => (row.facility_id === values[0] && row.reversed_by === values[1]
+        && row.idempotency_key === values[2]) || row.dispensing_id === values[3]);
+    }
+    if (/^insert into pharmacy\.dispensing_reversals/.test(sql)) {
+      const [rowId, dispensingId, version, workItemId,,, account,, , key, digest] = values as string[];
+      const row: ReversalRow = { id: rowId!, dispensing_id: dispensingId!, dispensing_version: String(version),
+        work_item_id: workItemId!, patient_id: ada, facility_id: facilityId, status: 'reversed', reversed_by: account!,
+        reversed_at: new Date(), row_version: '1', created_at: new Date(), idempotency_key: key!, request_sha256: digest! };
+      working.reversals.push(row);
+      return [row];
+    }
+    if (/^insert into pharmacy\.outbox_events/.test(sql)) {
+      working.outbox.push({ type: values[0] as string, payload: JSON.parse(values[6] as string) });
+      return [];
+    }
+    if (/^insert into audit\.events/.test(sql)) { working.audits.push(values); return []; }
+    if (/from pharmacy\.order_route_access_for/.test(sql)) {
+      const resourceId = (sql.includes("('work_item', $1, $2)") ? values[0] : values[1]) as string;
+      const workItemId = itemOf.has(resourceId) ? resourceId
+        : working.fills.find((row) => row.id === resourceId)?.work_item_id;
+      return itemOf.get(workItemId ?? '')?.routed ? [{ outcome: 'allowed', route_id: routeId, work_item_id: workItemId }]
+        : [{ outcome: 'none', route_id: null, work_item_id: workItemId ?? null }];
+    }
+    if (/from pharmacy\.own_work_access_for/.test(sql)) return [{ work_item_id: values[1], basis: 'own-work' }];
+    if (sql === OWN_WORK_STEPS_QUERY || sql === OWN_WORK_STATES_QUERY) {
+      return (values[0] as string[]).filter((workItemId) => !itemOf.get(workItemId)?.routed).map((workItemId) => ({
+        work_item_id: workItemId, basis: 'own-work', withdrawn: false, withdrawn_reason: null, sent_automatically: false,
+        accepted_at: null, accepted_by_membership_id: null, accepted_with: null }));
+    }
+    if (/from pharmacy\.order_route_cards/.test(sql)) {
+      return (values[0] as string[]).filter((workItemId) => itemOf.get(workItemId)?.routed).map((workItemId) => ({
+        work_item_id: workItemId, route_id: routeId, reference: 'RX-ORD12-0001', effective_state: 'completed',
+        access: 'read', ordering_facility_name: 'Fictional Lakeside Hospital', orderer_name: 'Dr Fictional Orderer',
+        orderer_licence_body: null, orderer_licence_number: null, patient_full_name: 'Ada Refill', patient_sex: 'female',
+        patient_date_of_birth: '1990-04-05', patient_health_id_last4: 'RF12', row_version: '3', ended_kind: null }));
+    }
+    if (sql === CHANGES_AFTER_DISPENSING_QUERY) return [];
+    if (/pharmacy\.order_route_receives_here\(\)/.test(sql)) return [{ receives: true, routes_here: { waiting: false, held: false } }];
+    throw new Error(`unexpected statement: ${sql}`);
+  };
+
+  const pool = {
+    connect: async () => {
+      let working = copy(committed);
+      const savepoints = new Map<string, State>();
+      return {
+        query: async (sql: string, values: unknown[] = []) => {
+          const text = sql.trim();
+          statements.push({ sql: text, values });
+          if (text === 'BEGIN' || text.startsWith('SET TRANSACTION') || text.startsWith('select set_config(')) return { rows: [] };
+          if (text === 'COMMIT') { Object.assign(committed, working); return { rows: [] }; }
+          if (text === 'ROLLBACK') { working = copy(committed); return { rows: [] }; }
+          const savepoint = /^savepoint (\w+)$/.exec(text);
+          if (savepoint) { savepoints.set(savepoint[1]!, copy(working)); return { rows: [] }; }
+          const back = /^rollback to savepoint (\w+)$/.exec(text);
+          if (back) { working = copy(savepoints.get(back[1]!)!); return { rows: [] }; }
+          if (/^release savepoint \w+$/.test(text)) return { rows: [] };
+          return { rows: answer(sql, values, working) };
+        },
+        release: () => undefined,
+      };
+    },
+    query: async () => ({ rows: [{ orders: true, work: true }] }),
+  };
+  const database = Object.create(DatabaseService.prototype) as DatabaseService;
+  Object.assign(database, { pool, pauseBeforeRetry: async () => undefined });
+  const identity = { authorize: jest.fn().mockResolvedValue({ allowed: true, breakGlass: false }) };
+  const ownWork = new PharmacyOwnWork(true);
+  const refills = new PharmacyRefills(options.on ?? false);
+  const service = new PharmacyService(database, identity as unknown as IdentityService, new AuditService(),
+    new PharmacyOrderRouteAccess(identity as unknown as IdentityService, ownWork), new PharmacyOrderRouteCards(database),
+    OWN_WORK_PATIENT_CARDS_OFF, PRESCRIPTION_DETAILS_OFF, ownWork, new PharmacyChangesAfterDispensing(true), refills);
+  const audited = () => committed.audits.map((values) => ({ action: values[7], resourceId: values[9],
+    details: JSON.parse(values[11] as string) as Record<string, unknown> }));
+  const sent = (predicate: (sql: string) => boolean) => statements.filter((statement) => predicate(statement.sql));
+  return { service, committed, statements, audited, sent, inserts: () => inserts };
+}
+
+type Answer = Record<string, unknown>;
+const listOf = async (h: ReturnType<typeof harness>) => (await h.service.listWorkItems(pharmacist)).items as unknown as Answer[];
+const readOf = async (h: ReturnType<typeof harness>, n: number) => await h.service.getWorkItem(pharmacist, id(n)) as unknown as Answer;
+const dispense = (h: ReturnType<typeof harness>, n: number, key: string, extra: Record<string, unknown> = {}) =>
+  h.service.dispense(pharmacist, id(n), { ...body, ...extra } as never, key) as Promise<Answer>;
+const refusal = async (promise: Promise<unknown>) => {
+  try {
+    await promise;
+  } catch (error) {
+    if (error instanceof DomainProblem) return { status: error.getStatus(), code: error.code, ...(error.extensions ?? {}) };
+    throw error;
+  }
+  throw new Error('expected a refusal');
+};
+const wire = (value: unknown) => JSON.parse(JSON.stringify(value)) as unknown;
+
+/** Today's fields of a work item, in today's order (Release B with 0148), and nothing else. */
+const TODAY_KEYS = ['id', 'patientId', 'facilityId', 'sourceEhrPrescriptionId', 'sourceEncounterId',
+  'sourceEhrPrescriptionVersion', 'status', 'medication', 'doseQuantity', 'doseUnit', 'routeCode', 'frequency',
+  'instructions', 'acceptedAt', 'version', 'dispensing', 'pharmacyStep', 'pharmacistAcceptance'];
+
+/**
+ * Item 1: three fills (refills 2), the second reversed; item 2: no fill; item 3: one fill, refills 1 (open). Each
+ * with the refills' last day 0154's reader gives (D9).
+ */
+const SEVERAL: Item[] = [
+  { n: 1, refills: 2, received: 20, refillsEndOn: plusDays(LAGOS_TODAY, 20), fills: [{ days: 19 },
+    { days: 9, reversed: true }, { days: 2 }] },
+  { n: 2, refills: 2, received: 3, refillsEndOn: plusDays(LAGOS_TODAY, 37) },
+  { n: 3, refills: 1, received: 5, refillsEndOn: plusDays(LAGOS_TODAY, 25), fills: [{ days: 4 }] },
+];
+
+beforeEach(() => {
+  jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+});
+afterEach(() => jest.restoreAllMocks());
+
+describe('ORD-12: one row per item, whatever the setting', () => {
+  it.each([[false], [true]])('R1 the work list answers an item with three fills once, with its latest fill (on: %p)',
+    async (on) => {
+      const h = harness({ items: SEVERAL, on });
+      const items = await listOf(h);
+      expect(items.map((item) => item.id)).toEqual(on ? [id(2), id(3), id(1)] : [id(2), id(3), id(1)]);
+      expect(new Set(items.map((item) => item.id)).size).toBe(items.length);
+      const three = items.find((item) => item.id === id(1))!;
+      // The latest fill (3), not the reversed second one nor the first.
+      expect(three.dispensing).toEqual({ id: fillId(1, 3), status: 'dispensed', reversed: false, ...(on ? { fillNumber: 3 } : {}) });
+      expect(three.pharmacyStep).toBe('dispensed');
+      // Every statement that reads work items and their fills reads each item once (WORK_ITEM_SELECT).
+      const reads = h.sent((sql) => /pharmacy\.dispensings/.test(sql) && /pharmacy\.work_items w/.test(sql));
+      expect(reads.length).toBeGreaterThan(0);
+      for (const statement of reads) {
+        expect(statement.sql).not.toMatch(/left join pharmacy\.dispensings d on/);
+      }
+    });
+
+  it('R2 setting off: the answers are today\'s fields only, the statements today\'s plus the latest-fill read', async () => {
+    const h = harness({ items: SEVERAL });
+    const items = await listOf(h);
+    for (const item of items) expect(Object.keys(item)).toEqual(TODAY_KEYS);
+    expect(Object.keys(await readOf(h, 1))).toEqual(TODAY_KEYS);
+    // No reader, no open refills, no new parameter but an empty list of open refills.
+    expect(h.sent((sql) => sql === WORK_ITEM_REFILLS_QUERY || sql === OPEN_REFILLS_QUERY)).toEqual([]);
+    expect(h.sent((sql) => sql === WORK_LIST_QUERY_0133).map((statement) => statement.values[1])).toEqual([[]]);
+    // Item 3 still has a refill open in the database, but off it is done work like any dispensed item.
+    expect(items.map((item) => [item.id, item.dispensing === null])).toEqual([[id(2), true], [id(3), false], [id(1), false]]);
+  });
+
+  it('R3 WORK_ITEM_SELECT takes the latest fill by number, with its time and the item\'s count, in one probe per item', () => {
+    const flat = WORK_ITEM_SELECT.replace(/\s+/g, ' ');
+    expect(flat).toContain('left join lateral (select df.id,df.status,df.fill_number,df.dispensed_at,'
+      + '(count(*) over ())::integer as fills_recorded from pharmacy.dispensings df where df.work_item_id=w.id '
+      + 'order by df.fill_number desc limit 1) d on true');
+    expect(flat).toContain('left join pharmacy.dispensing_reversals r on r.dispensing_id=d.id');
+    expect(flat.startsWith('select w.*,d.id::text as dispensing_id,d.status as dispensing_status, r.id::text as reversal_id,'))
+      .toBe(true);
+  });
+
+  it('R4 a single read answers the latest fill; reversed is that fill\'s', async () => {
+    const reversedLast: Item[] = [{ n: 4, refills: 2, fills: [{ days: 3 }, { days: 1, reversed: true }] }];
+    for (const on of [false, true]) {
+      const read = await readOf(harness({ items: reversedLast, on }), 4);
+      expect(read.dispensing).toEqual({ id: fillId(4, 2), status: 'dispensed', reversed: true, ...(on ? { fillNumber: 2 } : {}) });
+      expect(read.pharmacyStep).toBe('dispensing_reversed');
+    }
+  });
+});
+
+describe('ORD-12: refills on the work item (setting on)', () => {
+  it('F1 an own item carries refills from 0154\'s reader; lastFilledAt and the latest fill\'s number', async () => {
+    const h = harness({ items: SEVERAL, on: true });
+    const items = await listOf(h);
+    const byId = (n: number) => items.find((item) => item.id === id(n))!;
+    expect(byId(1).refills).toEqual({ allowed: 2, recorded: 3, open: false, closedReason: 'none_left', nextFillOn: null,
+      endsOn: plusDays(LAGOS_TODAY, 20) });
+    expect(byId(2).refills).toEqual({ allowed: 2, recorded: 0, open: false, closedReason: null, nextFillOn: null,
+      endsOn: plusDays(LAGOS_TODAY, 37) });
+    // Filled 4 days ago, a one-day interval: open since 3 days ago (the Lagos day).
+    expect(byId(3).refills).toEqual({ allowed: 1, recorded: 1, open: true, closedReason: null,
+      nextFillOn: plusDays(lagosDay(ago(4)), 1), endsOn: plusDays(LAGOS_TODAY, 25) });
+    expect(wire(byId(1).lastFilledAt)).toBe(ago(2).toISOString());
+    expect(byId(2)).not.toHaveProperty('lastFilledAt');
+    // After today's fields, before Q132's notice (none here): refills last, lastFilledAt before it.
+    expect(Object.keys(byId(1))).toEqual([...TODAY_KEYS, 'lastFilledAt', 'refills']);
+    expect(Object.keys(byId(2))).toEqual([...TODAY_KEYS, 'refills']);
+  });
+
+  it('F2 the open refills are asked first (no ids), then the per-item reader once, for the own rows shown', async () => {
+    const h = harness({ items: SEVERAL, on: true });
+    const items = await listOf(h);
+    expect(h.sent((sql) => sql === OPEN_REFILLS_QUERY).map((statement) => statement.values)).toEqual([[]]);
+    // The per-item reader: one statement, the own rows the list shows, in their order.
+    expect(h.sent((sql) => sql === WORK_ITEM_REFILLS_QUERY).map((statement) => statement.values[0]))
+      .toEqual([items.map((item) => item.id)]);
+    const order = h.statements.map((statement) => statement.sql).filter((sql) => sql === OPEN_REFILLS_QUERY
+      || sql === WORK_ITEM_REFILLS_QUERY || sql === WORK_LIST_QUERY_0133);
+    expect(order).toEqual([OPEN_REFILLS_QUERY, WORK_LIST_QUERY_0133, WORK_ITEM_REFILLS_QUERY]);
+  });
+
+  it('F3 a route-backed item carries one fill and none allowed, without asking the reader about it', async () => {
+    const items: Item[] = [{ n: 5, routed: true, fills: [{ days: 1 }] }, { n: 6, routed: true }];
+    const h = harness({ items, on: true });
+    const listed = await listOf(h);
+    expect(listed.map((item) => [item.id, item.refills])).toEqual([
+      [id(6), { allowed: 0, recorded: 0, open: false, closedReason: null, nextFillOn: null, endsOn: null }],
+      [id(5), { allowed: 0, recorded: 1, open: false, closedReason: 'none_left', nextFillOn: null, endsOn: null }]]);
+    expect(h.sent((sql) => sql === WORK_ITEM_REFILLS_QUERY)).toEqual([]);
+    expect((await readOf(h, 5)).refills).toEqual({ allowed: 0, recorded: 1, open: false, closedReason: 'none_left',
+      nextFillOn: null, endsOn: null });
+    // No prescription id or encounter of the other facility comes with it (PRIV P4.3).
+    expect(listed[1]).not.toHaveProperty('sourceEhrPrescriptionId');
+  });
+
+  it.each([['changed'], ['stopped'], ['ended']] as const)('F4 the closed reason %s is answered as the reader gives it',
+    async (closed) => {
+      const h = harness({ items: [{ n: 7, refills: 2, closed, fills: [{ days: 1 }] }], on: true });
+      expect((await readOf(h, 7)).refills).toEqual({ allowed: 2, recorded: 1, open: false, closedReason: closed,
+        nextFillOn: null, endsOn: null });
+    });
+
+  it('F5 a reader that fails leaves refills out and opens no item; it never fails the list or the read', async () => {
+    const failing = () => [sqlError('42883'), sqlError('57014'), sqlError('42501')];
+    const h = harness({ items: SEVERAL, on: true, readerErrors: failing() });
+    const items = await listOf(h);
+    expect(items.map((item) => item.id)).toEqual([id(2), id(3), id(1)]);
+    for (const item of items) expect(item).not.toHaveProperty('refills');
+    expect(h.sent((sql) => /^rollback to savepoint pharmacy_work_item_refills$/.test(sql))).toHaveLength(1);
+    expect(await readOf(h, 3)).not.toHaveProperty('refills');
+    // An error, as the open refills' (the clinical owner's call, 26 November 2026): the list then says
+    // refillsUnavailable.
+    expect(Logger.prototype.error).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'Refills on own work could not be read; they are left out, and the work list says refillsUnavailable',
+      sqlState: '42883' }));
+    // The open refills failing (a statement timeout): none open (item 3 is done work, newest first), the list still
+    // answers.
+    const noOpen = harness({ items: SEVERAL, on: true, openError: sqlError('57014') });
+    expect((await listOf(noOpen)).map((item) => item.id)).toEqual([id(2), id(3), id(1)]);
+    expect(noOpen.sent((sql) => /^rollback to savepoint pharmacy_open_refills$/.test(sql))).toHaveLength(1);
+    expect(noOpen.sent((sql) => sql === WORK_LIST_QUERY_0133).map((statement) => statement.values[1])).toEqual([[]]);
+    // An error, not a warning (fix2): every due refill is then missing from the open work.
+    expect(Logger.prototype.error).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'Own work with refills open could not be read; the work list says refillsUnavailable',
+      sqlState: '57014' }));
+  });
+
+  it('F9 the open refills run under their own time limit, set in their savepoint and undone with it', async () => {
+    const h = harness({ items: SEVERAL, on: true });
+    const page = await h.service.listWorkItems(pharmacist) as unknown as Answer;
+    expect(OPEN_REFILLS_TIMEOUT_MS).toBe(3_000);
+    expect(OPEN_REFILLS_TIMEOUT_QUERY).toBe("select set_config('statement_timeout', '3000', true)");
+    const sqls = h.statements.map((statement) => statement.sql);
+    const at = sqls.indexOf(OPEN_REFILLS_QUERY);
+    // The limit is set inside the savepoint, just before the open refills, and rolling back to the savepoint (the
+    // reader's only write, its scan marker, is deleted before it returns) undoes it, so the list statement and every
+    // later one keep the pool's 15 s.
+    expect(sqls.slice(at - 2, at + 3)).toEqual(['savepoint pharmacy_open_refills', OPEN_REFILLS_TIMEOUT_QUERY,
+      OPEN_REFILLS_QUERY, 'rollback to savepoint pharmacy_open_refills', 'release savepoint pharmacy_open_refills']);
+    expect(sqls.filter((sql) => /statement_timeout/.test(sql))).toEqual([OPEN_REFILLS_TIMEOUT_QUERY,
+      OPEN_REFILLS_TIMEOUT_QUERY]);
+    expect(sqls.indexOf(WORK_LIST_QUERY_0133)).toBeGreaterThan(at + 2);
+    // What it read is kept: item 3's refill is open work.
+    expect((page.items as Answer[]).find((item) => item.id === id(3))!.refills).toMatchObject({ open: true });
+    expect(page).not.toHaveProperty('refillsUnavailable');
+    // The per-item reader (the 200 rows shown) runs under the same limit in its own savepoint, undone with it (the
+    // clinical owner's call, 26 November 2026), so the statements after it keep the pool's 15 s.
+    const reader = sqls.indexOf(WORK_ITEM_REFILLS_QUERY);
+    expect(sqls.slice(reader - 2, reader + 3)).toEqual(['savepoint pharmacy_work_item_refills',
+      OPEN_REFILLS_TIMEOUT_QUERY, WORK_ITEM_REFILLS_QUERY, 'rollback to savepoint pharmacy_work_item_refills',
+      'release savepoint pharmacy_work_item_refills']);
+  });
+
+  it('F9b the single read\'s per-item reader runs under the same time limit, in its savepoint, undone with it; on a '
+    + 'failure (its time limit, a refusal, no reader) the item answers without refills, logged as an error', async () => {
+    const h = harness({ items: SEVERAL, on: true });
+    expect((await readOf(h, 3)).refills).toMatchObject({ open: true });
+    const sqls = h.statements.map((statement) => statement.sql);
+    const reader = sqls.indexOf(WORK_ITEM_REFILLS_QUERY);
+    expect(sqls.slice(reader - 2, reader + 3)).toEqual(['savepoint pharmacy_work_item_refills',
+      OPEN_REFILLS_TIMEOUT_QUERY, WORK_ITEM_REFILLS_QUERY, 'rollback to savepoint pharmacy_work_item_refills',
+      'release savepoint pharmacy_work_item_refills']);
+    expect(sqls.filter((sql) => /statement_timeout/.test(sql))).toEqual([OPEN_REFILLS_TIMEOUT_QUERY]);
+    for (const code of ['57014', '42501', '42883']) {
+      const failing = harness({ items: SEVERAL, on: true, readerErrors: [sqlError(code)] });
+      const one = await readOf(failing, 3);
+      expect(one).not.toHaveProperty('refills');
+      expect(one).not.toHaveProperty('refillsUnavailable');
+      const sent = failing.statements.map((statement) => statement.sql);
+      const at = sent.indexOf(WORK_ITEM_REFILLS_QUERY);
+      expect(sent.slice(at - 2, at + 3)).toEqual(['savepoint pharmacy_work_item_refills', OPEN_REFILLS_TIMEOUT_QUERY,
+        WORK_ITEM_REFILLS_QUERY, 'rollback to savepoint pharmacy_work_item_refills',
+        'release savepoint pharmacy_work_item_refills']);
+      expect(Logger.prototype.error).toHaveBeenLastCalledWith(expect.objectContaining({ sqlState: code,
+        correlationId: pharmacist.correlationId }));
+    }
+  });
+
+  it('F10 the open refills failing (their time limit, a refusal, no reader): the list answers without them and says '
+    + 'refillsUnavailable, logged as an error', async () => {
+    for (const code of ['57014', '42501', '42883']) {
+      const h = harness({ items: SEVERAL, on: true, openError: sqlError(code) });
+      const page = await h.service.listWorkItems(pharmacist) as unknown as Answer;
+      expect(page.refillsUnavailable).toBe(true);
+      // The rows are otherwise whole: item 3 is done work (its open refill could not be found), and each own row
+      // still carries refills from the per-item reader.
+      const items = page.items as Answer[];
+      expect(items.map((item) => item.id)).toEqual([id(2), id(3), id(1)]);
+      expect(items.find((item) => item.id === id(3))!.refills).toMatchObject({ open: true });
+      // The savepoint is released, so nothing later runs under the open refills' time limit.
+      const sqls = h.statements.map((statement) => statement.sql);
+      expect(sqls.slice(sqls.indexOf(OPEN_REFILLS_QUERY) + 1, sqls.indexOf(OPEN_REFILLS_QUERY) + 3)).toEqual([
+        'rollback to savepoint pharmacy_open_refills', 'release savepoint pharmacy_open_refills']);
+      expect(Logger.prototype.error).toHaveBeenLastCalledWith(expect.objectContaining({ sqlState: code,
+        correlationId: pharmacist.correlationId }));
+    }
+  });
+
+  it('F11 the per-item reader failing on the list: refillsUnavailable too; a single read carries no flag', async () => {
+    const h = harness({ items: SEVERAL, on: true, readerErrors: [sqlError('57014')] });
+    const page = await h.service.listWorkItems(pharmacist) as unknown as Answer;
+    expect(page.refillsUnavailable).toBe(true);
+    for (const item of page.items as Answer[]) expect(item).not.toHaveProperty('refills');
+    const read = harness({ items: SEVERAL, on: true, readerErrors: [sqlError('57014')] });
+    const one = await readOf(read, 3);
+    expect(one).not.toHaveProperty('refills');
+    expect(one).not.toHaveProperty('refillsUnavailable');
+  });
+
+  it('F12 refillsUnavailable only while on and only on a failure: absent off (today\'s answer), absent on success, '
+    + 'absent with no own row to read', async () => {
+    const off = await harness({ items: SEVERAL }).service.listWorkItems(pharmacist) as unknown as Answer;
+    expect(off).not.toHaveProperty('refillsUnavailable');
+    const offFailing = harness({ items: SEVERAL, openError: sqlError('57014'), readerErrors: [sqlError('57014')] });
+    expect(await offFailing.service.listWorkItems(pharmacist)).not.toHaveProperty('refillsUnavailable');
+    expect(offFailing.sent((sql) => /statement_timeout/.test(sql) || sql === OPEN_REFILLS_QUERY)).toEqual([]);
+    const on = await harness({ items: SEVERAL, on: true }).service.listWorkItems(pharmacist) as unknown as Answer;
+    expect(on).not.toHaveProperty('refillsUnavailable');
+    const routedOnly = harness({ items: [{ n: 5, routed: true, fills: [{ days: 1 }] }], on: true });
+    expect(await routedOnly.service.listWorkItems(pharmacist)).not.toHaveProperty('refillsUnavailable');
+    expect(new PharmacyRefills(true).listFlag({ ids: [], unavailable: false }, new Map())).toEqual({});
+    expect(new PharmacyRefills(true).listFlag({ ids: [], unavailable: true }, new Map())).toEqual({ refillsUnavailable: true });
+    expect(new PharmacyRefills(true).listFlag({ ids: [], unavailable: false }, undefined)).toEqual({ refillsUnavailable: true });
+    expect(REFILLS_OFF.listFlag({ ids: [], unavailable: true }, undefined)).toEqual({});
+  });
+
+  it('F6 a closed reason this image does not know is answered as null, never passed on', () => {
+    expect(new PharmacyRefills(true).forRow({ order_route_id: null }, { work_item_id: id(1), refills_allowed: 2,
+      fills_recorded: 1, refill_open: false, closed_reason: 'something_new' })).toEqual({ allowed: 2, recorded: 1,
+      open: false, closedReason: null, nextFillOn: null, endsOn: null });
+    expect(REFILLS_OFF.forRow({ order_route_id: null }, { work_item_id: id(1), refills_allowed: 2, fills_recorded: 1,
+      refill_open: true, closed_reason: null })).toBeUndefined();
+  });
+
+  it('F8 the refill interval: a refill not yet due reads not_yet with the Lagos day it opens; open again on that day',
+    async () => {
+      // Item 8: refills 2, a 7-day interval (10 days' duration), filled 2 days ago: opens in 5 days. Item 9: the same,
+      // filled 7 days ago: opens today. Item 16: fill 2 (2 days ago) reversed, fill 1 9 days ago standing: open.
+      const items: Item[] = [{ n: 8, refills: 2, interval: 8, received: 3, fills: [{ days: 2 }] },
+        { n: 9, refills: 2, interval: 7, received: 8, fills: [{ days: 7 }] },
+        { n: 16, refills: 2, interval: 8, received: 10, fills: [{ days: 9 }, { days: 2, reversed: true }] }];
+      const h = harness({ items, on: true });
+      expect((await readOf(h, 8)).refills).toEqual({ allowed: 2, recorded: 1, open: false, closedReason: 'not_yet',
+        nextFillOn: plusDays(lagosDay(ago(2)), 8), endsOn: null });
+      expect((await readOf(h, 9)).refills).toEqual({ allowed: 2, recorded: 1, open: true, closedReason: null,
+        nextFillOn: plusDays(lagosDay(ago(7)), 7), endsOn: null });
+      expect((await readOf(h, 16)).refills).toEqual({ allowed: 2, recorded: 2, open: true, closedReason: null,
+        nextFillOn: plusDays(lagosDay(ago(9)), 8), endsOn: null });
+      // pharmacy-api passes the day on only as a day, and open only with no closed reason.
+      const refills = new PharmacyRefills(true);
+      expect(refills.forRow({ order_route_id: null }, { work_item_id: id(8), refills_allowed: 2, fills_recorded: 1,
+        refill_open: false, closed_reason: 'not_yet', next_fill_on: '2026-12-01' }))
+        .toEqual({ allowed: 2, recorded: 1, open: false, closedReason: 'not_yet', nextFillOn: '2026-12-01', endsOn: null });
+      expect(refills.forRow({ order_route_id: null }, { work_item_id: id(8), refills_allowed: 2, fills_recorded: 1,
+        refill_open: true, closed_reason: 'not_yet', next_fill_on: '1 December' }))
+        .toEqual({ allowed: 2, recorded: 1, open: false, closedReason: 'not_yet', nextFillOn: null, endsOn: null });
+      expect(WORK_ITEM_REFILLS_QUERY.replace(/\s+/g, ' ')).toBe('select work_item_id::text as work_item_id, refills_allowed, '
+        + "fills_recorded, refill_open, closed_reason, to_char(next_fill_on, 'YYYY-MM-DD') as next_fill_on, "
+        + "to_char(refills_end_on, 'YYYY-MM-DD') as refills_end_on from pharmacy.work_item_refills($1::uuid[])");
+    });
+
+  it('F7 the reader is asked at most 200 ids a statement', async () => {
+    const refills = new PharmacyRefills(true);
+    const query = jest.fn(async (sql: string, values?: unknown[]) => ({
+      rows: sql === WORK_ITEM_REFILLS_QUERY ? (values![0] as string[]).map((workItemId) => ({ work_item_id: workItemId,
+        refills_allowed: 0, fills_recorded: 0, refill_open: false, closed_reason: null })) : [] }));
+    const ids = Array.from({ length: 450 }, (_, index) => id(1000 + index));
+    const found = await refills.read({ query } as never, ids, 'ord12-correlation-0002');
+    expect(found?.size).toBe(450);
+    expect(query.mock.calls.filter(([sql]) => sql === WORK_ITEM_REFILLS_QUERY).map(([, values]) => (values![0] as string[]).length))
+      .toEqual([200, 200, 50]);
+  });
+
+  it('F13 endsOn: the refills\' last day from 0154\'s reader (the Lagos day), whatever the state; null when the '
+    + 'reader gives no day, and on a route-backed item', async () => {
+    const end = plusDays(LAGOS_TODAY, 37);
+    const items: Item[] = [{ n: 60, refills: 2, interval: 8, received: 3, refillsEndOn: end, fills: [{ days: 2 }] },
+      { n: 61, refills: 2, received: 1, refillsEndOn: end },
+      { n: 62, refills: 1, received: 5, refillsEndOn: plusDays(LAGOS_TODAY, 10), fills: [{ days: 4 }, { days: 1 }] }];
+    const h = harness({ items, on: true });
+    // Not yet due, before the first fill, none left: the same day, so a screen can say "Refills until <date>".
+    expect((await readOf(h, 60)).refills).toEqual({ allowed: 2, recorded: 1, open: false, closedReason: 'not_yet',
+      nextFillOn: plusDays(lagosDay(ago(2)), 8), endsOn: end });
+    expect((await readOf(h, 61)).refills).toEqual({ allowed: 2, recorded: 0, open: false, closedReason: null,
+      nextFillOn: null, endsOn: end });
+    expect((await readOf(h, 62)).refills).toEqual({ allowed: 1, recorded: 2, open: false, closedReason: 'none_left',
+      nextFillOn: null, endsOn: plusDays(LAGOS_TODAY, 10) });
+    // The list carries it the same way (the per-item reader, for the rows shown).
+    expect((await listOf(h)).map((item) => [item.id, (item.refills as Answer).endsOn]))
+      .toEqual([[id(61), end], [id(60), end], [id(62), plusDays(LAGOS_TODAY, 10)]]);
+    // Asked as the Lagos day; anything but a day, or none, is null (never passed on).
+    expect(WORK_ITEM_REFILLS_QUERY.replace(/\s+/g, ' '))
+      .toContain("to_char(refills_end_on, 'YYYY-MM-DD') as refills_end_on from pharmacy.work_item_refills");
+    const refills = new PharmacyRefills(true);
+    const row = { work_item_id: id(60), refills_allowed: 2, fills_recorded: 1, refill_open: true, closed_reason: null,
+      next_fill_on: '2026-12-01' };
+    for (const odd of [{ refills_end_on: '31 December' }, { refills_end_on: '2026-12-31T00:00:00Z' },
+      { refills_end_on: null }, {}]) {
+      expect(refills.forRow({ order_route_id: null }, { ...row, ...odd })).toEqual({ allowed: 2, recorded: 1, open: true,
+        closedReason: null, nextFillOn: '2026-12-01', endsOn: null });
+    }
+    expect(refills.forRow({ order_route_id: null }, { ...row, refills_end_on: '2027-01-15' }))
+      .toMatchObject({ endsOn: '2027-01-15' });
+    // A route-backed item: its prescription is the other facility's, no day.
+    expect(refills.forRow({ order_route_id: routeId, fills_recorded: 1 }, undefined)).toEqual({ allowed: 0, recorded: 1,
+      open: false, closedReason: 'none_left', nextFillOn: null, endsOn: null });
+  });
+
+  it('F14 the refills\' last day passed (D9): the item reads ended with endsOn, no refill open, and is not open work; '
+    + 'on the last day itself the refill is still open', async () => {
+    const yesterday = plusDays(LAGOS_TODAY, -1);
+    // Item 63: received 400 days ago, filled the next day, its refills ended yesterday (done work past the 90 days:
+    // not listed). Item 64: received 20 days ago, ended yesterday: done work. Item 65: the same, its last day today:
+    // open, open work.
+    const items: Item[] = [
+      { n: 63, refills: 2, received: 400, refillsEndOn: yesterday, fills: [{ days: 399 }] },
+      { n: 64, refills: 2, received: 20, refillsEndOn: yesterday, fills: [{ days: 19 }] },
+      { n: 65, refills: 2, received: 20, refillsEndOn: LAGOS_TODAY, fills: [{ days: 19 }] }];
+    const h = harness({ items, on: true });
+    const listed = await listOf(h);
+    expect(h.sent((sql) => sql === WORK_LIST_QUERY_0133).map((statement) => statement.values[1])).toEqual([[id(65)]]);
+    expect(listed.map((item) => item.id)).toEqual([id(65), id(64)]);
+    expect(listed[1]!.refills).toEqual({ allowed: 2, recorded: 1, open: false, closedReason: 'ended', nextFillOn: null,
+      endsOn: yesterday });
+    expect(listed[0]!.refills).toEqual({ allowed: 2, recorded: 1, open: true, closedReason: null,
+      nextFillOn: plusDays(lagosDay(ago(19)), 1), endsOn: LAGOS_TODAY });
+    expect((await readOf(h, 63)).refills).toEqual({ allowed: 2, recorded: 1, open: false, closedReason: 'ended',
+      nextFillOn: null, endsOn: yesterday });
+  });
+
+  it('F16 a late fill (0154\'s reader): a refill that would open only after the last day reads ended at once, with '
+    + 'endsOn still ahead and no nextFillOn, and is not open work; one that opens on the last day itself reads not_yet',
+  async () => {
+    // Both allow 2 refills with a 23-day interval and end in 10 days. Item 66 was filled 12 days ago: its refill would
+    // open in 11 days, after the last day. Item 67 was filled 13 days ago: its refill opens on the last day.
+    const end = plusDays(LAGOS_TODAY, 10);
+    const items: Item[] = [
+      { n: 66, refills: 2, interval: 23, received: 30, refillsEndOn: end, fills: [{ days: 12 }] },
+      { n: 67, refills: 2, interval: 23, received: 30, refillsEndOn: end, fills: [{ days: 13 }] }];
+    const h = harness({ items, on: true });
+    expect((await readOf(h, 66)).refills).toEqual({ allowed: 2, recorded: 1, open: false, closedReason: 'ended',
+      nextFillOn: null, endsOn: end });
+    expect((await readOf(h, 67)).refills).toEqual({ allowed: 2, recorded: 1, open: false, closedReason: 'not_yet',
+      nextFillOn: plusDays(lagosDay(ago(13)), 23), endsOn: end });
+    await listOf(h);
+    expect(h.sent((sql) => sql === WORK_LIST_QUERY_0133).map((statement) => statement.values[1])).toEqual([[]]);
+  });
+
+  it('F15 the two callers of 0154\'s readers ask them in a read-write READ COMMITTED transaction (the readers write '
+    + 'the refill scan marker, D8; a READ ONLY transaction would refuse them, 25006)', async () => {
+    const calls: [string, (h: ReturnType<typeof harness>) => Promise<unknown>][] = [
+      ['the work list', listOf], ['a single read', (h) => readOf(h, 3)]];
+    for (const [label, call] of calls) {
+      const h = harness({ items: SEVERAL, on: true });
+      await call(h);
+      const sqls = h.statements.map((statement) => statement.sql);
+      const readers = sqls.map((sql, index) => (sql === OPEN_REFILLS_QUERY || sql === WORK_ITEM_REFILLS_QUERY ? index : -1))
+        .filter((index) => index >= 0);
+      expect([label, readers.length > 0]).toEqual([label, true]);
+      const begin = sqls.lastIndexOf('BEGIN', readers[0]);
+      expect([label, sqls.slice(begin, begin + 2)]).toEqual([label, ['BEGIN',
+        'SET TRANSACTION ISOLATION LEVEL READ COMMITTED']]);
+      expect([label, sqls.slice(begin, readers[readers.length - 1]).filter((sql) => /read only/i.test(sql))])
+        .toEqual([label, []]);
+    }
+  });
+});
+
+describe('ORD-12: open work on the list (setting on)', () => {
+  // Item 10: received 200 days ago, two fills, refills 3, one still open; item 11: received 200 days ago, one fill,
+  // none left; item 12: received 120 days ago, no fill; item 13: received 2 days ago, one fill, refills 0;
+  // item 14: received 30 days ago, one fill, refills 2 but its prescription changed; item 15: received today, no fill.
+  const OLD: Item[] = [
+    { n: 10, refills: 3, received: 200, fills: [{ days: 199 }, { days: 30 }] },
+    { n: 11, refills: 0, received: 200, fills: [{ days: 199 }] },
+    { n: 12, refills: 1, received: 120 },
+    { n: 13, refills: 0, received: 2, fills: [{ days: 2 }] },
+    { n: 14, refills: 2, received: 30, closed: 'changed', fills: [{ days: 29 }] },
+    { n: 15, refills: 0, received: 0 },
+  ];
+
+  it('O1 an own item with a refill open is open work of any age, after the items waiting for a first fill', async () => {
+    const h = harness({ items: OLD, on: true });
+    const items = await listOf(h);
+    expect(items.map((item) => item.id)).toEqual([id(12), id(15), id(10), id(13), id(14)]);
+    // Item 10 (200 days, a refill open) is listed; item 11 (200 days, none left) is not: done work keeps 90 days.
+    expect(h.sent((sql) => sql === WORK_LIST_QUERY_0133).map((statement) => statement.values))
+      .toEqual([[workListSince(), [id(10)]]]);
+    expect(items.find((item) => item.id === id(10))!.refills).toEqual({ allowed: 3, recorded: 2, open: true,
+      closedReason: null, nextFillOn: plusDays(lagosDay(ago(30)), 1), endsOn: null });
+  });
+
+  it('O2 off, the same items: an item with any fill is done work, so item 10 is left out', async () => {
+    const h = harness({ items: OLD });
+    expect((await listOf(h)).map((item) => item.id)).toEqual([id(12), id(15), id(13), id(14)]);
+  });
+
+  it('O3 the open refills are 0154\'s reader, asked with no ids; pharmacy-api picks no candidates itself', () => {
+    expect(OPEN_REFILLS_QUERY.replace(/\s+/g, ' ')).toBe('select work_item_id::text as work_item_id from '
+      + 'pharmacy.open_refill_work_items()');
+  });
+
+  it('O4 an item whose prescription ended is not open work; one with a 12th fill neither', async () => {
+    const items: Item[] = [
+      { n: 20, refills: 2, received: 10, endsOn: '2000-01-01', fills: [{ days: 9 }] },
+      { n: 21, refills: 11, received: 10, fills: Array.from({ length: 12 }, (_, index) => ({ days: 9 - index * 0.5 })) },
+      { n: 22, refills: 2, received: 10, endsOn: '2999-12-31', fills: [{ days: 9 }] },
+    ];
+    const h = harness({ items, on: true });
+    await listOf(h);
+    expect(h.sent((sql) => sql === WORK_LIST_QUERY_0133).map((statement) => statement.values[1])).toEqual([[id(22)]]);
+  });
+
+  it('O5 a refill that is open stays open work however many items were filled after it', async () => {
+    // Item 40: received 31 days ago, filled 30 days ago, a refill open. Items 100-349: 250 items received and filled
+    // in the last days, none with a refill. Before, pharmacy-api asked the reader only about the 200 most recently
+    // filled own items, so item 40 was done work, received a month ago: the 201st row or later, never listed.
+    const busy: Item[] = [{ n: 40, refills: 2, received: 31, fills: [{ days: 30 }] },
+      ...Array.from({ length: 250 }, (_, index): Item => ({ n: 100 + index, refills: 0, received: 0.002 * index,
+        fills: [{ days: 0.001 * index }] }))];
+    const h = harness({ items: busy, on: true });
+    const items = await listOf(h);
+    expect(items).toHaveLength(200);
+    expect(items[0]!.id).toBe(id(40));
+    expect(items[0]!.refills).toEqual({ allowed: 2, recorded: 1, open: true, closedReason: null,
+      nextFillOn: plusDays(lagosDay(ago(30)), 1), endsOn: null });
+    expect(h.sent((sql) => sql === WORK_LIST_QUERY_0133).map((statement) => statement.values[1])).toEqual([[id(40)]]);
+    // The per-item reader is asked about the 200 rows shown, once.
+    expect(h.sent((sql) => sql === WORK_ITEM_REFILLS_QUERY).map((statement) => (statement.values[0] as string[]).length))
+      .toEqual([200]);
+  });
+});
+
+describe('ORD-12: the refill interval and the order on the list (setting on)', () => {
+  it('O6 a refill not yet due is done work (not in the open refills); open refills follow the first fills, the refill '
+    + 'that opened first first', async () => {
+    // Item 50: no fill, received 2 days ago. Item 51: filled 40 days ago (one-day interval): opened 39 days ago.
+    // Item 52: filled 20 days ago, a 10-day interval: opened 10 days ago. Item 53: filled 3 days ago, a 23-day
+    // interval: not yet (opens in 20 days), received 5 days ago. Item 54: no fill, received 1 day ago.
+    const items: Item[] = [{ n: 50, refills: 1, received: 2 }, { n: 51, refills: 2, received: 41, fills: [{ days: 40 }] },
+      { n: 52, refills: 2, interval: 10, received: 21, fills: [{ days: 20 }] },
+      { n: 53, refills: 1, interval: 23, received: 5, fills: [{ days: 3 }] }, { n: 54, refills: 0, received: 1 }];
+    const h = harness({ items, on: true });
+    const listed = await listOf(h);
+    expect(h.sent((sql) => sql === WORK_LIST_QUERY_0133).map((statement) => statement.values[1]))
+      .toEqual([[id(51), id(52)]]);
+    expect(listed.map((item) => item.id)).toEqual([id(50), id(54), id(51), id(52), id(53)]);
+    expect(listed[4]!.refills).toEqual({ allowed: 1, recorded: 1, open: false, closedReason: 'not_yet',
+      nextFillOn: plusDays(lagosDay(ago(3)), 23), endsOn: null });
+  });
+
+  it('O7 WORK_LIST_ORDER puts the open refills in $2\'s order (0154\'s: the refill that opened first first)', () => {
+    for (const query of [WORK_LIST_QUERY, WORK_LIST_QUERY_0133]) {
+      expect(query.replace(/\s+/g, ' ')).toContain('order by o.open_work desc,o.refill_open asc,'
+        + 'case when o.refill_open then array_position($2::uuid[],w.id) end asc, ');
+    }
+  });
+});
+
+describe('ORD-12: recording a fill', () => {
+  const ONE: Item[] = [{ n: 30, refills: 2, fills: [{ days: 3 }] }];
+
+  it('D1 the next fill (fills + 1) is recorded with its number; MedicationDispensed names it, and the audit row', async () => {
+    const h = harness({ items: ONE, on: true });
+    const answer = await dispense(h, 30, 'ord12-dispense-key-000000000001', { fillNumber: 2 });
+    expect(answer).toMatchObject({ workItemId: id(30), status: 'dispensed', fillNumber: 2 });
+    expect(h.sent((sql) => sql === INSERT_DISPENSING).map((statement) => statement.values[16])).toEqual([2]);
+    expect(h.committed.outbox).toEqual([{ type: 'MedicationDispensed',
+      payload: { dispensingId: answer.id, workItemId: id(30), status: 'dispensed', fillNumber: 2 } }]);
+    expect(h.audited()).toEqual([{ action: 'pharmacy.dispensing.create', resourceId: answer.id,
+      details: { workItemId: id(30), workItemVersion: 1, status: 'dispensed', fillNumber: 2, basis: 'own-work' } }]);
+  });
+
+  it('D2 a first fill writes today\'s MedicationDispensed and audit row (no fillNumber), with the setting on or off', async () => {
+    for (const on of [false, true]) {
+      const h = harness({ items: [{ n: 31, refills: 2 }], on });
+      const answer = await dispense(h, 31, 'ord12-dispense-key-000000000002');
+      expect(h.committed.outbox).toEqual([{ type: 'MedicationDispensed',
+        payload: { dispensingId: answer.id, workItemId: id(31), status: 'dispensed' } }]);
+      expect(h.audited()[0]!.details).toEqual({ workItemId: id(31), workItemVersion: 1, status: 'dispensed', basis: 'own-work' });
+      expect(h.sent((sql) => sql === INSERT_DISPENSING).map((statement) => statement.values[16])).toEqual([1]);
+      // Off, the answer is today's dispensing; on, it names its fill.
+      expect(Object.keys(answer)).toEqual(['id', 'workItemId', 'patientId', 'facilityId', 'status', 'effectiveStatus',
+        'medication', 'quantityDispensed', 'quantityUnit', 'dispensedAt', 'reversalId', 'version', ...(on ? ['fillNumber'] : [])]);
+    }
+  });
+
+  it('D3 every fill writes its own MedicationDispensed: three fills, three events, the refills naming 2 and 3', async () => {
+    const h = harness({ items: [{ n: 32, refills: 2 }], on: true });
+    await dispense(h, 32, 'ord12-dispense-key-000000000031');
+    await dispense(h, 32, 'ord12-dispense-key-000000000032', { fillNumber: 2 });
+    await dispense(h, 32, 'ord12-dispense-key-000000000033', { fillNumber: 3 });
+    expect(h.committed.outbox.map((event) => [event.type, (event.payload as Answer).fillNumber]))
+      .toEqual([['MedicationDispensed', undefined], ['MedicationDispensed', 2], ['MedicationDispensed', 3]]);
+    expect(new Set(h.committed.outbox.map((event) => (event.payload as Answer).dispensingId)).size).toBe(3);
+  });
+
+  it.each([[1, 'PHARMACY_WORK_ITEM_ALREADY_DISPENSED', {}], [3, 'PHARMACY_FILL_NUMBER_CHANGED', { fillsRecorded: 1 }],
+    [4, 'PHARMACY_FILL_NUMBER_CHANGED', { fillsRecorded: 1 }]] as const)(
+    'D4 a fill number that is not the next (%p after one fill) is 409 %s, nothing written', async (fill, code, extra) => {
+      const h = harness({ items: ONE, on: true });
+      // Fill 1 left out with another quantity: today's request for an item already dispensed (the same request replays,
+      // P3).
+      expect(await refusal(dispense(h, 30, 'ord12-dispense-key-000000000004', fill === 1 ? { quantityDispensed: 28 }
+        : { fillNumber: fill })))
+        .toEqual({ status: 409, code, ...extra });
+      expect(h.inserts()).toBe(0);
+      expect(h.committed.outbox).toEqual([]);
+    });
+
+  it('D5 a refill of a route-backed item is 409 PHARMACY_NO_REFILLS_LEFT before the insert', async () => {
+    const h = harness({ items: [{ n: 33, routed: true, fills: [{ days: 1 }] }], on: true });
+    expect(await refusal(dispense(h, 33, 'ord12-dispense-key-000000000005', { fillNumber: 2 })))
+      .toEqual({ status: 409, code: 'PHARMACY_NO_REFILLS_LEFT' });
+    expect(h.inserts()).toBe(0);
+  });
+
+  it('D6 setting off: a refill asked of the service directly is 409 PHARMACY_REFILLS_NOT_AVAILABLE, nothing written', async () => {
+    const h = harness({ items: ONE });
+    expect(await refusal(dispense(h, 30, 'ord12-dispense-key-000000000006', { fillNumber: 2 })))
+      .toEqual({ status: 409, code: 'PHARMACY_REFILLS_NOT_AVAILABLE' });
+    expect(h.inserts()).toBe(0);
+  });
+
+  it.each([
+    [sqlError('23514', { message: 'NO_REFILLS_LEFT' }), 'PHARMACY_NO_REFILLS_LEFT'],
+    [sqlError('23514', { message: 'REFILL_PRESCRIPTION_ENDED' }), 'PHARMACY_REFILL_PRESCRIPTION_ENDED'],
+    [sqlError('23514', { message: 'PRESCRIPTION_SOURCE_NOT_DISPENSABLE' }), 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE'],
+    [sqlError('23514', { message: 'PRESCRIPTION_SOURCE_NOT_DISPENSABLE', detail: 'not_claimed' }),
+      'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE'],
+  ])('D7 the database\'s refusal %p is a plain 409 %s, never a 500', async (error, code) => {
+    const h = harness({ items: ONE, on: true, insertErrors: [error] });
+    expect(await refusal(dispense(h, 30, 'ord12-dispense-key-000000000007', { fillNumber: 2 })))
+      .toMatchObject({ status: 409, code });
+    expect(h.committed.outbox).toEqual([]);
+    expect(h.committed.fills).toHaveLength(1);
+  });
+
+  it('D10 a refill too soon (0154\'s REFILL_TOO_SOON) is 409 PHARMACY_REFILL_TOO_SOON with the Lagos day it opens',
+    async () => {
+      const soon = harness({ items: ONE, on: true,
+        insertErrors: [sqlError('23514', { message: 'REFILL_TOO_SOON', detail: '2026-12-08' })] });
+      expect(await refusal(dispense(soon, 30, 'ord12-dispense-key-000000000011', { fillNumber: 2 })))
+        .toEqual({ status: 409, code: 'PHARMACY_REFILL_TOO_SOON', refillOpensOn: '2026-12-08' });
+      expect(soon.committed.outbox).toEqual([]);
+      expect(soon.committed.fills).toHaveLength(1);
+      // A DETAIL that is not a day: the same refusal, without the day (never a 500).
+      const odd = harness({ items: ONE, on: true, insertErrors: [sqlError('23514', { message: 'REFILL_TOO_SOON' })] });
+      expect(await refusal(dispense(odd, 30, 'ord12-dispense-key-000000000012', { fillNumber: 2 })))
+        .toEqual({ status: 409, code: 'PHARMACY_REFILL_TOO_SOON' });
+    });
+
+  it('D11 a refill after the refills\' last day (0154\'s REFILL_PRESCRIPTION_ENDED, DETAIL the day; D9) is 409 '
+    + 'PHARMACY_REFILL_PRESCRIPTION_ENDED with refillsEndedOn, as a refill too soon carries refillOpensOn', async () => {
+    const ended = harness({ items: ONE, on: true,
+      insertErrors: [sqlError('23514', { message: 'REFILL_PRESCRIPTION_ENDED', detail: '2026-11-20' })] });
+    const problem = await dispense(ended, 30, 'ord12-dispense-key-000000000013', { fillNumber: 2 })
+      .catch((error: unknown) => error) as DomainProblem;
+    expect(problem).toBeInstanceOf(DomainProblem);
+    expect({ status: problem.getStatus(), code: problem.code, detail: problem.message, ...problem.extensions }).toEqual({
+      status: 409, code: 'PHARMACY_REFILL_PRESCRIPTION_ENDED', refillsEndedOn: '2026-11-20',
+      detail: 'The refills on this prescription ended on 2026-11-20. Ask the prescriber for a new one.' });
+    expect(ended.committed.outbox).toEqual([]);
+    expect(ended.committed.fills).toHaveLength(1);
+    // A DETAIL that is not a day (or none): the same refusal, without the day (never a 500).
+    for (const detail of [undefined, 'yesterday', '2026-11-20T00:00:00Z']) {
+      const odd = harness({ items: ONE, on: true,
+        insertErrors: [sqlError('23514', { message: 'REFILL_PRESCRIPTION_ENDED', ...(detail ? { detail } : {}) })] });
+      const plain = await dispense(odd, 30, 'ord12-dispense-key-000000000014', { fillNumber: 2 })
+        .catch((error: unknown) => error) as DomainProblem;
+      expect({ status: plain.getStatus(), code: plain.code, detail: plain.message, extensions: plain.extensions })
+        .toEqual({ status: 409, code: 'PHARMACY_REFILL_PRESCRIPTION_ENDED', extensions: undefined,
+          detail: 'The refills on this prescription have ended. Ask the prescriber for a new one.' });
+    }
+  });
+
+  it('D12 a late fill (0154 refuses a refill that would open only after the refills\' last day as '
+    + 'REFILL_PRESCRIPTION_ENDED, DETAIL that day, today or later): the refills end on that day, before this refill '
+    + 'would be due', async () => {
+    const late = harness({ items: ONE, on: true,
+      insertErrors: [sqlError('23514', { message: 'REFILL_PRESCRIPTION_ENDED', detail: '2099-12-31' })] });
+    const problem = await dispense(late, 30, 'ord12-dispense-key-000000000034', { fillNumber: 2 })
+      .catch((error: unknown) => error) as DomainProblem;
+    expect(problem).toBeInstanceOf(DomainProblem);
+    expect({ status: problem.getStatus(), code: problem.code, detail: problem.message, ...problem.extensions }).toEqual({
+      status: 409, code: 'PHARMACY_REFILL_PRESCRIPTION_ENDED', refillsEndedOn: '2099-12-31',
+      detail: 'The refills on this prescription end on 2099-12-31, before this refill would be due. Ask the prescriber '
+        + 'for a new one.' });
+    expect(late.committed.outbox).toEqual([]);
+    expect(late.committed.fills).toHaveLength(1);
+    // The words follow the Lagos day (UTC+1) at Lagos midnight: the last day itself is today ("end on"), a day
+    // before today has passed ("ended on").
+    const lastMoment = new Date('2026-11-24T22:59:59.999Z'); // 23:59:59.999 on 24 November in Lagos
+    const midnight = new Date('2026-11-24T23:00:00.000Z'); // 00:00 on 25 November in Lagos
+    expect(refillPrescriptionEnded('2026-11-24', lastMoment).message).toBe('The refills on this prescription end on '
+      + '2026-11-24, before this refill would be due. Ask the prescriber for a new one.');
+    expect(refillPrescriptionEnded('2026-11-24', midnight).message)
+      .toBe('The refills on this prescription ended on 2026-11-24. Ask the prescriber for a new one.');
+    expect(refillPrescriptionEnded('2026-11-23', lastMoment).message)
+      .toBe('The refills on this prescription ended on 2026-11-23. Ask the prescriber for a new one.');
+    expect(refillPrescriptionEnded('2026-11-25', midnight).extensions).toEqual({ refillsEndedOn: '2026-11-25' });
+  });
+
+  it('D13 a refill the database says is not the next fill (0154\'s REFILL_NOT_NEXT_FILL, DETAIL the fills it counts) '
+    + 'is 409 PHARMACY_FILL_NUMBER_CHANGED with fillsRecorded, as this service\'s own check answers it', async () => {
+    const counted = harness({ items: ONE, on: true,
+      insertErrors: [sqlError('23514', { message: 'REFILL_NOT_NEXT_FILL', detail: '2' })] });
+    expect(await refusal(dispense(counted, 30, 'ord12-dispense-key-000000000035', { fillNumber: 2 })))
+      .toEqual({ status: 409, code: 'PHARMACY_FILL_NUMBER_CHANGED', fillsRecorded: 2 });
+    expect(counted.committed.outbox).toEqual([]);
+    expect(counted.committed.fills).toHaveLength(1);
+    // A DETAIL that is not a count: the same refusal, without it (never a 500).
+    for (const detail of [undefined, 'two', '-1']) {
+      const odd = harness({ items: ONE, on: true,
+        insertErrors: [sqlError('23514', { message: 'REFILL_NOT_NEXT_FILL', ...(detail ? { detail } : {}) })] });
+      expect(await refusal(dispense(odd, 30, 'ord12-dispense-key-000000000036', { fillNumber: 2 })))
+        .toEqual({ status: 409, code: 'PHARMACY_FILL_NUMBER_CHANGED' });
+    }
+  });
+
+  it('D14 a fill the database says is dated after now (0154\'s DISPENSED_IN_FUTURE: a refill, or a first fill of an '
+    + 'item whose prescription allows refills) is 409 PHARMACY_DISPENSED_IN_FUTURE, nothing written', async () => {
+    const future = () => sqlError('23514', { message: 'DISPENSED_IN_FUTURE' });
+    const refill = harness({ items: ONE, on: true, insertErrors: [future()] });
+    expect(await refusal(dispense(refill, 30, 'ord12-dispense-key-000000000037', { fillNumber: 2 })))
+      .toEqual({ status: 409, code: 'PHARMACY_DISPENSED_IN_FUTURE' });
+    expect(refill.committed.outbox).toEqual([]);
+    expect(refill.committed.fills).toHaveLength(1);
+    for (const on of [false, true]) {
+      const first = harness({ items: [{ n: 34, refills: 2 }], on, insertErrors: [future()] });
+      expect(await refusal(dispense(first, 34, 'ord12-dispense-key-000000000038')))
+        .toEqual({ status: 409, code: 'PHARMACY_DISPENSED_IN_FUTURE' });
+      expect(first.committed.outbox).toEqual([]);
+      expect(first.committed.fills).toHaveLength(0);
+    }
+  });
+
+  it('D8 another 23514 is passed on unchanged (a broken session, not a refusal for the pharmacist)', async () => {
+    const other = sqlError('23514', { message: 'Dispensing does not match its eligible Pharmacy work item and actor context' });
+    const h = harness({ items: ONE, on: true, insertErrors: [other] });
+    await expect(dispense(h, 30, 'ord12-dispense-key-000000000008', { fillNumber: 2 })).rejects.toBe(other);
+  });
+
+  it('D9 no fill above the first accepts the item (ORD-4): only a first fill asks the steps reader', async () => {
+    const h = harness({ items: ONE, on: true });
+    await dispense(h, 30, 'ord12-dispense-key-000000000009', { fillNumber: 2 });
+    expect(h.sent((sql) => sql === OWN_WORK_STEPS_QUERY)).toEqual([]);
+    const first = harness({ items: [{ n: 34, refills: 1 }], on: true });
+    await dispense(first, 34, 'ord12-dispense-key-000000000010');
+    expect(first.sent((sql) => sql === OWN_WORK_STEPS_QUERY)).toHaveLength(1);
+  });
+});
+
+describe('ORD-12: replay by the item, the fill number and the request', () => {
+  const TWO: Item[] = [{ n: 40, refills: 2, fills: [{ days: 3 }, { days: 1 }] }];
+
+  it('P1 the same refill under a new key (a second press) answers the recorded fill, 201, writing nothing', async () => {
+    const h = harness({ items: TWO, on: true });
+    const answer = await dispense(h, 40, 'ord12-replay-key-00000000000001', { fillNumber: 2 });
+    expect(answer).toMatchObject({ id: fillId(40, 2), fillNumber: 2 });
+    expect(h.inserts()).toBe(0);
+    expect(h.committed.outbox).toEqual([]);
+    expect(h.committed.audits).toEqual([]);
+  });
+
+  it('P2 the same fill number with another body is 409 PHARMACY_FILL_NUMBER_CHANGED (fill 2), ALREADY_DISPENSED (fill 1)',
+    async () => {
+      const h = harness({ items: TWO, on: true });
+      expect(await refusal(dispense(h, 40, 'ord12-replay-key-00000000000002', { fillNumber: 2, quantityDispensed: 28 })))
+        .toEqual({ status: 409, code: 'PHARMACY_FILL_NUMBER_CHANGED', fillsRecorded: 2 });
+      expect(await refusal(dispense(h, 40, 'ord12-replay-key-00000000000003', { quantityDispensed: 28 })))
+        .toEqual({ status: 409, code: 'PHARMACY_WORK_ITEM_ALREADY_DISPENSED' });
+      expect(h.inserts()).toBe(0);
+    });
+
+  it('P3 a request without fillNumber, or naming fill 1, replays fill 1 on an item with refills (today\'s clients)', async () => {
+    for (const on of [false, true]) {
+      const h = harness({ items: TWO, on });
+      expect(await dispense(h, 40, 'ord12-replay-key-00000000000004')).toMatchObject({ id: fillId(40, 1) });
+      if (on) expect(await dispense(h, 40, 'ord12-replay-key-00000000000005', { fillNumber: 1 })).toMatchObject({ id: fillId(40, 1), fillNumber: 1 });
+      expect(h.inserts()).toBe(0);
+    }
+  });
+
+  it('P4 the digest of a first fill is today\'s, with or without fillNumber 1; a refill\'s names its number', () => {
+    expect(digestOf(40, body)).toBe(requestDigest('pharmacy.dispensing.create', { workItemId: id(40), ...body }));
+    expect(digestOf(40, { ...body, fillNumber: 1 })).toBe(digestOf(40, body));
+    expect(digestOf(40, { ...body, fillNumber: undefined })).toBe(digestOf(40, body));
+    expect(digestOf(40, { ...body, fillNumber: 2 })).toBe(requestDigest('pharmacy.dispensing.create',
+      { workItemId: id(40), ...body, fillNumber: 2 }));
+    expect(digestOf(40, { ...body, fillNumber: 2 })).not.toBe(digestOf(40, { ...body, fillNumber: 3 }));
+  });
+
+  it('P5 this member\'s key used for another request is 409: IDEMPOTENCY_CONFLICT for a refill, ALREADY_DISPENSED for fill 1',
+    async () => {
+      const h = harness({ items: [...TWO, { n: 41, refills: 2 }], on: true });
+      const key = 'ord12-seeded-key-40-2-000000';
+      expect(await refusal(dispense(h, 40, key, { fillNumber: 3 })))
+        .toEqual({ status: 409, code: 'IDEMPOTENCY_CONFLICT' });
+      expect(await refusal(dispense(h, 41, key))).toEqual({ status: 409, code: 'PHARMACY_WORK_ITEM_ALREADY_DISPENSED' });
+      // The same key and request: the recorded fill.
+      expect(await dispense(h, 40, key, { fillNumber: 2 })).toMatchObject({ id: fillId(40, 2) });
+      expect(h.inserts()).toBe(0);
+    });
+
+  it('P6 two presses at once: the loser meets 0154\'s key, runs again and answers the winner\'s fill (same request)',
+    async () => {
+      const h = harness({ items: TWO, on: true, race: { n: 40, fill: 3, by: pharmacistAccount,
+        key: 'ord12-race-winner-key-0000000001' } });
+      const answer = await dispense(h, 40, 'ord12-race-loser-key-00000000001', { fillNumber: 3 });
+      expect(answer).toMatchObject({ id: fillId(40, 3), fillNumber: 3 });
+      expect(h.sent((sql) => sql === 'ROLLBACK')).toHaveLength(1);
+      expect(h.committed.outbox).toEqual([]);
+    });
+
+  it('P7 another member records the same fill first: the loser runs again and is 409 PHARMACY_FILL_NUMBER_CHANGED', async () => {
+    const h = harness({ items: TWO, on: true, race: { n: 40, fill: 3, body: { quantityDispensed: 10 } } });
+    expect(await refusal(dispense(h, 40, 'ord12-race-loser-key-00000000002', { fillNumber: 3 })))
+      .toEqual({ status: 409, code: 'PHARMACY_FILL_NUMBER_CHANGED', fillsRecorded: 3 });
+  });
+
+  it('P8 a second 23505 on a key (the winner hidden from this member) is a 409, never a 500', async () => {
+    const fillKey = harness({ items: TWO, on: true, race: { n: 40, fill: 3, hidden: true },
+      insertErrors: [sqlError('23505', { constraint: FILL_KEY_CONSTRAINT })] });
+    expect(await refusal(dispense(fillKey, 40, 'ord12-race-loser-key-00000000003', { fillNumber: 3 })))
+      .toEqual({ status: 409, code: 'PHARMACY_FILL_NUMBER_CHANGED', fillsRecorded: 2 });
+    const firstFill = harness({ items: [{ n: 42, refills: 1 }], on: true,
+      insertErrors: [sqlError('23505', { constraint: FILL_KEY_CONSTRAINT }), sqlError('23505', { constraint: FILL_KEY_CONSTRAINT })] });
+    expect(await refusal(dispense(firstFill, 42, 'ord12-race-loser-key-00000000004')))
+      .toEqual({ status: 409, code: 'PHARMACY_WORK_ITEM_ALREADY_DISPENSED' });
+    const memberKey = harness({ items: TWO, on: true, insertErrors: [sqlError('23505', { constraint: DISPENSING_KEY_CONSTRAINT }),
+      sqlError('23505', { constraint: DISPENSING_KEY_CONSTRAINT })] });
+    expect(await refusal(dispense(memberKey, 40, 'ord12-race-loser-key-00000000005', { fillNumber: 3 })))
+      .toEqual({ status: 409, code: 'IDEMPOTENCY_CONFLICT' });
+  });
+});
+
+describe('ORD-12: only the latest fill can be reversed (setting on or off)', () => {
+  const FILLS: Item[] = [{ n: 50, refills: 2, fills: [{ days: 3 }, { days: 1 }] }];
+  const reverse = (h: ReturnType<typeof harness>, fill: number, key: string) =>
+    h.service.reverse(pharmacist, fillId(50, fill), { expectedDispensingVersion: 1, reason: 'Returned unopened' }, key);
+
+  it.each([[false], [true]])('V1 reversing an earlier fill is 409 PHARMACY_DISPENSING_NOT_LATEST_FILL (on: %p)', async (on) => {
+    const h = harness({ items: FILLS, on });
+    expect(await refusal(reverse(h, 1, 'ord12-reverse-key-0000000000001')))
+      .toEqual({ status: 409, code: 'PHARMACY_DISPENSING_NOT_LATEST_FILL' });
+    expect(h.committed.reversals).toEqual([]);
+    expect(h.sent((sql) => sql === LATER_FILL_QUERY).map((statement) => statement.values)).toEqual([[id(50), 1]]);
+  });
+
+  it('V2 the latest fill is reversed as before, and the item then answers it reversed', async () => {
+    const h = harness({ items: FILLS, on: true });
+    await expect(reverse(h, 2, 'ord12-reverse-key-0000000000002')).resolves.toMatchObject({ dispensingId: fillId(50, 2),
+      status: 'reversed' });
+    expect(h.committed.outbox.map((event) => event.type)).toEqual(['MedicationDispensingReversed']);
+    const read = await readOf(h, 50);
+    expect(read.dispensing).toEqual({ id: fillId(50, 2), status: 'dispensed', reversed: true, fillNumber: 2 });
+    expect(read.pharmacyStep).toBe('dispensing_reversed');
+  });
+
+  it('V3 a reversal already recorded on an earlier fill still replays (a reversal recorded before the refill)', async () => {
+    const h = harness({ items: [{ n: 50, refills: 2, fills: [{ days: 3, reversed: true }, { days: 1 }] }], on: true });
+    const stored = h.committed.reversals[0]!;
+    const replay = await h.service.reverse(pharmacist, fillId(50, 1), { expectedDispensingVersion: 1,
+      reason: 'Returned unopened' }, stored.idempotency_key).catch((error: unknown) => error);
+    // The stored reversal's digest is another request's: 409 ALREADY_REVERSED, decided before the latest-fill rule.
+    expect(replay).toMatchObject({ code: 'PHARMACY_DISPENSING_ALREADY_REVERSED' });
+    expect(h.sent((sql) => sql === LATER_FILL_QUERY)).toEqual([]);
+  });
+});
+
+describe('ORD-12: the dispensing body (CreateDispensingBodyPipe)', () => {
+  const pipe = (on: boolean) => new CreateDispensingBodyPipe(new PharmacyRefills(on));
+  const problem = async (promise: Promise<unknown>) => promise.then(() => undefined, (error: unknown) => error as DomainProblem);
+
+  it('B1 off: today\'s body, and fillNumber refused as any field the route does not take', async () => {
+    await expect(pipe(false).transform(body)).resolves.toEqual(body);
+    const refused = await problem(pipe(false).transform({ ...body, fillNumber: 2 }));
+    expect(refused).toMatchObject({ code: 'VALIDATION_FAILED', errors: [{ field: 'fillNumber',
+      messages: ['property fillNumber should not exist'] }] });
+    expect(await problem(pipe(false).transform({ ...body, fillNumber: 1 }))).toMatchObject({ code: 'VALIDATION_FAILED' });
+  });
+
+  it('B2 on: fillNumber 1-12 taken, left out taken; null, 0, 13, 2.5 and "2" refused', async () => {
+    await expect(pipe(true).transform({ ...body, fillNumber: 2 })).resolves.toMatchObject({ fillNumber: 2 });
+    await expect(pipe(true).transform({ ...body, fillNumber: 12 })).resolves.toMatchObject({ fillNumber: 12 });
+    await expect(pipe(true).transform(body)).resolves.toMatchObject(body);
+    for (const fillNumber of [null, 0, 13, 2.5, '2']) {
+      expect(await problem(pipe(true).transform({ ...body, fillNumber }))).toMatchObject({ code: 'VALIDATION_FAILED',
+        errors: [{ field: 'fillNumber' }] });
+    }
+    expect(await problem(pipe(true).transform({ ...body, refillsLeft: 1 }))).toMatchObject({ code: 'VALIDATION_FAILED' });
+  });
+});
+
+describe('ORD-12: wiring (PRESCRIPTION_REFILLS_ENABLED)', () => {
+  const original = { ...process.env };
+  const base = { NODE_ENV: 'test', PHARMACY_DATABASE_URL: 'postgresql://pharmacy:test@localhost:5432/hid',
+    DATABASE_SSL: 'false', CORS_ORIGINS: 'http://localhost:3000', PHARMACY_INTERNAL_SERVICE_TOKEN: 'z'.repeat(32) };
+  afterEach(() => {
+    for (const key of Object.keys(process.env)) if (!(key in original)) delete process.env[key];
+    Object.assign(process.env, original);
+    resetEnvironmentForTests();
+  });
+  const provider = () => (Reflect.getMetadata('providers', PharmacyModule) as unknown[]).find((entry) =>
+    typeof entry === 'object' && entry !== null && (entry as { provide?: unknown }).provide === PharmacyRefills) as
+    { useFactory: () => PharmacyRefills };
+
+  it('W1 is off unless set to true, separate from 0125\'s setting; PharmacyModule follows it', () => {
+    Object.assign(process.env, base, { PRESCRIPTION_DISPENSING_DETAILS_ENABLED: 'true' });
+    delete process.env.PRESCRIPTION_REFILLS_ENABLED;
+    resetEnvironmentForTests();
+    expect(getEnvironment().PRESCRIPTION_REFILLS_ENABLED).toBe(false);
+    expect(provider().useFactory().enabled).toBe(false);
+    process.env.PRESCRIPTION_REFILLS_ENABLED = 'true';
+    process.env.PRESCRIPTION_DISPENSING_DETAILS_ENABLED = 'false';
+    resetEnvironmentForTests();
+    expect(getEnvironment().PRESCRIPTION_REFILLS_ENABLED).toBe(true);
+    expect(provider().useFactory().enabled).toBe(true);
+  });
+
+  it('W2 refuses any value but true or false', () => {
+    Object.assign(process.env, base, { PRESCRIPTION_REFILLS_ENABLED: 'yes' });
+    resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/PRESCRIPTION_REFILLS_ENABLED/);
+  });
+
+  it('W3 is the service\'s last parameter, what Nest injects, and off in a module without it', async () => {
+    const types = Reflect.getMetadata('design:paramtypes', PharmacyService) as unknown[];
+    expect(types).toHaveLength(10);
+    expect(types[9]).toBe(PharmacyRefills);
+    const identityToken = types[1];
+    const others = [{ provide: DatabaseService, useValue: {} }, { provide: identityToken, useValue: {} },
+      { provide: AuditService, useValue: {} }, { provide: PharmacyOrderRouteAccess, useValue: {} },
+      { provide: PharmacyOrderRouteCards, useValue: {} },
+      { provide: PharmacyOwnWorkPatientCards, useValue: OWN_WORK_PATIENT_CARDS_OFF },
+      { provide: PharmacyPrescriptionDetails, useValue: PRESCRIPTION_DETAILS_OFF },
+      { provide: PharmacyOwnWork, useValue: new PharmacyOwnWork(false) }];
+    const on = new PharmacyRefills(true);
+    const withIt = await Test.createTestingModule({ providers: [PharmacyService, ...others,
+      { provide: PharmacyRefills, useValue: on }] as never[] }).compile();
+    expect((withIt.get(PharmacyService) as unknown as { refills: unknown }).refills).toBe(on);
+    const without = await Test.createTestingModule({ providers: [PharmacyService, ...others] as never[] }).compile();
+    expect((without.get(PharmacyService) as unknown as { refills: unknown }).refills).toBe(REFILLS_OFF);
+  });
+});

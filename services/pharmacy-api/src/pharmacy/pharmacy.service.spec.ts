@@ -197,11 +197,16 @@ describe('PharmacyService.listWorkItems order: open work first', () => {
   };
 
   it('asks for open work (no dispensing) oldest first, then done work (dispensed or reversed) newest first, 200 rows in all', () => {
-    expect(WORK_LIST_QUERY).toContain('cross join lateral (select d.id is null as open_work) o');
-    // A reversed dispensing is done: the item cannot be dispensed again (one dispensing per work item, 0023).
+    // ORD-12: or an own item with a refill open ($2, empty while refills are off), after the items with no fill.
+    expect(WORK_LIST_QUERY.replace(/\s+/g, ' ')).toContain('cross join lateral (select d.id is null or w.id=any($2::uuid[]) '
+      + 'as open_work, d.id is not null and w.id=any($2::uuid[]) as refill_open) o');
+    // A reversed dispensing is done unless a refill is open: a reversed fill still counts (0154).
     expect(WORK_LIST_QUERY).not.toMatch(/r\.id is not null as open_work/);
     const order = WORK_LIST_QUERY.slice(WORK_LIST_QUERY.lastIndexOf('order by'));
-    expect(order.replace(/\s+/g, ' ')).toBe('order by o.open_work desc,case when o.open_work then w.accepted_at end asc,'
+    // ORD-12: the refills open in $2's order (0154's open refills: the refill that opened first first).
+    expect(order.replace(/\s+/g, ' ')).toBe('order by o.open_work desc,o.refill_open asc,'
+      + 'case when o.refill_open then array_position($2::uuid[],w.id) end asc, '
+      + 'case when o.open_work then w.accepted_at end asc,'
       + 'case when o.open_work then null else w.accepted_at end desc, case when o.open_work then w.id end asc,'
       + 'case when o.open_work then null else w.id end desc limit 200');
     expect(WORK_LIST_QUERY).not.toMatch(/order by w\.accepted_at asc,w\.id asc/);
@@ -211,10 +216,13 @@ describe('PharmacyService.listWorkItems order: open work first', () => {
 
   it('reaches open work of any age and done work received from the Lagos midnight of $1 (Q123 A), before the order and limit', () => {
     const query = WORK_LIST_QUERY.replace(/\s+/g, ' ');
-    expect(query).toContain("cross join lateral (select d.id is null as open_work) o where (o.open_work or "
+    expect(query).toContain("as refill_open) o where (o.open_work or "
       + "w.accepted_at >= ($1::date::timestamp at time zone 'Africa/Lagos')) order by o.open_work desc");
-    expect(query.match(/\$\d/g)).toEqual(['$1']);
-    expect(query.match(/\bwhere\b/g)).toHaveLength(1);
+    // $1 the window's first day; $2 (three times) the own items with a refill open, in their order (ORD-12).
+    expect(query.match(/\$\d/g)).toEqual(['$2', '$2', '$1', '$2']);
+    // One for the list, one inside WORK_ITEM_SELECT's latest-fill lookup (ORD-12: one row per item).
+    expect(query.match(/\bwhere\b/g)).toHaveLength(2);
+    expect(query).toContain('from pharmacy.dispensings df where df.work_item_id=w.id order by df.fill_number desc limit 1');
   });
 
   it('works the window\'s first day out on each request, so a running service moves on at the Lagos midnight', async () => {
@@ -224,7 +232,8 @@ describe('PharmacyService.listWorkItems order: open work first', () => {
     jest.setSystemTime(new Date('2026-11-19T23:30:00Z'));
     const after = await service.listWorkItems(context);
     expect([before.since, after.since]).toEqual(['2026-08-21', '2026-08-22']);
-    expect(workListValues).toEqual([['2026-08-21'], ['2026-08-22']]);
+    // With refills off (the default), no item has a refill open.
+    expect(workListValues).toEqual([['2026-08-21', []], ['2026-08-22', []]]);
   });
 
   it('answers what the query returns, in its order and shape: 250 items with 30 open answers all 30 first', async () => {
@@ -238,8 +247,9 @@ describe('PharmacyService.listWorkItems order: open work first', () => {
     const { service, statements, audits, workListValues } = build([...openRows, ...doneRows]);
     const answer = await service.listWorkItems(context);
     expect(answer.items).toHaveLength(200);
-    // The window's first day, sent as the query's only parameter and answered so the screen can say so (Q123 A).
-    expect(workListValues).toEqual([['2026-08-22']]);
+    // The window's first day, sent as the query's first parameter and answered so the screen can say so (Q123 A);
+    // the second, the own items with a refill open, is empty while refills are off (ORD-12).
+    expect(workListValues).toEqual([['2026-08-22', []]]);
     expect(answer.since).toBe('2026-08-22');
     expect(answer.items.slice(0, 30).map((item) => item.id)).toEqual(openRows.map((r) => r.id));
     expect(answer.items.slice(30).map((item) => item.id)).toEqual(doneRows.map((r) => r.id));
@@ -282,7 +292,8 @@ describe('WORK_LIST_QUERY_0133 (0133 D14)', () => {
 
   it('leaves out an item sent elsewhere before the limit, and counts a withdrawn item as done work', () => {
     const query = flat(WORK_LIST_QUERY_0133);
-    expect(query).toContain('cross join lateral (select d.id is null and x.work_item_id is null as open_work) o');
+    expect(query).toContain('cross join lateral (select (d.id is null and x.work_item_id is null) or w.id=any($2::uuid[]) '
+      + 'as open_work, d.id is not null and w.id=any($2::uuid[]) as refill_open) o');
     expect(query).toContain("where x.withdrawn_reason is distinct from 'sent_elsewhere' and (o.open_work or ");
     expect(query.indexOf("is distinct from 'sent_elsewhere'")).toBeLessThan(query.indexOf('limit 200'));
   });
@@ -292,7 +303,8 @@ describe('WORK_LIST_QUERY_0133 (0133 D14)', () => {
     expect(window(WORK_LIST_QUERY_0133)).toEqual(window(WORK_LIST_QUERY));
     expect(window(WORK_LIST_QUERY)).toEqual(["(o.open_work or w.accepted_at >= ($1::date::timestamp at time zone 'Africa/Lagos'))"]);
     expect(flat(WORK_LIST_QUERY_0133)).toContain(`and ${window(WORK_LIST_QUERY)![0]} order by`);
-    expect(flat(WORK_LIST_QUERY_0133).match(/\$\d/g)).toEqual(['$1']);
+    // $2 (ORD-12) twice for the open work and once for the order of the open refills.
+    expect(flat(WORK_LIST_QUERY_0133).match(/\$\d/g)).toEqual(['$2', '$2', '$1', '$2']);
   });
 
   it('keeps WORK_LIST_QUERY\'s order and limit, byte for byte', () => {

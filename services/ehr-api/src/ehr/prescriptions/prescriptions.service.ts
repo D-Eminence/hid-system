@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
@@ -16,6 +16,7 @@ import { checkPrescriptionAllergies, readAllergyAcknowledgements,
 import { type CreatePrescriptionInput, PRESCRIPTION_DISPENSING_DETAILS_OFF,
   PrescriptionDispensingDetails } from './prescription-dispensing-details';
 import { OWN_PHARMACY_SEND_OFF, OwnPharmacySend, type PharmacyHandoff, pharmacyHandoff } from './own-pharmacy-send';
+import { PRESCRIPTION_REFILLS_OFF, PrescriptionRefills } from './prescription-refills';
 import type { SendPrescriptionToOwnPharmacyDto } from './own-pharmacy-send.dto';
 
 export interface PrescriptionRow extends QueryResultRow {
@@ -69,11 +70,19 @@ export class PrescriptionsService {
     private readonly orderRoutes: OrderRouteReader,
     private readonly details: PrescriptionDispensingDetails = PRESCRIPTION_DISPENSING_DETAILS_OFF,
     private readonly ownPharmacy: OwnPharmacySend = OWN_PHARMACY_SEND_OFF,
+    // ORD-12 (0154): refills, behind PRESCRIPTION_REFILLS_ENABLED; last, optional and off by default, so every
+    // `new PrescriptionsService(...)` and every testing module built before it is unchanged.
+    @Optional() private readonly refills: PrescriptionRefills = PRESCRIPTION_REFILLS_OFF,
   ) {}
 
-  /** The answer's columns: today's, plus the dispensing details while they are on (0125). */
+  /** The answer's columns: today's, plus the dispensing details (0125) and the refills (ORD-12) while each is on. */
   private columns(): string {
-    return COLUMNS + this.details.selectList();
+    return COLUMNS + this.details.selectList() + this.refills.selectList();
+  }
+
+  /** A row as these routes answer it: the details (0125), then `refillsAllowed` (ORD-12), each while on. */
+  private project<Row extends object>(row: Row) {
+    return this.refills.project(this.details.project(row));
   }
 
   /**
@@ -87,7 +96,9 @@ export class PrescriptionsService {
    * ended, a dispensing it recorded for the wrong person (D17, 0090). While
    * PRESCRIPTION_DISPENSING_DETAILS_ENABLED is on (0125), each item carries
    * the dispensing details it was written with, and `dispensingDetails: true`
-   * says a create may carry them; off, neither.
+   * says a create may carry them; off, neither. While PRESCRIPTION_REFILLS_ENABLED
+   * is on (ORD-12), each item carries `refillsAllowed` and `refills: true` says
+   * a create may carry it; off, neither.
    */
   async list(context: DataAccessContext, patientId: string, encounterId: string, query: TimelineQueryDto) {
     const scope = { list: 'ehr.prescriptions', patientId, encounterId };
@@ -110,7 +121,7 @@ export class PrescriptionsService {
         const acknowledgements = await readAllergyAcknowledgements(client, context, patientId, ids);
         // 0133: whether a send to this hospital's own pharmacy can reach somebody here (no field without 0133).
         const staffed = withStaffed(await this.ownPharmacy.staffed(client, context.correlationId));
-        const items = page.items.map((item) => ({ ...withOrderRoute(this.details.project(item), routes),
+        const items = page.items.map((item) => ({ ...withOrderRoute(this.project(item), routes),
           allergyAcknowledgements: acknowledgements.get(item.id) ?? [], ...staffed }));
         return { value: { ...page, items },
           details: { resultCount: page.items.length, allergyAcknowledgementCount: countValues(acknowledgements) } };
@@ -118,7 +129,7 @@ export class PrescriptionsService {
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
     return { ...page, crossFacilityOrders: await this.orderRoutes.crossFacilityOrdersEnabled(), wrongPatientReports: true,
-      lateCorrection: true, ...this.details.flag() };
+      lateCorrection: true, ...this.details.flag(), ...this.refills.flag() };
   }
 
   get(context: DataAccessContext, patientId: string, encounterId: string, prescriptionId: string) {
@@ -133,7 +144,7 @@ export class PrescriptionsService {
         const acknowledgements = (await readAllergyAcknowledgements(client, context, patientId, [row.id])).get(row.id) ?? [];
         // 0133: whether a send to this hospital's own pharmacy can reach somebody here (no field without 0133).
         const staffed = withStaffed(await this.ownPharmacy.staffed(client, context.correlationId));
-        return { value: { ...withOrderRoute(this.details.project(row), routes), allergyAcknowledgements: acknowledgements,
+        return { value: { ...withOrderRoute(this.project(row), routes), allergyAcknowledgements: acknowledgements,
           ...staffed },
           details: { allergyAcknowledgementCount: acknowledgements.length } };
       },
@@ -146,6 +157,12 @@ export class PrescriptionsService {
    * (0125) it may carry the dispensing details (CreatePrescriptionBodyPipe),
    * each pair together, stored with it and echoed when set; a body without
    * them keeps today's Idempotency-Key digest. Off, exactly as before.
+   * While PRESCRIPTION_REFILLS_ENABLED is on (ORD-12) it may carry
+   * `refillsAllowed` (0-11), stored with it (left out: null, none) and
+   * answered as `refillsAllowed`; a body without it keeps today's digest.
+   * Refills none of which could ever be collected are refused, 400
+   * REFILLS_CANNOT_BE_COLLECTED, by the database's own rule on the row just
+   * written (PrescriptionRefills.requireCollectable); nothing is kept.
    *
    * Written as active, it goes to this hospital's own pharmacy (0133) and the
    * answer carries `pharmacyHandoff`. A replay of the same request (the same
@@ -161,8 +178,10 @@ export class PrescriptionsService {
       throw new DomainProblem(400, 'DOSE_INCOMPLETE', 'Dose quantity and unit must be supplied together');
     }
     this.details.requirePairs(input);
+    this.refills.requireDuration(input);
     const operation = 'prescription.create';
-    const digest = requestDigest(operation, { patientId, encounterId, input: this.details.digestInput(input) });
+    const digest = requestDigest(operation, { patientId, encounterId,
+      input: this.refills.digestInput(this.details.digestInput(input)) });
     return this.repository.run(
       context, patientId, 'write_records',
       { action: 'ehr.prescription.create', resourceType: 'prescription' },
@@ -189,22 +208,27 @@ export class PrescriptionsService {
           `insert into ehr.prescriptions (
              encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
              medication_code_system, medication_code, medication_display, dose_quantity, dose_unit,
-             route_code, frequency, instructions, starts_on, ends_on, status${this.details.insertColumns()}
-           ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16${this.details.insertPlaceholders()})
+             route_code, frequency, instructions, starts_on, ends_on, status${this.details.insertColumns()}${
+  this.refills.insertColumns()}
+           ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16${this.details.insertPlaceholders()}${
+  this.refills.insertPlaceholders(17 + this.details.insertValues(input).length)})
            returning ${this.columns()}`,
           [
             encounterId, patientId, context.facilityId, context.actor.accountId, context.membershipId,
             input.medicationCodeSystem ?? null, input.medicationCode ?? null, input.medicationDisplay,
             input.doseQuantity ?? null, input.doseUnit ?? null, input.routeCode ?? null,
             input.frequency, input.instructions, input.startsOn ?? null, input.endsOn ?? null, input.status,
-            ...this.details.insertValues(input),
+            ...this.details.insertValues(input), ...this.refills.insertValues(input),
           ],
         );
         const row = this.single(result.rows[0]);
+        // ORD-12 (0154): refills none of which could ever be collected are refused (400), by the database's own
+        // rule on the row just written, before it goes anywhere; the transaction rolls back.
+        await this.refills.requireCollectable(client, row.id, input);
         // 0133: a prescription written as active goes to this hospital's own pharmacy at once.
         const handoff = row.status === OrderStatus.Active
           ? await this.ownPharmacy.send(client, row.id, Number(row.rowVersion), context.correlationId) : undefined;
-        const value = withHandoff(this.details.project(row), handoff);
+        const value = withHandoff(this.project(row), handoff);
         if (matches.length > 0 && input.allergyAcknowledgement) {
           // The audit says the prescriber went ahead after a warning: flags and counts only,
           // never the substance or the reason text.
@@ -220,7 +244,7 @@ export class PrescriptionsService {
         // 0133: a request written as active answers its hand-off on a replay too.
         replayHandoff = input.status === OrderStatus.Active
           ? await this.ownPharmacy.send(client, row.id, Number(row.rowVersion), context.correlationId) : undefined;
-        return withHandoff(this.details.project(row), replayHandoff);
+        return withHandoff(this.project(row), replayHandoff);
       },
     );
     return replayHandoff ? { ...created, details: { ...created.details, ...handoffDetails(replayHandoff) } } : created;
@@ -306,10 +330,10 @@ export class PrescriptionsService {
         if (matches.length > 0 && input.allergyAcknowledgement) {
           const override = await recordAllergyAcknowledgement(client, context, patientId, row.id,
             current.status === OrderStatus.Draft ? 'activate' : 'resume', matches, input.allergyAcknowledgement);
-          return { value: withHandoff(this.details.project(row), handoff), resourceId: prescriptionId,
+          return { value: withHandoff(this.project(row), handoff), resourceId: prescriptionId,
             details: { rowVersion: row.rowVersion, ...reasonDetails, ...override, ...sendDetails } };
         }
-        return { value: withHandoff(this.details.project(row), handoff), resourceId: prescriptionId,
+        return { value: withHandoff(this.project(row), handoff), resourceId: prescriptionId,
           details: { rowVersion: row.rowVersion, ...reasonDetails, ...sendDetails } };
       },
       (client) => this.repository.exists(client, 'prescriptions', prescriptionId, patientId, context.facilityId, encounterId),

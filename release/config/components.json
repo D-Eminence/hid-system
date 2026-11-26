@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0153",
-    "count": 154,
+    "last": "0154",
+    "count": 155,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -713,6 +713,10 @@
       {
         "name": "0153_clinician_recent_diagnoses.sql",
         "sha256": "45faa6a739056cc07426fdb5363b58c7dda1dbcbc096fb6d1769ae746798500b"
+      },
+      {
+        "name": "0154_prescription_refills.sql",
+        "sha256": "bb41cb74706a4767c401e00c41a200414410d0dde3d169d83028a576fa372b02"
       }
     ]
   },

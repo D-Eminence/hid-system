@@ -18,7 +18,8 @@
 --      UPDATE triggers; the two functions (md5, owner, SECURITY DEFINER,
 --      volatility, language, search_path, not STRICT) and who may execute
 --      them; no 0148 body names ehr.prescriptions or the sends table, and
---      0133's S7 list is unchanged; ehr.prescriptions' columns in order (a
+--      0133's S7 list is unchanged by 0148 (0154's refills reader joins it);
+--      ehr.prescriptions' columns in order (a
 --      migration that adds one decides the fingerprint's left-out keys);
 --      pharmacy.work_items' read policies are the two the reader repeats;
 --   2. recording (own items sent automatically, dispensed by PH): a hold
@@ -213,11 +214,16 @@ begin
     'as granted public=false');
   -- 1g. No 0148 body names ehr.prescriptions or the sends table, so 0133's
   -- S7 list (the owner-run definers whose text names ehr.prescriptions,
-  -- each of which sees D5's rows in a pharmacist's session) stays the ten
-  -- 0133's suite pins on Release B (0143's ehr.list_my_orders, 0144's
-  -- acceptance trigger function and 0145's identity.decide_unknown_patient
-  -- among them).
-  perform pg_temp.expect('1g no 0148 body names ehr.prescriptions or the sends table; 0133''s S7 list unchanged',
+  -- each of which sees D5's rows in a pharmacist's session) is unchanged by
+  -- 0148: the ten 0133's suite pins on Release B (0143's ehr.list_my_orders,
+  -- 0144's acceptance trigger function and 0145's
+  -- identity.decide_unknown_patient among them), and, once 0154 (ORD-12,
+  -- refills) is applied, its two readers pharmacy.work_item_refills and
+  -- pharmacy.open_refill_work_items (the prescription-refills suite, cases
+  -- 13, 14 and 16: they read ehr.prescriptions under 0154's refill scan
+  -- marker; its test, pharmacy.refill_scan_open, names no
+  -- ehr.prescriptions).
+  perform pg_temp.expect('1g no 0148 body names ehr.prescriptions or the sends table; 0133''s S7 list (with 0154''s readers)',
     (select count(*) from pg_proc proc
       where proc.oid in ('pharmacy.work_item_changes_after_dispensing(uuid[])'::regprocedure,
               'pharmacy.prescription_change_after_dispensing()'::regprocedure)
@@ -228,8 +234,8 @@ begin
     || 'ehr.patient_list_order_routes() ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,'
     || 'character) ehr.send_prescription_to_own_pharmacy(uuid,bigint) ehr.withdraw_own_pharmacy_send(uuid) '
     || 'identity.decide_unknown_patient(uuid,text,bigint,text,text,text) '
-    || 'identity.demo_story_install(text) pharmacy.validate_dispensing() pharmacy.validate_work_item() '
-    || 'pharmacy.validate_work_item_acceptance()');
+    || 'identity.demo_story_install(text) pharmacy.open_refill_work_items() pharmacy.validate_dispensing() '
+    || 'pharmacy.validate_work_item() pharmacy.validate_work_item_acceptance() pharmacy.work_item_refills(uuid[])');
   -- 1h. ehr.prescriptions' columns, in order: the trigger fingerprints the
   -- whole row less status, row_version and the two times, so a migration
   -- that adds a NOT NULL or defaulted column (which changes every later
@@ -241,7 +247,11 @@ begin
   -- numeric(14,6) turns 1.0000 into 1.000000), or renames or drops a column
   -- that holds values, meets this case too: that also changes every later
   -- fingerprint, and the first resume after it reads 'edited' (the safe
-  -- side).
+  -- side). 0154 (ORD-12) added
+  -- refills_allowed smallint, nullable and without a default: null in every
+  -- older row, so no fingerprint changes and the trigger function stays
+  -- 0148's (its md5 is pinned in 1e); a value an owner sets after
+  -- dispensing shows as 'edited' (prescription-refills, case 9).
   perform pg_temp.expect('1h ehr.prescriptions'' columns and types, in order (a migration that adds one decides C2''s excluded keys)',
     (select string_agg(attribute.attname || ' ' || format_type(attribute.atttypid, attribute.atttypmod)
               || case when attribute.attnotnull then ' not null' else '' end
@@ -255,7 +265,7 @@ begin
     || 'status text not null, row_version bigint not null default, created_at timestamp with time zone not null '
     || 'default, updated_at timestamp with time zone not null default, priority text, medication_strength text, '
     || 'medication_dose_form text, duration_value integer, duration_unit text, quantity_to_dispense numeric(12,4), '
-    || 'quantity_unit text');
+    || 'quantity_unit text, refills_allowed smallint');
   -- 1i. The work items' read policies: the reader repeats exactly these two
   -- as conditions (0086's consent or order route, 0133's own work), and
   -- none is restrictive.

@@ -474,6 +474,77 @@ begin
 end;
 $$;
 
+-- Prescription refills (0154, ORD-12), once 0154 is applied: exactly the
+-- grants its block of runtime-grants.sql gives. The bootstrap revokes every
+-- runtime grant before it applies a file, so an older file (Release E's
+-- 49b378f5..., or Release C's 1c10c2e0...) run after 0154 would drop six of
+-- them (the two readers' EXECUTE from hid_pharmacy_runtime and
+-- hid_schema_test_runtime, the last day's from hid_ehr_runtime and
+-- hid_schema_test_runtime) and still report "provisioned and verified":
+-- ehr-api could then not write a prescription with refills (the open
+-- refills' index runs the last day as the writer: 42501) and the work list
+-- would say refillsUnavailable (Rahman's review of 25 November 2026). Here
+-- that bootstrap fails instead. Before 0154 (an older database) nothing is
+-- asked; a database with only part of 0154 fails (a missing function).
+do $$
+declare
+  role_name text;
+  readers text[] := array['pharmacy.work_item_refills(uuid[])', 'pharmacy.open_refill_work_items()'];
+  last_day text := 'ehr.prescription_refills_end_on(timestamptz,smallint,integer,text,date)';
+  signature text;
+begin
+  if to_regprocedure(readers[1]) is null and to_regprocedure(readers[2]) is null
+     and to_regprocedure(last_day) is null and to_regprocedure('pharmacy.refill_scan_open()') is null then
+    return;
+  end if;
+  foreach role_name in array array['hid_pharmacy_runtime', 'hid_schema_test_runtime'] loop
+    foreach signature in array readers loop
+      if not has_function_privilege(role_name, signature, 'EXECUTE') then
+        raise exception '0154 refills: % cannot execute % (an older runtime-grants.sql after 0154?)', role_name, signature;
+      end if;
+    end loop;
+  end loop;
+  foreach role_name in array array['hid_ehr_runtime', 'hid_schema_test_runtime'] loop
+    if not has_function_privilege(role_name, last_day, 'EXECUTE') then
+      raise exception '0154 refills: % cannot execute % (an older runtime-grants.sql after 0154?)', role_name, last_day;
+    end if;
+  end loop;
+  foreach role_name in array array['hid_identity_runtime', 'hid_ehr_runtime', 'hid_lab_runtime', 'hid_ocr_runtime',
+      'hid_ocr_worker', 'hid_outreach_runtime', 'hid_notification_runtime', 'hid_event_dispatcher'] loop
+    foreach signature in array readers loop
+      if has_function_privilege(role_name, signature, 'EXECUTE') then
+        raise exception '0154 refills: % may execute %, which only the Pharmacy and schema test runtimes may',
+          role_name, signature;
+      end if;
+    end loop;
+  end loop;
+  foreach role_name in array array['hid_identity_runtime', 'hid_pharmacy_runtime', 'hid_lab_runtime', 'hid_ocr_runtime',
+      'hid_ocr_worker', 'hid_outreach_runtime', 'hid_notification_runtime', 'hid_event_dispatcher'] loop
+    if has_function_privilege(role_name, last_day, 'EXECUTE') then
+      raise exception '0154 refills: % may execute %, which only the EHR and schema test runtimes may', role_name, last_day;
+    end if;
+  end loop;
+  foreach signature in array readers || last_day loop
+    if exists (select 1 from pg_proc proc, lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
+                where proc.oid = signature::regprocedure and acl.grantee = 0 and acl.privilege_type = 'EXECUTE') then
+      raise exception '0154 refills: PUBLIC can execute %', signature;
+    end if;
+  end loop;
+  -- The refill scan marker: its test is PUBLIC's (every role that reads
+  -- ehr.prescriptions plans the policy that calls it), its table no runtime's.
+  if not has_function_privilege('public', 'pharmacy.refill_scan_open()', 'EXECUTE') then
+    raise exception '0154 refills: PUBLIC cannot execute pharmacy.refill_scan_open()';
+  end if;
+  if exists (select 1 from pg_roles role_row
+              where role_row.rolname like 'hid\_%' and not role_row.rolsuper
+                and not pg_has_role(role_row.oid, (select relation.relowner from pg_class relation
+                                                    where relation.oid = 'pharmacy.refill_scans'::regclass), 'MEMBER')
+                and has_table_privilege(role_row.oid, 'pharmacy.refill_scans', 'SELECT,INSERT,UPDATE,DELETE')) then
+    raise exception '0154 refills: a runtime role may read or write pharmacy.refill_scans';
+  end if;
+end
+$$;
+
 select
   rolname,
   rolcanlogin,

@@ -88,6 +88,30 @@ describe('HID event envelope v1', () => {
     });
 
 
+  it('admits a refill\'s MedicationDispensed with its fill number (ORD-12, 0154), and nowhere else', () => {
+    const dispensed = { ...event, producer: 'pharmacy' as const, eventType: 'MedicationDispensed',
+      aggregateType: 'medication-dispensing', aggregateVersion: 1, payload: { dispensingId: event.aggregateId,
+        workItemId: '70000000-0000-4000-8000-000000000001', status: 'dispensed' } };
+    // A first fill's payload is as before; a refill's names its fill.
+    expect(eventEnvelope(dispensed)).toMatchObject({ type: 'MedicationDispensed', payload: dispensed.payload });
+    for (const fillNumber of [2, 12, 1]) {
+      expect(eventEnvelope({ ...dispensed, payload: { ...dispensed.payload, fillNumber } }))
+        .toMatchObject({ payload: { fillNumber } });
+    }
+    for (const fillNumber of [0, 13, 2.5, '2', null, -1]) {
+      expect(() => eventEnvelope({ ...dispensed, payload: { ...dispensed.payload, fillNumber } }))
+        .toThrow(/Dispensing fill number is invalid/);
+    }
+    const reversed = { ...dispensed, eventType: 'MedicationDispensingReversed', aggregateType: 'medication-dispensing-reversal',
+      payload: { reversalId: event.aggregateId, dispensingId: '60000000-0000-4000-8000-000000000001',
+        workItemId: '70000000-0000-4000-8000-000000000001', status: 'reversed', fillNumber: 2 } };
+    expect(() => eventEnvelope(reversed)).toThrow(/outside its producer contract/);
+    expect(() => eventEnvelope({ ...dispensed, producer: 'lab' as const, eventType: 'LabResultReleased',
+      payload: { resultId: event.aggregateId, fillNumber: 2 } })).toThrow(/outside its producer contract/);
+    expect(() => eventEnvelope({ ...event, payload: { ...event.payload, fillNumber: 2 } }))
+      .toThrow(/outside its producer contract/);
+  });
+
   it('accepts the two rows the late correction writes (D17, 0090), the same shapes as the wrong-patient report\'s', () => {
     // C29 writes item 3's rows: the Lab invalidation's event per current result version, and the Pharmacy reversal's.
     const voided = { ...event, producer: 'lab' as const, eventType: 'LabResultEnteredInError', aggregateType: 'lab-result',

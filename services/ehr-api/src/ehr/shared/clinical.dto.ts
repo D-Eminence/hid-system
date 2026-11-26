@@ -496,6 +496,33 @@ export class CreatePrescriptionWithDetailsDto extends CreatePrescriptionDto {
   quantityUnit?: string;
 }
 
+/**
+ * ORD-12 (refills, 0154): how many times the prescription may be dispensed
+ * again after the first fill, 0-11, at this hospital's own pharmacy. Left out
+ * means none (stored as null, as every prescription written before 0154); an
+ * explicit null, a fraction or a number outside 0-11 is refused. Set at
+ * creation only: UpdatePrescriptionDto has no such field, so a PATCH naming it
+ * is refused like any unknown field. Used only while
+ * PRESCRIPTION_REFILLS_ENABLED is on (CreatePrescriptionBodyPipe), with or
+ * without the 0125 details.
+ */
+export class CreatePrescriptionWithRefillsDto extends CreatePrescriptionDto {
+  @IsOptionalButNotNull()
+  @IsInt()
+  @Min(0)
+  @Max(11)
+  refillsAllowed?: number;
+}
+
+/** CreatePrescriptionWithDetailsDto and `refillsAllowed` (both settings on); see CreatePrescriptionWithRefillsDto. */
+export class CreatePrescriptionWithDetailsAndRefillsDto extends CreatePrescriptionWithDetailsDto {
+  @IsOptionalButNotNull()
+  @IsInt()
+  @Min(0)
+  @Max(11)
+  refillsAllowed?: number;
+}
+
 export class UpdatePrescriptionDto extends OptionalReasonVersionedUpdateDto {
   @IsOptionalButNotNull()
   @IsEnum(OrderStatus)
