@@ -720,7 +720,7 @@
       },
       {
         "name": "0163_billing_settings_and_price_list.sql",
-        "sha256": "c3a0705e643281c9befb5078686475178bec82926ab9d617c0670ad86aa6cb62"
+        "sha256": "1f9634f112d5265867509495cfd23afd960e9dc4569a74ccbddd03e2bbe72bde"
       },
       {
         "name": "0164_bills_payments_and_hmo_cover.sql",
@@ -736,7 +736,7 @@
       },
       {
         "name": "0167_billing_and_stock_hooks.sql",
-        "sha256": "3e0590ecbd0cef6e90e1d7472b3ffa24fd482a050eee628ae298d0288bff32b1"
+        "sha256": "269bc3971851b4e0add7089fbe466d64827ce3257b3e2b8edcfd9581ef612eab"
       }
     ]
   },
