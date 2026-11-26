@@ -1761,8 +1761,10 @@ insert into d18_pins values
   ('lab.context_allows(uuid,uuid,text)', '57e689661a6227e34d3bde9562468951'),
   ('lab.patient_self_context(uuid)', '39aeca12d2c59b69877800a9a3a7c50b'),
   ('notification.enqueue_patient_inbox_item(uuid,text,text,uuid,jsonb)', '0b5689f31a3ce00f9313fe1e55244fad'),
-  -- 0115 (outreach organisers) added the key outreach_organiser_signup_enabled.
-  ('platform.control_enabled(text)', '1d24fbded6edff32d934d319b0135fb2'),
+  -- 0115 (outreach organisers) added the key outreach_organiser_signup_enabled, and 0161 (APPT-1)
+  -- appointment_sms_reminders_enabled; where 0161 is not applied yet, 0115's body.
+  ('platform.control_enabled(text)', case when to_regprocedure('ehr.appointment_send_reminders(integer)') is null
+    then '1d24fbded6edff32d934d319b0135fb2' else '3fe37993cd36970f2d957d29b8bc39f3' end),
   ('platform.current_account_id()', 'b715ffe72856836d13ab16656fa6e94a'),
   ('platform.current_actor_subject()', 'cf14c2d4a16d44a79ea9dbef9dc79c2b'),
   ('platform.current_correlation_id()', '48d3bf187101d33bfda51dac829aa223'),

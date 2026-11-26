@@ -1,4 +1,4 @@
-import { IsIn, IsInt, IsObject, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
+import { IsDateString, IsIn, IsInt, IsObject, IsOptional, IsString, Matches, Max, MaxLength, Min, MinLength } from 'class-validator';
 import { PERSON_NAME } from './deliver-emergency-contact-alert.dto';
 
 /** A Health ID as Identity issues it. */
@@ -81,5 +81,18 @@ export class DeliverContactChangedDto {
   @IsString() @MaxLength(270) @Matches(MASKED_CONTACT) newContactHint!: string;
   @IsOptional() @IsString() @Matches(PERSON_NAME) firstName?: string;
   @IsOptional() @IsString() @Matches(HEALTH_ID) healthId?: string;
+  @IsOptional() @IsObject() plan?: Record<string, unknown>;
+}
+
+/**
+ * APPT-1 (0161): one appointment notice. An email (generic, every kind) or,
+ * only for the reminder, an SMS with the facility's name and the start time.
+ */
+export class DeliverAppointmentNoticeDto {
+  @IsIn(['email', 'sms']) channel!: 'email' | 'sms';
+  @IsString() @MaxLength(320) recipient!: string;
+  @IsIn(['booked', 'rescheduled', 'cancelled', 'reminder']) kind!: 'booked' | 'rescheduled' | 'cancelled' | 'reminder';
+  @IsOptional() @IsString() @MinLength(2) @MaxLength(120) @Matches(/^[^\p{Cc}]+$/u) facilityName?: string;
+  @IsOptional() @IsDateString({ strict: true }) startsAt?: string;
   @IsOptional() @IsObject() plan?: Record<string, unknown>;
 }

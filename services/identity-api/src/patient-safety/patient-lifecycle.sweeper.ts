@@ -8,6 +8,7 @@ import { NinCheckOnce } from '../identity/nin-check-once';
 import { AccountDeletionNoticeDispatcher } from './account-deletion-notice.dispatcher';
 import { EmergencyContactNotificationDispatcher } from './emergency-contact-notification.dispatcher';
 import { PatientAccountDeletionService } from './patient-account-deletion.service';
+import { AppointmentNoticeDispatcher } from '../appointments/appointment-notice.dispatcher';
 import { RecordAccessAlertDispatcher } from './record-access-alert.dispatcher';
 import { WEB_PUSH_DELIVERY_TIMEOUT_MS, WebPushDispatcher } from '../web-push/web-push.dispatcher';
 import { webPushConfiguration } from '../web-push/web-push.config';
@@ -45,7 +46,10 @@ export const NIN_CHECK_PRUNE_BATCH = 500;
  *      answer past its end (90 days for a record, 24 hours for the others), an
  *      ended hold, and the answers for the NINs of patients whose login
  *      deletion completed in the last day are erased, each through an index
- *      (no row is tested on every tick).
+ *      (no row is tested on every tick);
+ *   9. the appointment emails and, while the Platform control
+ *      appointment_sms_reminders_enabled is on (seeded off), the reminder SMS
+ *      (APPT-1, 0161), while APPOINTMENTS_ENABLED is on.
  * The timer no longer depends on the emergency-contact switch. Multiple
  * replicas are safe: claims use row locks with SKIP LOCKED and leases.
  */
@@ -65,6 +69,7 @@ export class PatientLifecycleSweeper implements OnApplicationBootstrap, BeforeAp
     @Optional() private readonly accountDeletionNotices?: AccountDeletionNoticeDispatcher,
     @Optional() private readonly webPush?: WebPushDispatcher,
     @Optional() private readonly ninChecks?: NinCheckOnce,
+    @Optional() private readonly appointmentNotices?: AppointmentNoticeDispatcher,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -95,6 +100,7 @@ export class PatientLifecycleSweeper implements OnApplicationBootstrap, BeforeAp
     this.recordAccessAlerts?.stop();
     this.accountDeletionNotices?.stop();
     this.webPush?.stop();
+    this.appointmentNotices?.stop();
     if (!this.inFlight) return;
     let timer: NodeJS.Timeout | undefined;
     const expired = new Promise<void>((resolve) => {
@@ -149,6 +155,11 @@ export class PatientLifecycleSweeper implements OnApplicationBootstrap, BeforeAp
     if (this.ninChecks) {
       const ninChecks = this.ninChecks;
       await this.step('nin_check_prune', correlationId, () => ninChecks.prune(correlationId, NIN_CHECK_PRUNE_BATCH));
+    }
+    if (this.environment.APPOINTMENTS_ENABLED && this.appointmentNotices) {
+      const notices = this.appointmentNotices;
+      await this.step('appointment_emails', correlationId, () => notices.dispatchEmails(correlationId));
+      await this.step('appointment_sms', correlationId, () => notices.dispatchSms(correlationId));
     }
   }
 

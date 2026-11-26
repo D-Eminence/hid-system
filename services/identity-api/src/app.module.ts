@@ -1,3 +1,4 @@
+import { AppointmentsModule } from './appointments/appointments.module';
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { AuditInterceptor } from './audit/audit.interceptor';
@@ -26,7 +27,7 @@ import { OpenPatientModule } from './open-patient/open-patient.module';
   imports: [DatabaseModule, AuditModule, IntegrationModule, AuthModule, ConsentModule, IdentityModule, AdminModule, CommercialModule,
     PatientSafetyModule, PatientProfileModule, WebPushModule, OutreachOrganisersModule,
     StaffProfileModule,
-    PatientSearchModule, OpenPatientModule],
+    PatientSearchModule, OpenPatientModule, AppointmentsModule],
   controllers: [HealthController],
   providers: [
     { provide: APP_GUARD, useExisting: SecurityGuard },

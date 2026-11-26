@@ -35,6 +35,8 @@ import { CatalogModule } from './catalog/catalog.module';
 
 import { ConsultationDraftsModule } from './consultation-drafts/consultation-drafts.module';
 import { MyOrdersModule } from './my-orders/my-orders.module';
+// APPT-1 (0160, 0161): appointments, behind APPOINTMENTS_ENABLED.
+import { AppointmentsModule } from './appointments/appointments.module';
 @Module({
   imports: [
     ClinicalInfrastructureModule,
@@ -55,6 +57,8 @@ import { MyOrdersModule } from './my-orders/my-orders.module';
     VisitQueueModule,
     // ORD-7 (0149): the medicine and lab-test lists.
     CatalogModule,
+    // APPT-1 (0160, 0161): appointments, behind APPOINTMENTS_ENABLED.
+    AppointmentsModule,
   ],
   controllers: [PatientRecordsController,StaffPatientChatController,HealthProfileController],
   providers: [StaffChatScopeService,StaffEvidenceService,StaffChatHistoryService,PatientRecordsService, ImportedAttachmentService, BedrockAiService, ClaudeAiService, PatientAttachmentTextService,PatientEvidenceService, PatientChatService, PatientChatHistoryService, PatientChatSourceService,

@@ -383,3 +383,31 @@ Fixed, not configurable: 3 codes a day per registration and per email, a 60-seco
 codes for one registration, and 30 code confirmations a day per volunteer and email. Raising a
 variable takes effect on the next identity-api deployment; lowering one never affects Health IDs
 already created.
+
+## Appointments (0160, 0161; APPT-1 of Release D, numbers provisional)
+
+Production applies these files after Release E (0001-0153), as the migration login, with a dry run of
+every pending file in one transaction first; the files grant EXECUTE on their own functions to the
+runtime roles. No role bootstrap is part of the release itself.
+
+- Any role bootstrap (`npm run db:bootstrap`, which runs `database/runtime-grants.sql`) after 0160 and
+  0161 must use the integration's `runtime-grants.sql`: Release E's signed file followed by the
+  Appointments block, and by any other Release D block released in the same integration, in release
+  order. Re-running Release E's file alone after 0160 and 0161 takes the EHR and Identity runtimes'
+  EXECUTE on the appointment functions away again, and gives the EHR runtime the history's sequence.
+- So the new ehr-api and identity-api images ship only after the release has applied 0160 and 0161 and
+  any bootstrap since then has used that union. `npm run db:verify-roles` does not look at the
+  appointment functions: check with `has_function_privilege` that `hid_ehr_runtime` may execute
+  `ehr.appointment_book` and `hid_identity_runtime` `identity.appointment_call_list`.
+- The Appointments block also revokes `ehr.appointment_events_sequence_no_seq` from `hid_ehr_runtime`
+  and `hid_schema_test_runtime`, after the file's schema-wide sequence grants: no runtime role may read
+  that sequence (its `last_value` counts every facility's appointment events) or take a number from it.
+- 0160 and 0161 accept what Billing (0162-0167) and Emergency (0168-0169) add to the shared role table
+  (codes added to the four roles) and to the waiting-list basis CHECK (`emergency` after `search` and
+  `own_facility`, nothing else), so they apply before or after either lane.
+- Release order (Rahman's order of 25 November 2026, accepted on hid-system#258): one department per
+  release, each built on a staging that holds the release before it, in the fixed order 0154
+  (prescription refills), Appointments, Billing, Emergency. The numbers here are provisional:
+  at integration each release's files are renumbered to close up the gap after the release before it
+  (Appointments' 0160 and 0161 become 0155 and 0156 after 0154), so their sha256s change and the
+  declaration is signed at the new numbers.

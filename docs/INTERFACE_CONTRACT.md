@@ -9165,7 +9165,8 @@ The card (every answer):
 ```
 
 - `stage`: `waiting`, `triage`, `ready`, `with_clinician` (open); `finished`, `left`, `cancelled` (closed).
-- `triageLevel`: 1 (most urgent) to 5, or null. `checkInBasis`: `search` or `own-facility`.
+- `triageLevel`: 1 (most urgent) to 5, or null. `checkInBasis`: `search` or `own-facility`; with APPT-1 (0160) also
+  `appointment` (checked in from this facility's appointment on its own day, see APPT-1 below).
 - `checkInDay`: the Lagos calendar day of the check-in. `chartBlocked`: an active deny directive covers this facility.
 - No clinical content. `patientId` opens the chart only through the usual consent check (PIN, approval or 0131's
   own-facility rule); the card itself gives no access.
@@ -12423,3 +12424,138 @@ when `dateOfBirthEstimated`, and "NIN Not Verified". On `sent_for_review`
 show the message and nobody else's details. After `identified`, offer
 "Verify NIN" (ID-6). Never show `firstName`/`lastName` of a record whose
 `recordKind` is `unknown`.
+
+## APPT-1. Appointments, with check-in to the waiting list (Release D, migrations 0160 and 0161, provisional; not live until signed)
+
+Built exactly as `docs/EHR_PLANNED_CONTRACT.md` APPT-1 says, at the recommended option of every open question (not
+yet answered by the owner; the owner can still change them): Q-APPT-1 A (check-in opens the waiting-list row in the
+same transaction), Q-APPT-2 A (timed bookings, server clash check, clinician optional), Q-APPT-3 A (inbox, web push,
+email and the printable call list; SMS built but off), Q-APPT-4 A (staff book; the portal is read only), Q-APPT-5 A
+(who books, table below), Q-APPT-6 A (the appointment is a check-in-only basis on its own day), Q-APPT-7 A (the call
+list shows only the phone this facility recorded). Numbers 0160 and 0161 are provisional (given at merge, after
+0152-0154); neither file reads anything 0152-0154 create or change.
+
+Two service flags, `APPOINTMENTS_ENABLED` in ehr-api and in identity-api, both off by default. While off, every route
+below answers 503 `APPOINTMENTS_NOT_AVAILABLE` ("Appointments are not available yet."), the reminder sweep does not
+run and Identity sends no appointment email or SMS. On in staging and at the sealed demo and QA facilities; in
+production only after the clinical lead's checklist and the owner's go-live. A database without 0160 or 0161 also
+answers 503 `APPOINTMENTS_NOT_AVAILABLE`.
+
+Staff routes need `X-Facility-Id` and `X-Purpose-Of-Use: direct-care`; every write needs an `Idempotency-Key` (a
+replay with the same body answers the first answer with `"replayed": true`; another body 409 `IDEMPOTENCY_KEY_REUSED`).
+No Health ID or NIN in any path, query, body or answer: patients by UUID, appointments by UUID, new bookings by a
+search card's `matchRef`.
+
+**Who** (two new codes; clinic and default-length changes reuse `organization.manage`):
+
+| Backend role | `ehr.appointment.read` | `ehr.appointment.write` |
+|---|---|---|
+| `receptionist`, `doctor`, `clinician` | yes | yes |
+| `nurse` | yes | no |
+| `admin`, `org_admin`, `lab`, `pharmacist`, others | no | no |
+
+Check-in also needs 0135's pair `ehr.encounter.read` and `ehr.encounter.write`. A member without the code gets 403
+`APPOINTMENT_NOT_ALLOWED` in plain words (reads: "Only the front desk, nurses, clinicians and doctors of this facility
+can see appointments."; writes: "Only the front desk, clinicians and doctors of this facility can book or change
+appointments."; clinics and length: "Only the hospital administrator can change the clinics and the default
+appointment length."). Staff screens never show the word "permission".
+
+**The staff card** (every staff answer), exactly as the planned contract:
+`{ appointmentId, patientId, fullName, sex, dateOfBirth, healthIdLast4, chartBlocked, departmentCode, clinicId,
+clinicName, clinicianMembershipId, startsAt, endsAt, lengthMinutes, appointmentDay, visitType, reason, status,
+bookingBasis ("search" | "own-facility"), visitQueueEntryId, bookedAt, bookedByMembershipId, statusChangedAt,
+reminderSentAt, rowVersion }`. `appointmentDay` is the Lagos day of `startsAt`. `visitType`: `new_visit`, `follow_up`,
+`results_review`, `antenatal`, `procedure`, `other`. `status`: `booked`, `checked_in`, `cancelled`, `no_show`.
+
+| # | Route | Body or query | Answer |
+|---|---|---|---|
+| 1 | `POST /ehr/appointments` | `{ matchRef | patientId (exactly one), departmentCode, clinicId?, clinicianMembershipId?, startsAt (5-minute step, at most 15 minutes back, at most 366 days ahead), lengthMinutes? (5-240, steps of 5; else the clinic's, the facility's, 30), visitType, reason? (0-200) }` | 201 `{ appointment, replayed }` |
+| 2 | `GET /ehr/appointments` | `?day=YYYY-MM-DD (Lagos) [&clinicId][&clinicianMembershipId][&status=booked,checked_in,cancelled,no_show][&limit=1..200][&cursor]` | `{ items, nextCursor }`, by start time then booking time |
+| 3 | `GET /ehr/appointments/:appointmentId` | | `{ appointment, history: [{ kind, at, byMembershipId, fromStartsAt, toStartsAt, fromClinicianMembershipId, toClinicianMembershipId, reason }] }` |
+| 4 | `GET /ehr/patients/:patientId/appointments` | | `{ items }`: this facility's, upcoming and the last 90 days |
+| 5 | `POST /ehr/appointments/:id/reschedule` | `{ expectedRowVersion, startsAt, lengthMinutes?, clinicianMembershipId? (null removes), reason (8-500) }` | `{ appointment, replayed }` |
+| 6 | `POST /ehr/appointments/:id/cancel` | `{ expectedRowVersion, reason (8-500) }` | `{ appointment, replayed }` |
+| 7 | `POST /ehr/appointments/:id/no-show` | `{ expectedRowVersion }` (only after the start time) | `{ appointment, replayed }` |
+| 8 | `POST /ehr/appointments/:id/check-in` | `{ expectedRowVersion, identityConfirmed: true, matchRef? }` | `{ outcome: "checked_in" | "already_on_list", appointment, entry (EHR-C7 card), replayed }` |
+| 9 | `GET /ehr/appointment-clinics[?includeInactive=true]`, `POST /ehr/appointment-clinics`, `PATCH /ehr/appointment-clinics/:clinicId`, `GET /ehr/appointment-settings`, `PATCH /ehr/appointment-settings` | as planned; the settings write is **PATCH** `{ expectedRowVersion, defaultLengthMinutes }` (the planned PUT: ehr-api's CORS allows GET, POST and PATCH only) | `{ items: [{ clinicId, name, departmentCode, defaultLengthMinutes, active, rowVersion }] }`; `{ clinic, replayed }`; `{ defaultLengthMinutes, rowVersion }` |
+| 10 | `GET /ehr/appointments/bookable-staff` | | `{ items: [{ membershipId }] }` (names from SX-9) |
+| 11 | `GET /identity/appointment-call-list` (identity-api) | `?day=YYYY-MM-DD[&clinicId][&clinicianMembershipId]`, `ehr.appointment.write` here | `{ items: [{ appointmentId, startsAt, clinicName, clinicianMembershipId, fullName, healthIdLast4, phone (E.164 or null), phoneSource ("facility_contact" or null) }] }`, booked only, active patients only (never one who has died or is inactive, merged or deleted), at most 500 |
+| 12 | `GET /ehr/me/appointments` (patient session) | `?when=upcoming|past[&limit=1..50][&cursor]` | `{ items: [{ appointmentId, facilityName, clinicName, departmentCode, clinicianName, startsAt, endsAt, lengthMinutes, visitType, reason, status }], nextCursor }`; a staff session 403 `PATIENT_SESSION_REQUIRED` |
+
+Errors, exactly the planned table: 400 `VALIDATION_FAILED`, `APPOINTMENT_NEEDS_ONE_PATIENT`,
+`APPOINTMENT_TIME_INVALID`, `APPOINTMENT_CLINICIAN_INVALID`, `APPOINTMENT_CLINIC_INVALID`,
+`APPOINTMENT_IDENTITY_NOT_CONFIRMED`, `PURPOSE_OF_USE_REQUIRED`, `IDEMPOTENCY_KEY_REQUIRED`; 403
+`APPOINTMENT_NOT_ALLOWED`, `APPOINTMENT_NEEDS_SEARCH` (the same answer for every reason), `APPOINTMENT_CHECK_IN_NEEDS_SEARCH`,
+`PATIENT_SESSION_REQUIRED`; 404 `APPOINTMENT_NOT_FOUND` (also another facility's); 409 `APPOINTMENT_CLINICIAN_CLASH`,
+`APPOINTMENT_PATIENT_CLASH`, `APPOINTMENT_NOT_BOOKED`, `APPOINTMENT_NO_SHOW_TOO_EARLY`, `APPOINTMENT_CHECK_IN_WRONG_DAY`,
+`IDEMPOTENCY_KEY_REUSED`; 412 `APPOINTMENT_VERSION_CONFLICT`; 503 `APPOINTMENTS_NOT_AVAILABLE`. Added for route 9:
+404 `APPOINTMENT_CLINIC_NOT_FOUND`, 409 `APPOINTMENT_CLINIC_NAME_TAKEN` ("This facility already has a clinic with
+this name."), 412 `APPOINTMENT_CLINIC_VERSION_CONFLICT`, 412 `APPOINTMENT_SETTINGS_VERSION_CONFLICT`; 400
+`INVALID_CURSOR` for a cursor of another day or list.
+
+**Check-in without a 10-minute search (Q-APPT-6 A, the challenger correction).** 0135's check-in takes only a fresh
+matchRef or a patient already this facility's own (0131). A booking made days ahead from a search therefore stores
+its basis (`search` or `own_facility`) and its facility, and the appointment itself is the basis for **one check-in
+only**: at the facility that booked it, by a member with `ehr.appointment.write` and 0135's pair, on the appointment's
+own Lagos day, from `booked` (or `no_show` marked that day, undone and recorded), while the patient is active, not
+merged and allowed by the facility's seal, with `identityConfirmed: true` ("Confirm the patient's name and date of
+birth with them before checking them in."). The waiting-list row gets `checkInBasis: "appointment"` and shows only what
+the appointment list already shows. A booking never makes the patient this facility's own: 0131 is unchanged, and no
+booking or check-in opens the chart without a PIN, approval or 0131. With a `matchRef`, the ref must name the
+appointment's patient and the check-in goes through 0135's own function (basis `search`). Otherwise 403
+`APPOINTMENT_CHECK_IN_NEEDS_SEARCH` ("Search for the patient to check them in.") and the screen offers the search.
+Option B (if Rahman or the DPO choose it): check-in without a `matchRef` refused unless the patient is this facility's
+own.
+
+**Notices (0161).** A booking, a reschedule and a cancel write one inbox item each in the same transaction
+(`APPOINTMENT_BOOKED`, `APPOINTMENT_RESCHEDULED`, `APPOINTMENT_CANCELLED`; resource `appointment`; metadata
+`facilityName` and `startsAt` only), and the reminder sweep writes `APPOINTMENT_REMINDER` about a day before (booked,
+starting within 24 hours, booked at least 12 hours before, 07:00-21:00 Lagos, once). Web push follows by 0097's poll.
+Each inbox item also queues one email in `ehr.appointment_email_outbox`, which identity-api sends to a verified email
+only (0063's rule, checked when each row is leased: a row without such a recipient is never leased or sent; at most 5
+attempts, and a row whose attempts are spent with its last lease lapsed is closed as failed, `attempts_exhausted`) with the generic text "There is an update to your appointments. Sign in to Health ID and open My
+appointments to see it." through notification-api's new `POST /api/v1/notifications/appointment-notice`. No notice
+for check-in or no-show; a patient with no account gets nothing. SMS: the Platform control
+`appointment_sms_reminders_enabled` (seeded off, switchable in the Platform console) gates both the queue and the
+sender; the text is "Reminder: you have an appointment at {facility} on {day} at {time}." to the phone this facility
+recorded (the newest unerased one, read when the sender claims the SMS, as the call list shows it), never the clinic
+or reason, and only to an active patient with notices on (the email's rule, 0063), checked
+when the sweep queues it and again when the sender claims it. The sender claims only between 07:00 and 21:00 Lagos,
+only an SMS whose appointment is still booked, was reminded by the sweep since its last move and starts within the
+next 24 hours (an unsent SMS kept by a move further ahead waits), and only one it can send; each lease is held by one
+sender, and only that sender records the outcome (any other record answers `stale` and changes nothing). An SMS that
+can never be sent is closed unsent: `APPOINTMENT_NOT_BOOKED` (moved away, cancelled, checked in),
+`APPOINTMENT_STARTED`, `PATIENT_NOT_REACHABLE` (the patient has since become inactive, merged, deceased or deleted, or
+turned notices off), `CONTACT_ERASED` (no unerased phone of the patient at the facility is left) or
+`ATTEMPTS_EXHAUSTED` (5 attempts). At most one unsent SMS per appointment: a rescheduled appointment keeps its unsent
+one (the sender reads the new time when it claims it), and gets a new one only after the earlier one was sent or
+failed; an appointment moved while its SMS is being sent, or after that SMS spent its 5 attempts, waits for the next
+sweep, which then sends the new time. The reminder audit row names `sms` only
+when the sweep queued the SMS.
+
+Deviation from the planned contract, for the reviewers: the planned email path was a producer `ehr` on
+`integration.outbox_envelopes` for the event-dispatcher and notification-worker. The worker's claim functions are
+owned by the private command owner `hid_event_delivery_commands`, so a migration run by the NOSUPERUSER migrator cannot
+replace them. 0161 instead keeps its own email outbox, drained by identity-api the way the "records were opened"
+emails are (0095); no integration object, dispatcher or worker changes. The email text is the same generic one.
+
+Audit (in the request's transaction, refusals included; never a name, date of birth, Health ID, phone, reason text or
+clinic name): `ehr.appointment.book`, `.read`, `.list` (+ `.list.shown` per patient), `.patient-list` (+ `.shown`),
+`.reschedule`, `.cancel`, `.no-show`, `.check-in` (plus 0135's `ehr.visit-queue.check-in` with `by: "appointment"`),
+`.clinic.save`, `.settings.save`; `ehr.appointment.patient-read` (patient actor); `identity.appointment-call-list.read`
+(+ `.shown` per patient); system rows `ehr.appointment.reminder` (with the channels), `notification.appointment-email.send`,
+`notification.appointment-sms.send`. 0160 writes seven `auth.role-permission.add` rows and 0161 one
+`platform.control.add` row, as the system actor.
+
+Old images on this schema: nothing calls the new functions; today's ehr-api shows an appointment check-in's basis as
+`search` until the new image ships (no access depends on it); an old identity-api sends no appointment email (they
+wait); its Platform controls read the 11 keys as before.
+
+Database release: 0160 and 0161 apply after Release E (0001-0153). Release D ships one department per release, in the
+fixed order 0154 (prescription refills), Appointments, Billing, Emergency (hid-system#258), and the numbers are closed
+up at integration (0160 and 0161 become 0155 and 0156 after 0154). They accept what Billing (0162-0167) and Emergency
+(0168-0169) add to the shared role table and to the waiting-list basis CHECK, so they apply before or after either lane
+(after Emergency's 0168 the CHECK is `search`, `own_facility`, `appointment`, `emergency`, whichever file runs
+first). A role bootstrap after them uses the integration's `runtime-grants.sql`, never Release E's alone, and the
+new images ship only after that (`docs/MIGRATION_RUNBOOK.md`, Appointments). The appointment history cannot be
+updated, deleted or truncated, even by its owner, and no runtime role may read or advance its sequence.

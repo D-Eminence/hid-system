@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0153",
-    "count": 154,
+    "last": "0161",
+    "count": 156,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -713,6 +713,14 @@
       {
         "name": "0153_clinician_recent_diagnoses.sql",
         "sha256": "45faa6a739056cc07426fdb5363b58c7dda1dbcbc096fb6d1769ae746798500b"
+      },
+      {
+        "name": "0160_appointments.sql",
+        "sha256": "cece2bf38a4c4159ad3032c7ad7c67eb6ac2ed40897577f39acd6d8dca17ff68"
+      },
+      {
+        "name": "0161_appointment_notices_and_call_list.sql",
+        "sha256": "04d84233fa71e4f45feeafb1ec634a67e1d5a0a1af62968da5300edf6aee789a"
       }
     ]
   },

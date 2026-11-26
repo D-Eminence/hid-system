@@ -43,7 +43,8 @@ select set_config('hid.test.control_owner_bypasses_rls',
      join pg_roles role_row on role_row.oid = proc.proowner
     where proc.oid = 'platform.control_enabled(text)'::regprocedure), true);
 
--- 1. The table: eleven keys (0115 added outreach_organiser_signup_enabled), the seeds, forced row-level security.
+-- 1. The table: eleven keys (0115 added outreach_organiser_signup_enabled; 0161, APPT-1, adds
+-- appointment_sms_reminders_enabled, seeded off), the seeds, forced row-level security.
 do $$
 declare violated text; seed record;
 begin
@@ -52,11 +53,13 @@ begin
              regexp_matches(pg_get_constraintdef(constraint_row.oid), '''([a-z_]+)''', 'g') match
        where constraint_row.conrelid = 'platform.control_settings'::regclass
          and constraint_row.conname = 'control_settings_control_key_check')
-     is distinct from array['break_glass_enabled', 'cross_facility_orders_enabled',
+     is distinct from (select array_agg(wanted.k order by wanted.k) from unnest(array['break_glass_enabled', 'cross_facility_orders_enabled',
        'cross_facility_route_access_enabled', 'maintenance_mode', 'outreach_organiser_signup_enabled',
        'outreach_portal_enabled', 'patient_portal_enabled', 'provider_portal_enabled', 'provider_self_service_enabled',
-       'staff_invitations_enabled', 'uploads_enabled'] then
-    raise exception 'control_settings_control_key_check does not list exactly the eleven keys (0115 added outreach_organiser_signup_enabled)';
+       'staff_invitations_enabled', 'uploads_enabled']
+       || case when exists (select 1 from pg_proc where proname = 'appointment_send_reminders')
+               then array['appointment_sms_reminders_enabled'] else array[]::text[] end) wanted(k)) then
+    raise exception 'control_settings_control_key_check does not list exactly the eleven keys (0115 added outreach_organiser_signup_enabled), and 0161''s twelfth where it is applied';
   end if;
   if (select count(*) from pg_constraint constraint_row
        where constraint_row.conrelid = 'platform.control_settings'::regclass and constraint_row.contype = 'c'
@@ -87,8 +90,9 @@ begin
      or seed.reason <> 'Work on accepted cross-facility orders; switch off only to stop it everywhere (P4c)' then
     raise exception 'cross_facility_route_access_enabled was not seeded on with its reason: %', row_to_json(seed);
   end if;
-  if (select count(*) from platform.control_settings) <> 11 then
-    raise exception 'platform.control_settings does not hold exactly eleven controls';
+  if (select count(*) from platform.control_settings)
+     <> 11 + (case when exists (select 1 from pg_proc where proname = 'appointment_send_reminders') then 1 else 0 end) then
+    raise exception 'platform.control_settings does not hold exactly eleven controls (twelve with 0161)';
   end if;
   begin
     insert into platform.control_settings (control_key, enabled, reason)
@@ -130,11 +134,13 @@ declare
 begin
   select array_agg(control.control_key order by control.control_key) into listed
     from platform.admin_list_controls() control;
-  if listed is distinct from array['break_glass_enabled', 'cross_facility_orders_enabled',
+  if listed is distinct from (select array_agg(wanted.k order by wanted.k) from unnest(array['break_glass_enabled', 'cross_facility_orders_enabled',
       'cross_facility_route_access_enabled', 'maintenance_mode', 'outreach_organiser_signup_enabled',
       'outreach_portal_enabled', 'patient_portal_enabled', 'provider_portal_enabled', 'provider_self_service_enabled',
-      'staff_invitations_enabled', 'uploads_enabled'] then
-    raise exception 'admin_list_controls did not list the eleven controls: %', listed;
+      'staff_invitations_enabled', 'uploads_enabled']
+      || case when exists (select 1 from pg_proc where proname = 'appointment_send_reminders')
+              then array['appointment_sms_reminders_enabled'] else array[]::text[] end) wanted(k)) then
+    raise exception 'admin_list_controls did not list the eleven controls (twelve with 0161): %', listed;
   end if;
   if (select control.enabled from platform.admin_list_controls() control
        where control.control_key = 'provider_self_service_enabled')

@@ -287,6 +287,8 @@
   ],
   "todayRolePermissions": {
     "receptionist": [
+      "ehr.appointment.read",
+      "ehr.appointment.write",
       "ehr.document.read-own",
       "ehr.document.write",
       "ehr.encounter.read",
@@ -306,6 +308,7 @@
       "outreach.registration.write"
     ],
     "nurse": [
+      "ehr.appointment.read",
       "ehr.diagnosis.read",
       "ehr.document.read",
       "ehr.document.write",
@@ -345,6 +348,8 @@
       "pharmacy.work-item.read"
     ],
     "doctor": [
+      "ehr.appointment.read",
+      "ehr.appointment.write",
       "ehr.diagnosis.read",
       "ehr.diagnosis.write",
       "ehr.document.read",
@@ -382,6 +387,8 @@
       "pharmacy.import.write"
     ],
     "clinician": [
+      "ehr.appointment.read",
+      "ehr.appointment.write",
       "ehr.diagnosis.read",
       "ehr.diagnosis.write",
       "ehr.document.read",

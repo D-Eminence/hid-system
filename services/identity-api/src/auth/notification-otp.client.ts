@@ -378,6 +378,41 @@ export class NotificationOtpClient {
   }
 
   /**
+   * APPT-1 (0161): the generic appointment email ("There is an update to
+   * your appointments"), for every notice kind, to the patient's verified
+   * email. No time, facility, clinic or reason. Keyed
+   * appointment-email:<outbox row id>; the dispatcher retries an
+   * unknown outcome. An older notification-api answers 404, a definitive
+   * non-send.
+   */
+  async deliverAppointmentEmail(input: { emailId: string; recipient: string;
+    kind: 'booked' | 'rescheduled' | 'cancelled' | 'reminder'; correlationId: string;
+  }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
+    const plan = await this.integrations.deliveryPlan('email').catch(() => null);
+    if (!plan) return { outcome: 'unknown', safeCode: 'delivery_policy_unavailable' };
+    return this.post('appointment-notice', `appointment-email:${input.emailId}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient, kind: input.kind, plan,
+    }, OTP_TIMEOUT_MS);
+  }
+
+  /**
+   * APPT-1 (0161): the reminder SMS ("Reminder: you have an appointment at
+   * {facility} on {day} at {time}."), sent only while the Platform control
+   * appointment_sms_reminders_enabled is on (seeded off). Keyed
+   * appointment-sms:<outbox row id>.
+   */
+  async deliverAppointmentReminderSms(input: { smsId: string; recipient: string; facilityName: string;
+    startsAt: Date; correlationId: string;
+  }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
+    const plan = await this.integrations.deliveryPlan('sms').catch(() => null);
+    if (!plan) return { outcome: 'unknown', safeCode: 'delivery_policy_unavailable' };
+    return this.post('appointment-notice', `appointment-sms:${input.smsId}`, input.correlationId, {
+      channel: 'sms', recipient: input.recipient, kind: 'reminder', facilityName: input.facilityName,
+      startsAt: input.startsAt.toISOString(), plan,
+    }, OTP_TIMEOUT_MS);
+  }
+
+  /**
    * E4 (0096): "Your Health ID account is scheduled for deletion" (with the
    * date), "... deletion was cancelled" or "... account was deleted", to the
    * account's verified email: the kind and the date only, never a name, a
@@ -471,7 +506,7 @@ export class NotificationOtpClient {
 
   private async post(path: 'otp' | 'emergency-contact-alert' | 'staff-invitation' | 'patient-welcome'
     | 'password-reset-code' | 'staff-password-reset-code' | 'password-updated' | 'email-change-code' | 'contact-changed'
-    | 'patient-share-invitation' | 'share-received' | 'record-access-alert' | 'account-deletion',
+    | 'patient-share-invitation' | 'share-received' | 'record-access-alert' | 'account-deletion' | 'appointment-notice',
     idempotencyKey: string, correlationId: string,
     body: Record<string, unknown>, timeoutMs: number,
   ): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {

@@ -16,13 +16,16 @@ describe('PlatformControlCommandDto', () => {
     // Facility staff invitations (P4b): the owner switches them on here.
     'staff_invitations_enabled',
     // Orders between facilities (P4c): sending and accepting, and work on accepted orders.
-    'cross_facility_orders_enabled', 'cross_facility_route_access_enabled'])('accepts %s', async (key) => {
+    'cross_facility_orders_enabled', 'cross_facility_route_access_enabled',
+    // Appointment reminder SMS (APPT-1, 0161): seeded off; switched on here only after its approvals.
+    'appointment_sms_reminders_enabled'])('accepts %s', async (key) => {
     expect(await keyErrors(key)).toEqual([]);
   });
 
   it.each(['provider_self_service', 'provider_self_service_enabled_x', 'PROVIDER_SELF_SERVICE_ENABLED',
     'staff_mfa_required', 'staff_invitations', 'staff_invitations_enabled_x', 'cross_facility_orders',
-    'cross_facility_route_access', 'cross_facility_orders_enabled_x', 'CROSS_FACILITY_ORDERS_ENABLED', '', 7])('refuses %p', async (key) => {
+    'cross_facility_route_access', 'cross_facility_orders_enabled_x', 'CROSS_FACILITY_ORDERS_ENABLED',
+    'appointment_sms_reminders', 'appointment_sms_reminders_enabled_x', '', 7])('refuses %p', async (key) => {
     expect(await keyErrors(key)).toEqual(['controlKey']);
   });
 });

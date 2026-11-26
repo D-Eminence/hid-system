@@ -35,6 +35,9 @@ const baseEnvironment = {
   PGHOST: temporary, PGPORT: '5432', PGUSER: admin, PGSSLMODE: 'disable',
 };
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
+// The audit rows the release's migrations write at apply time on any data: 0150 one, 0160 seven, 0161 one. Each
+// dry run and each apply takes that many numbers from audit.events' identity sequence.
+const AUDITED_MIGRATION_ROWS = 9;
 const evidence = {
   schema_version: 1, scope: 'local-synthetic-only', status: 'failed', staging_accepted: false,
   started_at: new Date().toISOString(), checks: {}, artifacts: [],
@@ -295,7 +298,9 @@ try {
   await artifact('pre-schema-upgrade.dump');
   migration('existing baseline schema upgrade dry run', 'apply-migrations.mjs', 'hid_upgrade', {}, 0, ['--dry-run']);
   // Migration 0150 (owner decision Q141 B) writes one audit row at any data,
-  // so the dry run takes one number from audit.events' identity sequence:
+  // 0160 (APPT-1) seven (one per appointment role row) and 0161 one (the SMS
+  // control, seeded off), so the dry run takes nine numbers from
+  // audit.events' identity sequence:
   // sequences are not transactional, so the rollback leaves that one number
   // unused (a gap, as any rolled-back audited request leaves; nothing reads
   // the numbers as gap-free). Every row, and every other sequence, is as
@@ -304,7 +309,7 @@ try {
   const advanced = (sequence, by) => ({ last_value: String(Number(sequence.last_value) + by - (sequence.is_called ? 0 : 1)),
     is_called: true });
   assert.deepEqual(await snapshot('hid_upgrade'),
-    { ...upgradeBefore, [auditSequence]: advanced(upgradeBefore[auditSequence], 1) },
+    { ...upgradeBefore, [auditSequence]: advanced(upgradeBefore[auditSequence], AUDITED_MIGRATION_ROWS) },
     'Upgrade dry run must preserve all historical rows');
   migration('existing baseline schema upgrade', 'apply-migrations.mjs', 'hid_upgrade');
   migration('upgraded baseline role bootstrap', 'bootstrap-database-roles.mjs', 'hid_upgrade');
@@ -411,12 +416,15 @@ try {
       granted_by: null, revoked_at: null }], 'Migration 0106 must add exactly its declared OCR worker role');
   });
   // Migration 0150 (owner decision Q141 B) writes exactly one audit row, the
-  // system actor's auth.role-permission.add for doctor/ocr.job.start; every
-  // historical audit row is unchanged.
+  // system actor's auth.role-permission.add for doctor/ocr.job.start; 0160
+  // (APPT-1) one auth.role-permission.add per appointment role row; 0161 one
+  // platform.control.add for the SMS control. Every historical audit row is
+  // unchanged.
   await withClient('hid_upgrade', async client => {
     await client.query("set timezone = 'UTC'");
     const kept = (await client.query(`select to_jsonb(t)::text as value from audit.events t
-      where correlation_id <> '0150-doctors-start-readings-q141b' order by to_jsonb(t)::text collate "C"`)).rows;
+      where correlation_id not in ('0150-doctors-start-readings-q141b', '0160-appointments-appt1',
+        '0161-appointment-notices-appt1') order by to_jsonb(t)::text collate "C"`)).rows;
     assert.deepEqual({ rows: kept.length, sha256: sha256(kept.map(row => row.value).join('\n')) },
       upgradeBefore['audit.events'], 'Upgrade changed a historical audit.events row');
     assert.deepEqual((await client.query(`select actor_type, action, outcome, resource_type, resource_id, provenance,
@@ -425,9 +433,22 @@ try {
     [{ actor_type: 'system', action: 'auth.role-permission.add', outcome: 'success', resource_type: 'role-permission',
       resource_id: 'doctor/ocr.job.start', provenance: 'migration', source_system: 'hid-0150', actor_account_id: null,
       facility_id: null, patient_id: null }], 'Migration 0150 must write exactly its one audit row');
-    // The dry run's number and the apply's.
-    assert.deepEqual(upgradeAfter[auditSequence], advanced(upgradeBefore[auditSequence], 2),
-      'Only 0150 takes numbers from audit.events\' identity sequence (one in the dry run, one in the apply)');
+    assert.deepEqual((await client.query(`select actor_type, action, outcome, resource_type, resource_id, provenance,
+        source_system, actor_account_id, facility_id, patient_id
+      from audit.events where correlation_id in ('0160-appointments-appt1', '0161-appointment-notices-appt1')
+      order by correlation_id, resource_id collate "C"`)).rows,
+    [...['clinician/ehr.appointment.read', 'clinician/ehr.appointment.write', 'doctor/ehr.appointment.read',
+      'doctor/ehr.appointment.write', 'nurse/ehr.appointment.read', 'receptionist/ehr.appointment.read',
+      'receptionist/ehr.appointment.write'].map((resource) => ({ actor_type: 'system', action: 'auth.role-permission.add',
+      outcome: 'success', resource_type: 'role-permission', resource_id: resource, provenance: 'migration',
+      source_system: 'hid-0160', actor_account_id: null, facility_id: null, patient_id: null })),
+    { actor_type: 'system', action: 'platform.control.add', outcome: 'success', resource_type: 'platform-control',
+      resource_id: 'appointment_sms_reminders_enabled', provenance: 'migration', source_system: 'hid-0161',
+      actor_account_id: null, facility_id: null, patient_id: null }],
+    'Migrations 0160 and 0161 must write exactly their eight audit rows');
+    // The dry run's numbers and the apply's.
+    assert.deepEqual(upgradeAfter[auditSequence], advanced(upgradeBefore[auditSequence], 2 * AUDITED_MIGRATION_ROWS),
+      'Only 0150, 0160 and 0161 take numbers from audit.events\' identity sequence (in the dry run and in the apply)');
   });
   const expectedChanged = new Set([
     'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
@@ -514,6 +535,11 @@ try {
   // when nothing is stored, so only this proves the choice is stored and read).
   evidence.checks.facility_selection_runtime = JSON.parse(command('exact-role facility choice kept per sign-in',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-facility-selection-runtime.mjs')], workflowEnvironment));
+  // 0160 and 0161 (APPT-1): book by a search and by this facility's own patient, the clash, reschedule, cancel,
+  // no-show, check-in with the appointment as the basis and with a fresh search, "My appointments" and the call list,
+  // through ehr-api's AppointmentsService and identity-api's call list as their exact runtime roles.
+  evidence.checks.appointments_runtime = JSON.parse(command('exact-role appointments, check-in and the call list',
+    process.execPath, [join(repository, 'services/ehr-api/scripts/verify-appointments-runtime.mjs')], workflowEnvironment));
   // 0133: this facility's own pharmacy and lab work and the automatic send to the hospital's own pharmacy, through
   // ehr-api, pharmacy-api and lab-api: the doctor's activation sends, the pharmacist and the lab scientist without a
   // grant work on it (every row, execution reads included, names the patient with basis own-work), a hold or an edit
