@@ -16,27 +16,51 @@ import {
 } from './catalog.dto';
 import { CatalogModule } from './catalog.module';
 import {
-  CATALOG_SEARCHES_PER_WINDOW, CATALOG_SEARCH_WINDOW_MS, CatalogService, DIAGNOSES_SQL, LAB_TESTS_SQL, MEDICINES_SQL,
-  STATUS_SQL, diagnosisSearchUnavailable, looksLikePersonIdentifier, medicineDisplay, typedIcd10,
+  CATALOG_SEARCHES_PER_WINDOW, CATALOG_SEARCH_WINDOW_MS, CatalogService, DIAGNOSES_SQL, FACILITY_ITEMS_SEARCH_SQL,
+  LAB_TESTS_SQL, MEDICINES_SQL, STATUS_SQL, diagnosisSearchUnavailable, looksLikePersonIdentifier, medicineDisplay,
+  mergeInListOrder, typedIcd10, type CatalogCaller,
 } from './catalog.service';
+import { FacilityItemsService } from './facility-items.service';
 import { RECENT_DIAGNOSES_SQL, RecentDiagnosesService, type RecentDiagnosesCaller } from './recent-diagnoses.service';
 
 // Fictional identifiers only. Medicine and test names are list facts, not patient data.
 const membershipA = '123e4567-e89b-42d3-a456-426614174004';
 const membershipB = '123e4567-e89b-42d3-a456-426614174005';
+const catalogFacility = '123e4567-e89b-42d3-a456-426614174006';
+const callerA: CatalogCaller = { subject: 'staff:test', facilityId: catalogFacility, membershipId: membershipA,
+  correlationId: 'correlation-catalog' };
+const callerB: CatalogCaller = { ...callerA, membershipId: membershipB };
 
-function fakeDatabase(answer: readonly Record<string, unknown>[] | Error) {
+/**
+ * The pool (the diagnosis search) and a staff transaction (the status, the medicine and lab-test searches, 0155)
+ * answer from the same rows; the facility search answers `facilityRows`. Each statement is recorded, and so is each
+ * transaction's session and options.
+ */
+function fakeDatabase(answer: readonly Record<string, unknown>[] | Error,
+  facilityRows: readonly Record<string, unknown>[] | Error = []) {
   const calls: { sql: string; values: unknown[] }[] = [];
+  const transactions: { staff: unknown; options: unknown }[] = [];
+  const run = async (sql: string, values: unknown[] = []) => {
+    calls.push({ sql, values });
+    const rows = sql === FACILITY_ITEMS_SEARCH_SQL ? facilityRows : answer;
+    if (rows instanceof Error) throw rows;
+    return { rows };
+  };
   const database = {
-    query: jest.fn(async (sql: string, values: unknown[] = []) => {
-      calls.push({ sql, values });
-      if (answer instanceof Error) throw answer;
-      return { rows: answer };
+    query: jest.fn(run),
+    withStaffTransaction: jest.fn(async (staff: unknown, operation: (client: { query: typeof run }) => Promise<unknown>,
+      options: unknown) => {
+      transactions.push({ staff, options });
+      return operation({ query: run });
     }),
     withTransaction: jest.fn(async () => { throw new Error('the catalogue needs no request transaction'); }),
   } as unknown as DatabaseService;
-  return { database, calls };
+  return { database, calls, transactions };
 }
+
+/** The national list's statements only (each medicine or lab-test search also asks the facility's, 0155). */
+const nationalCalls = (calls: readonly { sql: string; values: unknown[] }[]) =>
+  calls.filter((call) => call.sql !== FACILITY_ITEMS_SEARCH_SQL);
 
 function databaseError(code: string): Error {
   return Object.assign(new Error(`database error ${code}`), { code });
@@ -100,7 +124,7 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
         searchMedicines: jest.fn(async () => { throw new DomainProblem(429, 'CATALOG_SEARCH_LIMITED', 'Too many'); }),
         searchLabTests: jest.fn(async () => { throw new DomainProblem(503, 'CATALOG_UNAVAILABLE', 'Not now'); }),
       };
-      const controller = new CatalogController(service as unknown as CatalogService);
+      const controller = new CatalogController(service as unknown as CatalogService, {} as FacilityItemsService);
       const request = { actor: { subject: 'staff:test', facility: { membershipId: membershipA } }, facilityId: 'facility',
         res: { setHeader } } as unknown as HidRequest;
       await expect(controller.medicines(request, medicines())).rejects.toMatchObject({ code: 'CATALOG_SEARCH_LIMITED' });
@@ -110,16 +134,24 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       expect(setHeader).toHaveBeenCalledWith('Cache-Control', CATALOG_CACHE_CONTROL);
     });
 
-    it('counts searches per membership at the facility', async () => {
-      const service = { searchMedicines: jest.fn(async () => ({})), searchLabTests: jest.fn(async () => ({})) };
-      const controller = new CatalogController(service as unknown as CatalogService);
-      const request = { actor: { subject: 'staff:test', facility: { membershipId: membershipA } },
-        facilityId: 'facility' } as unknown as HidRequest;
-      await controller.medicines(request, medicines());
-      await controller.labTests(request, labTests());
-      expect(service.searchMedicines).toHaveBeenCalledWith(membershipA, expect.anything());
-      expect(service.searchLabTests).toHaveBeenCalledWith(membershipA, expect.anything());
-    });
+    it('searches and reads the status as the guards\' actor at this facility (0155: the session sets the facility)',
+      async () => {
+        const service = { searchMedicines: jest.fn(async () => ({})), searchLabTests: jest.fn(async () => ({})),
+          status: jest.fn(async () => ({})) };
+        const controller = new CatalogController(service as unknown as CatalogService, {} as FacilityItemsService);
+        const request = { actor: { subject: 'staff:test', accountId: 'account', facility: { membershipId: membershipA,
+          organizationId: 'organization' } }, facilityId: 'facility', correlationId: 'correlation-catalog' } as unknown as HidRequest;
+        await controller.medicines(request, medicines());
+        await controller.labTests(request, labTests());
+        await controller.status(request);
+        const caller = { subject: 'staff:test', accountId: 'account', organizationId: 'organization', facilityId: 'facility',
+          membershipId: membershipA, correlationId: 'correlation-catalog' };
+        expect(service.searchMedicines).toHaveBeenCalledWith(caller, expect.anything());
+        expect(service.searchLabTests).toHaveBeenCalledWith(caller, expect.anything());
+        expect(service.status).toHaveBeenCalledWith(caller);
+        expect(() => controller.status({ ...request, actor: undefined } as unknown as HidRequest))
+          .toThrow('Request context was not established by security guards');
+      });
   });
 
   describe('query validation', () => {
@@ -178,7 +210,7 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
 
     it('before a signed list is loaded: nothing is available, the later fields are off', async () => {
       const { database, calls } = fakeDatabase([statusRow('lab_test'), statusRow('medicine')]);
-      await expect(new CatalogService(database).status()).resolves.toEqual({
+      await expect(new CatalogService(database).status(callerA)).resolves.toEqual({
         medicines: { available: false, version: null, approvedAt: null, fileSha256: null },
         labTests: { available: false, version: null, approvedAt: null, fileSha256: null },
         diagnoses: { available: false, release: null, fileSha256: null },
@@ -198,7 +230,7 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
         statusRow('medicine', { available: true, list_version: '2026.2', approved_day: '2026-12-02', offered: 1620,
           attribution: [who, loinc], file_sha256: 'a'.repeat(64) }),
       ]);
-      await expect(new CatalogService(database).status()).resolves.toMatchObject({
+      await expect(new CatalogService(database).status(callerA)).resolves.toMatchObject({
         medicines: { available: true, version: '2026.2', approvedAt: '2026-12-02', fileSha256: 'a'.repeat(64) },
         labTests: { available: true, version: '2026.1', approvedAt: '2026-12-01', fileSha256: 'b'.repeat(64) },
         attribution: [loinc, who],
@@ -211,20 +243,20 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
           attribution: ['notice'] }),
         statusRow('medicine'),
       ]);
-      await expect(new CatalogService(database).status()).resolves.toMatchObject({
+      await expect(new CatalogService(database).status(callerA)).resolves.toMatchObject({
         labTests: { available: false, version: null, approvedAt: null, fileSha256: null }, attribution: [],
       });
     });
 
     it.each(['42883', '42P01'])('on a schema without 0149 (%s) it answers 404 CATALOG_NOT_AVAILABLE', async (code) => {
-      const problem = await problemOf(new CatalogService(fakeDatabase(databaseError(code)).database).status());
+      const problem = await problemOf(new CatalogService(fakeDatabase(databaseError(code)).database).status(callerA));
       expect(problem.getStatus()).toBe(404);
       expect(problem.code).toBe('CATALOG_NOT_AVAILABLE');
     });
 
     it('any other failure is 503 CATALOG_UNAVAILABLE', async () => {
       const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
-      const problem = await problemOf(new CatalogService(fakeDatabase(databaseError('57014')).database).status());
+      const problem = await problemOf(new CatalogService(fakeDatabase(databaseError('57014')).database).status(callerA));
       expect([problem.getStatus(), problem.code]).toEqual([503, 'CATALOG_UNAVAILABLE']);
       expect(warn).toHaveBeenCalledWith('Catalogue status failed (57014)');
       warn.mockRestore();
@@ -239,9 +271,11 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
           dose_form: 'tablet', dose_form_text: 'Tablet', matched_name: 'co-amoxiclav', common_adult_dose: '1 tablet every 12 hours',
           more: true }),
       ]);
-      const answer = await new CatalogService(database).searchMedicines(membershipA,
+      const answer = await new CatalogService(database).searchMedicines(callerA,
         medicines({ q: 'amox', limit: 2, doseForm: 'capsule', route: 'Oral' }));
-      expect(calls).toEqual([{ sql: MEDICINES_SQL, values: ['amox', 2, 'capsule', 'oral'] }]);
+      // 0155: with a filter, up to 25 of the facility's own matches are read and filtered here.
+      expect(calls).toEqual([{ sql: MEDICINES_SQL, values: ['amox', 2, 'capsule', 'oral'] },
+        { sql: FACILITY_ITEMS_SEARCH_SQL, values: ['medicine', 'amox', 25] }]);
       expect(MEDICINES_SQL).not.toContain('atc_code');
       expect(answer).toEqual({
         listVersion: '2026.1',
@@ -260,7 +294,7 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
 
     it('sends no filter as null, and answers an empty list with no version', async () => {
       const { database, calls } = fakeDatabase([]);
-      await expect(new CatalogService(database).searchMedicines(membershipA, medicines({ q: 'zzz', limit: 10 })))
+      await expect(new CatalogService(database).searchMedicines(callerA, medicines({ q: 'zzz', limit: 10 })))
         .resolves.toEqual({ listVersion: null, more: false, items: [] });
       expect(calls[0]?.values).toEqual(['zzz', 10, null, null]);
     });
@@ -281,7 +315,7 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
         { list_id: 'LAB-0090', code_system: 'HID-LAB', code: 'WIDAL', display: 'Widal test', other_names: null,
           specimen: null, category: 'serology', matched_name: null, list_version: '2026.1', more: false },
       ]);
-      await expect(new CatalogService(database).searchLabTests(membershipA, labTests({ q: 'fbc', limit: 5 })))
+      await expect(new CatalogService(database).searchLabTests(callerA, labTests({ q: 'fbc', limit: 5 })))
         .resolves.toEqual({
           listVersion: '2026.1', more: false, items: [
             { codeSystem: 'LOINC', code: '57021-8', display: 'Full blood count', otherNames: ['FBC', 'CBC'],
@@ -290,7 +324,8 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
               category: 'serology', matchedName: null, scope: 'national' },
           ],
         });
-      expect(calls).toEqual([{ sql: LAB_TESTS_SQL, values: ['fbc', 5] }]);
+      expect(calls).toEqual([{ sql: LAB_TESTS_SQL, values: ['fbc', 5] },
+        { sql: FACILITY_ITEMS_SEARCH_SQL, values: ['lab_test', 'fbc', 5] }]);
     });
   });
 
@@ -301,7 +336,7 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       ['empty', ''],
     ])('q %s is 400 CATALOG_SEARCH_TEXT_TOO_SHORT', async (_name, q) => {
       const { database, calls } = fakeDatabase([]);
-      const problem = await problemOf(new CatalogService(database).searchMedicines(membershipA, medicines({ q })));
+      const problem = await problemOf(new CatalogService(database).searchMedicines(callerA, medicines({ q })));
       expect([problem.getStatus(), problem.code, problem.message]).toEqual([400, 'CATALOG_SEARCH_TEXT_TOO_SHORT',
         'Type at least 2 letters to search.']);
       expect(calls).toEqual([]);
@@ -311,7 +346,7 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       const { database, calls } = fakeDatabase([]);
       const service = new CatalogService(database);
       for (const q of ['HID-7KQ2M9', '12345678901']) {
-        const problem = await problemOf(service.searchLabTests(membershipA, labTests({ q })));
+        const problem = await problemOf(service.searchLabTests(callerA, labTests({ q })));
         expect([problem.getStatus(), problem.code, problem.message]).toEqual([400, 'CATALOG_SEARCH_TEXT_NOT_ALLOWED',
           'Search by medicine or test name. Do not type a Health ID or NIN here.']);
       }
@@ -326,8 +361,8 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       expect(q).toHaveLength(2);
       const { database, calls } = fakeDatabase([]);
       const service = new CatalogService(database);
-      for (const search of [service.searchMedicines(membershipA, medicines({ q })),
-        service.searchLabTests(membershipA, labTests({ q }))]) {
+      for (const search of [service.searchMedicines(callerA, medicines({ q })),
+        service.searchLabTests(callerA, labTests({ q }))]) {
         const problem = await problemOf(search);
         expect([problem.getStatus(), problem.code]).toEqual([400, 'CATALOG_SEARCH_TEXT_TOO_SHORT']);
       }
@@ -337,9 +372,9 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
     it('q of two code points is searched, though one of them is two UTF-16 units', async () => {
       const { database, calls } = fakeDatabase([]);
       const service = new CatalogService(database);
-      await service.searchMedicines(membershipA, medicines({ q: 'a\u{1D538}' }));
-      await service.searchLabTests(membershipA, labTests({ q: '\u{1F600}\u{1F600}' }));
-      expect(calls.map((call) => call.values[0])).toEqual(['a\u{1D538}', '\u{1F600}\u{1F600}']);
+      await service.searchMedicines(callerA, medicines({ q: 'a\u{1D538}' }));
+      await service.searchLabTests(callerA, labTests({ q: '\u{1F600}\u{1F600}' }));
+      expect(nationalCalls(calls).map((call) => call.values[0])).toEqual(['a\u{1D538}', '\u{1F600}\u{1F600}']);
     });
 
     it('q of 100 code points is searched; over 100 is VALIDATION_FAILED, even where the validator counted fewer', async () => {
@@ -350,11 +385,11 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       await expect(validate(SearchCatalogLabTestsQueryDto, { q: presented })).resolves.toMatchObject({ q: presented });
       const { database, calls } = fakeDatabase([]);
       const service = new CatalogService(database);
-      await service.searchLabTests(membershipA, labTests({ q: astral }));
-      const problem = await problemOf(service.searchMedicines(membershipA, medicines({ q: presented })));
+      await service.searchLabTests(callerA, labTests({ q: astral }));
+      const problem = await problemOf(service.searchMedicines(callerA, medicines({ q: presented })));
       expect([problem.getStatus(), problem.code, problem.errors]).toEqual([400, 'VALIDATION_FAILED',
         [{ field: 'q', messages: ['q must be shorter than or equal to 100 characters'] }]]);
-      expect(calls.map((call) => call.values[0])).toEqual([astral]);
+      expect(nationalCalls(calls).map((call) => call.values[0])).toEqual([astral]);
     });
 
     // Rahman's re-review of #320, nit 9c: U+0000 reached the database (22021) and answered 503.
@@ -367,8 +402,8 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
     ])('q with %s is 400 VALIDATION_FAILED, and nothing is searched', async (_name, q) => {
       const { database, calls } = fakeDatabase([]);
       const service = new CatalogService(database);
-      for (const search of [service.searchMedicines(membershipA, medicines({ q })),
-        service.searchLabTests(membershipA, labTests({ q }))]) {
+      for (const search of [service.searchMedicines(callerA, medicines({ q })),
+        service.searchLabTests(callerA, labTests({ q }))]) {
         const problem = await problemOf(search);
         expect([problem.getStatus(), problem.code, problem.errors]).toEqual([400, 'VALIDATION_FAILED',
           [{ field: 'q', messages: ['q must not contain control characters'] }]]);
@@ -379,9 +414,9 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
     it('q with a tab, or with U+007F, is searched', async () => {
       const { database, calls } = fakeDatabase([]);
       const service = new CatalogService(database);
-      await service.searchMedicines(membershipA, medicines({ q: 'amox\tcap' }));
-      await service.searchLabTests(membershipA, labTests({ q: 'fbc\u007F' }));
-      expect(calls.map((call) => call.values[0])).toEqual(['amox\tcap', 'fbc\u007F']);
+      await service.searchMedicines(callerA, medicines({ q: 'amox\tcap' }));
+      await service.searchLabTests(callerA, labTests({ q: 'fbc\u007F' }));
+      expect(nationalCalls(calls).map((call) => call.values[0])).toEqual(['amox\tcap', 'fbc\u007F']);
     });
   });
 
@@ -393,24 +428,24 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       const { database, calls } = fakeDatabase([]);
       const service = new CatalogService(database);
       for (let index = 0; index < CATALOG_SEARCHES_PER_WINDOW; index += 1) {
-        await (index % 2 === 0 ? service.searchMedicines(membershipA, medicines()) : service.searchLabTests(membershipA, labTests()));
+        await (index % 2 === 0 ? service.searchMedicines(callerA, medicines()) : service.searchLabTests(callerA, labTests()));
       }
-      const problem = await problemOf(service.searchLabTests(membershipA, labTests()));
+      const problem = await problemOf(service.searchLabTests(callerA, labTests()));
       expect([problem.getStatus(), problem.code, problem.message]).toEqual([429, 'CATALOG_SEARCH_LIMITED',
         'Too many searches. Please wait a minute and try again.']);
-      await expect(service.searchMedicines(membershipB, medicines())).resolves.toMatchObject({ items: [] });
-      expect(calls).toHaveLength(CATALOG_SEARCHES_PER_WINDOW + 1);
+      await expect(service.searchMedicines(callerB, medicines())).resolves.toMatchObject({ items: [] });
+      expect(nationalCalls(calls)).toHaveLength(CATALOG_SEARCHES_PER_WINDOW + 1);
       jest.setSystemTime(new Date(Date.now() + CATALOG_SEARCH_WINDOW_MS));
-      await expect(service.searchMedicines(membershipA, medicines())).resolves.toMatchObject({ items: [] });
+      await expect(service.searchMedicines(callerA, medicines())).resolves.toMatchObject({ items: [] });
     });
 
     it('a refused text does not count', async () => {
       const { database } = fakeDatabase([]);
       const service = new CatalogService(database);
       for (let index = 0; index < CATALOG_SEARCHES_PER_WINDOW + 5; index += 1) {
-        await problemOf(service.searchMedicines(membershipA, medicines({ q: 'a' })));
+        await problemOf(service.searchMedicines(callerA, medicines({ q: 'a' })));
       }
-      await expect(service.searchMedicines(membershipA, medicines())).resolves.toMatchObject({ items: [] });
+      await expect(service.searchMedicines(callerA, medicines())).resolves.toMatchObject({ items: [] });
     });
   });
 
@@ -498,7 +533,7 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
             + 'or NIN here.']);
         }
         // The medicine and lab-test searches keep their words.
-        expect((await problemOf(service.searchMedicines(membershipA, medicines({ q: '2B6B2Y' })))).message)
+        expect((await problemOf(service.searchMedicines(callerA, medicines({ q: '2B6B2Y' })))).message)
           .toBe('Search by medicine or test name. Do not type a Health ID or NIN here.');
         await service.searchDiagnoses(membershipA, diagnoses('2B6B.2Y'));
         expect(calls.map((call) => call.values[0])).toEqual(['2B6B.2Y']);
@@ -556,7 +591,7 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
         { kind: 'medicine', available: false, list_version: null, approved_day: null, offered: 0, attribution: [],
           file_sha256: null },
       ]);
-      await expect(new CatalogService(database).status()).resolves.toMatchObject({
+      await expect(new CatalogService(database).status(callerA)).resolves.toMatchObject({
         diagnoses: { available: true, release: 'ICD-11 MMS 2026-01', fileSha256: 'd'.repeat(64) },
         medicines: { available: false }, attribution: [icd],
       });
@@ -577,7 +612,7 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       // The terminology controller also serves recent diagnoses; these HTTP tests never call that route.
       @Module({ controllers: [CatalogController, TerminologyController],
         providers: [CatalogService, { provide: DatabaseService, useValue: database },
-          { provide: RecentDiagnosesService, useValue: {} }] })
+          { provide: RecentDiagnosesService, useValue: {} }, { provide: FacilityItemsService, useValue: {} }] })
       class TestModule {}
       const moduleRef = await Test.createTestingModule({ imports: [TestModule] }).compile();
       app = moduleRef.createNestApplication({ logger: false });
@@ -644,8 +679,8 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
     it.each(['42883', '42P01', '57014', '08006', '42501'])('%s is 503 CATALOG_UNAVAILABLE, and q is never logged', async (code) => {
       const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
       const service = new CatalogService(fakeDatabase(databaseError(code)).database);
-      for (const promise of [service.searchMedicines(membershipA, medicines({ q: 'paracetamol' })),
-        service.searchLabTests(membershipA, labTests({ q: 'malaria' }))]) {
+      for (const promise of [service.searchMedicines(callerA, medicines({ q: 'paracetamol' })),
+        service.searchLabTests(callerA, labTests({ q: 'malaria' }))]) {
         const problem = await problemOf(promise);
         expect([problem.getStatus(), problem.code, problem.message]).toEqual([503, 'CATALOG_UNAVAILABLE',
           'The list cannot be searched right now. You can type the name instead.']);
@@ -655,6 +690,138 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       expect(warn).toHaveBeenCalledTimes(code === '42883' || code === '42P01' ? 0 : 2);
       warn.mockRestore();
     });
+  });
+});
+
+// 0155 (ORD-7, third slice): the status and the medicine and lab-test searches run in a read-only staff transaction
+// with the session's facility, and add this facility's own items. Fictional items only.
+describe('ORD-7 catalogue with facility items (0155)', () => {
+  const ownMedicine = (overrides: Record<string, unknown> = {}) => ({ item_id: '7d1c3a52-5f0e-4c1b-9a63-2b8e4f6a9c01',
+    display: 'Amoxicillin 250 mg dispersible tablet', generic_name: 'amoxicillin', strength: '250 mg', dose_form: 'tablet',
+    routes: ['oral'], specimen: null, category: null, more: false, ...overrides });
+  const ownTest = (overrides: Record<string, unknown> = {}) => ({ item_id: '7d1c3a52-5f0e-4c1b-9a63-2b8e4f6a9c02',
+    display: 'Full blood count (own analyser)', generic_name: null, strength: null, dose_form: null, routes: [],
+    specimen: 'Blood (EDTA)', category: 'haematology', more: false, ...overrides });
+
+  it('reads the status in a read-only transaction as the caller, so 0155 counts this facility\'s items', async () => {
+    const { database, transactions, calls } = fakeDatabase([]);
+    await new CatalogService(database).status(callerA);
+    expect(transactions).toEqual([{ staff: callerA, options: { readOnly: true } }]);
+    expect(calls).toEqual([{ sql: STATUS_SQL, values: [] }]);
+    expect(database.query).not.toHaveBeenCalled();
+  });
+
+  it('a list with only this facility\'s items is available, with no version, sign-off, seed file or notice', async () => {
+    const { database } = fakeDatabase([
+      { kind: 'lab_test', available: true, list_version: null, approved_day: null, offered: 3, attribution: [],
+        file_sha256: null },
+      { kind: 'medicine', available: false, list_version: null, approved_day: null, offered: 0, attribution: [],
+        file_sha256: null },
+    ]);
+    await expect(new CatalogService(database).status(callerA)).resolves.toMatchObject({
+      labTests: { available: true, version: null, approvedAt: null, fileSha256: null },
+      medicines: { available: false }, attribution: [] });
+  });
+
+  it('searches both lists in one read-only transaction as the caller, and asks the facility\'s for the limit', async () => {
+    const { database, transactions, calls } = fakeDatabase([], []);
+    await new CatalogService(database).searchLabTests(callerA, labTests({ q: 'fbc', limit: 7 }));
+    expect(transactions).toEqual([{ staff: callerA, options: { readOnly: true } }]);
+    expect(calls).toEqual([{ sql: LAB_TESTS_SQL, values: ['fbc', 7] },
+      { sql: FACILITY_ITEMS_SEARCH_SQL, values: ['lab_test', 'fbc', 7] }]);
+    expect(FACILITY_ITEMS_SEARCH_SQL).toContain('from ehr.search_catalog_facility_items($1, $2, $3)');
+    expect(database.query).not.toHaveBeenCalled();
+  });
+
+  it('merges a facility medicine in 0149\'s order, with its own display, HID-FACILITY and its id as the code', async () => {
+    const { database } = fakeDatabase([medicineRow(), medicineRow({ list_id: 'MED-00009', generic_name: 'cefuroxime',
+      strength: '250 mg', dose_form: 'tablet', dose_form_text: 'Tablet', matched_name: 'zinnat' })], [ownMedicine()]);
+    const answer = await new CatalogService(database).searchMedicines(callerA, medicines({ q: 'amox', limit: 10 }));
+    expect(answer.items.map((item) => [item.code, item.scope])).toEqual([['MED-00001', 'national'],
+      ['7d1c3a52-5f0e-4c1b-9a63-2b8e4f6a9c01', 'facility'], ['MED-00009', 'national']]);
+    expect(answer.items[1]).toEqual({ codeSystem: 'HID-FACILITY', code: '7d1c3a52-5f0e-4c1b-9a63-2b8e4f6a9c01',
+      display: 'Amoxicillin 250 mg dispersible tablet', genericName: 'amoxicillin', strength: '250 mg', doseForm: 'tablet',
+      doseFormText: null, routes: ['oral'], atcCode: null, commonAdultDose: null, matchedName: null, scope: 'facility',
+      source: 'facility' });
+    expect([answer.listVersion, answer.more]).toEqual(['2026.1', false]);
+  });
+
+  it('puts a facility name that starts with q before national names that only contain it', async () => {
+    const { database } = fakeDatabase([
+      { list_id: 'LAB-0001', code_system: 'LOINC', code: '57021-8', display: 'Complete blood count', other_names: ['CBC'],
+        specimen: null, category: 'haematology', matched_name: null, list_version: '2026.1', more: false },
+    ], [ownTest({ display: 'Blood film for malaria parasites', category: null, specimen: null })]);
+    const answer = await new CatalogService(database).searchLabTests(callerA, labTests({ q: 'blood', limit: 10 }));
+    expect(answer.items).toEqual([
+      { codeSystem: 'HID-FACILITY', code: '7d1c3a52-5f0e-4c1b-9a63-2b8e4f6a9c02', display: 'Blood film for malaria parasites',
+        otherNames: [], specimen: null, category: null, matchedName: null, scope: 'facility' },
+      expect.objectContaining({ code: '57021-8', scope: 'national' }),
+    ]);
+  });
+
+  it('answers this facility\'s items while no national list is active, with no list version', async () => {
+    const { database } = fakeDatabase([], [ownTest()]);
+    await expect(new CatalogService(database).searchLabTests(callerA, labTests({ q: 'full', limit: 10 }))).resolves.toEqual({
+      listVersion: null, more: false, items: [expect.objectContaining({ codeSystem: 'HID-FACILITY', scope: 'facility' })] });
+  });
+
+  it('keeps the limit across both lists and says more when they pass it, or when either had more', async () => {
+    const national = [medicineRow({ list_id: 'MED-00001' }), medicineRow({ list_id: 'MED-00002', strength: '500 mg' })];
+    const { database } = fakeDatabase(national, [ownMedicine()]);
+    const two = await new CatalogService(database).searchMedicines(callerA, medicines({ q: 'amox', limit: 2 }));
+    expect([two.items.map((item) => item.code), two.more]).toEqual([['MED-00001', 'MED-00002'], true]);
+    const { database: ownMore } = fakeDatabase([], [ownMedicine({ more: true })]);
+    await expect(new CatalogService(ownMore).searchMedicines(callerA, medicines({ q: 'amox', limit: 1 })))
+      .resolves.toMatchObject({ more: true });
+  });
+
+  it('filters a facility medicine by dose form and route (route in any letter case), reading up to 25 of them', async () => {
+    // In the facility search's own order (lower(display) in the "C" collation).
+    const rows = [ownMedicine({ item_id: '7d1c3a52-5f0e-4c1b-9a63-2b8e4f6a9c05', display: 'Amoxicillin (no form)',
+      dose_form: null, routes: [] }), ownMedicine({ item_id: '7d1c3a52-5f0e-4c1b-9a63-2b8e4f6a9c03',
+      display: 'Amoxicillin 125 mg/5 mL syrup', dose_form: 'liquid', routes: ['Oral'] }), ownMedicine(),
+    ownMedicine({ item_id: '7d1c3a52-5f0e-4c1b-9a63-2b8e4f6a9c04', display: 'Amoxicillin 500 mg injection',
+      dose_form: 'injection', routes: ['intravenous'] })];
+    const { database, calls } = fakeDatabase([], rows);
+    const service = new CatalogService(database);
+    const liquid = await service.searchMedicines(callerA, medicines({ q: 'amox', limit: 5, doseForm: 'liquid' }));
+    expect(liquid.items.map((item) => item.display)).toEqual(['Amoxicillin 125 mg/5 mL syrup']);
+    const oral = await service.searchMedicines(callerA, medicines({ q: 'amox', limit: 5, route: 'ORAL' }));
+    expect(oral.items.map((item) => item.display)).toEqual(['Amoxicillin 125 mg/5 mL syrup',
+      'Amoxicillin 250 mg dispersible tablet']);
+    const plain = await service.searchMedicines(callerA, medicines({ q: 'amox', limit: 5 }));
+    expect(plain.items).toHaveLength(4);
+    expect(calls.filter((call) => call.sql === FACILITY_ITEMS_SEARCH_SQL).map((call) => call.values))
+      .toEqual([['medicine', 'amox', 25], ['medicine', 'amox', 25], ['medicine', 'amox', 5]]);
+  });
+
+  it.each(['42883', '42P01'])('on a schema without 0155 (%s) the search is 503 CATALOG_UNAVAILABLE, not logged',
+    async (code) => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const { database } = fakeDatabase([medicineRow()], databaseError(code));
+      const problem = await problemOf(new CatalogService(database).searchMedicines(callerA, medicines({ q: 'paracetamol' })));
+      expect([problem.getStatus(), problem.code]).toEqual([503, 'CATALOG_UNAVAILABLE']);
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
+  it('any other failure of the facility search is 503, logged with its SQLSTATE only, never q', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const { database } = fakeDatabase([], databaseError('57014'));
+    const problem = await problemOf(new CatalogService(database).searchLabTests(callerA, labTests({ q: 'malaria' })));
+    expect([problem.getStatus(), problem.code]).toEqual([503, 'CATALOG_UNAVAILABLE']);
+    expect(warn.mock.calls.map((call) => String(call[0]))).toEqual(['Catalogue search failed (57014)']);
+    warn.mockRestore();
+  });
+
+  it('merges by 0149\'s rule: starts with q first, then the "C" collation, a national item first on the same name', () => {
+    const ranked = (starts: boolean, name: string) => ({ starts, name, item: name });
+    expect(mergeInListOrder([ranked(true, 'amoxicillin'), ranked(false, 'co-amoxiclav')],
+      [ranked(true, 'amoxicillin'), ranked(true, 'amoxil'), ranked(false, 'b-amox')], 10)).toEqual({
+      items: ['amoxicillin', 'amoxicillin', 'amoxil', 'b-amox', 'co-amoxiclav'], overLimit: false });
+    // Byte order: a digit before a letter, and a plain letter before an accented one. Each list comes in its own order.
+    expect(mergeInListOrder([ranked(false, 'zinc')], [ranked(false, '5% dextrose'), ranked(false, 'émulsion')], 2))
+      .toEqual({ items: ['5% dextrose', 'zinc'], overLimit: true });
   });
 });
 
@@ -693,7 +860,8 @@ describe('ORD-9 (0153): recent diagnoses', () => {
     expect(Reflect.getMetadata(REQUIRED_PERMISSIONS, handler)).toEqual(['ehr.diagnosis.write']);
     expect(Reflect.getMetadata(AUDIT_FAILURES_ONLY, handler)).toBe(true);
     expect(Reflect.getMetadata(HEADERS_METADATA, handler)).toBeUndefined();
-    expect(Reflect.getMetadata('providers', CatalogModule)).toEqual([CatalogService, RecentDiagnosesService]);
+    expect(Reflect.getMetadata('providers', CatalogModule)).toEqual([CatalogService, RecentDiagnosesService,
+      FacilityItemsService]);
   });
 
   it('the route reads the guards\' actor at this facility, sets no header and needs no X-Purpose-Of-Use', async () => {

@@ -164,18 +164,22 @@ export class DatabaseService implements OnApplicationShutdown {
 
   /**
    * A staff member's own work that reads no patient (ORD-9's recent
-   * diagnoses, 0153): the actor, facility and membership the guards
-   * established, and no purpose of use, as there is no patient. It sets
-   * neither app.own_facility_work nor app.vitals_status: the recent list
-   * reads no order route and no vitals.
+   * diagnoses, 0153; ORD-7's catalogue status, searches and facility items,
+   * 0155): the actor, facility and membership the guards established, and no
+   * purpose of use, as there is no patient. It sets neither
+   * app.own_facility_work nor app.vitals_status: this work reads no order
+   * route and no vitals. `readOnly` makes the transaction READ ONLY (the
+   * catalogue status and searches).
    */
   async withStaffTransaction<Result>(
     staff: StaffTransactionContext,
     operation: (client: PoolClient) => Promise<Result>,
+    options: { readOnly?: boolean } = {},
   ): Promise<Result> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      if (options.readOnly) await client.query('SET TRANSACTION READ ONLY');
       await client.query(
         `select
            set_config('app.actor_subject', $1, true),
