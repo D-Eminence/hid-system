@@ -524,8 +524,11 @@ describe('ORD-12: refills on the work item (setting on)', () => {
     for (const item of items) expect(item).not.toHaveProperty('refills');
     expect(h.sent((sql) => /^rollback to savepoint pharmacy_work_item_refills$/.test(sql))).toHaveLength(1);
     expect(await readOf(h, 3)).not.toHaveProperty('refills');
-    expect(Logger.prototype.warn).toHaveBeenCalledWith(expect.objectContaining({
-      message: 'Refills on own work could not be read', sqlState: '42883' }));
+    // An error, as the open refills' (the clinical owner's call, 26 November 2026): the list then says
+    // refillsUnavailable.
+    expect(Logger.prototype.error).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'Refills on own work could not be read; they are left out, and the work list says refillsUnavailable',
+      sqlState: '42883' }));
     // The open refills failing (a statement timeout): none open (item 3 is done work, newest first), the list still
     // answers.
     const noOpen = harness({ items: SEVERAL, on: true, openError: sqlError('57014') });
@@ -550,14 +553,43 @@ describe('ORD-12: refills on the work item (setting on)', () => {
     // later one keep the pool's 15 s.
     expect(sqls.slice(at - 2, at + 3)).toEqual(['savepoint pharmacy_open_refills', OPEN_REFILLS_TIMEOUT_QUERY,
       OPEN_REFILLS_QUERY, 'rollback to savepoint pharmacy_open_refills', 'release savepoint pharmacy_open_refills']);
-    expect(sqls.filter((sql) => /statement_timeout/.test(sql))).toEqual([OPEN_REFILLS_TIMEOUT_QUERY]);
+    expect(sqls.filter((sql) => /statement_timeout/.test(sql))).toEqual([OPEN_REFILLS_TIMEOUT_QUERY,
+      OPEN_REFILLS_TIMEOUT_QUERY]);
     expect(sqls.indexOf(WORK_LIST_QUERY_0133)).toBeGreaterThan(at + 2);
     // What it read is kept: item 3's refill is open work.
     expect((page.items as Answer[]).find((item) => item.id === id(3))!.refills).toMatchObject({ open: true });
     expect(page).not.toHaveProperty('refillsUnavailable');
-    // The per-item reader (bounded by the 200 rows shown) runs under the pool's limit, not this one.
+    // The per-item reader (the 200 rows shown) runs under the same limit in its own savepoint, undone with it (the
+    // clinical owner's call, 26 November 2026), so the statements after it keep the pool's 15 s.
     const reader = sqls.indexOf(WORK_ITEM_REFILLS_QUERY);
-    expect(sqls.slice(reader - 1, reader)).toEqual(['savepoint pharmacy_work_item_refills']);
+    expect(sqls.slice(reader - 2, reader + 3)).toEqual(['savepoint pharmacy_work_item_refills',
+      OPEN_REFILLS_TIMEOUT_QUERY, WORK_ITEM_REFILLS_QUERY, 'rollback to savepoint pharmacy_work_item_refills',
+      'release savepoint pharmacy_work_item_refills']);
+  });
+
+  it('F9b the single read\'s per-item reader runs under the same time limit, in its savepoint, undone with it; on a '
+    + 'failure (its time limit, a refusal, no reader) the item answers without refills, logged as an error', async () => {
+    const h = harness({ items: SEVERAL, on: true });
+    expect((await readOf(h, 3)).refills).toMatchObject({ open: true });
+    const sqls = h.statements.map((statement) => statement.sql);
+    const reader = sqls.indexOf(WORK_ITEM_REFILLS_QUERY);
+    expect(sqls.slice(reader - 2, reader + 3)).toEqual(['savepoint pharmacy_work_item_refills',
+      OPEN_REFILLS_TIMEOUT_QUERY, WORK_ITEM_REFILLS_QUERY, 'rollback to savepoint pharmacy_work_item_refills',
+      'release savepoint pharmacy_work_item_refills']);
+    expect(sqls.filter((sql) => /statement_timeout/.test(sql))).toEqual([OPEN_REFILLS_TIMEOUT_QUERY]);
+    for (const code of ['57014', '42501', '42883']) {
+      const failing = harness({ items: SEVERAL, on: true, readerErrors: [sqlError(code)] });
+      const one = await readOf(failing, 3);
+      expect(one).not.toHaveProperty('refills');
+      expect(one).not.toHaveProperty('refillsUnavailable');
+      const sent = failing.statements.map((statement) => statement.sql);
+      const at = sent.indexOf(WORK_ITEM_REFILLS_QUERY);
+      expect(sent.slice(at - 2, at + 3)).toEqual(['savepoint pharmacy_work_item_refills', OPEN_REFILLS_TIMEOUT_QUERY,
+        WORK_ITEM_REFILLS_QUERY, 'rollback to savepoint pharmacy_work_item_refills',
+        'release savepoint pharmacy_work_item_refills']);
+      expect(Logger.prototype.error).toHaveBeenLastCalledWith(expect.objectContaining({ sqlState: code,
+        correlationId: pharmacist.correlationId }));
+    }
   });
 
   it('F10 the open refills failing (their time limit, a refusal, no reader): the list answers without them and says '
@@ -983,6 +1015,40 @@ describe('ORD-12: recording a fill', () => {
     expect(refillPrescriptionEnded('2026-11-23', lastMoment).message)
       .toBe('The refills on this prescription ended on 2026-11-23. Ask the prescriber for a new one.');
     expect(refillPrescriptionEnded('2026-11-25', midnight).extensions).toEqual({ refillsEndedOn: '2026-11-25' });
+  });
+
+  it('D13 a refill the database says is not the next fill (0154\'s REFILL_NOT_NEXT_FILL, DETAIL the fills it counts) '
+    + 'is 409 PHARMACY_FILL_NUMBER_CHANGED with fillsRecorded, as this service\'s own check answers it', async () => {
+    const counted = harness({ items: ONE, on: true,
+      insertErrors: [sqlError('23514', { message: 'REFILL_NOT_NEXT_FILL', detail: '2' })] });
+    expect(await refusal(dispense(counted, 30, 'ord12-dispense-key-000000000035', { fillNumber: 2 })))
+      .toEqual({ status: 409, code: 'PHARMACY_FILL_NUMBER_CHANGED', fillsRecorded: 2 });
+    expect(counted.committed.outbox).toEqual([]);
+    expect(counted.committed.fills).toHaveLength(1);
+    // A DETAIL that is not a count: the same refusal, without it (never a 500).
+    for (const detail of [undefined, 'two', '-1']) {
+      const odd = harness({ items: ONE, on: true,
+        insertErrors: [sqlError('23514', { message: 'REFILL_NOT_NEXT_FILL', ...(detail ? { detail } : {}) })] });
+      expect(await refusal(dispense(odd, 30, 'ord12-dispense-key-000000000036', { fillNumber: 2 })))
+        .toEqual({ status: 409, code: 'PHARMACY_FILL_NUMBER_CHANGED' });
+    }
+  });
+
+  it('D14 a fill the database says is dated after now (0154\'s DISPENSED_IN_FUTURE: a refill, or a first fill of an '
+    + 'item whose prescription allows refills) is 409 PHARMACY_DISPENSED_IN_FUTURE, nothing written', async () => {
+    const future = () => sqlError('23514', { message: 'DISPENSED_IN_FUTURE' });
+    const refill = harness({ items: ONE, on: true, insertErrors: [future()] });
+    expect(await refusal(dispense(refill, 30, 'ord12-dispense-key-000000000037', { fillNumber: 2 })))
+      .toEqual({ status: 409, code: 'PHARMACY_DISPENSED_IN_FUTURE' });
+    expect(refill.committed.outbox).toEqual([]);
+    expect(refill.committed.fills).toHaveLength(1);
+    for (const on of [false, true]) {
+      const first = harness({ items: [{ n: 34, refills: 2 }], on, insertErrors: [future()] });
+      expect(await refusal(dispense(first, 34, 'ord12-dispense-key-000000000038')))
+        .toEqual({ status: 409, code: 'PHARMACY_DISPENSED_IN_FUTURE' });
+      expect(first.committed.outbox).toEqual([]);
+      expect(first.committed.fills).toHaveLength(0);
+    }
   });
 
   it('D8 another 23514 is passed on unchanged (a broken session, not a refusal for the pharmacist)', async () => {

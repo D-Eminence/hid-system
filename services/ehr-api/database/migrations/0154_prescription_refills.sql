@@ -75,7 +75,9 @@
 --    replaced: 0101's text with one block added before its RETURN, so the
 --    order-route branch, 0077's actor and work-item check and 0101's
 --    prescription check (FOR SHARE, active, at the accepted version) are
---    unchanged and answer first. The block runs only for fill_number > 1:
+--    unchanged and answer first. The block refuses a first fill only when
+--    it is dispensed in the future on an own item whose prescription allows
+--    refills (the first-fill rule below); the rest runs for fill_number > 1:
 --    a route-backed item takes one fill (23514 NO_REFILLS_LEFT); an own item
 --    takes at most 1 + coalesce(refills_allowed, 0) fills (23514
 --    NO_REFILLS_LEFT), and a refill is refused after the refills' last day,
@@ -104,6 +106,38 @@
 --    accepted: any change after the first fill, a hold then resume
 --    included, ends the remaining refills (0101's version check; owner
 --    decision at 0101:48-54).
+--    Two more rules for a refill (Rahman's review of 25 November 2026, R4's
+--    hardenings; the clinical owner's calls on #258, 26 November 2026; no
+--    production writer reaches either: pharmacy-api sends fills so far + 1
+--    and never names dispensed_at, whose default is the time of the
+--    INSERT), checked after NO_REFILLS_LEFT and before the rules above:
+--    (i) its number is the next one, 1 + every fill the item has (a
+--    reversed one included), else 23514 REFILL_NOT_NEXT_FILL with that
+--    count as DETAIL, so no number is skipped (a gap, fills 1 and 3, would
+--    leave pharmacy-api answering 409 PHARMACY_FILL_NUMBER_CHANGED for good)
+--    and two refills recorded at once carry the same number at any
+--    isolation level, which R3's key refuses; (ii) a refill dispensed in the
+--    future (dispensed_at later than clock_timestamp()) is refused, 23514
+--    DISPENSED_IN_FUTURE (fill-neutral: a first fill is answered the same,
+--    below; pharmacy-api answers it 409 PHARMACY_DISPENSED_IN_FUTURE). A
+--    backdated refill (entered later at its real time, after an offline
+--    period) stays allowed, and the interval rule treats it as it treats
+--    any refill: it is judged on the day it is
+--    entered (today, as above), not on its dispensed_at, so it is recorded
+--    whenever a refill entered now would be; and, as the latest fill not
+--    reversed, its own dispensed_at times the next refill. So a refill
+--    dispensed offline before its day, and entered once it has opened, is
+--    recorded at its real time, and the next one is due from that time.
+--    The refills' last day is judged on today too. The first-fill rule: a
+--    first fill dispensed in the future, on an own item whose prescription
+--    allows refills (refills_allowed above 0), is refused the same way, 23514
+--    DISPENSED_IN_FUTURE (a should-fix confirmed in review; the clinical
+--    owner's call on #258, 26 November 2026): its dispensed_at starts the refill
+--    interval, so a future one would hold every refill back, and could
+--    make each one refused as ended. A backdated first fill stays allowed.
+--    Any other first fill (a route-backed item, or a prescription with no
+--    refill: refills_allowed null or 0) is checked as 0101 checks it (its
+--    dispensed_at not at all), as before.
 -- R5 pharmacy.claim_prescription_dispensing() (0133 D14, AFTER INSERT,
 --    ENABLE ALWAYS) replaced: fill 1 exactly as before (it turns the item's
 --    live, undispensed claim dispensed, or is refused sent_elsewhere or
@@ -274,6 +308,17 @@
 --    writing a prescription with refills is refused, 42501); ehr-api may
 --    call it to say "Refills can be collected until <date>". Nothing to
 --    PUBLIC.
+--    The limit this sets (Rahman's review of 25 November 2026): a
+--    prescription whose first refill could open only after R8's day can
+--    never have a refill collected: one fill longer than 486 days (3/4 of
+--    it, rounded up, is more than 365), or an end date (ends_on) before the
+--    Lagos day written plus the refill interval. This file accepts it (the
+--    late-fill rule closes it at fill 1: R6 'ended', R4
+--    REFILL_PRESCRIPTION_ENDED, R7 leaves it out, so nothing unsafe is
+--    recorded); ehr-api refuses it when it is written, 400
+--    REFILLS_CANNOT_BE_COLLECTED, asking R8 on the row it has just inserted
+--    and this file's refill interval (the clinical owner's call on #258, 26
+--    November 2026); the interface contract states the limit.
 -- R9 the refill scan marker (the clinical owner's decision D8, 24 November
 --    2026; 0143 D1's form, and 0133's THE COST). Under the production owner
 --    kind (NOSUPERUSER NOBYPASSRLS) every ehr.prescriptions row R6 and R7
@@ -286,7 +331,13 @@
 --    EXECUTE to PUBLIC, because PostgreSQL checks EXECUTE on every function
 --    of a plan when it starts it, and every role that reads
 --    ehr.prescriptions plans the policy below), which answers only whether
---    this backend's own transaction holds a marker; and the policy
+--    a marker row carries this backend's pid and this transaction's start
+--    time (transaction_timestamp()); that key is 0130's, 0143's and 0145's,
+--    and it does not single out one transaction (transactions begun within
+--    one simple-protocol message share their start time), which is enough
+--    here because R6 and R7 never commit a marker, so no other transaction
+--    can see one (a later file that holds a marker longer should key it on
+--    pg_current_xact_id_if_assigned()); and the policy
 --    prescriptions_scan_refills on ehr.prescriptions, permissive, for
 --    SELECT, to PUBLIC, using ((select case when pg_has_role(<the table's
 --    owner, looked up as 0143 does>, 'USAGE') then
@@ -344,17 +395,33 @@
 -- runtime's SELECT and INSERT on pharmacy.dispensings), so the new columns
 -- need no grant; R6's, R7's, R8's and R9's EXECUTE (and R9's table, the
 -- owner's only) are granted here and in runtime-grants.sql (0154's block).
--- Fill
--- numbers need not be contiguous in the database (a gap needs a caller that
--- skips one; pharmacy-api sends fills so far + 1): the bound is on how many
--- rows an item can have.
+-- In origin mode a refill's number must be the next one (R4 (i)); in
+-- replica mode, where R4 does not fire, numbers need not be contiguous (no
+-- replica-mode writer records refills), and the bound there is on how many
+-- rows an item can have (R2's CHECK, R3's key).
+--
+-- Grants files. Only the union may run after this file: Release E's
+-- runtime-grants.sql (49b378f5...) followed by 0154's block, byte for byte
+-- (57e06a12...). The role bootstrap revokes every runtime grant before it
+-- applies a file, so Release E's file alone, or Release C's (1c10c2e0...),
+-- run after this file drops six grants: R6's and R7's EXECUTE from
+-- hid_pharmacy_runtime and hid_schema_test_runtime, and R8's from
+-- hid_ehr_runtime and hid_schema_test_runtime. Once a prescription with
+-- refills exists, ehr-api could then neither create one nor make a non-HOT
+-- update to one (R7's partial index runs R8 as the writer: 42501), the work
+-- list would say refillsUnavailable, and the bootstrap would still report
+-- "provisioned and verified" (its runtime-roles suite does not name 0154's
+-- functions).
 --
 -- 0. Preconditions (catalog reads only, no table lock; 55000, or 42501 for
 --    the owner and the applier; nothing applied): a. 0001-0148 applied
 --    (0148's table and two functions, 0144's acceptances and their
 --    validator, 0133's claims); b. already applied (the six bodies, both
 --    columns, the new key, R7's index, R9's table and policy: "0154: already
---    applied", nothing changes); c. no column, constraint, index, table,
+--    applied", nothing changes; it checks names and bodies, not grants,
+--    owners or the policy's expression, so drift after apply, such as a
+--    changed ACL, still reads "already applied": out of this file's scope,
+--    as for 0143 and 0148); c. no column, constraint, index, table,
 --    policy or function of this file's names; d. every
 --    column the new bodies read, by name and type (created_at among them,
 --    for R8); e. the two replaced
@@ -372,7 +439,12 @@
 --    triggers on pharmacy.dispensings as 0023, 0086, 0101 and 0133 left
 --    them, with their modes (origin for the validator, the immutability
 --    guard and 0086's route return; always for 0133's claim and key guard),
---    and no other; h. one owner (0148's e and f, for a NOSUPERUSER
+--    and no other, but for one: Billing's zz_billing_stock_and_gate
+--    (commercial.hook_dispensing(), BEFORE INSERT FOR EACH ROW, origin
+--    mode), exactly that, may be there as a sixth, should Billing's 0167 be
+--    released first (Rahman's release-order review of 25 November 2026,
+--    should-fix 3; its name sorts after the five, so it fires after the
+--    validator); h. one owner (0148's e and f, for a NOSUPERUSER
 --    NOBYPASSRLS owner, as production's): pharmacy.work_items' owner owns
 --    pharmacy.dispensings, ehr.prescriptions and 0133's claims, the two
 --    replaced functions and the policy functions R6 and R7 repeat and
@@ -391,7 +463,8 @@
 --    so before the locks they could wait behind DDL): 0023's key by its
 --    definition; 0133 D14's claims CHECK (a dispensed claim is never
 --    released: R5's and R6's premise); every policy of ehr.prescriptions,
---    pharmacy.dispensings and pharmacy.work_items exactly (name, command,
+--    pharmacy.dispensings, pharmacy.dispensing_reversals and
+--    pharmacy.work_items exactly (name, command,
 --    permissive, roles and both expressions, by md5 of their printed text;
 --    so none is restrictive and no other is there); 0148's order of the
 --    AFTER UPDATE triggers on ehr.prescriptions.
@@ -420,16 +493,27 @@
 --    search_path, EXECUTE for PUBLIC only; the policy's exact expression by
 --    md5, permissive, SELECT, PUBLIC; no permissive read policy of
 --    ehr.prescriptions sorting after it; no hid_ role but the owner a member
---    of the table's owner); the five triggers and modes; 0148's AFTER UPDATE
+--    of the table's owner); the triggers and modes section 0 found (the
+--    five, or the five and Billing's, g); 0148's AFTER UPDATE
 --    order on ehr.prescriptions and C2's md5; owners, row-level security and
 --    both tables' ACLs unchanged; a probe, undone: R6 refuses 201 ids and a
 --    null array (it opens no table and writes no marker to do so); no marker
 --    row.
 --
 -- Locks. Section 2, one DO block, each attempt in its own subtransaction:
--- ACCESS SHARE NOWAIT on pharmacy.work_items, ehr.order_routes and 0133's
--- claims (section 4's compile of R4 resolves the first two's row types;
--- section 3 prints the claims' CHECK and the work items' policies), then
+-- ACCESS SHARE NOWAIT on pharmacy.work_items, ehr.order_routes, 0133's
+-- claims and pharmacy.dispensing_reversals (section 4's compile of R4
+-- resolves the first two's row types; section 3 prints the claims' CHECK
+-- and the policies of the work items and of the reversals, and pg_get_expr
+-- opens the table whose policy it prints: the review of 25 November 2026
+-- found the reversals read there unlocked, so behind DDL on them the file
+-- waited the runner's 5 s lock_timeout while it held the two ACCESS
+-- EXCLUSIVE locks below, then failed with the server's message, which the
+-- dry run does not retry; now, behind ACCESS EXCLUSIVE on the reversals,
+-- the apply refuses with its own text after about 5 s, holding neither
+-- strong lock meanwhile, and the dry run retries it:
+-- services/ehr-api/scripts/prescription-refills-busy.test.mjs, against a
+-- disposable server), then
 -- ACCESS EXCLUSIVE NOWAIT on pharmacy.dispensings and ehr.prescriptions
 -- (ALTER TABLE ADD COLUMN, ADD CONSTRAINT and DROP CONSTRAINT need it, and
 -- R9's CREATE POLICY), so an attempt that fails never holds the strong
@@ -471,19 +555,19 @@
 -- event's work item, so pharmacy-api's own-work dispensing and reversal
 -- events wait as well. They wait; none fails unless its own lock_timeout or
 -- statement_timeout is shorter than the hold. The ACCESS SHARE locks block
--- only DDL on the work items, the routes and the claims; their reads and
--- writes go on. Behind an open reader or writer of either altered table, an
--- autovacuum or ANALYZE of either (SHARE UPDATE EXCLUSIVE), or DDL on any of
--- the five, the file stops after 5 seconds, nothing applied, and never
--- blocks them. In the dry run the locks last until the dry run ends.
+-- only DDL on the work items, the routes, the claims and the reversals;
+-- their reads and writes go on. Behind an open reader or writer of either
+-- altered table, an autovacuum or ANALYZE of either (SHARE UPDATE
+-- EXCLUSIVE), or DDL on any of the six, the file stops after 5 seconds,
+-- nothing applied, and never blocks them. In the dry run the locks last until the dry run ends.
 -- pg_locks before commit, with either applier: ACCESS EXCLUSIVE on
 -- pharmacy.dispensings, ehr.prescriptions, the new key's index, R7's index
 -- and 0023's dropped key's index (and the weaker locks VALIDATE, the index
 -- builds and the comments take on the same tables and indexes), on R9's new
 -- table pharmacy.refill_scans and its key's index (made in this
 -- transaction, so no other session can want them), ACCESS SHARE on
--- pharmacy.work_items, ehr.order_routes and 0133's claims, and no other
--- application table (R5's, R6's and R7's statements are planned only when
+-- pharmacy.work_items, ehr.order_routes, 0133's claims and
+-- pharmacy.dispensing_reversals, and no other application table (R5's, R6's and R7's statements are planned only when
 -- they first run; section 7's probe opens no table, and its check that no
 -- marker row is left reads R9's own table); after section 0, none.
 -- Measured on throwaway PostgreSQL 16 with 0001-0146 and 0148 applied and
@@ -501,6 +585,15 @@
 --   R9 (its table, test and policy) 1.6-3.5 ms; R6, R7 and their grants
 --   1.6-4.6 ms; the post-checks 12.7-32.3 ms; commit 0.8-2.2 ms. Section 0,
 --   before any lock, 18-41 ms;
+--   the hold grows with the two tables (Rahman's review of 25 November
+--   2026, production's owner kind): under the two ACCESS EXCLUSIVE locks
+--   R1's and R2's VALIDATE and R3's and R7's index builds each scan a
+--   whole table, so from the locks to commit it took 73-110 ms with 20,000
+--   prescriptions and 20,000 dispensings, 216-549 ms with 200,000 of each
+--   and 0.9-1.1 s with 1,000,000 of each (R3's index build 407 ms of it).
+--   Callers wait and do not fail (statement_timeout 15 s, no pool sets a
+--   lock_timeout); the release note gives the hold for production's row
+--   counts of ehr.prescriptions and pharmacy.dispensings;
 --   behind another session's open read (ACCESS SHARE), write (ROW
 --   EXCLUSIVE), SHARE UPDATE EXCLUSIVE (as autovacuum) or ACCESS EXCLUSIVE
 --   on pharmacy.dispensings or on ehr.prescriptions, or ACCESS EXCLUSIVE on
@@ -545,6 +638,18 @@
 --   with R9 and the consent test asked first in its own conditions,
 --   0.37-0.42 s (that test, about 2 ms a call, was nearly all of it; 0.32-0.44
 --   s under a superuser owner);
+--   R6 for a session that may read only on consent (a nurse or a
+--   clinician; Rahman's review of 25 November 2026, production's owner
+--   kind): about 0.8-0.9 s for 200 own items it may read, against about 40
+--   ms for a pharmacist on the own-work basis, as it asks the consent test
+--   about 3 times an item (the work items' own policy, R6's own check, the
+--   fills' policy), so a work list or item read opened by such a session
+--   costs that much more; pharmacy-api calls R6 in a savepoint under the
+--   same 3-second OPEN_REFILLS_TIMEOUT_MS guard as R7, and past it answers
+--   without refills (the clinical owner's call, 26 November 2026); the
+--   whole request measured at the hospital's numbers before the setting
+--   goes on (the interface contract's "Before the setting goes on", 2)
+--   includes it;
 --   R7 as the same pharmacist, the same facility, with K refills open at
 --   once (K prescriptions allowing 2 refills of 30 days, written 24 to 60
 --   days ago, filled once; so K live, all due), 3 calls at each K, under the
@@ -724,6 +829,7 @@ declare
   applier oid := (select role_row.oid from pg_roles role_row where role_row.rolname = current_user);
   owner_oid oid;
   validator_owner oid;
+  dispensing_triggers text[];
 begin
   -- a. 0001-0148 applied: 0148's table and its two functions (0148 checks
   -- 0001-0137 itself), and 0133's claims, which R5 reads.
@@ -743,7 +849,7 @@ begin
   -- there. Nothing changes.
   if (select count(*) from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
        where (namespace.nspname, proc.proname, md5(proc.prosrc)) in (
-               ('pharmacy', 'validate_dispensing', '06be902c41bcd4ee65f7f840c120db8f'),
+               ('pharmacy', 'validate_dispensing', '69015652de60b9cb4ece428acba88eb2'),
                ('pharmacy', 'claim_prescription_dispensing', '1a50612f5330a36c9b64d0d831c77812'),
                ('pharmacy', 'work_item_refills', '1563ae61481d70df74c493a497260d44'),
                ('pharmacy', 'open_refill_work_items', '928d4e14fe8d7bff9ce717ef757a6974'),
@@ -944,20 +1050,32 @@ begin
       message = '0154: pharmacy.dispensings does not have exactly one key on work_item_id alone (0023''s)';
   end if;
   -- g. The five triggers on pharmacy.dispensings, by name, function, type
-  -- and mode, and no other (internal ones aside; catalog only).
-  if (select array_agg(trigger_row.tgname::text || ':' || trigger_row.tgfoid::regprocedure::text || ':'
-          || trigger_row.tgtype::text || ':' || trigger_row.tgenabled::text order by trigger_row.tgname::text collate "C")
+  -- and mode, and no other (internal ones aside; catalog only); or those
+  -- five and, exactly, Billing's zz_billing_stock_and_gate (0167, should
+  -- Billing be released first), which sorts last. Kept for section 7.
+  dispensing_triggers := (select array_agg(trigger_row.tgname::text || ':'
+          || trigger_row.tgfoid::regprocedure::text || ':' || trigger_row.tgtype::text || ':'
+          || trigger_row.tgenabled::text order by trigger_row.tgname::text collate "C")
         from pg_trigger trigger_row
-       where trigger_row.tgrelid = 'pharmacy.dispensings'::regclass and not trigger_row.tgisinternal)
-     is distinct from array[
+       where trigger_row.tgrelid = 'pharmacy.dispensings'::regclass and not trigger_row.tgisinternal);
+  if dispensing_triggers is distinct from array[
        'dispensings_claim_prescription:pharmacy.claim_prescription_dispensing():5:A',
        'dispensings_order_route_return:pharmacy.return_order_route_dispensing():5:O',
        'pharmacy_dispensing_validate:pharmacy.validate_dispensing():7:O',
        'pharmacy_dispensings_immutable:pharmacy.reject_immutable_evidence():27:O',
-       'prescription_claim_key_immutable:pharmacy.refuse_claim_key_change():19:A'] then
+       'prescription_claim_key_immutable:pharmacy.refuse_claim_key_change():19:A']
+     and dispensing_triggers is distinct from array[
+       'dispensings_claim_prescription:pharmacy.claim_prescription_dispensing():5:A',
+       'dispensings_order_route_return:pharmacy.return_order_route_dispensing():5:O',
+       'pharmacy_dispensing_validate:pharmacy.validate_dispensing():7:O',
+       'pharmacy_dispensings_immutable:pharmacy.reject_immutable_evidence():27:O',
+       'prescription_claim_key_immutable:pharmacy.refuse_claim_key_change():19:A',
+       'zz_billing_stock_and_gate:commercial.hook_dispensing():7:O'] then
     raise exception using errcode = '55000',
-      message = '0154: the triggers on pharmacy.dispensings are not the five 0023, 0086, 0101 and 0133 left';
+      message = '0154: the triggers on pharmacy.dispensings are not the five 0023, 0086, 0101 and 0133 left, '
+        || 'with or without Billing''s zz_billing_stock_and_gate (0167)';
   end if;
+  perform set_config('refills_0154.dispensing_triggers', array_to_string(dispensing_triggers, ' '), true);
   -- h. One owner (0148's e and f), never through a superuser's bypass
   -- (production's owner and applier have neither superuser nor BYPASSRLS):
   -- pharmacy.work_items' owner owns pharmacy.dispensings and
@@ -1085,9 +1203,9 @@ begin
 end
 $$;
 
--- 2. Locks (see Locks), NOWAIT, at most 5 s: ACCESS SHARE on the three
--- tables sections 3 and 4 open, then ACCESS EXCLUSIVE on the two this file
--- alters, so an attempt that fails never holds the strong ones. A failed
+-- 2. Locks (see Locks), NOWAIT, at most 5 s: ACCESS SHARE on the four
+-- tables sections 3 and 4 open (the work items, the routes, the claims and
+-- the reversals), then ACCESS EXCLUSIVE on the two this file alters, so an attempt that fails never holds the strong ones. A failed
 -- attempt's subtransaction releases what it took. When this transaction
 -- already holds a lock that stops other sessions' reads or writes of a table
 -- (an earlier migration in the same transaction, as in the runner's dry run
@@ -1110,21 +1228,23 @@ begin
   loop
     attempt := attempt + 1;
     begin
-      lock table pharmacy.work_items, ehr.order_routes, pharmacy.prescription_item_claims in access share mode nowait;
+      lock table pharmacy.work_items, ehr.order_routes, pharmacy.prescription_item_claims,
+        pharmacy.dispensing_reversals in access share mode nowait;
       lock table pharmacy.dispensings, ehr.prescriptions in access exclusive mode nowait;
       exit;
     exception when lock_not_available then
       if holding then
         raise exception using errcode = '55P03',
           message = '0154: pharmacy.dispensings, ehr.prescriptions or a table 0154 reads (the Pharmacy work items, '
-            || 'the order routes or 0133''s claims) is busy, and this transaction already holds an earlier '
-            || 'migration''s locks, so it does not wait; nothing applied; run the release again at a quieter time';
+            || 'the order routes, 0133''s claims or the dispensing reversals) is busy, and this transaction already '
+            || 'holds an earlier migration''s locks, so it does not wait; nothing applied; run the release again at '
+            || 'a quieter time';
       end if;
       if attempt >= 50 then
         raise exception using errcode = '55P03',
           message = '0154: pharmacy.dispensings, ehr.prescriptions or a table 0154 reads (the Pharmacy work items, '
-            || 'the order routes or 0133''s claims) stayed busy for 5 seconds; nothing applied; run the release '
-            || 'again at a quieter time';
+            || 'the order routes, 0133''s claims or the dispensing reversals) stayed busy for 5 seconds; nothing '
+            || 'applied; run the release again at a quieter time';
       end if;
       perform pg_sleep(0.1);
     end;
@@ -1342,18 +1462,24 @@ begin
       raise exception using errcode = '23514', message = 'PRESCRIPTION_SOURCE_NOT_DISPENSABLE';
     end if;
   end if;
-  -- Refills (ORD-12): fill 1 is checked as above and nothing more. A later
-  -- fill only on an own item (a route-backed item takes one fill), at most
-  -- 1 + refills_allowed fills (null: none), and not once the refills of the
-  -- prescription read above have ended (after their last day, R8's: the
-  -- earliest of its ends_on, the Lagos day written plus (refills_allowed + 2)
-  -- fills' durations and that day plus 365; the DETAIL is that day), nor
-  -- before the refill interval has passed: the Lagos day of the latest fill
-  -- not reversed, plus 3/4 of the prescription's duration in days (a week 7,
-  -- a month 30), rounded up, at least 1 (no fill standing: no wait). The
-  -- DETAIL is the day the refill opens. A refill that would open only after
-  -- the last day (a late fill) can never be recorded, so it is refused as
-  -- ended at once, with the last day, not told a day it would be refused on.
+  -- Refills (ORD-12): fill 1 is checked as above, and on an own item whose
+  -- prescription allows refills (refills_allowed above 0) it is not
+  -- dispensed in the future, as no refill is (its time starts the refill
+  -- interval; a backdated one is allowed); nothing more. A later fill only
+  -- on an own item (a route-backed item takes one fill), at most
+  -- 1 + refills_allowed fills (null: none), numbered next (1 + every fill of
+  -- the item, a reversed one included; the DETAIL is that count), not
+  -- dispensed in the future (a backdated one is allowed), and not once the
+  -- refills of the prescription read above have ended (after their last
+  -- day, R8's: the earliest of its ends_on, the Lagos day written plus
+  -- (refills_allowed + 2) fills' durations and that day plus 365; the
+  -- DETAIL is that day), nor before the refill interval has passed: the
+  -- Lagos day of the latest fill not reversed, plus 3/4 of the
+  -- prescription's duration in days (a week 7, a month 30), rounded up, at
+  -- least 1 (no fill standing: no wait), judged on today. The DETAIL is the
+  -- day the refill opens. A refill that would open only after the last day
+  -- (a late fill) can never be recorded, so it is refused as ended at once,
+  -- with the last day, not told a day it would be refused on.
   if new.fill_number > 1 then
     if parent_row.order_route_id is not null
        or new.fill_number > 1 + coalesce(source_row.refills_allowed, 0) then
@@ -1362,20 +1488,27 @@ begin
     declare
       refills_end_on date := ehr.prescription_refills_end_on(source_row.created_at, source_row.refills_allowed,
         source_row.duration_value, source_row.duration_unit, source_row.ends_on);
+      fills_recorded integer;
       refill_opens_on date;
     begin
+      select count(*)::integer,
+             (max(dispensing.dispensed_at) filter (where reversal.id is null) at time zone 'Africa/Lagos')::date
+               + greatest(1, ceil(0.75 * source_row.duration_value
+                   * case source_row.duration_unit when 'week' then 7 when 'month' then 30 else 1 end))::integer
+        into fills_recorded, refill_opens_on
+        from pharmacy.dispensings dispensing
+        left join pharmacy.dispensing_reversals reversal on reversal.dispensing_id = dispensing.id
+       where dispensing.work_item_id = new.work_item_id;
+      if new.fill_number <> fills_recorded + 1 then
+        raise exception using errcode = '23514', message = 'REFILL_NOT_NEXT_FILL', detail = fills_recorded::text;
+      end if;
+      if new.dispensed_at > clock_timestamp() then
+        raise exception using errcode = '23514', message = 'DISPENSED_IN_FUTURE';
+      end if;
       if refills_end_on < (clock_timestamp() at time zone 'Africa/Lagos')::date then
         raise exception using errcode = '23514', message = 'REFILL_PRESCRIPTION_ENDED',
           detail = to_char(refills_end_on, 'YYYY-MM-DD');
       end if;
-      select (max(dispensing.dispensed_at) at time zone 'Africa/Lagos')::date
-               + greatest(1, ceil(0.75 * source_row.duration_value
-                   * case source_row.duration_unit when 'week' then 7 when 'month' then 30 else 1 end))::integer
-        into refill_opens_on
-        from pharmacy.dispensings dispensing
-       where dispensing.work_item_id = new.work_item_id
-         and not exists (select 1 from pharmacy.dispensing_reversals reversal
-                          where reversal.dispensing_id = dispensing.id);
       if refill_opens_on > refills_end_on then
         raise exception using errcode = '23514', message = 'REFILL_PRESCRIPTION_ENDED',
           detail = to_char(refills_end_on, 'YYYY-MM-DD');
@@ -1385,6 +1518,9 @@ begin
           detail = to_char(refill_opens_on, 'YYYY-MM-DD');
       end if;
     end;
+  elsif parent_row.order_route_id is null and source_row.refills_allowed > 0
+        and new.dispensed_at > clock_timestamp() then
+    raise exception using errcode = '23514', message = 'DISPENSED_IN_FUTURE';
   end if;
   return new;
 end
@@ -1420,7 +1556,7 @@ end;
 $$;
 
 comment on function pharmacy.validate_dispensing() is
-  '0101, refills by 0154 (ORD-12): a route-backed work item is dispensable only while its route is accepted and inside its work window (0086, ORDER_ROUTE_CLOSED); the dispensing must match its work item and the session (0077); a same-facility work item is dispensable only while its ehr.prescriptions row, read FOR SHARE, is active at the version accepted, for its patient, facility and encounter (23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE). A fill_number above 1: own items only, at most 1 + refills_allowed fills (null: none), else 23514 NO_REFILLS_LEFT; not after the refills'' last day, ehr.prescription_refills_end_on (the earliest of ends_on, the Lagos day written plus (refills_allowed + 2) fills'' durations, and that day plus 365; 23514 REFILL_PRESCRIPTION_ENDED, DETAIL that day, YYYY-MM-DD); not before the Lagos day of the latest fill not reversed plus 3/4 of the duration in days, rounded up, at least 1 (23514 REFILL_TOO_SOON, DETAIL the day it opens, YYYY-MM-DD); a refill whose day would come after the refills'' last day (a late fill) can never be recorded and is refused REFILL_PRESCRIPTION_ENDED at once, DETAIL the last day. Origin mode only.';
+  '0101, refills by 0154 (ORD-12): a route-backed work item is dispensable only while its route is accepted and inside its work window (0086, ORDER_ROUTE_CLOSED); the dispensing must match its work item and the session (0077); a same-facility work item is dispensable only while its ehr.prescriptions row, read FOR SHARE, is active at the version accepted, for its patient, facility and encounter (23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE). A first fill of an own item whose prescription allows refills (refills_allowed above 0): dispensed_at no later than now, else 23514 DISPENSED_IN_FUTURE (it starts the refill interval; a backdated one is allowed); any other first fill: nothing more. A fill_number above 1: own items only, at most 1 + refills_allowed fills (null: none), else 23514 NO_REFILLS_LEFT; numbered next, 1 + every fill of the item (a reversed one included), else 23514 REFILL_NOT_NEXT_FILL, DETAIL that count; dispensed_at no later than now, else 23514 DISPENSED_IN_FUTURE (a backdated refill is allowed and judged on today, as any refill); not after the refills'' last day, ehr.prescription_refills_end_on (the earliest of ends_on, the Lagos day written plus (refills_allowed + 2) fills'' durations, and that day plus 365; 23514 REFILL_PRESCRIPTION_ENDED, DETAIL that day, YYYY-MM-DD); not before the Lagos day of the latest fill not reversed (by dispensed_at) plus 3/4 of the duration in days, rounded up, at least 1, judged on today (23514 REFILL_TOO_SOON, DETAIL the day it opens, YYYY-MM-DD); a refill whose day would come after the refills'' last day (a late fill) can never be recorded and is refused REFILL_PRESCRIPTION_ENDED at once, DETAIL the last day. Origin mode only.';
 comment on function pharmacy.claim_prescription_dispensing() is
   '0133 D14, refills by 0154 (ORD-12): fill 1 turns the item''s live, undispensed claim dispensed (dispensed_at, kept for good); a later fill needs that claim live, dispensed and the item''s own (no order route) and changes nothing; else 23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE, DETAIL sent_elsewhere or not_claimed. Enabled always; reads only the claims. Executed by no role.';
 
@@ -1472,19 +1608,20 @@ comment on constraint prescriptions_refills_allowed_ck on ehr.prescriptions is
 comment on index ehr.prescriptions_refills_facility_idx is
   'ORD-12 (0154): the prescriptions that allow refills, by facility, the time they were written and their refills'' last day (ehr.prescription_refills_end_on). pharmacy.open_refill_work_items range-scans it: only the facility''s prescriptions written in the last 365 Lagos days (rule (c)), and under an owner that bypasses row-level security only those whose refills have not ended (under a NOSUPERUSER NOBYPASSRLS owner the last day, not leakproof, is checked on each row read instead), so its cost is bounded by them and not by the facility''s history.';
 comment on column pharmacy.dispensings.fill_number is
-  'ORD-12 (0154): 1 for the first fill of the work item, 2 and above for refills (at most 12). Rows recorded before 0154 are fill 1. A reversed fill keeps its number.';
+  'ORD-12 (0154): 1 for the first fill of the work item, 2 and above for refills (at most 12). Rows recorded before 0154 are fill 1. A reversed fill keeps its number. In origin mode a refill must be the next number (pharmacy.validate_dispensing).';
 comment on constraint dispensings_fill_number_ck on pharmacy.dispensings is
   'ORD-12 (0154): fill_number is 1-12 (one fill and at most 11 refills).';
 comment on constraint dispensings_work_item_fill_number_key on pharmacy.dispensings is
   'ORD-12 (0154): one dispensing per fill number of a work item; replaces 0023''s one dispensing per work item, and stops a second fill recorded with the same number at the same time (23505).';
 
 -- 6. R9, the refill scan marker (see R9): its table, the owner's only (one
--- row while R6 or R7 reads ehr.prescriptions, for this backend's
--- transaction only); its test, which PUBLIC may execute (PostgreSQL checks
--- EXECUTE on every function of a plan when it starts it, and every role
--- that reads ehr.prescriptions plans the policy below) and which answers
--- only whether this backend's own transaction holds a marker, which only R6
--- and R7 write; and the policy, named after every other read policy of the
+-- row while R6 or R7 reads ehr.prescriptions, keyed by the backend's pid
+-- and the transaction's start time, never committed); its test, which
+-- PUBLIC may execute (PostgreSQL checks EXECUTE on every function of a plan
+-- when it starts it, and every role that reads ehr.prescriptions plans the
+-- policy below) and which answers only whether a marker row carries this
+-- backend's pid and this transaction's start time (see R9 on that key),
+-- which only R6 and R7 write; and the policy, named after every other read policy of the
 -- table so it is asked first (PostgreSQL joins a table's permissive
 -- policies with OR in reverse order of their names and stops at the first
 -- that holds; 0133, THE COST), one scalar subquery, so asked once per
@@ -1516,9 +1653,9 @@ create policy prescriptions_scan_refills on ehr.prescriptions
                                          where relation.oid = 'ehr.prescriptions'::regclass), 'USAGE')
                       then pharmacy.refill_scan_open() else false end));
 comment on table pharmacy.refill_scans is
-  '0154 ORD-12 (D8): one row while pharmacy.work_item_refills or pharmacy.open_refill_work_items reads ehr.prescriptions, for that backend''s transaction only; written just before that one statement and deleted just after it (an error rolls it back). The owner''s only.';
+  '0154 ORD-12 (D8): one row while pharmacy.work_item_refills or pharmacy.open_refill_work_items reads ehr.prescriptions, keyed by that backend''s pid and its transaction''s start time; written just before that one statement and deleted just after it (an error rolls it back), so never committed. The owner''s only.';
 comment on function pharmacy.refill_scan_open() is
-  '0154 ORD-12 (D8): whether this backend''s own transaction holds a refill scan marker (pharmacy.refill_scans), which only the two refill readers write. Asked by the policy prescriptions_scan_refills on ehr.prescriptions, so every role that reads that table may execute it.';
+  '0154 ORD-12 (D8): whether a refill scan marker (pharmacy.refill_scans) carries this backend''s pid and this transaction''s start time, which only the two refill readers write, and never commit. Asked by the policy prescriptions_scan_refills on ehr.prescriptions, so every role that reads that table may execute it.';
 comment on policy prescriptions_scan_refills on ehr.prescriptions is
   '0154 ORD-12 (D8): the table''s owner reads every row while this transaction holds a refill scan marker (pharmacy.refill_scan_open), which only the two refill readers write around their one read; asked first (its name sorts after every other read policy) and once per statement; false for every role that is not a member of the owner.';
 
@@ -1851,7 +1988,7 @@ begin
   -- marker), plpgsql, not STRICT, the result, the search_path each had; R4
   -- and R5 no EXECUTE for anyone but the owner (R6's and R7's grants below).
   with expected(proc_name, argument_types, digest, volatility, result_type, search_path) as (values
-         ('validate_dispensing', '', '06be902c41bcd4ee65f7f840c120db8f', 'v', 'trigger',
+         ('validate_dispensing', '', '69015652de60b9cb4ece428acba88eb2', 'v', 'trigger',
            'search_path=pharmacy, platform, pg_temp'),
          ('claim_prescription_dispensing', '', '1a50612f5330a36c9b64d0d831c77812', 'v', 'trigger',
            'search_path=pg_catalog, pg_temp'),
@@ -2111,17 +2248,26 @@ begin
         || 'asked before it or between it and 0143''s prescriptions_scan_my_orders, or a hid_ role is a member of '
         || 'the owner of ehr.prescriptions';
   end if;
-  -- The five triggers on pharmacy.dispensings and their modes, as before.
-  if (select array_agg(trigger_row.tgname::text || ':' || trigger_row.tgfoid::regprocedure::text || ':'
-          || trigger_row.tgtype::text || ':' || trigger_row.tgenabled::text order by trigger_row.tgname::text collate "C")
+  -- The triggers on pharmacy.dispensings and their modes exactly as section
+  -- 0 found them (the five, or the five and Billing's; g).
+  if (select string_agg(trigger_row.tgname::text || ':' || trigger_row.tgfoid::regprocedure::text || ':'
+          || trigger_row.tgtype::text || ':' || trigger_row.tgenabled::text, ' '
+          order by trigger_row.tgname::text collate "C")
         from pg_trigger trigger_row
        where trigger_row.tgrelid = 'pharmacy.dispensings'::regclass and not trigger_row.tgisinternal)
-     is distinct from array[
-       'dispensings_claim_prescription:pharmacy.claim_prescription_dispensing():5:A',
-       'dispensings_order_route_return:pharmacy.return_order_route_dispensing():5:O',
-       'pharmacy_dispensing_validate:pharmacy.validate_dispensing():7:O',
-       'pharmacy_dispensings_immutable:pharmacy.reject_immutable_evidence():27:O',
-       'prescription_claim_key_immutable:pharmacy.refuse_claim_key_change():19:A'] then
+     is distinct from nullif(current_setting('refills_0154.dispensing_triggers', true), '')
+     or current_setting('refills_0154.dispensing_triggers', true) not in (
+       'dispensings_claim_prescription:pharmacy.claim_prescription_dispensing():5:A '
+         || 'dispensings_order_route_return:pharmacy.return_order_route_dispensing():5:O '
+         || 'pharmacy_dispensing_validate:pharmacy.validate_dispensing():7:O '
+         || 'pharmacy_dispensings_immutable:pharmacy.reject_immutable_evidence():27:O '
+         || 'prescription_claim_key_immutable:pharmacy.refuse_claim_key_change():19:A',
+       'dispensings_claim_prescription:pharmacy.claim_prescription_dispensing():5:A '
+         || 'dispensings_order_route_return:pharmacy.return_order_route_dispensing():5:O '
+         || 'pharmacy_dispensing_validate:pharmacy.validate_dispensing():7:O '
+         || 'pharmacy_dispensings_immutable:pharmacy.reject_immutable_evidence():27:O '
+         || 'prescription_claim_key_immutable:pharmacy.refuse_claim_key_change():19:A '
+         || 'zz_billing_stock_and_gate:commercial.hook_dispensing():7:O') then
     raise exception using errcode = '55000', message = '0154: the triggers on pharmacy.dispensings changed';
   end if;
   -- 0148's order of the AFTER UPDATE triggers on ehr.prescriptions; the

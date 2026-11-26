@@ -160,6 +160,9 @@ export class PrescriptionsService {
    * While PRESCRIPTION_REFILLS_ENABLED is on (ORD-12) it may carry
    * `refillsAllowed` (0-11), stored with it (left out: null, none) and
    * answered as `refillsAllowed`; a body without it keeps today's digest.
+   * Refills none of which could ever be collected are refused, 400
+   * REFILLS_CANNOT_BE_COLLECTED, by the database's own rule on the row just
+   * written (PrescriptionRefills.requireCollectable); nothing is kept.
    *
    * Written as active, it goes to this hospital's own pharmacy (0133) and the
    * answer carries `pharmacyHandoff`. A replay of the same request (the same
@@ -219,6 +222,9 @@ export class PrescriptionsService {
           ],
         );
         const row = this.single(result.rows[0]);
+        // ORD-12 (0154): refills none of which could ever be collected are refused (400), by the database's own
+        // rule on the row just written, before it goes anywhere; the transaction rolls back.
+        await this.refills.requireCollectable(client, row.id, input);
         // 0133: a prescription written as active goes to this hospital's own pharmacy at once.
         const handoff = row.status === OrderStatus.Active
           ? await this.ownPharmacy.send(client, row.id, Number(row.rowVersion), context.correlationId) : undefined;

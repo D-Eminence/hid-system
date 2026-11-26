@@ -437,7 +437,8 @@ describe('ORD-4: accepted in the prescriber\'s progress', () => {
 
 /*
  * ORD-12 (refills, 0154): an item may have several fills. The progress reads
- * each item once (WORK_ITEM_PROGRESS_QUERY, setting on or off): `dispensedAt`
+ * each item once (WORK_ITEM_PROGRESS_QUERY, setting on or off), and as few of
+ * its fills as it can, as many whatever their number: `dispensedAt`
  * the first fill (0133's claim time); 'dispensed' while any fill stands (is
  * not reversed), and 'dispensing_reversed' with `reversedAt` (the latest
  * fill's reversal) only once every fill is reversed; and while
@@ -465,19 +466,26 @@ describe('ORD-12: refills in the prescriber\'s progress', () => {
     return { ...built, service };
   };
 
-  it('PR1 reads each item\'s fills once, in one lateral: the first fill, the latest fill and the latest fill\'s '
-    + 'reversal, by fill number, and whether a fill stands', () => {
+  it('PR1 reads the latest fill and its reversal first, fill 1 by its number and an earlier standing fill only when '
+    + 'the latest fill does not answer them, so it reads as many fills whatever the number of fills', () => {
     const flat = WORK_ITEM_PROGRESS_QUERY.replace(/\s+/g, ' ');
-    expect(flat).toContain('f.dispensed_at, f.last_filled_at, f.reversed_at, f.fill_standing from pharmacy.work_items w '
-      + 'left join lateral (select (array_agg(df.dispensed_at order by df.fill_number asc))[1] as dispensed_at, '
-      + '(array_agg(df.dispensed_at order by df.fill_number desc))[1] as last_filled_at, '
-      + '(array_agg(rs.reversed_at order by df.fill_number desc))[1] as reversed_at, '
-      + 'coalesce(bool_or(rs.id is null), false) as fill_standing from pharmacy.dispensings df '
-      + 'left join pharmacy.dispensing_reversals rs on rs.dispensing_id=df.id where df.work_item_id=w.id) f on true');
-    // The fills and their reversals once each: every row read runs the clinician's read policies.
-    expect(flat.match(/pharmacy\.dispensings\b/g)).toHaveLength(1);
-    expect(flat.match(/pharmacy\.dispensing_reversals\b/g)).toHaveLength(1);
-    expect(flat).not.toMatch(/left join pharmacy\.dispensings d on/);
+    // The latest fill and its reversal: one row, by fill number.
+    expect(flat).toContain('left join lateral (select df.id, df.fill_number, df.dispensed_at, rs.id as reversal_id, '
+      + 'rs.reversed_at from pharmacy.dispensings df left join pharmacy.dispensing_reversals rs on rs.dispensing_id=df.id '
+      + 'where df.work_item_id=w.id order by df.fill_number desc limit 1) l on true');
+    // Fill 1 by its number (an equality on the key, at most one row), only when the latest fill is not fill 1; the
+    // first fill the session may read only when fill 1 is hidden from it.
+    expect(flat).toContain('case when l.id is null then null when l.fill_number=1 then l.dispensed_at else coalesce('
+      + '(select f1.dispensed_at from pharmacy.dispensings f1 where f1.work_item_id=w.id and f1.fill_number=1), '
+      + '(select fv.dispensed_at from pharmacy.dispensings fv where fv.work_item_id=w.id order by fv.fill_number asc '
+      + 'limit 1)) end as dispensed_at');
+    // Whether a fill stands: the latest one's reversal answers it, unless it is reversed.
+    expect(flat).toContain('case when l.id is null then false when l.reversal_id is null then true else exists '
+      + '(select 1 from pharmacy.dispensings fe where fe.work_item_id=w.id and fe.fill_number<l.fill_number and not '
+      + 'exists (select 1 from pharmacy.dispensing_reversals re where re.dispensing_id=fe.id)) end as fill_standing');
+    expect(flat).toContain('l.dispensed_at as last_filled_at, l.reversed_at,');
+    // No aggregate over every fill of an item.
+    expect(flat).not.toMatch(/array_agg|bool_or|count\(/);
   });
 
   it('PR2 setting off: today\'s fields; dispensedAt the first fill; every fill reversed reads the latest reversal', async () => {

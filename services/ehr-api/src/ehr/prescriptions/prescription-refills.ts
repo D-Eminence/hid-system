@@ -1,3 +1,4 @@
+import type { PoolClient } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { CreatePrescriptionWithRefillsDto } from '../shared/clinical.dto';
 
@@ -30,10 +31,16 @@ import type { CreatePrescriptionWithRefillsDto } from '../shared/clinical.dto';
  * day is computed): the earliest of the end date, the Lagos day the
  * prescription was written (created_at, which ehr-api never changes) plus
  * (refills + 2) times one fill's duration in days (a day 1, a week 7, a month
- * 30), and that day plus 365. ehr-api checks nothing more for it and answers
- * no new field: the prescribe form works the same day out from what it sends
- * ("Refills can be collected until <date>"), and pharmacy-api answers it as
- * `refills.endsOn`.
+ * 30), and that day plus 365. ehr-api answers no new field for it: the
+ * prescribe form works the same day out from what it sends ("Refills can be
+ * collected until <date>"), and pharmacy-api answers it as `refills.endsOn`.
+ * One limit follows from it (Rahman's review of 25 November 2026; the
+ * clinical owner's call on #258, 26 November 2026): a prescription whose
+ * first refill could open only after that day can never have a refill
+ * collected (one fill longer than 486 days, or an end date before the day
+ * written plus the refill interval). The database would close it at the
+ * first fill; ehr-api refuses it at create instead (requireCollectable,
+ * 400 REFILLS_CANNOT_BE_COLLECTED), asking the database's own rule.
  */
 /**
  * REFILLS_NEED_DURATION's words. With refills above 0, the duration (0125's
@@ -44,6 +51,36 @@ import type { CreatePrescriptionWithRefillsDto } from '../shared/clinical.dto';
  */
 export const REFILLS_NEED_DURATION_MESSAGE = 'A prescription with refills needs the duration of each fill: how long '
   + 'one supply lasts, not the whole course. Add it, or set refills to 0.';
+
+/**
+ * Whether any refill of a prescription just written could ever be collected,
+ * by the database's own rule, on the row as stored (so on the very values
+ * 0154's dispensing check, reader and open refills use): the refills' last
+ * day is 0154's `ehr.prescription_refills_end_on` (R8, which the EHR runtime
+ * may execute), and the earliest a refill can open is the Lagos day the
+ * prescription was written (the earliest first fill) plus 0154's refill
+ * interval, 3/4 of one fill's duration in days rounded up, at least 1 (the
+ * expression of 0154's dispensing check, pharmacy.validate_dispensing, with
+ * the prescription's own columns; prescription-refills.spec.ts pins that it
+ * is the same text). Never collectable when that day is after the last day.
+ * Exported for the tests.
+ */
+export const REFILLS_COLLECTABLE_QUERY = `select first_refill_on > refills_end_on as "neverCollectable",
+  to_char(refills_end_on, 'YYYY-MM-DD') as "refillsEndOn", to_char(first_refill_on, 'YYYY-MM-DD') as "firstRefillOn"
+  from (select ehr.prescription_refills_end_on(p.created_at, p.refills_allowed, p.duration_value, p.duration_unit,
+                 p.ends_on) as refills_end_on,
+               (p.created_at at time zone 'Africa/Lagos')::date
+                 + greatest(1, ceil(0.75 * p.duration_value
+                     * case p.duration_unit when 'week' then 7 when 'month' then 30 else 1 end))::integer
+                 as first_refill_on
+          from ehr.prescriptions p where p.id = $1::uuid) refills`;
+
+/** REFILLS_CANNOT_BE_COLLECTED's words, with the two days. Exported for the tests. */
+export function refillsCannotBeCollectedMessage(refillsEndOn: string, firstRefillOn: string): string {
+  return `No refill of this prescription could ever be collected: refills end on ${refillsEndOn}, before the first `
+    + `refill would be due (${firstRefillOn} at the earliest). Use a shorter duration of each fill or a later end `
+    + 'date, or set refills to 0.';
+}
 
 export class PrescriptionRefills {
   constructor(readonly enabled: boolean) {}
@@ -79,6 +116,29 @@ export class PrescriptionRefills {
       durationValue?: number | null; durationUnit?: string | null };
     if ((refillsAllowed ?? 0) > 0 && (durationValue == null || durationUnit == null)) {
       throw new DomainProblem(400, 'REFILLS_NEED_DURATION', REFILLS_NEED_DURATION_MESSAGE);
+    }
+  }
+
+  /**
+   * The clinical owner's call (26 November 2026): a prescription with refills
+   * none of which could ever be collected is refused at create, 400
+   * REFILLS_CANNOT_BE_COLLECTED, with the refills' last day and the earliest
+   * day a first refill could open (as `refillsEndOn` and `firstRefillOn`), by
+   * the database's own rule (REFILLS_COLLECTABLE_QUERY) on the row just
+   * inserted, in the create's transaction, before the send to the pharmacy;
+   * the refusal rolls the whole create back (idempotency key included), as
+   * 0117's allergy check does. Only while on, and only with refills above 0
+   * (requireDuration has made sure there is a duration). Nothing while off.
+   */
+  async requireCollectable(client: Pick<PoolClient, 'query'>, prescriptionId: string, input: object): Promise<void> {
+    if (!this.enabled || ((input as { refillsAllowed?: number | null }).refillsAllowed ?? 0) <= 0) return;
+    const { rows } = await client.query<{ neverCollectable: boolean | null; refillsEndOn: string | null;
+      firstRefillOn: string | null }>(REFILLS_COLLECTABLE_QUERY, [prescriptionId]);
+    const answer = rows[0];
+    if (answer?.neverCollectable === true && answer.refillsEndOn && answer.firstRefillOn) {
+      throw new DomainProblem(400, 'REFILLS_CANNOT_BE_COLLECTED',
+        refillsCannotBeCollectedMessage(answer.refillsEndOn, answer.firstRefillOn), undefined,
+        { refillsEndOn: answer.refillsEndOn, firstRefillOn: answer.firstRefillOn });
     }
   }
 
