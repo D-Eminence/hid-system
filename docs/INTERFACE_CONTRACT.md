@@ -12512,22 +12512,25 @@ own.
 `facilityName` and `startsAt` only), and the reminder sweep writes `APPOINTMENT_REMINDER` about a day before (booked,
 starting within 24 hours, booked at least 12 hours before, 07:00-21:00 Lagos, once). Web push follows by 0097's poll.
 Each inbox item also queues one email in `ehr.appointment_email_outbox`, which identity-api sends to a verified email
-only (0063's rule, checked when each row is leased: a row without such a recipient is never leased or sent) with the generic text "There is an update to your appointments. Sign in to Health ID and open My
+only (0063's rule, checked when each row is leased: a row without such a recipient is never leased or sent; at most 5
+attempts, and a row whose attempts are spent with its last lease lapsed is closed as failed, `attempts_exhausted`) with the generic text "There is an update to your appointments. Sign in to Health ID and open My
 appointments to see it." through notification-api's new `POST /api/v1/notifications/appointment-notice`. No notice
 for check-in or no-show; a patient with no account gets nothing. SMS: the Platform control
 `appointment_sms_reminders_enabled` (seeded off, switchable in the Platform console) gates both the queue and the
 sender; the text is "Reminder: you have an appointment at {facility} on {day} at {time}." to the phone this facility
-recorded, never the clinic or reason, and only to an active patient with notices on (the email's rule, 0063), checked
+recorded (the newest unerased one, read when the sender claims the SMS, as the call list shows it), never the clinic
+or reason, and only to an active patient with notices on (the email's rule, 0063), checked
 when the sweep queues it and again when the sender claims it. The sender claims only between 07:00 and 21:00 Lagos,
 only an SMS whose appointment is still booked, was reminded by the sweep since its last move and starts within the
 next 24 hours (an unsent SMS kept by a move further ahead waits), and only one it can send; each lease is held by one
 sender, and only that sender records the outcome (any other record answers `stale` and changes nothing). An SMS that
 can never be sent is closed unsent: `APPOINTMENT_NOT_BOOKED` (moved away, cancelled, checked in),
 `APPOINTMENT_STARTED`, `PATIENT_NOT_REACHABLE` (the patient has since become inactive, merged, deceased or deleted, or
-turned notices off), `CONTACT_ERASED` (the facility's recorded phone was erased) or `ATTEMPTS_EXHAUSTED` (5 attempts).
-At most one unsent SMS per appointment: a rescheduled appointment keeps its unsent one (the sender reads the new time
-when it claims it), and gets a new one only after the earlier one was sent or failed; an appointment moved while its
-SMS is being sent waits for the next sweep, which then sends the new time. The reminder audit row names `sms` only
+turned notices off), `CONTACT_ERASED` (no unerased phone of the patient at the facility is left) or
+`ATTEMPTS_EXHAUSTED` (5 attempts). At most one unsent SMS per appointment: a rescheduled appointment keeps its unsent
+one (the sender reads the new time when it claims it), and gets a new one only after the earlier one was sent or
+failed; an appointment moved while its SMS is being sent, or after that SMS spent its 5 attempts, waits for the next
+sweep, which then sends the new time. The reminder audit row names `sms` only
 when the sweep queued the SMS.
 
 Deviation from the planned contract, for the reviewers: the planned email path was a producer `ehr` on

@@ -29,7 +29,9 @@
 --    identity.appointment_email_claim leases rows and answers the patient's
 --    verified email by 0063's rule (active patient with notices on, active
 --    account, verified email; a row without one is closed as skipped and is
---    never leased, however many wait), and
+--    never leased, however many wait; a row whose 5 attempts are spent and
+--    whose last lease has lapsed is closed as failed, attempts_exhausted,
+--    never left claimed), and
 --    identity.appointment_email_record records delivered, retry or failed,
 --    with one audit row each (notification.appointment-email.send). The email
 --    is generic ("There is an update to your appointments. Sign in to Health
@@ -52,13 +54,15 @@
 --    and only for an active patient with notices on (the email's rule, 0063;
 --    the inbox, 0037, needs an active patient too), at most one unsent per
 --    appointment (a rescheduled appointment keeps its unsent one, which
---    carries the new time, and one whose lease has lapsed goes back to the
---    queue; after a sent one it gets a new row), and one system audit row
---    (ehr.appointment.reminder) naming the channels, sms only when the sweep
---    wrote the SMS row. An appointment whose unsent SMS is under a live lease
---    (moved while its sender sends the old time) is left for the next sweep:
---    no notice, no reminder_sent_at and no audit row yet, so the moved time
---    is sent once that lease is answered or has lapsed.
+--    carries the new time, and one whose lease has lapsed with attempts left
+--    goes back to the queue; after a sent or closed one it gets a new row),
+--    and one system audit row (ehr.appointment.reminder) naming the channels,
+--    sms only when the sweep wrote the SMS row. An appointment whose unsent
+--    SMS is under a live lease (moved while its sender sends the old time), or
+--    has spent its 5 attempts and is not yet closed by the claim
+--    (ATTEMPTS_EXHAUSTED), is left for the next sweep: no notice, no
+--    reminder_sent_at and no audit row yet, so the moved time is sent once
+--    that lease is answered or has lapsed, or that SMS is closed.
 -- B4 SMS, built but switched off. The control appointment_sms_reminders_enabled
 --    is added and seeded OFF (the control_settings key CHECK and
 --    platform.control_enabled carry the 11 existing keys plus this one: 0086's
@@ -73,14 +77,18 @@
 --    rows it can send, between 07:00 and 21:00 Lagos (none at night), for an
 --    appointment still booked that the sweep has reminded and that starts
 --    within the next 24 hours (an unsent SMS kept by a move further ahead
---    waits), whose patient is active with notices on, whose facility contact
---    is unerased and which has attempts left. A row that can never be sent is
---    closed unsent (failed), at any hour: APPOINTMENT_NOT_BOOKED (moved away,
---    cancelled, checked in), APPOINTMENT_STARTED, PATIENT_NOT_REACHABLE
---    (inactive, merged, deceased, deleted, or notices off), CONTACT_ERASED
---    (0114's erasure, or an account deletion) and ATTEMPTS_EXHAUSTED (5
---    attempts and the lease lapsed). Only the sender that holds a lease records
---    it; any other record answers stale and changes nothing.
+--    waits), whose patient is active with notices on and has an unerased
+--    phone this facility recorded, and which has attempts left; it answers the
+--    phone as the facility records it at that moment (the newest unerased
+--    one, as the sweep and the call list take it, so a phone the desk records
+--    after the SMS was queued is the one used). A row that can never be sent
+--    is closed unsent (failed), at any hour: APPOINTMENT_NOT_BOOKED (moved
+--    away, cancelled, checked in), APPOINTMENT_STARTED, PATIENT_NOT_REACHABLE
+--    (inactive, merged, deceased, deleted, or notices off), CONTACT_ERASED (no
+--    unerased phone of the patient at the facility is left: 0114's erasure,
+--    or an account deletion) and ATTEMPTS_EXHAUSTED (5 attempts and the lease
+--    lapsed). Only the sender that holds a lease records it; any other record
+--    answers stale and changes nothing.
 --    The fixed message: "Reminder: you have an appointment at {facility} on
 --    {day} at {time}." No clinic or reason. Switching it on waits for the SMS
 --    budget, the Termii sender ID and the DPO's NDPA notice.
@@ -387,7 +395,7 @@ begin
   alter table ehr.appointment_sms_outbox enable row level security;
   revoke all on ehr.appointment_sms_outbox from public;
   comment on table ehr.appointment_sms_outbox is
-    '0161 (APPT-1): reminder SMS to send, queued by the reminder sweep only while appointment_sms_reminders_enabled is on (seeded off), only for an active patient with notices on (0063) and a phone this facility recorded; at most one unsent per appointment. identity-api drains it through identity.appointment_sms_claim (07:00-21:00 Lagos, an appointment still booked, reminded and starting within 24 hours; a row that can never be sent is closed unsent) and identity.appointment_sms_record (only by the sender that holds the lease). Ids, the state and a code only.';
+    '0161 (APPT-1): reminder SMS to send, queued by the reminder sweep only while appointment_sms_reminders_enabled is on (seeded off), only for an active patient with notices on (0063) and a phone this facility recorded; at most one unsent per appointment. identity-api drains it through identity.appointment_sms_claim (07:00-21:00 Lagos, an appointment still booked, reminded and starting within 24 hours, to the newest unerased phone this facility records when it is claimed; a row that can never be sent is closed unsent) and identity.appointment_sms_record (only by the sender that holds the lease). Ids, the state and a code only.';
 
   -- B1. The notices, in the same transaction as the event.
   create function ehr.appointment_notice(requested_appointment_id uuid, requested_code text, requested_starts_at timestamptz)
@@ -498,19 +506,21 @@ begin
       end if;
       if contact is not null then
         -- At most one unsent SMS per appointment. One queued before a reschedule is kept, with the phone as now
-        -- recorded (the sender reads the start time when it claims, so it carries the new time); one whose lease
-        -- has lapsed goes back to the queue (its sender's late record is then stale). Never a second one, and never
-        -- an error that would stop the whole sweep.
+        -- recorded (the sender reads the start time and the phone when it claims, so it carries the new time); one
+        -- whose lease has lapsed with attempts left goes back to the queue (its sender's late record is then
+        -- stale). Never a second one, and never an error that would stop the whole sweep.
         insert into ehr.appointment_sms_outbox as sms (appointment_id, facility_id, patient_id, contact_id)
         values (due.id, due.facility_id, due.patient_id, contact)
         on conflict (appointment_id) where state in ('pending', 'claimed')
         do update set contact_id = excluded.contact_id, state = 'pending', claimed_by = null, claimed_until = null
-         where sms.state = 'pending' or sms.claimed_until < clock_timestamp();
+         where sms.state = 'pending' or (sms.claimed_until < clock_timestamp() and sms.attempt_count < 5);
         get diagnostics sms_written = row_count;
         if sms_written = 0 then
-          -- The unsent SMS is under a live lease: its sender read the start time before the desk moved the
-          -- appointment. Nothing is done for this appointment now (no notice, no reminder_sent_at, no audit row);
-          -- the next sweep, once that lease is answered or has lapsed, reminds with the time as it is then.
+          -- The unsent SMS is under a live lease (its sender read the start time before the desk moved the
+          -- appointment), or its 5 attempts are spent and the claim has not closed it yet (ATTEMPTS_EXHAUSTED). Nothing
+          -- is done for this appointment now (no notice, no reminder_sent_at, no audit row); the next sweep, once
+          -- that lease is answered or has lapsed, or that SMS is closed, reminds with the time as it is then (a new
+          -- SMS row after a closed one).
           continue;
         end if;
       end if;
@@ -530,7 +540,7 @@ begin
   end
   $fn$;
   comment on function ehr.appointment_send_reminders(integer) is
-    '0161 (APPT-1, Q-APPT-3 A): the reminder sweep, as system:auth only, between 07:00 and 21:00 Lagos: booked appointments that start within 24 hours, without a reminder, booked at least 12 hours before their start, at most the batch (1-500). Each gets APPOINTMENT_REMINDER (inbox, push, email), an SMS outbox row only while appointment_sms_reminders_enabled is on and only for an active patient with notices on and a phone this facility recorded (at most one unsent per appointment: a rescheduled appointment keeps its unsent one), reminder_sent_at, and one system audit row naming the channels (sms only when the row was written). An appointment whose unsent SMS is under a live lease waits for the next sweep. Answers how many were reminded.';
+    '0161 (APPT-1, Q-APPT-3 A): the reminder sweep, as system:auth only, between 07:00 and 21:00 Lagos: booked appointments that start within 24 hours, without a reminder, booked at least 12 hours before their start, at most the batch (1-500). Each gets APPOINTMENT_REMINDER (inbox, push, email), an SMS outbox row only while appointment_sms_reminders_enabled is on and only for an active patient with notices on and a phone this facility recorded (at most one unsent per appointment: a rescheduled appointment keeps its unsent one), reminder_sent_at, and one system audit row naming the channels (sms only when the row was written). An appointment whose unsent SMS is under a live lease, or has spent its 5 attempts and is not yet closed, waits for the next sweep. Answers how many were reminded.';
   revoke all on function ehr.appointment_send_reminders(integer) from public;
 
   -- B4. The SMS sender's two calls (identity-api, system:auth, only while the control is on).
@@ -562,10 +572,10 @@ begin
     end;
     -- A reminder that can never be sent is closed unsent (failed), at any hour: its appointment is no longer booked
     -- (moved away, cancelled, checked in) or has started; its patient is no longer active (inactive, merged,
-    -- deceased, deleted) or has turned notices off since it was queued (the email's rule, 0063); its facility
-    -- contact was erased (0114's erasure, or an account deletion); or its 5 attempts are spent and the last lease
-    -- has lapsed. This pass is bounded, as the email claim's; the lease below checks the same rules itself, so a row
-    -- this pass leaves is never leased (a later claim closes it).
+    -- deceased, deleted) or has turned notices off since it was queued (the email's rule, 0063); this facility has
+    -- no unerased phone of the patient left (0114's erasure, or an account deletion); or its 5 attempts are spent
+    -- and the last lease has lapsed. This pass is bounded, as the email claim's; the lease below checks the same
+    -- rules itself, so a row this pass leaves is never leased (a later claim closes it).
     update ehr.appointment_sms_outbox sms
        set state = 'failed', claimed_by = null, claimed_until = null, last_error_code = closing.error_code
       from (select candidate.id, reason.error_code
@@ -579,7 +589,8 @@ begin
                                     where patient.id = candidate.patient_id and patient.status = 'active'
                                       and patient.notifications_enabled) then 'PATIENT_NOT_REACHABLE'
                   when not exists (select 1 from identity.patient_facility_contacts facility_contact
-                                    where facility_contact.id = candidate.contact_id
+                                    where facility_contact.patient_id = candidate.patient_id
+                                      and facility_contact.facility_id = candidate.facility_id
                                       and facility_contact.erased_at is null
                                       and facility_contact.phone_ciphertext is not null) then 'CONTACT_ERASED'
                   when candidate.attempt_count >= 5 then 'ATTEMPTS_EXHAUSTED'
@@ -598,28 +609,37 @@ begin
       -- Only rows this claim can answer are leased, each with what it answers (a lease is always answered, as the
       -- email claim's): the appointment still booked, reminded by the sweep since its last move, and starting within
       -- the next 24 hours (an unsent SMS kept by a move further ahead waits for the sweep); the patient active with
-      -- notices on; the facility contact unerased; attempts left.
+      -- notices on; attempts left; and the phone as this facility records it now: the newest unerased phone of the
+      -- patient at the facility, as the sweep and the call list take it (never the one recorded when the SMS was
+      -- queued if the desk has recorded a newer one since). The lease records which contact it answered.
       with picked as (
-        select candidate.id, facility.name as facility_name, appointment.starts_at,
+        select candidate.id, facility.name as facility_name, appointment.starts_at, facility_contact.id as contact_id,
                facility_contact.registration_case_id, facility_contact.phone_ciphertext, facility_contact.key_version
           from ehr.appointment_sms_outbox candidate
           join ehr.appointments appointment on appointment.id = candidate.appointment_id
           join identity.facilities facility on facility.id = candidate.facility_id
           join identity.patients patient on patient.id = candidate.patient_id
-          join identity.patient_facility_contacts facility_contact on facility_contact.id = candidate.contact_id
+          cross join lateral (
+            select current_contact.id, current_contact.registration_case_id, current_contact.phone_ciphertext,
+                   current_contact.key_version
+              from identity.patient_facility_contacts current_contact
+             where current_contact.patient_id = candidate.patient_id
+               and current_contact.facility_id = candidate.facility_id
+               and current_contact.erased_at is null and current_contact.phone_ciphertext is not null
+             order by current_contact.created_at desc, current_contact.id
+             limit 1) facility_contact
          where (candidate.state = 'pending' or (candidate.state = 'claimed' and candidate.claimed_until < clock_timestamp()))
            and candidate.attempt_count < 5
            and appointment.status = 'booked' and appointment.reminder_sent_at is not null
            and appointment.starts_at > clock_timestamp() and appointment.starts_at <= clock_timestamp() + interval '24 hours'
            and patient.status = 'active' and patient.notifications_enabled
-           and facility_contact.erased_at is null and facility_contact.phone_ciphertext is not null
          order by candidate.created_at, candidate.id
          limit requested_batch
          for update of candidate skip locked
       ), claimed as (
         update ehr.appointment_sms_outbox sms
            set state = 'claimed', claimed_by = requested_worker, claimed_until = clock_timestamp() + interval '5 minutes',
-               attempt_count = sms.attempt_count + 1
+               attempt_count = sms.attempt_count + 1, contact_id = picked.contact_id
           from picked where sms.id = picked.id
         returning sms.id
       )
@@ -630,7 +650,7 @@ begin
   end
   $fn$;
   comment on function identity.appointment_sms_claim(text, integer) is
-    '0161 (APPT-1): leases up to the batch (1-100) of reminder SMS to the sender (3-128 characters), as system:auth, only while appointment_sms_reminders_enabled is on (otherwise none), and only between 07:00 and 21:00 Lagos. Each with the facility name, the start time and the facility-recorded phone ciphertext and its registration case (the associated data); a lease is always answered. Leases only a row whose appointment is booked, reminded since its last move and starts within 24 hours, whose patient is active with notices on and whose contact is unerased; lapsed leases come back; at most 5 attempts. A row that can never be sent is closed unsent (failed): APPOINTMENT_NOT_BOOKED, APPOINTMENT_STARTED, PATIENT_NOT_REACHABLE, CONTACT_ERASED or ATTEMPTS_EXHAUSTED.';
+    '0161 (APPT-1): leases up to the batch (1-100) of reminder SMS to the sender (3-128 characters), as system:auth, only while appointment_sms_reminders_enabled is on (otherwise none), and only between 07:00 and 21:00 Lagos. Each with the facility name, the start time and the phone ciphertext as this facility records it when claimed (the newest unerased one, as the sweep and the call list take it) and its registration case (the associated data); a lease is always answered. Leases only a row whose appointment is booked, reminded since its last move and starts within 24 hours, whose patient is active with notices on and has an unerased phone this facility recorded; lapsed leases come back; at most 5 attempts. A row that can never be sent is closed unsent (failed): APPOINTMENT_NOT_BOOKED, APPOINTMENT_STARTED, PATIENT_NOT_REACHABLE, CONTACT_ERASED or ATTEMPTS_EXHAUSTED.';
   revoke all on function identity.appointment_sms_claim(text, integer) from public;
 
   create function identity.appointment_sms_record(requested_sms_id uuid, requested_worker text, requested_outcome text,
@@ -698,23 +718,29 @@ begin
        or requested_lease_seconds is null or requested_lease_seconds not between 30 and 900 then
       raise exception using errcode = '22023', message = 'APPOINTMENT_INVALID';
     end if;
-    -- A row whose patient has no verified email (0063's rule) is closed as skipped, never sent. This pass is
-    -- bounded; the lease below checks the same rule itself, so a row this pass leaves is never leased or sent (a
-    -- later claim closes it).
+    -- A row whose patient has no verified email (0063's rule) is closed as skipped, never sent; a row whose 5
+    -- attempts are spent and whose last lease has lapsed is closed as failed (attempts_exhausted), as the SMS claim
+    -- closes one, never left claimed. This pass is bounded; the lease below checks the same rules itself, so a row
+    -- this pass leaves is never leased or sent (a later claim closes it).
     update ehr.appointment_email_outbox email
-       set state = 'skipped', finished_at = clock_timestamp(), claimed_by = null, claimed_until = null,
-           last_error_code = 'no_verified_recipient'
-     where email.id in (
-       select candidate.id from ehr.appointment_email_outbox candidate
-        where (candidate.state = 'pending' or (candidate.state = 'claimed' and candidate.claimed_until < clock_timestamp()))
-          and not exists (
-            select 1 from identity.patients patient join auth.accounts account_row on account_row.id = patient.account_id
-             where patient.id = candidate.patient_id and patient.status = 'active' and patient.notifications_enabled
-               and account_row.status = 'active' and account_row.email is not null and btrim(account_row.email) <> ''
-               and account_row.email_verified_at is not null)
-        order by candidate.created_at, candidate.id
-        limit requested_limit
-        for update skip locked);
+       set state = closing.next_state, finished_at = clock_timestamp(), claimed_by = null, claimed_until = null,
+           last_error_code = closing.error_code
+      from (select candidate.id,
+                   case when reason.no_recipient then 'skipped' else 'failed' end as next_state,
+                   case when reason.no_recipient then 'no_verified_recipient' else 'attempts_exhausted' end as error_code
+              from ehr.appointment_email_outbox candidate
+              cross join lateral (
+                select not exists (
+                  select 1 from identity.patients patient join auth.accounts account_row on account_row.id = patient.account_id
+                   where patient.id = candidate.patient_id and patient.status = 'active' and patient.notifications_enabled
+                     and account_row.status = 'active' and account_row.email is not null and btrim(account_row.email) <> ''
+                     and account_row.email_verified_at is not null) as no_recipient) reason
+             where (candidate.state = 'pending' or (candidate.state = 'claimed' and candidate.claimed_until < clock_timestamp()))
+               and (reason.no_recipient or candidate.attempt_count >= 5)
+             order by candidate.created_at, candidate.id
+             limit requested_limit
+             for update of candidate skip locked) closing
+     where email.id = closing.id;
     return query
       -- Only rows whose patient has a recipient by 0063's rule now (active patient with notices on, active account,
       -- verified email) are leased, each with that recipient; a lease is always answered.
@@ -745,7 +771,7 @@ begin
   end
   $fn$;
   comment on function identity.appointment_email_claim(text, integer, integer) is
-    '0161 (APPT-1): leases up to the limit (1-50) of appointment emails for identity-api''s sender, as system:auth, with the patient''s verified email by 0063''s rule; rows without one are closed as skipped and are never leased. Lapsed leases come back; at most 5 attempts.';
+    '0161 (APPT-1): leases up to the limit (1-50) of appointment emails for identity-api''s sender, as system:auth, with the patient''s verified email by 0063''s rule; rows without one are closed as skipped and are never leased. Lapsed leases come back; at most 5 attempts: a row whose 5 attempts are spent and whose last lease has lapsed is closed as failed (attempts_exhausted).';
   revoke all on function identity.appointment_email_claim(text, integer, integer) from public;
 
   create function identity.appointment_email_record(requested_email_id uuid, requested_worker text,
