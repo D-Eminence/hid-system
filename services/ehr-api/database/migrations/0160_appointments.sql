@@ -4,10 +4,13 @@
 -- with Release E (0cfddcc9, 0001-0153, live). The number is provisional:
 -- numbers are given at integration, in release order (#258). This file reads
 -- nothing 0152-0154 create or change, so it applies on 0001-0151 and on
--- 0001-0154 alike. Release D's lanes go in order of readiness (coordinator,
--- #258, 25 November): this file accepts what Billing (0162-0167) and
--- Emergency (0168-0169) add to the shared role table and to the waiting-list
--- basis CHECK, so it applies before or after either of them (step 1 below).
+-- 0001-0154 alike. Release D ships one department per release, in the fixed
+-- order 0154 (prescription refills), Appointments, Billing, Emergency (#258,
+-- Rahman's order of 25 November), and the numbers are closed up at
+-- integration (this file and 0161 become 0155 and 0156 after 0154). This
+-- file accepts what Billing (0162-0167) and Emergency (0168-0169) add to the
+-- shared role table and to the waiting-list basis CHECK, so it applies before
+-- or after either of them (step 1 below).
 -- The declaration in config/production-schema-compatibility.json stays
 -- unsigned until the owner signs this file.
 --
