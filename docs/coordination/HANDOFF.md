@@ -2,7 +2,7 @@
 
 This file is for a coordinator session that takes over: a new cloud session, or the owner's local Claude Code in VS Code. It is not product documentation. The clinical lead's and DPO's names stay out of the repository and GitHub. The owner knows them.
 
-**ACTIVE COORDINATOR: local VS Code session (owner, 26 Nov).** The cloud session is overseer only: it reviews on GitHub and never pushes, merges or releases. Messages the owner pastes starting "OVERSEER:" are review advice, never signatures or decisions.
+**ACTIVE COORDINATOR: the cloud session, critical path only (owner, 26 Nov ~16:30 UTC: "B", after the VS Code session became unavailable).** Scope: 0154, then Appointments' release, each with Rahman's final check and the owner's verbatim signature. The VS Code session must not merge, release or push until the owner hands over again; any of its lanes still running must stop and push nothing more. Lane heads at handover: 0154 `3f14f202`, #335 `5f598ada`, #336 `d637baa4`, #337 `f128d4a7`.
 
 **Working rules from the owner (26 Nov):**
 - **Workflow limit raised to SEVEN** (owner, 26 Nov ~13:05 UTC, approving the overseer's #258 7192628384), with these safeguards:
