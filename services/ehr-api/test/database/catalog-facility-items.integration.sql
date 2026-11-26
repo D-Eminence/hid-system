@@ -49,7 +49,8 @@
 --      Idempotency-Key per creator, at most 500 active items of a kind
 --      (re-activation counted, an add whose key was used not counted, an add
 --      under REPEATABLE READ refused); the guard keeps every column but active,
---      row_version (old + 1) and the changed columns; no DELETE or TRUNCATE;
+--      row_version (old + 1) and the changed columns, and records a change at
+--      the time it is made; no DELETE or TRUNCATE;
 --      the session ties on the creator and changer columns; a session at A
 --      cannot insert a B row (without RETURNING) or change B's rows with an
 --      UPDATE that reads no column; a withdrawn item keeps its id and comes
@@ -434,7 +435,7 @@ select pg_temp.expect('2g the four functions: the write check, the search and th
 select pg_temp.expect('2h the write check takes no argument, so it cannot be asked about another member or facility',
   '1 0', (select count(*) || ' ' || min(pronargs) from pg_proc
            where proname = 'facility_item_write_allowed' and pronamespace = 'ehr'::regnamespace));
-select pg_temp.expect('2i the bodies are the ones 0155''s post-check pins', 'a1e4e99c07cb978f4eedb910dbf3c23c '
+select pg_temp.expect('2i the bodies are the ones 0155''s post-check pins', '4befb59b31982d87c758810d2d3116ec '
   || '99e0abe265d0006f77ff6f279986dea2 b6ed2869600110b6399835bd4c4f6d7e 56d5b39e176c83b02a12df1c8a3e3e77',
   (select string_agg(md5(prosrc), ' ' order by oid::regprocedure::text) from pg_proc
     where oid in ('ehr.catalog_facility_item_guard()'::regprocedure, 'ehr.catalog_status()'::regprocedure,
@@ -907,6 +908,11 @@ $$;
 create function pg_temp.active_count(kind text) returns text language sql as $$
   select count(*)::text from ehr.catalog_facility_items where kind = $1 and active;
 $$;
+create function pg_temp.changed_line(item uuid) returns text language sql as $$
+  select 'changed by ' || case when changed_by = pg_temp.acct('x') then 'x' else coalesce(changed_by::text, 'nobody') end
+         || case when changed_at > now() - interval '1 minute' then ' now' else ' at ' || coalesce(changed_at::text, 'no time') end
+    from ehr.catalog_facility_items where id = $1;
+$$;
 create function pg_temp.item_line(item uuid) returns text language sql as $$
   select 'version ' || row_version || ', created by '
          || case when created_by = pg_temp.acct('x') then 'x' else 'other' end || ', changed by '
@@ -1210,9 +1216,28 @@ select pg_temp.expect('4ad the row version moves by one: the same or two more is
   || ' | ' || pg_temp.try(format($s$update ehr.catalog_facility_items set active = false, row_version = row_version + 2,
       changed_by = pg_temp.acct('x'), changed_by_membership_id = pg_temp.mem('x', 'a'), changed_at = clock_timestamp()
     where id = %L$s$, pg_temp.item(1))));
+-- A change is recorded at the time it is made: a time given (or none) is
+-- replaced by now. Rolled back, so item 1 stays as it was.
+savepoint change_time;
+select pg_temp.expect('4at a change is recorded at the time it is made: a time given, or none, is replaced by now',
+  'a time given: ok 1 | changed by x now | none: ok 1 | changed by x now',
+  'a time given: ' || pg_temp.try(format($s$update ehr.catalog_facility_items set active = false,
+      row_version = row_version + 1, changed_by = pg_temp.acct('x'), changed_by_membership_id = pg_temp.mem('x', 'a'),
+      changed_at = '2001-01-01' where id = %L$s$, pg_temp.item(1)))
+  || ' | ' || pg_temp.changed_line(pg_temp.item(1))
+  || ' | none: ' || pg_temp.try(format($s$update ehr.catalog_facility_items set active = true,
+      row_version = row_version + 1, changed_by = pg_temp.acct('x'), changed_by_membership_id = pg_temp.mem('x', 'a'),
+      changed_at = null where id = %L$s$, pg_temp.item(1)))
+  || ' | ' || pg_temp.changed_line(pg_temp.item(1)));
+rollback to savepoint change_time;
+-- As the suite's own role (row security would refuse a write without the
+-- changer first): a time without a changer breaks the all-or-none CHECK.
+reset role;
 select pg_temp.expect('4ae the changed columns are all set or all empty', '23514 catalog_facility_items_changed_ck',
   pg_temp.try(format($s$update ehr.catalog_facility_items set active = false, row_version = row_version + 1,
-      changed_by = pg_temp.acct('x'), changed_by_membership_id = pg_temp.mem('x', 'a') where id = %L$s$, pg_temp.item(1))));
+      changed_at = clock_timestamp() where id = %L$s$, pg_temp.item(1))));
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member('x', 'a');
 select pg_temp.expect('4af an add starts at version 1, now, with no change recorded: a change given is refused',
   '55000 FACILITY_ITEM_IMMUTABLE | ok 1 | version 1, created by x, changed by nobody, created now',
   pg_temp.try($s$insert into ehr.catalog_facility_items (facility_id, kind, display, generic_name, idempotency_key,
@@ -1513,7 +1538,7 @@ rollback to savepoint undo;
 
 do $$
 declare
-  wanted integer := case when exists (select 1 from pg_extension where extname = 'dblink') then 84 else 78 end;
+  wanted integer := case when exists (select 1 from pg_extension where extname = 'dblink') then 85 else 79 end;
 begin
   if currval('pg_temp.c155_passed') is distinct from wanted then
     raise exception '0155 facility items suite failed: % cases ran, % expected', currval('pg_temp.c155_passed'), wanted;

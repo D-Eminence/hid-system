@@ -48,7 +48,9 @@
 --    b. an UPDATE may change only active, row_version (to the old value
 --       + 1) and the three "changed" columns; anything else is 55000
 --       FACILITY_ITEM_IMMUTABLE, so the id, facility, kind, names, creator,
---       key and digest never change;
+--       key and digest never change. An UPDATE that writes the changed
+--       columns has its changed_at set to now, whatever time it gave (a
+--       write that leaves them as they were keeps them);
 --    c. an item that becomes active (an INSERT, or an UPDATE from inactive
 --       to active, a re-activation) is held to at most 500 active items of
 --       its kind at its facility: it takes
@@ -329,7 +331,7 @@ begin
        and (select md5(proc.prosrc) from pg_proc proc where proc.oid = to_regprocedure('ehr.catalog_status()'))
            = '99e0abe265d0006f77ff6f279986dea2'
        and (select md5(proc.prosrc) from pg_proc proc
-             where proc.oid = to_regprocedure('ehr.catalog_facility_item_guard()')) = 'a1e4e99c07cb978f4eedb910dbf3c23c'
+             where proc.oid = to_regprocedure('ehr.catalog_facility_item_guard()')) = '4befb59b31982d87c758810d2d3116ec'
        and (select md5(proc.prosrc) from pg_proc proc
              where proc.oid = to_regprocedure('ehr.facility_item_write_allowed()')) = 'b6ed2869600110b6399835bd4c4f6d7e'
        and (select md5(proc.prosrc) from pg_proc proc
@@ -488,6 +490,13 @@ begin
                               'search_terms'])
        or new.row_version is distinct from old.row_version + 1 then
       raise exception using errcode = '55000', message = 'FACILITY_ITEM_IMMUTABLE';
+    end if;
+    -- A change is recorded at the time it is made, as an add is; a write that leaves the changed columns as they
+    -- were (the undo's withdrawal) keeps them.
+    if new.changed_by is distinct from old.changed_by
+       or new.changed_by_membership_id is distinct from old.changed_by_membership_id
+       or new.changed_at is distinct from old.changed_at then
+      new.changed_at := clock_timestamp();
     end if;
   end if;
   -- At most 500 active items of a kind at a facility, counted after the facility's lock.
@@ -808,7 +817,7 @@ begin
   -- The four bodies exactly, with their owner, SECURITY DEFINER, volatility and search_path.
   select string_agg(expected.signature, ', ' order by expected.signature) into mismatch
     from (values
-      ('ehr.catalog_facility_item_guard()', 'a1e4e99c07cb978f4eedb910dbf3c23c', false, 'v'),
+      ('ehr.catalog_facility_item_guard()', '4befb59b31982d87c758810d2d3116ec', false, 'v'),
       ('ehr.facility_item_write_allowed()', 'b6ed2869600110b6399835bd4c4f6d7e', true, 's'),
       ('ehr.search_catalog_facility_items(text,text,integer)', '56d5b39e176c83b02a12df1c8a3e3e77', true, 's'),
       ('ehr.catalog_status()', '99e0abe265d0006f77ff6f279986dea2', true, 's')
