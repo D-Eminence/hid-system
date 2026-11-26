@@ -92,3 +92,4 @@
 - 26 Nov ~00:30 UTC: Owner wrote (verbatim) "signed". Nothing was ready to sign (0154's fixes not done; wave 1 files to be renumbered and re-hashed), and no file or sha256 was named, so it is NOT recorded as a signature. The coordinator explained that exact signing text will be posted on #332.
 - 25 Nov ~23:30 to 26 Nov ~00:20 UTC: agents in all five local workflows failed with "API Error: Connection refused (ECONNREFUSED)"; wf_3ebd077f-b91 and wf_71155cf4-e48 ended with every agent failed; wf_877a0c93-e09, wf_9f4a817c-565 and wf_3cbe4e94-299 stopped when the session ended. Partial work is in local worktrees (HANDOFF "Local work not yet on GitHub"). Only #335 (d7511876) was pushed.
 - 26 Nov ~10:30 UTC: Owner (verbatim): "update the handover". Handoff rewritten with the overnight state.
+- 26 Nov ~10:35 UTC: Owner (verbatim): "stop". Local coordinator stopped; no active coordinator until the owner names one.

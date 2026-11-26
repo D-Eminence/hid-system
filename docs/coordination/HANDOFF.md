@@ -2,7 +2,7 @@
 
 This file is for a coordinator session that takes over: a new cloud session, or the owner's local Claude Code in VS Code. It is not product documentation. The clinical lead's and DPO's names stay out of the repository and GitHub. The owner knows them.
 
-**ACTIVE COORDINATOR: the local VS Code session, since 25 Nov ~21:00 UTC (the owner chose "Hand over to this session" in the local chat). The cloud session must not merge, release or push until the owner hands over again.**
+**ACTIVE COORDINATOR: none. The local VS Code session (active from 25 Nov ~21:00 UTC) stopped on the owner's "stop" at about 10:35 UTC on 26 Nov. Whichever session the owner names next takes over; until then, nobody merges, releases or pushes.**
 
 **Read "Overnight" and "Local work not yet on GitHub" first.** Five local workflows were running. From about 23:30 UTC on 25 Nov their agents failed with "API Error: Connection refused", and the session then restarted. Workflow runs resume only within the same session, so treat all five as dead. Their partial work exists only in local worktrees under `/home/l2e/hid/`. Nothing has been merged or released since website release F (25 Nov 18:01 UTC).
 
