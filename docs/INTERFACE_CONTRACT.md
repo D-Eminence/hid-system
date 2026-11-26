@@ -13073,14 +13073,23 @@ which needs 0154's `fill_number`):
   `reversedAt` (the latest fill's reversal), only once every fill is
   reversed. So the prescriber never reads "reversed" for an item whose
   earlier fill still stands (a reversed refill), and an item filled again
-  after a reversed fill reads `dispensed`. Each item's fills and their
-  reversals are read once, in one lateral, so the several-patient call costs
-  what it did before 0154: at 50 patients and 100 dispensed items, as the
-  Pharmacy runtime on a clinician's consent under the NOSUPERUSER
-  NOBYPASSRLS owner, its 50 statements took 0.57 s (median of 21) with one
-  fill an item, as Release E's statement did, and 0.66 s with 40 items
-  filled three times; reading the fills once for each of the four answers
-  had taken 1.05-1.15 s.
+  after a reversed fill reads `dispensed`. Every row read runs the
+  clinician's read policies (the consent test), so the statement reads as
+  few fills as it can, whatever their number (Rahman's review of 25
+  November 2026: reading every fill and reversal grew about 1.5 ms per fill
+  per item): first the latest fill and its reversal; fill 1 by its number
+  only when the latest is not fill 1; and only when the latest fill is
+  reversed, whether an earlier fill stands. Measured on a throwaway
+  production-kind copy, as the Pharmacy runtime in a doctor's session on
+  consent, 100 ids, medians of 5 (Release E's statement / the one before /
+  this one): 1 fill 190 / 190 / 188 ms; 2 fills 281 / 282 / 283 ms; 6 fills
+  651 / 658 / 283 ms; 12 fills 1,207 / 1,211 / 284 ms; 12 fills with 1-11
+  reversed 2,238 / 2,232 / 285 ms; 12 with the 12th reversed 1,301 / 1,318
+  / 478 ms. An item whose every fill is reversed is the one case that still
+  reads each fill and its reversal: 12 fills, all reversed, 2,356 / 2,352 /
+  2,442 ms at 100 such items. The answers are the earlier statement's, row
+  for row (random reversal sets and fills hidden by row-level security
+  included).
 - `GET /api/v1/health/ready` is 503 `PHARMACY_SCHEMA_NOT_READY` on a database
   without 0154's `pharmacy.dispensings.fill_number` (a catalog read; `live`
   stays 200), since every work-item statement names it.

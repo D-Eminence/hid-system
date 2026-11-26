@@ -100,24 +100,56 @@ interface ProgressRow extends QueryResultRow {
  * (`last_filled_at`) and the latest fill's reversal (one per dispensing,
  * 0023), each by fill number, and whether any fill of the item stands (has no
  * reversal), so that a refill reversed after an earlier fill that stands
- * still reads dispensed (false when none is recorded). Each item's fills and
- * their reversals are read once, in one lateral: every row read runs the
- * clinician's read policies (the consent test), and reading the fills once
- * for each of those four answers doubled the several-patient call's statement
- * time at 100 items, setting on or off. It needs 0154's `fill_number`.
+ * still reads dispensed (false when none is recorded). Every row read runs
+ * the clinician's read policies (the consent test, about 1.5 ms), so the
+ * statement reads as few fills as it can, and as many whatever the number of
+ * fills (Rahman's review of 25 November 2026: reading every fill and
+ * reversal grew about 1.5 ms per fill per item): first the latest fill and
+ * its reversal (the lateral, by fill number, one row); then, only when the
+ * latest is not fill 1, fill 1 by its number (an equality on the key
+ * (work_item_id, fill_number), so at most one row, whatever plan is chosen;
+ * the first fill the session may read when fill 1 is hidden from it, as
+ * before); and only when the latest fill is reversed, whether an earlier
+ * fill stands. So an item reads one fill (one fill recorded), or two
+ * (refills), and an earlier fill's reversal only when its latest is
+ * reversed. The answers are the ones the earlier statement gave (every fill
+ * and reversal read in one lateral). Measured on a throwaway production-kind
+ * copy (0001-0154 by a NOSUPERUSER NOBYPASSRLS migrator, the union grants),
+ * as hid_pharmacy_api_runtime in a doctor's session on consent, 100 ids,
+ * medians of 5 (consent-test calls, pharmacy.context_allows, in brackets),
+ * Release E's statement (one row per fill, a cost baseline only) / the one
+ * before (every fill and reversal in one lateral) / this one: 1 fill 190 /
+ * 190 / 188 ms (100 / 100 / 100); 2 fills 281 / 282 / 283 ms (200 each); 3
+ * fills 376 / 374 / 282 ms (300 / 300 / 200); 6 fills 651 / 658 / 283 ms
+ * (600 / 600 / 200); 12 fills 1,207 / 1,211 / 284 ms (1,200 / 1,200 / 200);
+ * 12 fills, 1-11 reversed, 2,238 / 2,232 / 285 ms (2,300 / 2,300 / 200); 12
+ * fills, the 12th reversed, 1,301 / 1,318 / 478 ms (1,300 / 1,300 / 400).
+ * The one case it does not keep flat is an item whose every fill is
+ * reversed, where it must read each fill and its reversal to know that none
+ * stands: 12 fills, all reversed, 2,356 / 2,352 / 2,442 ms (2,400 / 2,400 /
+ * 2,500). The same answers as the one before, row for row, in all of these
+ * and with a random set of reversals on 100 items and with fills hidden from
+ * the session by row-level security. It needs 0154's `fill_number`.
  * Exported for the tests.
  */
 export const WORK_ITEM_PROGRESS_QUERY = `select w.id::text as work_item_id,
   w.source_ehr_prescription_id::text as source_ehr_prescription_id, w.accepted_at,
-  f.dispensed_at, f.last_filled_at, f.reversed_at, f.fill_standing
+  case when l.id is null then null when l.fill_number=1 then l.dispensed_at
+    else coalesce((select f1.dispensed_at from pharmacy.dispensings f1
+        where f1.work_item_id=w.id and f1.fill_number=1),
+      (select fv.dispensed_at from pharmacy.dispensings fv
+        where fv.work_item_id=w.id order by fv.fill_number asc limit 1)) end as dispensed_at,
+  l.dispensed_at as last_filled_at, l.reversed_at,
+  case when l.id is null then false when l.reversal_id is null then true
+    else exists (select 1 from pharmacy.dispensings fe
+      where fe.work_item_id=w.id and fe.fill_number<l.fill_number
+        and not exists (select 1 from pharmacy.dispensing_reversals re where re.dispensing_id=fe.id)) end
+    as fill_standing
   from pharmacy.work_items w
-  left join lateral (select (array_agg(df.dispensed_at order by df.fill_number asc))[1] as dispensed_at,
-      (array_agg(df.dispensed_at order by df.fill_number desc))[1] as last_filled_at,
-      (array_agg(rs.reversed_at order by df.fill_number desc))[1] as reversed_at,
-      coalesce(bool_or(rs.id is null), false) as fill_standing
+  left join lateral (select df.id, df.fill_number, df.dispensed_at, rs.id as reversal_id, rs.reversed_at
     from pharmacy.dispensings df
     left join pharmacy.dispensing_reversals rs on rs.dispensing_id=df.id
-    where df.work_item_id=w.id) f on true
+    where df.work_item_id=w.id order by df.fill_number desc limit 1) l on true
   where w.patient_id=$1::uuid and w.facility_id=$2::uuid and w.order_route_id is null
     and w.source_ehr_prescription_id=any($3::uuid[])`;
 
