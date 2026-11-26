@@ -54,7 +54,9 @@
 --      the session ties on the creator and changer columns; a session at A
 --      cannot insert a B row (without RETURNING) or change B's rows with an
 --      UPDATE that reads no column; a withdrawn item keeps its id and comes
---      back with it;
+--      back with it; for Billing, an order of a facility item carries
+--      HID-FACILITY and the item's id into the lab and pharmacy work items
+--      unchanged (their validators refuse a pair changed in any way);
 --   5. the table's owner reads every facility's items; under FORCE its
 --      UPDATE changes no row (a NOSUPERUSER owner; a superuser owner skips
 --      row security);
@@ -1400,6 +1402,96 @@ select pg_temp.expect('4as an add under REPEATABLE READ is refused before the co
 select public.dblink_disconnect('c155_isolation') as disconnected \gset
 \endif
 
+-- For Billing (the coordinator's option 2, 7177222281): an order of a
+-- facility item carries the code system HID-FACILITY and the item's id into
+-- the lab and pharmacy work items unchanged. The patient, x's consent to
+-- her record at A, the visit and the orders are written with triggers off,
+-- as fixtures; the work items as lab-api and pharmacy-api write them (each
+-- value copied from the order), with every check on: their validators read
+-- the order under the session's consent and compare the pair with it, so a
+-- pair changed in any way (here only its letter case) is refused.
+set local session_replication_role = replica;
+insert into identity.patients (id, hid_code, first_name, last_name, full_name, gender, dob, status) values
+  ('c1556000-0000-4000-8000-000000000001', 'HID-FCTAAA2', 'Ada', 'Items', 'Ada Items', 'female', '1990-04-05', 'active');
+insert into identity.consent_grants (id, patient_id, staff_id, account_id, membership_id, facility_id, scope,
+  purpose_of_use, status, reason, starts_at, expires_at)
+values (gen_random_uuid(), 'c1556000-0000-4000-8000-000000000001', 'c1554000-0000-4000-8000-000000000001',
+  pg_temp.acct('x'), pg_temp.mem('x', 'a'), pg_temp.f('a'), 'write_records', 'direct-care', 'active',
+  'Synthetic 0155 suite consent', clock_timestamp() - interval '1 hour', clock_timestamp() + interval '1 day');
+insert into ehr.encounters (id, patient_id, facility_id, created_by, created_by_membership_id, encounter_type, status,
+  started_at)
+values ('c1556001-0000-4000-8000-000000000001', 'c1556000-0000-4000-8000-000000000001', pg_temp.f('a'),
+  pg_temp.acct('x'), pg_temp.mem('x', 'a'), 'ambulatory', 'in_progress', clock_timestamp());
+insert into ehr.lab_requests (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  test_code_system, test_code, test_display, priority, status)
+values ('c1556002-0000-4000-8000-000000000001', 'c1556001-0000-4000-8000-000000000001',
+  'c1556000-0000-4000-8000-000000000001', pg_temp.f('a'), pg_temp.acct('x'), pg_temp.mem('x', 'a'), 'HID-FACILITY',
+  pg_temp.item(2)::text, 'Malaria RDT (facility kit)', 'routine', 'active');
+insert into ehr.prescriptions (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  medication_code_system, medication_code, medication_display, dose_quantity, dose_unit, route_code, frequency,
+  instructions, starts_on, ends_on, status)
+values ('c1556003-0000-4000-8000-000000000001', 'c1556001-0000-4000-8000-000000000001',
+  'c1556000-0000-4000-8000-000000000001', pg_temp.f('a'), pg_temp.acct('x'), pg_temp.mem('x', 'a'), 'HID-FACILITY',
+  :'c155_item3', 'Ceftriaxone 1 g powder for injection', 1, 'vial', 'intravenous', 'Once a day',
+  'Give over 30 minutes for 5 days', current_date, current_date + 5, 'active');
+set local session_replication_role = origin;
+select pg_temp.as_member('x', 'a'), set_config('app.purpose_of_use', 'direct-care', true);
+-- lab-api's acceptance INSERT (LabWorkItemsService) and pharmacy-api's
+-- (PharmacyService.accept), each with the order's own values, and the case
+-- of the code changed (upper case) to show the validators compare it.
+create function pg_temp.lab_accept(test_code text, idempotency_key text) returns text language sql as $$
+  select pg_temp.try(format('insert into lab.work_items (id, patient_id, facility_id, ordering_facility_id, '
+    || 'source_ehr_order_id, source_ehr_order_version, source_encounter_id, status, priority, test_code_system, '
+    || 'test_code, test_name, clinical_indication, requested_by, requested_at, accepted_by, accepted_by_membership_id, '
+    || 'idempotency_key, request_sha256, correlation_id) values (%L, %L, %L, %L, %L, %s, %L, %L, %L, %L, %L, %L, %L, '
+    || '%L, %L, %L, %L, %L, %L, %L)', 'c1556004-0000-4000-8000-000000000001', request.patient_id, request.facility_id,
+    request.facility_id, request.id, request.row_version, request.encounter_id, 'accepted', request.priority,
+    request.test_code_system, $1, request.test_display, request.clinical_information, request.created_by,
+    request.created_at, pg_temp.acct('x'), pg_temp.mem('x', 'a'), $2, repeat('b', 64), 'c155-facility-items-suite'))
+    from ehr.lab_requests request where request.id = 'c1556002-0000-4000-8000-000000000001';
+$$;
+create function pg_temp.pharmacy_accept(medication_code text, idempotency_key text) returns text language sql as $$
+  select pg_temp.try(format('insert into pharmacy.work_items (id, patient_id, facility_id, ordering_facility_id, '
+    || 'source_ehr_prescription_id, source_ehr_prescription_version, source_encounter_id, source_status, '
+    || 'medication_code_system, medication_code, medication_display, dose_quantity, dose_unit, route_code, frequency, '
+    || 'instructions, starts_on, ends_on, prescribed_by, prescribed_at, accepted_by, accepted_by_membership_id, '
+    || 'acceptance_reason, idempotency_key, request_sha256, correlation_id) values (%L, %L, %L, %L, %L, %s, %L, %L, '
+    || '%L, %L, %L, %s, %L, %L, %L, %L, %L, %L, %L, %L, %L, %L, %L, %L, %L, %L)',
+    'c1556005-0000-4000-8000-000000000001', rx.patient_id, rx.facility_id, rx.facility_id, rx.id, rx.row_version,
+    rx.encounter_id, 'active', rx.medication_code_system, $1, rx.medication_display, rx.dose_quantity, rx.dose_unit,
+    rx.route_code, rx.frequency, rx.instructions, rx.starts_on, rx.ends_on, rx.created_by, rx.created_at,
+    pg_temp.acct('x'), pg_temp.mem('x', 'a'), 'Accepted by the pharmacist', $2, repeat('c', 64),
+    'c155-facility-items-suite'))
+    from ehr.prescriptions rx where rx.id = 'c1556003-0000-4000-8000-000000000001';
+$$;
+-- A work item's pair, and whether it is its order's byte for byte (36
+-- characters, lower case), read in its own statement after the inserts.
+create function pg_temp.work_item_pair(kind text) returns text language sql as $$
+  select pair.code_system || ' ' || pair.code
+         || case when (pair.code_system, pair.code) = (pair.order_code_system, pair.order_code)
+                      and length(pair.code) = 36 and pair.code = lower(pair.code)
+                 then ' same as the order' else ' differs from the order' end
+    from (select item.test_code_system as code_system, item.test_code as code,
+                 request.test_code_system as order_code_system, request.test_code as order_code
+            from lab.work_items item join ehr.lab_requests request on request.id = item.source_ehr_order_id
+           where $1 = 'lab' and item.id = 'c1556004-0000-4000-8000-000000000001'
+          union all
+          select item.medication_code_system, item.medication_code, rx.medication_code_system, rx.medication_code
+            from pharmacy.work_items item join ehr.prescriptions rx on rx.id = item.source_ehr_prescription_id
+           where $1 = 'pharmacy' and item.id = 'c1556005-0000-4000-8000-000000000001') pair;
+$$;
+select pg_temp.expect('4au for Billing: an order of a facility item carries HID-FACILITY and the item''s id into the lab and pharmacy work items unchanged; a changed pair is refused',
+  'lab, upper case: 23514 Lab work item does not match the exact active EHR order version and actor context | '
+  || 'pharmacy, upper case: 23514 PRESCRIPTION_SOURCE_MISMATCH | lab: ok 1 | pharmacy: ok 1 | '
+  || 'lab work item: HID-FACILITY ' || pg_temp.item(2) || ' same as the order | '
+  || 'pharmacy work item: HID-FACILITY ' || :'c155_item3' || ' same as the order',
+  'lab, upper case: ' || pg_temp.lab_accept(upper(pg_temp.item(2)::text), 'c155-billing-lab-0001')
+  || ' | pharmacy, upper case: ' || pg_temp.pharmacy_accept(upper(:'c155_item3'), 'c155-billing-pharmacy-0001')
+  || ' | lab: ' || pg_temp.lab_accept(pg_temp.item(2)::text, 'c155-billing-lab-0002')
+  || ' | pharmacy: ' || pg_temp.pharmacy_accept(:'c155_item3', 'c155-billing-pharmacy-0002')
+  || ' | lab work item: ' || pg_temp.work_item_pair('lab')
+  || ' | pharmacy work item: ' || pg_temp.work_item_pair('pharmacy'));
+
 -- 5. The table's owner: it reads every facility's items (its read policy,
 -- which the definer search and status need under FORCE); under FORCE its
 -- UPDATE changes no row. A superuser owner skips row security.
@@ -1538,7 +1630,7 @@ rollback to savepoint undo;
 
 do $$
 declare
-  wanted integer := case when exists (select 1 from pg_extension where extname = 'dblink') then 85 else 79 end;
+  wanted integer := case when exists (select 1 from pg_extension where extname = 'dblink') then 86 else 80 end;
 begin
   if currval('pg_temp.c155_passed') is distinct from wanted then
     raise exception '0155 facility items suite failed: % cases ran, % expected', currval('pg_temp.c155_passed'), wanted;
