@@ -260,6 +260,17 @@ describe('ORD-11 the client refuses a broken answer (502)', () => {
     expect(Object.keys(init.headers).filter((name) => name.startsWith('x-hid-service'))).toEqual([]);
   });
 
+  it('Seen: the answered id is the one sent, in any letter case', async () => {
+    // ehr-api's UUID check takes upper case, and the database answers the id in lower case.
+    const lettered = '70000000-0000-4000-8000-00000000abcd';
+    const seen = { ...notice, noticeId: lettered, seenAt: '2026-11-26T10:00:00.000Z', readAt: null, version: 2 };
+    respond(seen);
+    await expect(offline.markOrderNoticeSeen(lettered.toUpperCase(), context)).resolves.toMatchObject({
+      noticeId: lettered, seenAt: '2026-11-26T10:00:00.000Z' });
+    respond({ ...seen, noticeId: noticeB });
+    expect(await problemOf(offline.markOrderNoticeSeen(lettered.toUpperCase(), context))).toMatchObject({ status: 502 });
+  });
+
   it('keeps a kind it does not know; refuses a patient shown on a notice whose access ended', async () => {
     respond({ items: [{ ...notice, kind: 'a_later_kind' }], nextCursor: null });
     expect((await offline.listOrderNotices({ state: 'all' }, context)).items[0]!.kind).toBe('a_later_kind');

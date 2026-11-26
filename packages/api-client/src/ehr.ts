@@ -195,7 +195,10 @@ export class EhrApiClient {
   async markOrderNoticeSeen(noticeId: string, context: EhrRequestContext, signal?: AbortSignal): Promise<EhrOrderNotice> {
     const notice = parseOrderNotice(await this.request(
       `/api/v1/ehr/me/order-notices/${encodeURIComponent(noticeId)}/seen`, 'POST', {}, context, undefined, signal, null));
-    if (notice.noticeId !== noticeId || notice.seenAt === null) throw new EhrApiProblem(502, notice);
+    // ehr-api takes the id in either case and answers it in lower case.
+    if (notice.noticeId.toLowerCase() !== noticeId.toLowerCase() || notice.seenAt === null) {
+      throw new EhrApiProblem(502, notice);
+    }
     return notice;
   }
 
