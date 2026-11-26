@@ -1401,13 +1401,13 @@ begin
           requested_request_sha256);
       end if;
     elsif admission_row.source = 'waiting_list' then
-      -- The patient may have been put on the emergency board (0168) while waiting for a bed: the row then has an open
-      -- or decided ED record, and 0168's guard refuses any change of the row that the board's marker does not name.
-      -- 0168's interface (its header, "The board's marker"): lock the ED record, then the row, FOR UPDATE; set
+      -- The patient may have been put on the emergency board (ED-1) while waiting for a bed: the row then has an open
+      -- or decided ED record, and ED-1's guard refuses any change of the row that the board's marker does not name.
+      -- ED-1's interface (its migration's header, "The board's marker"): lock the ED record, then the row, FOR UPDATE; set
       -- hid.ed_board_closing to the row's id (transaction-local) just before the UPDATE and back to '' straight
       -- after; close the ED record here (the mirror stays out while the marker names the row). The record is read
       -- again under the row's lock, so one that arrived on the board after the first read (its arrival locks the row
-      -- first) is closed too; that late lock is taken row first, as 0168's mirror takes it.
+      -- first) is closed too; that late lock is taken row first, as ED-1's mirror takes it.
       select attendance.* into attendance_row from ehr.ed_attendances attendance
        where attendance.visit_queue_entry_id = admission_row.visit_queue_entry_id and attendance.status <> 'closed'
        for update;
@@ -2776,7 +2776,7 @@ begin
        'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
       ('ehr.admission_read(uuid)', false, true, 'v', '4ce67edf1482caf0cacf30fd45ba009d',
        'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
-      ('ehr.admission_admit(uuid,bigint,uuid,boolean,text,text)', false, true, 'v', 'dcacacc740a64578bcbb87c34b25e183',
+      ('ehr.admission_admit(uuid,bigint,uuid,boolean,text,text)', false, true, 'v', 'd7f543d23655145d4ca6d0508f171a79',
        'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
       ('ehr.admission_transfer(uuid,bigint,uuid,text,boolean,text,text)', false, true, 'v', '15520cb723672f1e9b3ae546d460e290',
        'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),

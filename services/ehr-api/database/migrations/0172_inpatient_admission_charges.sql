@@ -401,7 +401,7 @@ begin
   begin
     select * into sums from commercial.bill_sums(requested_bill);
     select bill_row.* into bill from commercial.bills bill_row where bill_row.id = requested_bill;
-    -- 0172 (ADT-1): on an admission bill a deposit may be more than what is due; what was collected beyond the total
+    -- ADT-1: on an admission bill a deposit may be more than what is due; what was collected beyond the total
     -- is the bill's credit, never a refund due or cover over the bill. Any other bill holds no credit.
     credit := case when bill.source = 'admission'
                    then greatest(sums.paid_kobo + sums.pending_check_kobo + sums.waived_kobo + sums.hmo_covered_kobo
@@ -445,9 +445,9 @@ begin
        and (bill.paid_kobo + bill.pending_check_kobo + bill.waived_kobo + bill.hmo_covered_kobo <= bill.total_kobo
             or exists (select 1 from commercial.bill_lines line where line.bill_id = bill.id and line.cancelled
                         and line.dispensing_reversed_at is not null)
-            -- 0172 (ADT-1): a deposit on an admission bill may be more than what is due.
+            -- ADT-1: a deposit on an admission bill may be more than what is due.
             or bill.source = 'admission')
-       -- 0172 (ADT-1): on an admission bill what was collected beyond the total is its credit, never a refund due or
+       -- ADT-1: on an admission bill what was collected beyond the total is its credit, never a refund due or
        -- cover over the bill; any other bill holds no credit.
        and bill.refund_due_kobo = case when bill.source = 'admission' then 0
              else least(greatest(sums.paid_kobo + sums.pending_check_kobo + sums.waived_kobo
@@ -487,7 +487,7 @@ begin
       'totalKobo', bill.total_kobo, 'paidKobo', bill.paid_kobo, 'waivedKobo', bill.waived_kobo,
       'hmoCoveredKobo', bill.hmo_covered_kobo, 'pendingCheckKobo', bill.pending_check_kobo, 'dueKobo', bill.due_kobo,
       'refundDueKobo', bill.refund_due_kobo, 'coverOverKobo', bill.cover_over_kobo,
-      -- 0172 (ADT-1, Q189 A): the admission bill's credit and stay.
+      -- ADT-1 (Q189 A): the admission bill's credit and stay.
       'creditKobo', bill.credit_kobo,
       'admission', case when bill.admission_id is null then null
                         else (select jsonb_build_object('admissionId', admission.id,
@@ -532,7 +532,7 @@ begin
     entry_value uuid;
     bill_id uuid;
   begin
-    -- 0172 (ADT-1, Q173 A): work for a patient with an open admission here goes on the admission bill.
+    -- ADT-1 (Q173 A): work for a patient with an open admission here goes on the admission bill.
     select bill.id into bill_id
       from commercial.bills bill
       join ehr.admissions admission on admission.id = bill.admission_id
@@ -590,7 +590,7 @@ begin
     receipt text;
     payment_id uuid;
     cover_id uuid;
-    -- 0172 (ADT-1, Q-ADT-14 A): a deposit on an admission bill while the stay is open.
+    -- ADT-1 (Q-ADT-14 A): a deposit on an admission bill while the stay is open.
     kind_value text := coalesce(requested->>'kind', 'payment');
   begin
     select * into actor from commercial.caller('billing.payment.record');
@@ -1216,11 +1216,11 @@ begin
   end if;
   select string_agg(expected.signature, ', ') into v_mismatch
     from (values
-      ('commercial.bill_for_work(uuid,uuid,text)', '4d0b477b431969fe565d7e85c21151a1'),
-      ('commercial.payment_record(uuid,jsonb,bigint,text,text)', 'be5c48fa4a92c2a703709a1f6e6ccff3'),
-      ('commercial.bill_recompute(uuid)', 'd8ac034327231a27be7e7d86365f229e'),
-      ('commercial.bill_totals_agree(uuid)', '905a6b2d1013ea2dc224de61391cb02a'),
-      ('commercial.bill_json(uuid)', 'ab73b8cf00a41a1fc37424d29f95813f')
+      ('commercial.bill_for_work(uuid,uuid,text)', '8913a0fbfa5a6c0c8e80fd9e5b477eee'),
+      ('commercial.payment_record(uuid,jsonb,bigint,text,text)', '2587fe66d1b2a8af4c3f9af480474751'),
+      ('commercial.bill_recompute(uuid)', '7106160e375db6012346a7f168d96c6e'),
+      ('commercial.bill_totals_agree(uuid)', '5cbae06f789449518a9361708d491375'),
+      ('commercial.bill_json(uuid)', '6cbeca3b8b73198e87ac36464a68c1c5')
     ) expected(signature, body_md5)
    where (select md5(proc.prosrc) from pg_proc proc where proc.oid = to_regprocedure(expected.signature))
          is distinct from expected.body_md5;
@@ -1331,15 +1331,15 @@ begin
   -- keeps a replaced function's owner and grants.
   select string_agg(expected.signature, ', ' order by expected.signature) into v_post_mismatch
     from (values
-      ('commercial.bill_recompute(uuid)', true, false, 'v', 'd8ac034327231a27be7e7d86365f229e',
+      ('commercial.bill_recompute(uuid)', true, false, 'v', '7106160e375db6012346a7f168d96c6e',
        'search_path=pg_catalog, pg_temp', null),
-      ('commercial.bill_totals_agree(uuid)', true, false, 's', '905a6b2d1013ea2dc224de61391cb02a',
+      ('commercial.bill_totals_agree(uuid)', true, false, 's', '5cbae06f789449518a9361708d491375',
        'search_path=pg_catalog, pg_temp', null),
-      ('commercial.bill_json(uuid)', true, false, 's', 'ab73b8cf00a41a1fc37424d29f95813f',
+      ('commercial.bill_json(uuid)', true, false, 's', '6cbeca3b8b73198e87ac36464a68c1c5',
        'search_path=pg_catalog, pg_temp', null),
-      ('commercial.bill_for_work(uuid,uuid,text)', true, false, 'v', '4d0b477b431969fe565d7e85c21151a1',
+      ('commercial.bill_for_work(uuid,uuid,text)', true, false, 'v', '8913a0fbfa5a6c0c8e80fd9e5b477eee',
        'search_path=pg_catalog, pg_temp', null),
-      ('commercial.payment_record(uuid,jsonb,bigint,text,text)', true, true, 'v', 'be5c48fa4a92c2a703709a1f6e6ccff3',
+      ('commercial.payment_record(uuid,jsonb,bigint,text,text)', true, true, 'v', '2587fe66d1b2a8af4c3f9af480474751',
        'search_path=pg_catalog, pg_temp', null),
       ('commercial.payments_deposit_guard()', false, false, 'v', '11115e3c6dc6625ea8a0951f9ff6e82b',
        'search_path=pg_catalog, pg_temp', array[]::text[]),
