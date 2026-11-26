@@ -222,7 +222,9 @@ begin
   -- pharmacy.open_refill_work_items (the prescription-refills suite, cases
   -- 13, 14 and 16: they read ehr.prescriptions under 0154's refill scan
   -- marker; its test, pharmacy.refill_scan_open, names no
-  -- ehr.prescriptions).
+  -- ehr.prescriptions), and, once 0159 (ORD-11) is applied, its list and
+  -- Seen, ehr.list_order_notices and ehr.mark_order_notice_seen (they read
+  -- an order only for the session's own notices: the order-notices suite).
   perform pg_temp.expect('1g no 0148 body names ehr.prescriptions or the sends table; 0133''s S7 list (with 0154''s readers)',
     (select count(*) from pg_proc proc
       where proc.oid in ('pharmacy.work_item_changes_after_dispensing(uuid[])'::regprocedure,
@@ -231,6 +233,7 @@ begin
     || ' | ' || (select string_agg(proc.oid::regprocedure::text, ' ' order by proc.oid::regprocedure::text) from pg_proc proc
                   where proc.prosecdef and proc.prosrc ~* 'ehr\.prescriptions' and proc.proowner = validator_owner),
     '0 | ehr.list_my_orders(text[],boolean,date,timestamp with time zone,text,uuid,integer) '
+    || 'ehr.list_order_notices(text,uuid,integer) ehr.mark_order_notice_seen(uuid) '
     || 'ehr.patient_list_order_routes() ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,'
     || 'character) ehr.send_prescription_to_own_pharmacy(uuid,bigint) ehr.withdraw_own_pharmacy_send(uuid) '
     || 'identity.decide_unknown_patient(uuid,text,bigint,text,text,text) '
