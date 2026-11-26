@@ -218,7 +218,7 @@ test('0154\'s two busy refusals, read from the file, are ones the dry run retrie
     messages.push([...literals[1].matchAll(/'((?:[^']|'')*)'/g)].map((part) => part[1].replaceAll("''", "'")).join(''));
   }
   const tables = 'pharmacy.dispensings, ehr.prescriptions or a table 0154 reads (the Pharmacy work items, the order '
-    + 'routes or 0133\'s claims)';
+    + 'routes, 0133\'s claims or the dispensing reversals)';
   assert.deepEqual(messages, [
     `0154: ${tables} is busy, and this transaction already holds an earlier migration's locks, so it does not wait; `
       + `nothing applied; ${tail}`,
@@ -230,4 +230,27 @@ test('0154\'s two busy refusals, read from the file, are ones the dry run retrie
     assert.equal(isBusyRefusal(new MigrationFileError('0153_clinician_recent_diagnoses.sql', databaseError('55P03', message))), false);
     assert.equal(isBusyRefusal(new MigrationFileError(file, databaseError('57014', message))), false);
   }
+});
+
+test('0154 locks, NOWAIT and before it prints them, every table whose policies or keys it prints', async () => {
+  // pg_get_expr and pg_get_constraintdef open the table they print for, so a table section 3 prints and section 2
+  // does not lock waits behind DDL for the runner's lock_timeout, with the two ACCESS EXCLUSIVE locks held, and
+  // fails with the server's message, which the dry run does not retry (Rahman's review of #331, 25 November 2026:
+  // pharmacy.dispensing_reversals' policies).
+  const sql = await readFile(path.join(scripts, '../database/migrations/0154_prescription_refills.sql'), 'utf8');
+  const section2 = sql.slice(sql.indexOf('\n-- 2. Locks (see Locks)'), sql.indexOf('\n-- 3. Under the locks:'));
+  const shared = /lock table ([^;]+?) in access share mode nowait;/.exec(section2);
+  const exclusive = /lock table ([^;]+?) in access exclusive mode nowait;/.exec(section2);
+  assert.ok(shared && exclusive, 'section 2 takes ACCESS SHARE and then ACCESS EXCLUSIVE, NOWAIT');
+  assert.ok(section2.indexOf(shared[0]) < section2.indexOf(exclusive[0]), 'the weak locks first');
+  const listed = (statement) => statement.split(',').map((name) => name.trim());
+  assert.deepEqual(listed(shared[1]), ['pharmacy.work_items', 'ehr.order_routes', 'pharmacy.prescription_item_claims',
+    'pharmacy.dispensing_reversals']);
+  assert.deepEqual(listed(exclusive[1]), ['pharmacy.dispensings', 'ehr.prescriptions']);
+  const locked = new Set([...listed(shared[1]), ...listed(exclusive[1])]);
+  // Section 3's policy check names the tables whose policies it prints; its CHECK and key checks name theirs.
+  const section3 = sql.slice(sql.indexOf('\n-- 3. Under the locks:'), sql.indexOf('\n-- 4. R8, '));
+  const printed = new Set([...section3.matchAll(/'([a-z_]+\.[a-z_]+)'::regclass/g)].map((found) => found[1]));
+  assert.ok(printed.has('pharmacy.dispensing_reversals'));
+  for (const table of printed) assert.ok(locked.has(table), `section 3 prints for ${table}, which section 2 does not lock`);
 });

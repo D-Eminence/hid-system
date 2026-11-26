@@ -105,7 +105,7 @@ create function pg_temp.untouched_bodies() returns text language sql as $f$
       ('pharmacy.validate_work_item()', array['e2411539ee8c95a02dad46c03e24db05']),
       -- 0101's body, or 0154's (ORD-12: 0101's with a refill block before
       -- its RETURN; it still reads the row through %ROWTYPE).
-      ('pharmacy.validate_dispensing()', array['17f7e8897bd2ab240332e4d2c9f757b7', '06be902c41bcd4ee65f7f840c120db8f']),
+      ('pharmacy.validate_dispensing()', array['17f7e8897bd2ab240332e4d2c9f757b7', '71cbc33c8643a6f6790ead6d24a7597e']),
       -- 0098's body, or 0123's (the sealed QA tenant: 0098's plus one clause),
       -- or 0133's (D14: 0123's with the hunks marked "0133 D14").
       ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)',

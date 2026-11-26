@@ -49,7 +49,8 @@
 --      zones (the Lagos day, not the session's);
 --   4. a route-backed item: one fill (fill 2 after it: ORDER_ROUTE_CLOSED;
 --      a fill 2 as its first: NO_REFILLS_LEFT), whatever refills_allowed;
---      the own item released by the route: sent_elsewhere;
+--      the own item released by the route: sent_elsewhere (a refill of it
+--      with no fill: not the next fill number);
 --   5. any change after the first fill ends the refills: an edit, a hold
 --      then resume, a completion (0101's check);
 --   6. double dispensing: a second refill with the same fill number (two
@@ -97,7 +98,9 @@
 --      each of the work items' two read policies alone, as the per-item
 --      reader; the same under a superuser owner and a NOSUPERUSER
 --      NOBYPASSRLS one; the read policies asked only of the due items it
---      answers, own-work half first, 200 at most (14e);
+--      answers, own-work half first, 200 at most (14e); and with the 20
+--      earliest due items unreadable to a session on consent alone, the
+--      first 200 it may read, not 180 (14f);
 --  15. the refill interval (cases' own text below);
 --  16. the refill scan marker (R9, D8): no runtime role may read or write
 --      its table; the owner with a session but no marker, and the EHR
@@ -123,7 +126,18 @@
 --      condition on the index only under an owner that bypasses row-level
 --      security; a late fill (a refill whose day would come after the last
 --      day) is ended at once in R6, R4 and R7, and a refill whose day is the
---      last day is not_yet until then (17g).
+--      last day is not_yet until then (17g);
+--  18. R4's two hardenings (Rahman's review of 25 November 2026; the
+--      clinical owner's calls of 26 November 2026): a refill's number must
+--      be the next (no gap, no number twice, a reversed fill counts); no
+--      refill dispensed in the future; a backdated refill stays allowed and
+--      the interval rule treats it as any refill: judged on the day it is
+--      entered (recorded once open, even if dated before its day; refused
+--      REFILL_TOO_SOON before it, whatever its dispensed_at), and its own
+--      dispensed_at times the next refill (R6 says so too); with every fill
+--      reversed, no wait, whatever its dispensed_at; the last day is judged
+--      on today; a first fill's dispensed_at is checked as before (not at
+--      all).
 -- Fixtures inserted as the suite runner with session_replication_role =
 -- replica where the services would not write them (identity rows, the
 -- outside pharmacy's approval). Synthetic values only; uuid prefix e152.
@@ -199,7 +213,7 @@ begin
            proc.provolatile, proc.proisstrict, proc.proconfig), '; ')
     into mismatch
     from (values
-      ('pharmacy.validate_dispensing()', '06be902c41bcd4ee65f7f840c120db8f', '{"search_path=pharmacy, platform, pg_temp"}'),
+      ('pharmacy.validate_dispensing()', '71cbc33c8643a6f6790ead6d24a7597e', '{"search_path=pharmacy, platform, pg_temp"}'),
       ('pharmacy.claim_prescription_dispensing()', '1a50612f5330a36c9b64d0d831c77812', '{"search_path=pg_catalog, pg_temp"}'),
       ('pharmacy.prescription_change_after_dispensing()', 'f61173d77be391a9e9c96db494827e82',
        '{"search_path=pg_catalog, pg_temp"}')) expected(proc_name, digest, config)
@@ -218,13 +232,21 @@ begin
   -- (the validator was on it already). Cases 13 and 14 show the readers give
   -- the pharmacist nothing the Pharmacy runtime may not select itself, and
   -- own-facility-pharmacy-lab-work's case 8 that the EHR runtime may not run
-  -- them.
+  -- them. Where Billing's 0167 is applied too (its hook on
+  -- pharmacy.dispensings, zz_billing_stock_and_gate, is there; Rahman's
+  -- release-order review of 25 November 2026), its acceptance hook,
+  -- commercial.hook_pharmacy_acceptance(), which reads a prescription's
+  -- price, is on the list as well, and nothing else is.
   perform pg_temp.expect('1d the claim function names no ehr.prescriptions; 0133''s S7 list gains the two readers alone',
     (select count(*) from pg_proc proc
       where proc.oid = 'pharmacy.claim_prescription_dispensing()'::regprocedure and proc.prosrc ~* 'ehr\.prescriptions')
     || ' | ' || (select string_agg(proc.oid::regprocedure::text, ' ' order by proc.oid::regprocedure::text) from pg_proc proc
                   where proc.prosecdef and proc.prosrc ~* 'ehr\.prescriptions' and proc.proowner = owner_oid),
-    '0 | ehr.list_my_orders(text[],boolean,date,timestamp with time zone,text,uuid,integer) '
+    '0 | ' || case when exists (select 1 from pg_trigger trigger_row
+                                 where trigger_row.tgrelid = 'pharmacy.dispensings'::regclass
+                                   and trigger_row.tgname = 'zz_billing_stock_and_gate')
+                   then 'commercial.hook_pharmacy_acceptance() ' else '' end
+    || 'ehr.list_my_orders(text[],boolean,date,timestamp with time zone,text,uuid,integer) '
     || 'ehr.patient_list_order_routes() ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,'
     || 'character) ehr.send_prescription_to_own_pharmacy(uuid,bigint) ehr.withdraw_own_pharmacy_send(uuid) '
     || 'identity.decide_unknown_patient(uuid,text,bigint,text,text,text) '
@@ -232,17 +254,30 @@ begin
     || 'pharmacy.validate_work_item() pharmacy.validate_work_item_acceptance() pharmacy.work_item_refills(uuid[])');
   -- 1e. The five triggers on pharmacy.dispensings: the validator, the
   -- immutability guard and 0086's route return in origin mode; 0133's claim
-  -- and key guard always.
+  -- and key guard always; and, only where Billing's 0167 is applied,
+  -- exactly its zz_billing_stock_and_gate as a sixth (BEFORE INSERT FOR
+  -- EACH ROW, origin mode; it sorts last, so it fires after the validator),
+  -- which 0154's precondition g and post-check accept, and nothing else.
   perform pg_temp.expect('1e the triggers on pharmacy.dispensings and their modes',
     (select string_agg(trigger_row.tgname || ':' || trigger_row.tgfoid::regprocedure::text || ':' || trigger_row.tgtype
               || ':' || trigger_row.tgenabled::text, ' ' order by trigger_row.tgname::text collate "C")
        from pg_trigger trigger_row
-      where trigger_row.tgrelid = 'pharmacy.dispensings'::regclass and not trigger_row.tgisinternal),
+      where trigger_row.tgrelid = 'pharmacy.dispensings'::regclass and not trigger_row.tgisinternal
+        and trigger_row.tgname <> 'zz_billing_stock_and_gate')
+    || coalesce(' | ' || (select string_agg(trigger_row.tgname || ':' || trigger_row.tgfoid::regprocedure::text || ':'
+                            || trigger_row.tgtype || ':' || trigger_row.tgenabled::text, ' ')
+                            from pg_trigger trigger_row
+                           where trigger_row.tgrelid = 'pharmacy.dispensings'::regclass
+                             and trigger_row.tgname = 'zz_billing_stock_and_gate'), ''),
     'dispensings_claim_prescription:pharmacy.claim_prescription_dispensing():5:A '
     || 'dispensings_order_route_return:pharmacy.return_order_route_dispensing():5:O '
     || 'pharmacy_dispensing_validate:pharmacy.validate_dispensing():7:O '
     || 'pharmacy_dispensings_immutable:pharmacy.reject_immutable_evidence():27:O '
-    || 'prescription_claim_key_immutable:pharmacy.refuse_claim_key_change():19:A');
+    || 'prescription_claim_key_immutable:pharmacy.refuse_claim_key_change():19:A'
+    || case when exists (select 1 from pg_trigger trigger_row
+                          where trigger_row.tgrelid = 'pharmacy.dispensings'::regclass
+                            and trigger_row.tgname = 'zz_billing_stock_and_gate')
+            then ' | zz_billing_stock_and_gate:commercial.hook_dispensing():7:O' else '' end);
   -- 1f. The runtimes, through any membership: the EHR runtime writes
   -- refills_allowed (table-wide INSERT and UPDATE; ehr-api's PATCH never
   -- names it), the Pharmacy runtime reads and inserts fill_number and never
@@ -649,8 +684,10 @@ $f$;
 -- 12 today, 40 days apart, after every interval of cases 2-14 (30 days: 23
 -- days), as if the patient came back for each refill when due. pharmacy-api
 -- never names dispensed_at (its default, the time of the INSERT); the
--- validator reads it only to find the latest fill's Lagos day, and compares
--- with today, never with the new row's time.
+-- validator reads it only to find the latest fill's Lagos day, and to
+-- refuse a refill dispensed in the future (case 18), and compares with
+-- today, never with the new row's time, so a backdated refill is judged as
+-- one recorded now (case 18).
 create function pg_temp.dispense_sql(work_item uuid, member integer, fill integer default null,
   as_of timestamptz default null) returns text
 language sql security definer as $f$
@@ -888,10 +925,12 @@ select pg_temp.expect('4a rx8 at F4: fill 1 passes; fill 2 is refused (the first
   pg_temp.fill(8, 1, 3, true) || ',' || pg_temp.fill(8, 2, 3, true), 'ok,23514 ORDER_ROUTE_CLOSED / -');
 select pg_temp.expect('4b rx9 at F4, its route still accepted: a fill 2 as its first is refused NO_REFILLS_LEFT',
   pg_temp.fill(9, 2, 3, true), '23514 NO_REFILLS_LEFT / -');
-select pg_temp.expect('4c rx8''s own item at F1 (released by the route): a first fill and a refill are refused by the '
-    || 'claim, sent elsewhere',
+-- (A refill of it is refused by the validator first, as it has no fill:
+-- not the next fill number; case 7b shows the claim refuses it too.)
+select pg_temp.expect('4c rx8''s own item at F1 (released by the route): a first fill is refused by the claim, sent '
+    || 'elsewhere; a refill is not the next fill (none recorded)',
   pg_temp.fill(8, 1) || ',' || pg_temp.fill(8, 2), '23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE / sent_elsewhere,'
-  || '23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE / sent_elsewhere');
+  || '23514 REFILL_NOT_NEXT_FILL / 0');
 
 -- 5. Any change after the first fill ends the refills (0101's check of the
 -- version and the status).
@@ -907,13 +946,25 @@ select pg_temp.expect('5c rx12: fill 1, completed, then a refill is refused',
 
 -- 6. Double dispensing on rx13 (refills 2). Two refills recorded at once
 -- both pass the validator (its FOR SHARE does not wait for another FOR
--- SHARE) and carry the same fill number (both counted one fill); the
--- second meets the key (PostgreSQL leaves the key's values out of the
--- message under row-level security). Today's pharmacy-api (no fill number)
--- records fill 1 again: the key too.
-select pg_temp.expect('6a rx13: fill 1, then two refills numbered 2: the second meets the key',
+-- SHARE, and neither counts the other's uncommitted fill) and carry the
+-- same fill number (both counted one fill); the second meets the key. One
+-- session cannot record them at once: here a second refill numbered 2,
+-- after the first, is refused by the validator, which counts two fills
+-- (REFILL_NOT_NEXT_FILL, DETAIL 2: the review of 25 November 2026), and the
+-- key itself is shown in replica mode, where the validator does not fire
+-- (PostgreSQL leaves the key's values out of the message under row-level
+-- security). Today's pharmacy-api (no fill number) records fill 1 again:
+-- the key too.
+select pg_temp.expect('6a rx13: fill 1, then a second refill numbered 2: not the next fill (two are recorded)',
   pg_temp.fill(13, 1) || ' ' || pg_temp.fill(13, 2) || ' ' || pg_temp.fill(13, 2),
-  'ok ok 23505 duplicate key value violates unique constraint "dispensings_work_item_fill_number_key" / -');
+  'ok ok 23514 REFILL_NOT_NEXT_FILL / 2');
+savepoint refills_key;
+set local session_replication_role = replica;
+select pg_temp.expect('6a rx13: a second fill 2 without the validator (replica mode) meets the key',
+  pg_temp.fill(13, 2),
+  '23505 duplicate key value violates unique constraint "dispensings_work_item_fill_number_key" / -');
+set local session_replication_role = origin;
+rollback to savepoint refills_key;
 select pg_temp.expect('6b rx13: today''s pharmacy-api INSERT (no fill number) is fill 1 again: the key',
   split_part(pg_temp.fill(13, null), ' / ', 1), '23505 duplicate key value violates unique constraint "dispensings_work_item_fill_number_key"');
 select pg_temp.expect('6c a fill number of 0, or null: the CHECK and NOT NULL',
@@ -946,13 +997,15 @@ select pg_temp.expect('7e replica (stated limit): the refill count and the end d
 set local session_replication_role = origin;
 rollback to savepoint refills_replica;
 
--- 8. A reversed fill still counts (rx15, refills 1).
+-- 8. A reversed fill still counts (rx15, refills 1), and its number is
+-- not taken again (a refill must be the next number, case 18a).
 select pg_temp.expect('8a rx15: fill 1, reversed; fill 2 passes; fill 3 is refused',
   pg_temp.fill(15, 1) || ' ' || pg_temp.reverse(15, 1) || ' ' || pg_temp.fill(15, 2) || ' ' || pg_temp.fill(15, 3),
   'ok ok ok 23514 NO_REFILLS_LEFT / -');
 select pg_temp.expect('8b rx15: fill 2 reversed too; still no fill 3; a reversed fill number is not taken again',
-  pg_temp.reverse(15, 2) || ' ' || pg_temp.fill(15, 3) || ' ' || left(pg_temp.fill(15, 2), 5) || ' '
-  || pg_temp.fills(pg_temp.work_item_of(pg_temp.rx(15))), 'ok 23514 NO_REFILLS_LEFT / - 23505 1r 2r');
+  pg_temp.reverse(15, 2) || ' ' || pg_temp.fill(15, 3) || ' ' || pg_temp.fill(15, 2) || ' '
+  || pg_temp.fills(pg_temp.work_item_of(pg_temp.rx(15))),
+  'ok 23514 NO_REFILLS_LEFT / - 23514 REFILL_NOT_NEXT_FILL / 2 1r 2r');
 
 -- 9. 0148's fingerprints (its recorder is not replaced). 9a: rx16 (null
 -- refills_allowed) fingerprints as it did before 0154 added the column (the
@@ -1125,7 +1178,7 @@ select pg_temp.expect('12 after the undo''s savepoint: 0154''s bodies again, and
   (select string_agg(md5(proc.prosrc), ' ' order by proc.proname) from pg_proc proc
     where proc.oid in ('pharmacy.validate_dispensing()'::regprocedure,
             'pharmacy.claim_prescription_dispensing()'::regprocedure)) || ' ' || pg_temp.fills_from(19, 1, 3),
-  '1a50612f5330a36c9b64d0d831c77812 06be902c41bcd4ee65f7f840c120db8f ok,ok,23514 NO_REFILLS_LEFT / -');
+  '1a50612f5330a36c9b64d0d831c77812 71cbc33c8643a6f6790ead6d24a7597e ok,ok,23514 NO_REFILLS_LEFT / -');
 
 -- 13. The reader, pharmacy.work_item_refills (0154's R6), through the
 -- Pharmacy runtime as the services call it. 'rxN:allowed/recorded/open/
@@ -1349,7 +1402,11 @@ insert into refills_bulk (label, n, refills, ends_on, fill_ages) values
   ('d22', 903, 2, null, array[interval '22 days']), ('d10', 904, 2, null, array[interval '10 days']),
   ('dE', 905, 2, pg_temp.lagos_day(-1), array[interval '40 days']),
   ('dN', 906, 1, null, array[interval '30 days', interval '25 days']);
-create function pg_temp.install_bulk(first_n integer, last_n integer) returns void language plpgsql as $f$
+create function pg_temp.install_bulk(first_n integer, last_n integer, patient integer default 2) returns void
+language plpgsql as $f$
+declare
+  patient_id uuid := ('e1520006-0000-4000-8000-00000000000' || patient)::uuid;
+  encounter_id uuid := ('e1520008-0000-4000-8000-00000000000' || patient)::uuid;
 begin
   set local session_replication_role = replica;
   update refills_bulk set prescription = ('e1520017-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid,
@@ -1358,7 +1415,7 @@ begin
   insert into ehr.prescriptions (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
     medication_code_system, medication_code, medication_display, dose_quantity, dose_unit, route_code, frequency,
     instructions, starts_on, ends_on, status, row_version, refills_allowed, duration_value, duration_unit)
-  select bulk.prescription, 'e1520008-0000-4000-8000-000000000002', 'e1520006-0000-4000-8000-000000000002',
+  select bulk.prescription, encounter_id, patient_id,
          'e1520001-0000-4000-8000-000000000001', pg_temp.account(1), pg_temp.membership(1), 'http://www.whocc.no/atc',
          'J01CA04', 'Amoxicillin 500 mg capsule (' || bulk.label || ')', 1, 'capsule', 'oral', 'Every 8 hours',
          'Take after food', pg_temp.lagos_day(-60), bulk.ends_on, 'active', 1, bulk.refills, 30, 'day'
@@ -1368,8 +1425,8 @@ begin
     medication_display, dose_quantity, dose_unit, route_code, frequency, instructions, starts_on, ends_on, prescribed_by,
     prescribed_at, accepted_by, accepted_by_membership_id, acceptance_reason, idempotency_key, request_sha256,
     correlation_id)
-  select bulk.item, 'e1520006-0000-4000-8000-000000000002', 'e1520001-0000-4000-8000-000000000001',
-         'e1520001-0000-4000-8000-000000000001', bulk.prescription, 1, 'e1520008-0000-4000-8000-000000000002', 'active',
+  select bulk.item, patient_id, 'e1520001-0000-4000-8000-000000000001',
+         'e1520001-0000-4000-8000-000000000001', bulk.prescription, 1, encounter_id, 'active',
          'http://www.whocc.no/atc', 'J01CA04', 'Amoxicillin 500 mg capsule (' || bulk.label || ')', 1, 'capsule',
          'oral', 'Every 8 hours', 'Take after food', pg_temp.lagos_day(-60), bulk.ends_on, pg_temp.account(1),
          clock_timestamp() - interval '60 days', pg_temp.account(1), pg_temp.membership(1),
@@ -1383,7 +1440,7 @@ begin
     insert into pharmacy.dispensings (id, work_item_id, work_item_version, patient_id, facility_id,
       medication_code_system, medication_code, medication_display, quantity_dispensed, quantity_unit, dispensed_by,
       dispensed_by_membership_id, dispensed_at, reason, idempotency_key, request_sha256, correlation_id, fill_number)
-    select gen_random_uuid(), bulk.item, 1, 'e1520006-0000-4000-8000-000000000002',
+    select gen_random_uuid(), bulk.item, 1, patient_id,
            'e1520001-0000-4000-8000-000000000001', 'http://www.whocc.no/atc', 'J01CA04',
            'Amoxicillin 500 mg capsule (' || bulk.label || ')', 30, 'capsule', pg_temp.account(2),
            pg_temp.membership(2), coalesce(bulk.fill_at, clock_timestamp() - bulk.fill_ages[fill_number]),
@@ -1570,6 +1627,39 @@ select pg_temp.expect('14e R7 asks the read policies of the due items it answers
                  join pg_class relation on relation.relowner = role_row.oid
                 where relation.oid = 'ehr.prescriptions'::regclass) then '200' else 'not counted' end || ' (due 204)');
 rollback to savepoint refills_two_hundred;
+-- 14f. The cap when the earliest due items are ones the session may not
+-- read (the review of 25 November 2026): a session that may read only on
+-- consent (PG without the own-work switch, a nurse's or a clinician's
+-- path) and 220 due items, the 20 earliest Ada's ('c1' to 'c20', filled at
+-- noon Lagos 460 days ago, so opened 437 days ago), which PG may not read
+-- here (its consent grant for Ada is taken away for this case), then
+-- 'o1' to 'o200', Bisi's, as in 14d. R7 answers the first 200 it may read,
+-- o1 to o200, not the 180 a LIMIT taken before the read test would leave
+-- (under an owner that bypasses row-level security only R7's own test
+-- keeps Ada's items out; under a NOSUPERUSER NOBYPASSRLS owner the work
+-- items' own policy does so first, so the case holds there trivially).
+-- PH (the own-work basis, which may read both) gets c1 to c20 and o1 to
+-- o180. Undone afterwards.
+savepoint refills_unreadable_first;
+insert into refills_bulk (label, n, refills, ends_on, fill_ages, fill_at)
+select 'o' || n, 1000 + n, 2, null, array[interval '450 days'], pg_temp.lagos_at(-450) + make_interval(secs => n)
+  from generate_series(1, 200) n;
+select pg_temp.install_bulk(1001, 1200);
+insert into refills_bulk (label, n, refills, ends_on, fill_ages, fill_at)
+select 'c' || n, 1300 + n, 2, null, array[interval '460 days'], pg_temp.lagos_at(-460) + make_interval(secs => n)
+  from generate_series(1, 20) n;
+select pg_temp.install_bulk(1301, 1320, 1);
+set local session_replication_role = replica;
+delete from identity.consent_grants
+ where patient_id = 'e1520006-0000-4000-8000-000000000001' and membership_id = pg_temp.membership(4);
+set local session_replication_role = origin;
+select pg_temp.expect('14f the cap counts only items the session may read, the earliest unreadable ones left out',
+  (select count(*) from refills_bulk bulk where bulk.label ~ '^[co][0-9]+$') || ' due | '
+  || pg_temp.labels(pg_temp.open_refills(4, false)) || ' | ' || pg_temp.labels(pg_temp.open_refills(2)),
+  '220 due | ' || (select string_agg('o' || n, ' ' order by n) from generate_series(1, 200) n) || ' | '
+  || (select string_agg('c' || n, ' ' order by n) from generate_series(1, 20) n) || ' '
+  || (select string_agg('o' || n, ' ' order by n) from generate_series(1, 180) n));
+rollback to savepoint refills_unreadable_first;
 
 -- 15. The refill interval (the clinical owner's decision, 24 November
 -- 2026): a refill opens on the Lagos day of the latest fill not reversed
@@ -2381,6 +2471,88 @@ select pg_temp.expect('17g under TimeZone Etc/GMT+12 (UTC-12): the same', pg_tem
   'L0:false/not_yet/10/10 L1:false/ended/-/10 | L0:23514 REFILL_TOO_SOON / 10 '
   || 'L1:23514 REFILL_PRESCRIPTION_ENDED / 10 | R7 none');
 reset timezone;
+
+-- 18. R4's two hardenings (Rahman's review of 25 November 2026; the
+-- clinical owner's calls on #258, 26 November 2026; no production writer
+-- reaches either: pharmacy-api sends fills so far + 1 and never names
+-- dispensed_at). Prescriptions written by DR and sent by D7 as
+-- ehr-api does, each lasting 10 days a fill (an 8-day refill interval),
+-- fill 1 recorded by PH as of noon Lagos 30 days ago (so the refill opened
+-- on day -22), each refill then as of the time named:
+--   rx70 (refills 3): the fill number must be the next one;
+--   rx71 (refills 3): a refill dispensed in the future;
+--   rx72 (refills 3), rx73 (refills 2), rx74 (refills 2, ends_on day -1):
+--   a refill entered later at the real time (backdated);
+--   rx75 (refills 2): a first fill dispensed in the future (fill 1 is
+--   checked as 0101 checks it).
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(1);
+select pg_temp.expect('18 fixtures: DR writes rx70-rx75 (10 days a fill) and D7 sends each',
+  (select string_agg(pg_temp.try(pg_temp.prescribe_sql(fixture.n, 2, fixture.refills, fixture.ends_on, 10, 'day'))
+            || ' ' || pg_temp.send(fixture.n), ',' order by fixture.n)
+     from (values (70, 3, null::date), (71, 3, null), (72, 3, null), (73, 2, null), (74, 2, pg_temp.lagos_day(-1)),
+                  (75, 2, null)) fixture(n, refills, ends_on)),
+  (select string_agg('ok sent:item', ',') from generate_series(70, 75)));
+reset role;
+select pg_temp.expect('18 fixtures: fill 1 of rx70-rx74 as of noon Lagos on day -30',
+  (select string_agg(pg_temp.fill(n, 1, as_of => pg_temp.lagos_at(-30)), ' ' order by n) from generate_series(70, 74) n),
+  'ok ok ok ok ok');
+-- 18a. The next number only: 1 + every fill the item has, a reversed one
+-- included (23514 REFILL_NOT_NEXT_FILL, DETAIL the fills recorded): fill
+-- 3 with one fill (a gap) is refused, fill 2 passes, fill 2 again and
+-- fill 4 are refused; once fill 3 is recorded and reversed, fill 3 again
+-- is refused and fill 4 is the next.
+select pg_temp.expect('18a a refill must be the next fill number: no gap, no number twice, a reversed fill counts',
+  pg_temp.fill(70, 3, as_of => clock_timestamp()) || ' | ' || pg_temp.fill(70, 2, as_of => pg_temp.lagos_at(-20)) || ' | '
+  || pg_temp.fill(70, 2, as_of => clock_timestamp()) || ' | ' || pg_temp.fill(70, 4, as_of => clock_timestamp()) || ' | '
+  || pg_temp.fill(70, 3, as_of => pg_temp.lagos_at(-10)) || ' ' || pg_temp.reverse(70, 3) || ' | '
+  || pg_temp.fill(70, 3, as_of => clock_timestamp()) || ' | ' || pg_temp.fill(70, 4, as_of => clock_timestamp()) || ' | '
+  || pg_temp.fills(pg_temp.work_item_of(pg_temp.rx(70))),
+  '23514 REFILL_NOT_NEXT_FILL / 1 | ok | 23514 REFILL_NOT_NEXT_FILL / 2 | 23514 REFILL_NOT_NEXT_FILL / 2 | ok ok | '
+  || '23514 REFILL_NOT_NEXT_FILL / 3 | ok | 1 2 3r 4');
+-- 18b. No refill dispensed in the future (23514 REFILL_DISPENSED_IN_FUTURE):
+-- a minute ahead, and tomorrow, are refused; now passes.
+select pg_temp.expect('18b a refill dispensed in the future is refused',
+  pg_temp.fill(71, 2, as_of => clock_timestamp() + interval '1 minute') || ' | '
+  || pg_temp.fill(71, 2, as_of => pg_temp.lagos_at(1)) || ' | ' || pg_temp.fill(71, 2, as_of => clock_timestamp()),
+  '23514 REFILL_DISPENSED_IN_FUTURE / - | 23514 REFILL_DISPENSED_IN_FUTURE / - | ok');
+-- 18c. How the interval rule treats a backdated refill (entered later at
+-- its real time, after an offline period; the clinical owner: it stays
+-- allowed): it is judged on the day it is entered, as a refill recorded now
+-- is, and its own dispensed_at times the next one. rx72's refill opened on
+-- day -22. Fill 2 dispensed on day -25 (before that day) and entered today
+-- is recorded; the reader then times the next refill from day -25 (open
+-- since day -17). Fill 3 dispensed on day -5 is recorded; the next opens on
+-- day 3 (not_yet, 3). Fill 4 dispensed on day -1 and entered today is
+-- refused REFILL_TOO_SOON with day 3, whatever its dispensed_at.
+select pg_temp.expect('18c a backdated refill: judged on the day it is entered; its own time times the next',
+  pg_temp.fill(72, 2, as_of => pg_temp.lagos_at(-25)) || ' | ' || pg_temp.refills(2, array[72]) || ' | '
+  || pg_temp.fill(72, 3, as_of => pg_temp.lagos_at(-5)) || ' | ' || pg_temp.refills(2, array[72]) || ' | '
+  || pg_temp.fill(72, 4, as_of => pg_temp.lagos_at(-1)) || ' | ' || pg_temp.fills(pg_temp.work_item_of(pg_temp.rx(72))),
+  'ok | rx72:3/2/true/-/-17 | ok | rx72:3/3/false/not_yet/3 | 23514 REFILL_TOO_SOON / '
+  || to_char(pg_temp.lagos_day(3), 'YYYY-MM-DD') || ' | 1 2 3');
+-- 18d. With every fill reversed there is no wait, whatever the refill's
+-- dispensed_at: rx73's fill 1 reversed today (the reader: open, its next
+-- day the reversal's, today); a refill dispensed on day -5 (after fill 1,
+-- before the reversal) and entered today is recorded, and the next waits
+-- from day -5 (opens on day 3).
+select pg_temp.expect('18d every fill reversed: no wait, whatever the refill''s dispensed_at',
+  pg_temp.reverse(73, 1) || ' | ' || pg_temp.refills(2, array[73]) || ' | '
+  || pg_temp.fill(73, 2, as_of => pg_temp.lagos_at(-5)) || ' | ' || pg_temp.refills(2, array[73]),
+  'ok | rx73:2/1/true/-/0 | ok | rx73:2/2/false/not_yet/3');
+-- 18e. The refills' last day is judged on today, whatever the refill's
+-- dispensed_at: rx74 ended yesterday; a refill dispensed on day -5 (after
+-- it opened, before the last day) and entered today is refused
+-- REFILL_PRESCRIPTION_ENDED with the last day.
+select pg_temp.expect('18e a backdated refill entered after the last day is refused as ended',
+  pg_temp.fill(74, 2, as_of => pg_temp.lagos_at(-5)),
+  '23514 REFILL_PRESCRIPTION_ENDED / ' || to_char(pg_temp.lagos_day(-1), 'YYYY-MM-DD'));
+-- 18f. A first fill's dispensed_at is checked as 0101 checks it (not at
+-- all: 0154 leaves fill 1 as it was): rx75's first fill dispensed tomorrow
+-- passes, and its refill waits from that day (opens in 9 days).
+select pg_temp.expect('18f a first fill dispensed in the future passes as before; its refill waits from that day',
+  pg_temp.fill(75, 1, as_of => pg_temp.lagos_at(1)) || ' | ' || pg_temp.refills(2, array[75]),
+  'ok | rx75:2/1/false/not_yet/9');
 
 do $$ begin raise notice 'prescription refills: every case passed'; end $$;
 rollback;
