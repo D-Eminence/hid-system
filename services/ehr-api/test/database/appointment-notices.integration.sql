@@ -56,8 +56,9 @@
 --   6. "My appointments": only in the patient's own live session; upcoming
 --      and past; every facility; no staff id or booking basis; audited;
 --   7. the call list: the session facility's booked appointments of one day,
---      the facility's own recorded phone ciphertext (or none); the nurse and
---      another facility's desk see nothing of it; audited per patient;
+--      the facility's own recorded phone ciphertext (or none); never a patient
+--      who has died or whose record was merged; the nurse and another
+--      facility's desk see nothing of it; audited per patient;
 --   8. privileges: the runtimes read no outbox and call only their own
 --      functions;
 --   9. audit rows hold no name, Health ID, phone, reason text or clinic name.
@@ -1164,6 +1165,25 @@ select pg_temp.check_case('7 B''s desk sees nothing of A''s', '(none)', pg_temp.
 select pg_temp.check_case('7 direct care only', '22023 APPOINTMENT_DIRECT_CARE_ONLY',
   pg_temp.call_list(1, :'n161_day', 'healthcare-operations'));
 reset role;
+-- A patient who has died or whose record was merged is not on the call list (each rolled back after): the check-in
+-- refuses them and no other reminder reaches them, so the desk never phones them.
+savepoint n161_call_list_patient_rule;
+update identity.patients set status = 'deceased' where id = pg_temp.patient(1);
+set local role hid_identity_api_runtime;
+select pg_temp.call_list(1, :'n161_day') as n161_call_list_deceased \gset
+reset role;
+rollback to savepoint n161_call_list_patient_rule;
+update identity.patients set status = 'merged' where id = pg_temp.patient(1);
+set local role hid_identity_api_runtime;
+select pg_temp.call_list(1, :'n161_day') as n161_call_list_merged \gset
+reset role;
+rollback to savepoint n161_call_list_patient_rule;
+select pg_temp.check_case('7 p1 deceased, then merged: not on the call list',
+  case when (pg_temp.slot(60 * 24 * 12 + 60) at time zone 'Africa/Lagos')::date = :'n161_day'::date
+       then 'Obi Remindtwo:AB33:-' else '(none)' end || '/'
+  || case when (pg_temp.slot(60 * 24 * 12 + 60) at time zone 'Africa/Lagos')::date = :'n161_day'::date
+       then 'Obi Remindtwo:AB33:-' else '(none)' end,
+  :'n161_call_list_deceased' || '/' || :'n161_call_list_merged');
 select pg_temp.check_case('7 audited: one read row for the desk''s list and one shown row per patient',
   'identity.appointment-call-list.read:1,identity.appointment-call-list.shown:'
   || case when (pg_temp.slot(60 * 24 * 12 + 60) at time zone 'Africa/Lagos')::date = :'n161_day'::date then 2 else 1 end,

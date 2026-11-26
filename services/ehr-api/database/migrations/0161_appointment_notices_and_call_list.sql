@@ -93,7 +93,9 @@
 --    patient actor).
 -- B6 identity.appointment_call_list(day, clinic, clinician) for route 11,
 --    EXECUTE hid_identity_runtime (only Identity holds the contact key): the
---    session facility's booked appointments that day, for a member with
+--    session facility's booked appointments that day whose patient is still
+--    active (never one who has died or is inactive, merged or deleted, as the
+--    check-in and the other reminder channels require), for a member with
 --    ehr.appointment.write, for direct care; each with the newest unerased phone
 --    ciphertext this facility recorded for the patient and the registration case
 --    it belongs to (the ciphertext's associated data), which identity-api
@@ -906,6 +908,10 @@ begin
               from ehr.appointments appointment
              where appointment.facility_id = actor_facility and appointment.appointment_day = requested_day
                and appointment.status = 'booked'
+               -- Only a patient who is still active: never one who has died or is inactive, merged or deleted (the
+               -- check-in refuses them, and the inbox, email and SMS reminders never reach them).
+               and exists (select 1 from identity.patients patient
+                            where patient.id = appointment.patient_id and patient.status = 'active')
                and (requested_clinic_id is null or appointment.clinic_id = requested_clinic_id)
                and (requested_clinician_membership_id is null
                     or appointment.clinician_membership_id = requested_clinician_membership_id)
@@ -947,7 +953,7 @@ begin
   end
   $fn$;
   comment on function identity.appointment_call_list(date, uuid, uuid) is
-    '0161 (APPT-1, Q-APPT-7 A): the session facility''s booked appointments on one Lagos day (optionally one clinic or clinician), at most 500, for the printable call list: name, last 4 of the Health ID, time, clinic, clinician id, and the newest unerased phone this facility recorded (ciphertext and its registration case; Identity decrypts). No reason, visit type or date of birth. Needs ehr.appointment.write here, for direct care. Audited (identity.appointment-call-list.read and one .shown row per patient).';
+    '0161 (APPT-1, Q-APPT-7 A): the session facility''s booked appointments of active patients on one Lagos day (optionally one clinic or clinician), at most 500, for the printable call list: name, last 4 of the Health ID, time, clinic, clinician id, and the newest unerased phone this facility recorded (ciphertext and its registration case; Identity decrypts). No reason, visit type or date of birth. Needs ehr.appointment.write here, for direct care. Audited (identity.appointment-call-list.read and one .shown row per patient).';
   revoke all on function identity.appointment_call_list(date, uuid, uuid) from public;
 
   -- Owners and EXECUTE.
