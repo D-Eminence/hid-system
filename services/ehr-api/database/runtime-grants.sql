@@ -2129,16 +2129,16 @@ grant execute on function
   ehr.appointment_my_list(uuid, text, integer, timestamptz, uuid) to hid_ehr_runtime;
 grant execute on function
   identity.appointment_call_list(date, uuid, uuid),
-  identity.appointment_sms_claim(integer),
-  identity.appointment_sms_record(uuid, text, text),
+  identity.appointment_sms_claim(text, integer),
+  identity.appointment_sms_record(uuid, text, text, text),
   identity.appointment_email_claim(text, integer, integer),
   identity.appointment_email_record(uuid, text, text, text) to hid_identity_runtime;
 revoke all on function
   ehr.appointment_send_reminders(integer),
   ehr.appointment_my_list(uuid, text, integer, timestamptz, uuid),
   identity.appointment_call_list(date, uuid, uuid),
-  identity.appointment_sms_claim(integer),
-  identity.appointment_sms_record(uuid, text, text),
+  identity.appointment_sms_claim(text, integer),
+  identity.appointment_sms_record(uuid, text, text, text),
   identity.appointment_email_claim(text, integer, integer),
   identity.appointment_email_record(uuid, text, text, text),
   ehr.appointment_notice(uuid, text, timestamptz),

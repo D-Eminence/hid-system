@@ -104,8 +104,8 @@ create function pg_temp.made0161() returns text language sql as $$
                                         to_regprocedure('ehr.appointment_send_reminders(integer)'),
                                         to_regprocedure('ehr.appointment_my_list(uuid,text,integer,timestamptz,uuid)'),
                                         to_regprocedure('identity.appointment_call_list(date,uuid,uuid)'),
-                                        to_regprocedure('identity.appointment_sms_claim(integer)'),
-                                        to_regprocedure('identity.appointment_sms_record(uuid,text,text)'),
+                                        to_regprocedure('identity.appointment_sms_claim(text,integer)'),
+                                        to_regprocedure('identity.appointment_sms_record(uuid,text,text,text)'),
                                         to_regprocedure('identity.appointment_email_claim(text,integer,integer)'),
                                         to_regprocedure('identity.appointment_email_record(uuid,text,text,text)')))
       || ' functions, ' || (select count(*) from platform.control_settings
@@ -248,8 +248,8 @@ create temporary table existing_tables as
 drop trigger appointment_events_notify on ehr.appointment_events;
 drop function ehr.appointment_events_notify(), ehr.appointment_notice(uuid, text, timestamptz),
   ehr.appointment_send_reminders(integer), ehr.appointment_my_list(uuid, text, integer, timestamptz, uuid),
-  identity.appointment_call_list(date, uuid, uuid), identity.appointment_sms_claim(integer),
-  identity.appointment_sms_record(uuid, text, text), identity.appointment_email_claim(text, integer, integer),
+  identity.appointment_call_list(date, uuid, uuid), identity.appointment_sms_claim(text, integer),
+  identity.appointment_sms_record(uuid, text, text, text), identity.appointment_email_claim(text, integer, integer),
   identity.appointment_email_record(uuid, text, text, text);
 drop table ehr.appointment_email_outbox, ehr.appointment_sms_outbox;
 delete from platform.control_settings where control_key = 'appointment_sms_reminders_enabled';
@@ -298,6 +298,16 @@ delete from platform.control_settings where control_key = 'uploads_enabled';
 rollback to savepoint s161;
 select pg_temp.expect('3e not exactly the 11 controls: refused, nothing applied',
   '55000 0161: platform.control_settings does not hold exactly the 11 controls 0001-0160 seed | '
+  || '0 tables, 0 functions, 0 control off, 0 audit rows',
+  pg_temp.answer('0161', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0161());
+
+-- A default privilege of schema identity that grants EXECUTE on new functions with grant option (to the Identity
+-- runtime, the role that should hold EXECUTE): 0161's post-check refuses it, nothing applied.
+alter default privileges in schema identity grant execute on functions to hid_identity_runtime with grant option;
+:run0161
+rollback to savepoint s161;
+select pg_temp.expect('3e2 a default privilege with grant option on the new functions: refused, nothing applied',
+  '55000 0161: post-check failed (the functions'' security or grants) | '
   || '0 tables, 0 functions, 0 control off, 0 audit rows',
   pg_temp.answer('0161', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0161());
 

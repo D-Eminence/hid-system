@@ -30,10 +30,25 @@
 --      facility, and after a sent one the moved appointment gets a new row;
 --      with it on, no SMS row for a deceased patient or one who turned
 --      notices off (the email's rule);
---   4. the SMS sender: nothing claimed while the control is off; a queued SMS
---      whose patient has since died or turned notices off is closed unsent
---      (PATIENT_NOT_REACHABLE) and never claimed; claim and record (sent,
---      stale) with one audit row; system:auth only;
+--   4. the SMS sender: nothing claimed while the control is off; 0161's own
+--      claim, run at the hour the suite runs and undone, leases between 07:00
+--      and 21:00 Lagos and none outside; then, in this transaction only, a
+--      copy of it whose one change is the sweep's settable clock line (owner,
+--      grants, SECURITY DEFINER and search_path kept): 0161's guard at its
+--      edges (none at 06 and 21, the SMS at 07 and 20), and the rest of 4 at
+--      noon Lagos; a queued SMS whose patient has since died or turned
+--      notices off is closed unsent (PATIENT_NOT_REACHABLE) and never
+--      claimed; claim and record under a sender's lease (another sender's
+--      record and a second record are stale, a record without an outcome is
+--      refused) with one audit row; system:auth only; a lease is always
+--      answered: an erased phone closes the SMS (CONTACT_ERASED) and a new
+--      phone and a move queue a new one, five lapsed leases close it
+--      (ATTEMPTS_EXHAUSTED), a started appointment closes it
+--      (APPOINTMENT_STARTED), an SMS kept by a move three days ahead waits
+--      for the sweep, a move under a live lease leaves the appointment for the
+--      next sweep (no notice, no SMS, no audit row), which then queues the new
+--      time, and a move after a lapsed lease queues the SMS again (the late
+--      record is stale);
 --   5. the email sender: a patient without a verified email is skipped;
 --      rows without a recipient are never leased, however many wait beyond
 --      one claim's limit (unverified email, notices turned off); claim and
@@ -615,31 +630,89 @@ select pg_temp.check_case('3 SMS on, p1 deceased: the reminder is set, with no c
 select pg_temp.check_case('3 SMS on, p1''s notices off: inbox and email, no SMS row', '1/0/["inbox", "email"]',
   :'n161_sweep_notices_off' || '/' || :'n161_r9_notices_off');
 
--- 4. The SMS sender.
+-- 4. The SMS sender. Its claim has the sweep's clock line: 0161's own claim runs first, at the hour the suite runs,
+-- and is undone (r6's SMS between 07:00 and 21:00 Lagos, none outside); then, for this transaction only, it is
+-- replaced by a copy of itself whose one change is that line (n161.lagos_hour when set, noon from here on), as the
+-- sweep was in 3, so every case of 4 runs whatever the hour.
 update platform.control_settings set enabled = false where control_key = 'appointment_sms_reminders_enabled';
-create function pg_temp.sms_claim(batch integer) returns text language plpgsql as $f$
+create function pg_temp.sms_claim(batch integer, worker text default 'reminder-suite-sms') returns text
+language plpgsql as $f$
 declare
   claimed text;
 begin
   perform pg_temp.as_system();
   select string_agg(claim.facility_name || ':' || left(encode(claim.phone_ciphertext, 'hex'), 4) || ':' || claim.key_version
            || ':' || right(claim.registration_case_id::text, 2), ',')
-    into claimed from identity.appointment_sms_claim(batch) claim;
+    into claimed from identity.appointment_sms_claim(worker, batch) claim;
   return coalesce(claimed, '(none)');
 exception when others then
   return sqlstate || ' ' || sqlerrm;
 end
 $f$;
-create function pg_temp.sms_record(outcome text) returns text language plpgsql as $f$
+-- The start times a claim answers (UTC, to the minute).
+create function pg_temp.sms_claim_starts(worker text default 'reminder-suite-sms') returns text language plpgsql as $f$
+declare
+  claimed text;
 begin
   perform pg_temp.as_system();
-  perform identity.appointment_sms_record((select id from ehr.appointment_sms_outbox where appointment_id <> pg_temp.id('r5') limit 1), outcome, null);
-  return 'recorded';
+  select string_agg(to_char(claim.starts_at at time zone 'UTC', 'YYYY-MM-DD HH24:MI'), ',')
+    into claimed from identity.appointment_sms_claim(worker, 10) claim;
+  return coalesce(claimed, '(none)');
 exception when others then
   return sqlstate || ' ' || sqlerrm;
 end
 $f$;
-alter function pg_temp.sms_record(text) security definer;
+-- Records the newest SMS row of an appointment for a sender.
+create function pg_temp.sms_record(label text, outcome text, worker text default 'reminder-suite-sms') returns text
+language plpgsql as $f$
+begin
+  perform pg_temp.as_system();
+  return identity.appointment_sms_record((select sms.id from ehr.appointment_sms_outbox sms
+    where sms.appointment_id = pg_temp.id(label) order by sms.created_at desc limit 1), worker, outcome, null);
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end
+$f$;
+alter function pg_temp.sms_record(text, text, text) security definer;
+-- An appointment's SMS rows, oldest first: state, error code and attempts.
+create function pg_temp.sms_rows(label text) returns text language sql security definer as $f$
+  select coalesce(string_agg(sms.state || ':' || coalesce(sms.last_error_code, '-') || ':' || sms.attempt_count,
+           ',' order by sms.created_at, sms.id), '(none)')
+    from ehr.appointment_sms_outbox sms where sms.appointment_id = pg_temp.id(label)
+$f$;
+-- A sender's lease that has lapsed (as the owner).
+create function pg_temp.lapse(label text) returns void language sql security definer as $f$
+  update ehr.appointment_sms_outbox set claimed_until = clock_timestamp() - interval '1 second'
+   where appointment_id = pg_temp.id(label) and state = 'claimed'
+$f$;
+-- Claims as often as asked, the lease lapsing after each: what each claim answered.
+create function pg_temp.claims_lapsing(label text, times integer) returns text language plpgsql as $f$
+declare
+  answers text[] := array[]::text[];
+begin
+  for attempt in 1..times loop
+    answers := answers || pg_temp.sms_claim(10);
+    perform pg_temp.lapse(label);
+  end loop;
+  return array_to_string(answers, '|');
+end
+$f$;
+-- How many reminder audit rows an appointment has, and the channels of the newest.
+create function pg_temp.reminded(label text) returns text language sql security definer as $f$
+  select count(*) || '/' || coalesce((array_agg(details ->> 'channels' order by sequence_id desc))[1], '-')
+    from audit.events where action = 'ehr.appointment.reminder' and resource_id = pg_temp.id(label)::text
+$f$;
+-- A booking of p1 by A's desk, placed due (starting in the hours given, booked 30 hours ago), then a sweep.
+create function pg_temp.book_due(label text, hours integer) returns text language plpgsql as $f$
+declare
+  booked text;
+begin
+  booked := pg_temp.book(1, label, 1, pg_temp.slot(60 * 24 * 20 + hours * 60));
+  perform pg_temp.place(label, pg_temp.slot(hours * 60), clock_timestamp() - interval '30 hours');
+  return booked || '/' || pg_temp.sweep(50);
+end
+$f$;
+grant execute on function pg_temp.place(text, timestamptz, timestamptz) to hid_ehr_api_runtime;
 -- A reminder queued for an appointment that was cancelled since (r5): closed unsent at the next claim.
 insert into ehr.appointment_sms_outbox (appointment_id, facility_id, patient_id, contact_id, created_at)
 values (pg_temp.id('r5'), 'e1610000-0000-4000-8000-000000000002', pg_temp.patient(3),
@@ -648,6 +721,64 @@ set local role hid_identity_api_runtime;
 select pg_temp.check_case('4 nothing is claimed while the control is off', '(none)', pg_temp.sms_claim(10));
 reset role;
 update platform.control_settings set enabled = true where control_key = 'appointment_sms_reminders_enabled';
+-- A claim of up to 10 at the Lagos hour given (or the clock's, when null), undone after: what it answered.
+create function pg_temp.claim_undone(hour_in_lagos integer) returns text language plpgsql as $f$
+declare
+  answer text;
+begin
+  begin
+    if hour_in_lagos is not null then
+      perform set_config('n161.lagos_hour', hour_in_lagos::text, true);
+    end if;
+    answer := pg_temp.sms_claim(10);
+    raise exception using errcode = 'P0001', message = 'appointment notices suite: undo the claim';
+  exception when sqlstate 'P0001' then
+    return answer;
+  end;
+end
+$f$;
+create function pg_temp.claim_attributes() returns text language sql as $f$
+  select proowner::regrole::text || '/' || coalesce(proacl::text, '-') || '/' || prosecdef::text || '/'
+         || coalesce(array_to_string(proconfig, ','), '-')
+    from pg_proc where oid = 'identity.appointment_sms_claim(text, integer)'::regprocedure
+$f$;
+-- Replaces the claim by its copy when 0161's clock line is in it exactly once; answers how many times it is.
+create function pg_temp.claim_copy() returns text language plpgsql as $f$
+declare
+  clock_line constant text :=
+    'lagos_hour integer := extract(hour from (clock_timestamp() at time zone ''Africa/Lagos''))::integer;';
+  copy_line constant text :=
+    'lagos_hour integer := coalesce(nullif(current_setting(''n161.lagos_hour'', true), '''')::integer, '
+    || 'extract(hour from (clock_timestamp() at time zone ''Africa/Lagos''))::integer);';
+  definition text := pg_get_functiondef('identity.appointment_sms_claim(text, integer)'::regprocedure);
+  found integer;
+begin
+  found := (length(definition) - length(replace(definition, clock_line, ''))) / length(clock_line);
+  if found = 1 then
+    execute replace(definition, clock_line, copy_line);
+  end if;
+  return found::text;
+end
+$f$;
+-- 0161's own claim, now, and undone.
+set local role hid_identity_api_runtime;
+select extract(hour from (clock_timestamp() at time zone 'Africa/Lagos'))::integer between 7 and 20 as n161_claim_in_window,
+       pg_temp.claim_undone(null) as n161_claim_now \gset
+reset role;
+select pg_temp.check_case('4 0161''s claim, run now and undone: r6''s SMS between 07:00 and 21:00 Lagos, none outside',
+  case when :'n161_claim_in_window'::boolean then 'Reminder Clinic A:0202:v1:01' else '(none)' end, :'n161_claim_now');
+select pg_temp.claim_attributes() as n161_claim_attributes \gset
+select pg_temp.check_case('4 the copy: 0161''s clock line found once, and replaced', '1', pg_temp.claim_copy());
+select pg_temp.check_case('4 the copy keeps the owner, the grants, SECURITY DEFINER and the search_path',
+  :'n161_claim_attributes', pg_temp.claim_attributes());
+set local role hid_identity_api_runtime;
+select pg_temp.check_case('4 0161''s guard, in the copy: no SMS at 06 and 21 Lagos, r6''s at 07 and 20',
+  '(none)/Reminder Clinic A:0202:v1:01/Reminder Clinic A:0202:v1:01/(none)',
+  pg_temp.claim_undone(6) || '/' || pg_temp.claim_undone(7) || '/' || pg_temp.claim_undone(20) || '/'
+  || pg_temp.claim_undone(21));
+reset role;
+-- From here on, noon in Lagos for the copies of the sweep and the claim (as set in 3).
+select pg_temp.check_case('4 the copies run at noon Lagos from here on', '12', current_setting('n161.lagos_hour', true));
 -- p1's queued SMS, once p1 has died or turned notices off since (each rolled back after): closed unsent at the
 -- next claim, never claimed.
 create function pg_temp.sms_states(patient integer) returns text language sql security definer as $f$
@@ -672,6 +803,8 @@ select pg_temp.check_case('4 p1 deceased: nothing claimed; p1''s SMS closed unse
 select pg_temp.check_case('4 p1''s notices off: nothing claimed; p1''s SMS closed unsent', '(none)/failed:PATIENT_NOT_REACHABLE',
   :'n161_claim_notices_off' || '/' || :'n161_sms_notices_off');
 set local role hid_identity_api_runtime;
+select pg_temp.check_case('4 a sender name outside 3-128 characters is refused', '22023 APPOINTMENT_INVALID',
+  pg_temp.sms_claim(10, 'x'));
 select pg_temp.check_case('4 the control on: the SMS with the facility name and A''s phone ciphertext',
   'Reminder Clinic A:0202:v1:01', pg_temp.sms_claim(10));
 reset role;
@@ -679,12 +812,198 @@ select pg_temp.check_case('4 the cancelled appointment''s reminder was closed un
   (select state || ':' || last_error_code from ehr.appointment_sms_outbox where appointment_id = pg_temp.id('r5')));
 set local role hid_identity_api_runtime;
 select pg_temp.as_member(1);
-select pg_temp.check_case('4 a staff session cannot claim', '42501', pg_temp.try('select * from identity.appointment_sms_claim(10)'));
+select pg_temp.check_case('4 a staff session cannot claim', '42501',
+  pg_temp.try('select * from identity.appointment_sms_claim(''reminder-suite-sms'', 10)'));
 reset role;
-select pg_temp.check_case('4 recorded as sent', 'recorded', pg_temp.sms_record('sent'));
-select pg_temp.check_case('4 a second record is stale', '55000 APPOINTMENT_SMS_CLAIM_STALE', pg_temp.sms_record('sent'));
-select pg_temp.check_case('4 one audit row, without the phone', 'success/{"attempt": 1, "outcome": "sent", "errorCode": null}',
+select pg_temp.check_case('4 another sender''s record: stale, and the lease stays as it was', 'stale/claimed:-:1',
+  pg_temp.sms_record('r6', 'sent', 'another-sender') || '/' || pg_temp.sms_rows('r6'));
+select pg_temp.check_case('4 a record without an outcome is refused', '22023 APPOINTMENT_INVALID',
+  pg_temp.sms_record('r6', null));
+select pg_temp.check_case('4 recorded as sent by the lease''s sender', 'sent', pg_temp.sms_record('r6', 'sent'));
+select pg_temp.check_case('4 a second record is stale', 'stale', pg_temp.sms_record('r6', 'sent'));
+select pg_temp.check_case('4 one audit row, without the phone',
+  'success/{"state": "sent", "attempt": 1, "outcome": "sent", "errorCode": null}',
   (select string_agg(outcome || '/' || details::text, ',') from audit.events where action = 'notification.appointment-sms.send'));
+-- A lease is always answered (each case below is rolled back after, so the sections below see the state above).
+-- r10, p1's, is due and swept: its SMS is queued with A's current phone (02). A then erases that phone (0114's
+-- erasure): the next claim closes the SMS unsent (CONTACT_ERASED) and answers nothing. The desk records a new phone
+-- (03) and moves the appointment: the next sweep queues a new SMS with it (sms among the channels), and the next
+-- claim answers it.
+savepoint n161_sms_erased;
+set local role hid_ehr_api_runtime;
+select pg_temp.book_due('r10', 18) as n161_r10_due \gset
+reset role;
+update identity.patient_facility_contacts
+   set phone_ciphertext = null, address_ciphertext = null, key_version = null, erased_at = clock_timestamp(),
+       erasure_reason = 'erasure_request'
+ where id = 'e1610700-0000-4000-8000-000000000002';
+set local role hid_identity_api_runtime;
+select pg_temp.sms_claim(10) as n161_claim_erased \gset
+reset role;
+select pg_temp.sms_rows('r10') as n161_r10_erased \gset
+set local session_replication_role = replica;
+insert into identity.registration_cases (id, facility_id, created_by_account_id, created_by_membership_id, status,
+  first_name, last_name, full_name, dob, identity_evidence, no_nin_reason, idempotency_key, request_sha256,
+  resolved_patient_id, review_idempotency_key, review_request_sha256, reviewed_by_account_id, reviewed_by_membership_id,
+  review_reason, created_at, updated_at)
+values ('e1610500-0000-4000-8000-000000000012', 'e1610000-0000-4000-8000-000000000002',
+  'e1610100-0000-4000-8000-000000000001', 'e1610300-0000-4000-8000-000000000001', 'approved_new_identity',
+  'Ngozi', 'Remindone', 'Ngozi Remindone', date '1985-02-02', 'none', 'no_nin', 'reminder-case-key-00012',
+  repeat('0', 64), 'e1610400-0000-4000-8000-000000000001', 'reminder-review-key-012', repeat('0', 64),
+  'e1610100-0000-4000-8000-000000000001', 'e1610300-0000-4000-8000-000000000001', 'Checked at the desk',
+  clock_timestamp(), clock_timestamp());
+insert into identity.registration_case_contacts (registration_case_id, facility_id, phone_ciphertext, address_ciphertext,
+  key_version, created_by_account_id, created_by_membership_id, erased_at, erasure_reason)
+values ('e1610500-0000-4000-8000-000000000012', 'e1610000-0000-4000-8000-000000000002', decode(repeat('03', 32), 'hex'),
+  decode(repeat('a3', 40), 'hex'), 'v1', 'e1610100-0000-4000-8000-000000000001', 'e1610300-0000-4000-8000-000000000001',
+  null, null);
+insert into identity.patient_facility_contacts (id, patient_id, facility_id, registration_case_id, phone_ciphertext,
+  address_ciphertext, key_version, created_by_account_id, created_by_membership_id, created_at)
+values ('e1610700-0000-4000-8000-000000000003', 'e1610400-0000-4000-8000-000000000001',
+  'e1610000-0000-4000-8000-000000000002', 'e1610500-0000-4000-8000-000000000012', decode(repeat('03', 32), 'hex'),
+  decode(repeat('a3', 40), 'hex'), 'v1', 'e1610100-0000-4000-8000-000000000001', 'e1610300-0000-4000-8000-000000000001',
+  clock_timestamp());
+set local session_replication_role = origin;
+set local role hid_ehr_api_runtime;
+select pg_temp.move(1, 'r10', pg_temp.slot(19 * 60), 'erased') as n161_r10_moved, pg_temp.sweep(50) as n161_r10_swept \gset
+reset role;
+select pg_temp.reminded('r10') as n161_r10_reminded \gset
+set local role hid_identity_api_runtime;
+select pg_temp.sms_claim(10) as n161_claim_new_phone \gset
+reset role;
+select pg_temp.sms_rows('r10') as n161_r10_rows \gset
+rollback to savepoint n161_sms_erased;
+select pg_temp.check_case('4 r10 booked and swept: one reminder', 'booked/1', :'n161_r10_due');
+select pg_temp.check_case('4 A erased p1''s phone: nothing claimed; r10''s SMS closed unsent (CONTACT_ERASED)',
+  '(none)/failed:CONTACT_ERASED:0', :'n161_claim_erased' || '/' || :'n161_r10_erased');
+select pg_temp.check_case('4 a new phone recorded and r10 moved: the sweep queues a new SMS with it',
+  'updated/1/2/["inbox", "email", "sms"]', :'n161_r10_moved' || '/' || :'n161_r10_swept' || '/' || :'n161_r10_reminded');
+select pg_temp.check_case('4 and the next claim answers it with the new phone',
+  'Reminder Clinic A:0303:v1:12/failed:CONTACT_ERASED:0,claimed:-:1', :'n161_claim_new_phone' || '/' || :'n161_r10_rows');
+-- r11: five claims, each lease lapsing unanswered, then a sixth: nothing more is claimed, and the SMS is closed
+-- unsent (ATTEMPTS_EXHAUSTED) instead of staying claimed for good.
+savepoint n161_sms_exhausted;
+set local role hid_ehr_api_runtime;
+select pg_temp.book_due('r11', 17) as n161_r11_due \gset
+reset role;
+set local role hid_identity_api_runtime;
+select pg_temp.claims_lapsing('r11', 6) as n161_r11_claims \gset
+reset role;
+select pg_temp.sms_rows('r11') as n161_r11_rows \gset
+rollback to savepoint n161_sms_exhausted;
+select pg_temp.check_case('4 five lapsed leases, then a sixth claim: nothing more; r11''s SMS closed unsent',
+  'booked/1 | ' || repeat('Reminder Clinic A:0202:v1:01|', 5) || '(none) | failed:ATTEMPTS_EXHAUSTED:5',
+  :'n161_r11_due' || ' | ' || :'n161_r11_claims' || ' | ' || :'n161_r11_rows');
+-- r12: its start passes before the SMS is claimed: closed unsent (APPOINTMENT_STARTED), never sent late.
+savepoint n161_sms_started;
+set local role hid_ehr_api_runtime;
+select pg_temp.book_due('r12', 16) as n161_r12_due \gset
+reset role;
+select pg_temp.place('r12', pg_temp.slot(-10), clock_timestamp() - interval '30 hours');
+set local role hid_identity_api_runtime;
+select pg_temp.sms_claim(10) as n161_claim_started \gset
+reset role;
+select pg_temp.sms_rows('r12') as n161_r12_rows \gset
+rollback to savepoint n161_sms_started;
+select pg_temp.check_case('4 r12 started before its SMS went: nothing claimed, closed unsent (APPOINTMENT_STARTED)',
+  'booked/1 | (none) | failed:APPOINTMENT_STARTED:0',
+  :'n161_r12_due' || ' | ' || :'n161_claim_started' || ' | ' || :'n161_r12_rows');
+-- r13: moved three days ahead with its SMS unsent: the SMS is kept and waits (not sent at once, days early); once the
+-- appointment is due again it waits for the sweep, and then the claim answers it with the time it has then.
+savepoint n161_sms_far;
+set local role hid_ehr_api_runtime;
+select pg_temp.book_due('r13', 15) as n161_r13_due \gset
+select pg_temp.move(1, 'r13', pg_temp.slot(60 * 24 * 3 + 15 * 60), 'far') as n161_r13_moved \gset
+reset role;
+set local role hid_identity_api_runtime;
+select pg_temp.sms_claim(10) as n161_claim_far \gset
+reset role;
+select pg_temp.sms_rows('r13') as n161_r13_waiting \gset
+select pg_temp.place('r13', pg_temp.slot(14 * 60), clock_timestamp() - interval '30 hours');
+set local role hid_identity_api_runtime;
+select pg_temp.sms_claim(10) as n161_claim_not_swept \gset
+reset role;
+set local role hid_ehr_api_runtime;
+select pg_temp.sweep(50) as n161_r13_swept \gset
+reset role;
+set local role hid_identity_api_runtime;
+select pg_temp.sms_claim_starts() as n161_claim_far_back \gset
+reset role;
+select (select to_char(starts_at at time zone 'UTC', 'YYYY-MM-DD HH24:MI') from ehr.appointments
+         where id = pg_temp.id('r13')) as n161_r13_start,
+       pg_temp.sms_rows('r13') as n161_r13_rows \gset
+rollback to savepoint n161_sms_far;
+select pg_temp.check_case('4 r13 moved three days ahead: its unsent SMS waits, not sent at once',
+  'booked/1 | updated | (none) | pending:-:0', :'n161_r13_due' || ' | ' || :'n161_r13_moved' || ' | ' || :'n161_claim_far'
+  || ' | ' || :'n161_r13_waiting');
+select pg_temp.check_case('4 r13 due again: nothing until the sweep has reminded it, then the SMS with its time',
+  '(none) | 1 | ' || :'n161_r13_start' || ' | claimed:-:1',
+  :'n161_claim_not_swept' || ' | ' || :'n161_r13_swept' || ' | ' || :'n161_claim_far_back' || ' | ' || :'n161_r13_rows');
+-- r14: moved while its SMS is under a live lease (the sender has read the old time). The sweep leaves r14 for later:
+-- no notice, no reminder_sent_at, no audit row. Once the sender records the send, the next sweep reminds r14 and
+-- queues a new SMS, which the claim answers with the new time.
+savepoint n161_sms_live_lease;
+set local role hid_ehr_api_runtime;
+select pg_temp.book_due('r14', 13) as n161_r14_due \gset
+reset role;
+set local role hid_identity_api_runtime;
+select pg_temp.sms_claim(10) as n161_r14_leased \gset
+reset role;
+set local role hid_ehr_api_runtime;
+select pg_temp.move(1, 'r14', pg_temp.slot(12 * 60), 'leased') as n161_r14_moved \gset
+select pg_temp.sweep(50) as n161_r14_swept_leased \gset
+reset role;
+select pg_temp.reminded('r14') || ' | ' || (select coalesce(reminder_sent_at::text, 'not reminded') from ehr.appointments
+         where id = pg_temp.id('r14')) || ' | ' || pg_temp.sms_rows('r14') as n161_r14_left \gset
+select pg_temp.sms_record('r14', 'sent') as n161_r14_recorded \gset
+set local role hid_ehr_api_runtime;
+select pg_temp.sweep(50) as n161_r14_swept_after \gset
+reset role;
+select pg_temp.reminded('r14') as n161_r14_reminded \gset
+set local role hid_identity_api_runtime;
+select pg_temp.sms_claim_starts() as n161_r14_new_time \gset
+reset role;
+select (select to_char(starts_at at time zone 'UTC', 'YYYY-MM-DD HH24:MI') from ehr.appointments
+         where id = pg_temp.id('r14')) as n161_r14_start,
+       pg_temp.sms_rows('r14') as n161_r14_rows \gset
+rollback to savepoint n161_sms_live_lease;
+select pg_temp.check_case('4 r14 leased, then moved: the sweep leaves it for later (no notice, no SMS, no audit row)',
+  'booked/1 | Reminder Clinic A:0202:v1:01 | updated | 0 | 1/["inbox", "email", "sms"] | not reminded | claimed:-:1',
+  :'n161_r14_due' || ' | ' || :'n161_r14_leased' || ' | ' || :'n161_r14_moved' || ' | ' || :'n161_r14_swept_leased'
+  || ' | ' || :'n161_r14_left');
+select pg_temp.check_case('4 the lease answered: the next sweep reminds r14 with a new SMS, sent with the new time',
+  'sent | 1 | 2/["inbox", "email", "sms"] | ' || :'n161_r14_start' || ' | sent:-:1,claimed:-:1',
+  :'n161_r14_recorded' || ' | ' || :'n161_r14_swept_after' || ' | ' || :'n161_r14_reminded' || ' | '
+  || :'n161_r14_new_time' || ' | ' || :'n161_r14_rows');
+-- r15: moved after its lease lapsed unanswered: the sweep takes the SMS back into the queue (sms among the
+-- channels), the late sender's record is stale, and another sender's claim answers it with the new time.
+savepoint n161_sms_lapsed;
+set local role hid_ehr_api_runtime;
+select pg_temp.book_due('r15', 11) as n161_r15_due \gset
+reset role;
+set local role hid_identity_api_runtime;
+select pg_temp.sms_claim(10) as n161_r15_leased \gset
+reset role;
+select pg_temp.lapse('r15');
+set local role hid_ehr_api_runtime;
+select pg_temp.move(1, 'r15', pg_temp.slot(10 * 60), 'lapsed') as n161_r15_moved \gset
+select pg_temp.sweep(50) as n161_r15_swept \gset
+reset role;
+select pg_temp.reminded('r15') || ' | ' || pg_temp.sms_rows('r15') as n161_r15_queued \gset
+select pg_temp.sms_record('r15', 'sent') as n161_r15_late \gset
+set local role hid_identity_api_runtime;
+select pg_temp.sms_claim_starts('reminder-suite-sms-2') as n161_r15_new_time \gset
+reset role;
+select (select to_char(starts_at at time zone 'UTC', 'YYYY-MM-DD HH24:MI') from ehr.appointments
+         where id = pg_temp.id('r15')) as n161_r15_start,
+       pg_temp.sms_rows('r15') as n161_r15_rows \gset
+rollback to savepoint n161_sms_lapsed;
+select pg_temp.check_case('4 r15''s lease lapsed, then moved: the sweep queues its SMS again; the late record is stale',
+  'booked/1 | Reminder Clinic A:0202:v1:01 | updated | 1 | 2/["inbox", "email", "sms"] | pending:-:1 | stale',
+  :'n161_r15_due' || ' | ' || :'n161_r15_leased' || ' | ' || :'n161_r15_moved' || ' | ' || :'n161_r15_swept' || ' | '
+  || :'n161_r15_queued' || ' | ' || :'n161_r15_late');
+select pg_temp.check_case('4 and another sender''s claim answers it with the new time',
+  :'n161_r15_start' || ' | claimed:-:2', :'n161_r15_new_time' || ' | ' || :'n161_r15_rows');
 update platform.control_settings set enabled = false where control_key = 'appointment_sms_reminders_enabled';
 
 -- 5. The email sender.
@@ -870,8 +1189,8 @@ select pg_temp.check_case('8 nothing for public', '0',
     where proc.oid in ('ehr.appointment_send_reminders(integer)'::regprocedure,
                        'ehr.appointment_my_list(uuid, text, integer, timestamptz, uuid)'::regprocedure,
                        'identity.appointment_call_list(date, uuid, uuid)'::regprocedure,
-                       'identity.appointment_sms_claim(integer)'::regprocedure,
-                       'identity.appointment_sms_record(uuid, text, text)'::regprocedure,
+                       'identity.appointment_sms_claim(text, integer)'::regprocedure,
+                       'identity.appointment_sms_record(uuid, text, text, text)'::regprocedure,
                        'identity.appointment_email_claim(text, integer, integer)'::regprocedure,
                        'identity.appointment_email_record(uuid, text, text, text)'::regprocedure,
                        'ehr.appointment_notice(uuid, text, timestamptz)'::regprocedure)

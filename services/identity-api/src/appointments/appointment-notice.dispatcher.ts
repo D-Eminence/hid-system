@@ -60,9 +60,10 @@ export function safeCode(code: string | undefined, upper: boolean): string | nul
  * APPT-1 (0161, Q-APPT-3 A): sends the appointment emails and, only while the
  * Platform control appointment_sms_reminders_enabled is on (seeded off), the
  * reminder SMS that 0161 queued, as the system actor, under leases (SKIP
- * LOCKED). The email is generic and goes only to a verified email (0063's
- * rule, checked again at the claim); the SMS goes only to the phone the
- * facility recorded, decrypted here. Nothing is claimed while
+ * LOCKED) held by this worker. The email is generic and goes only to a
+ * verified email (0063's rule, checked again at the claim); the SMS goes only
+ * to the phone the facility recorded, decrypted here, between 07:00 and 21:00
+ * Lagos (the database leases none outside). Nothing is claimed while
  * APPOINTMENTS_ENABLED is off. Logs counts only.
  */
 @Injectable()
@@ -114,10 +115,11 @@ export class AppointmentNoticeDispatcher {
     if (!getEnvironment().APPOINTMENTS_ENABLED) return summary;
     for (let batch = 0; batch < APPOINTMENT_NOTICE_CLAIM_BATCHES; batch += 1) {
       if (this.stopped) break;
-      // The database answers nothing while the Platform control is off (or unreadable).
+      // The database answers nothing while the Platform control is off (or unreadable), and nothing outside
+      // 07:00-21:00 Lagos; it leases only rows it can answer, each to this worker.
       const claimed = await this.database.withSystemTransaction(correlationId, async (client) => (await client.query<ClaimedSms>(
         `select sms_id::text, facility_name, starts_at, registration_case_id::text, phone_ciphertext, key_version
-           from identity.appointment_sms_claim($1)`, [APPOINTMENT_SMS_CLAIM_LIMIT])).rows);
+           from identity.appointment_sms_claim($1, $2)`, [this.workerId, APPOINTMENT_SMS_CLAIM_LIMIT])).rows);
       summary.claimed += claimed.length;
       for (const sms of claimed) {
         if (this.stopped) break;
@@ -128,11 +130,13 @@ export class AppointmentNoticeDispatcher {
             facilityName: sms.facility_name, startsAt: new Date(sms.starts_at), correlationId })
             .catch(() => ({ outcome: 'unknown' as const, safeCode: 'transport_error' }));
         const outcome = delivery.outcome === 'accepted' ? 'sent' : delivery.outcome === 'definitive_failure' ? 'failed' : 'retry';
-        await this.database.withSystemTransaction(correlationId, async (client) => client.query(
-          'select identity.appointment_sms_record($1, $2, $3)', [sms.sms_id, outcome, safeCode(delivery.safeCode, true)]));
-        if (outcome === 'sent') summary.delivered += 1;
-        else if (outcome === 'retry') summary.retried += 1;
-        else summary.failed += 1;
+        // Only this worker's lease is recorded; a lease that lapsed and went elsewhere answers stale.
+        const next = await this.database.withSystemTransaction(correlationId, async (client) => (await client.query<{ next: string }>(
+          'select identity.appointment_sms_record($1, $2, $3, $4) as next',
+          [sms.sms_id, this.workerId, outcome, safeCode(delivery.safeCode, true)])).rows[0]?.next);
+        if (next === 'sent') summary.delivered += 1;
+        else if (next === 'pending') summary.retried += 1;
+        else if (next === 'failed') summary.failed += 1;
       }
       if (claimed.length < APPOINTMENT_SMS_CLAIM_LIMIT) break;
     }

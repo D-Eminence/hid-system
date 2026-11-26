@@ -124,7 +124,14 @@ describe('APPT-1 identity-api: the call list and the appointment senders (0161)'
       registration_case_id: caseId, phone_ciphertext: protector.encrypt(registrationCaseContactLabel(caseId, 'phone'),
         '+2348030000001'), key_version: 'v1' };
     const unreadable = { ...good, registration_case_id: '123e4567-e89b-42d3-a456-426614174099' };
-    const { database: db, calls } = database([good, unreadable]);
+    const calls: { sql: string; values: unknown[] }[] = [];
+    // The claim answers the two rows; each record answers what 0161 would for this worker's lease.
+    const query = async (sql: string, values: unknown[] = []) => {
+      calls.push({ sql, values });
+      return { rows: sql.includes('appointment_sms_claim') ? [good, unreadable] : [{ next: values[2] === 'sent' ? 'sent' : 'failed' }] };
+    };
+    const db = { withSystemTransaction: jest.fn(async (_correlation: string, operation: (client: unknown) => Promise<unknown>) =>
+      operation({ query })) } as unknown as DatabaseService;
     const notification = { deliverAppointmentReminderSms: jest.fn().mockResolvedValue({ outcome: 'accepted' }) } as unknown as
       NotificationOtpClient;
     const summary = await new AppointmentNoticeDispatcher(db, notification).dispatchSms('correlation-1');
@@ -132,9 +139,27 @@ describe('APPT-1 identity-api: the call list and the appointment senders (0161)'
     expect(notification.deliverAppointmentReminderSms).toHaveBeenCalledWith({ smsId: appointmentId,
       recipient: '+2348030000001', facilityName: 'Booking Clinic A', startsAt: new Date('2026-12-03T09:00:00Z'),
       correlationId: 'correlation-1' });
+    const worker = calls[0]?.values[0];
+    expect(calls[0]?.sql).toContain('identity.appointment_sms_claim($1, $2)');
+    expect(worker).toMatch(/^identity-api:/);
+    expect(calls[0]?.values[1]).toBe(10);
     expect(calls.filter((call) => call.sql.includes('appointment_sms_record')).map((call) => call.values.slice(1)))
-      .toEqual([['sent', null], ['failed', 'PHONE_UNREADABLE']]);
+      .toEqual([[worker, 'sent', null], [worker, 'failed', 'PHONE_UNREADABLE']]);
     expect(summary).toEqual({ claimed: 2, delivered: 1, retried: 0, failed: 1 });
+  });
+
+  it('counts nothing for an SMS whose lease went to another sender (stale)', async () => {
+    const protector = new CollectedFieldProtector();
+    const claimedRow = { sms_id: appointmentId, facility_name: 'Booking Clinic A', starts_at: new Date('2026-12-03T09:00:00Z'),
+      registration_case_id: caseId, phone_ciphertext: protector.encrypt(registrationCaseContactLabel(caseId, 'phone'),
+        '+2348030000001'), key_version: 'v1' };
+    const query = async (sql: string) => ({ rows: sql.includes('appointment_sms_claim') ? [claimedRow] : [{ next: 'stale' }] });
+    const db = { withSystemTransaction: jest.fn(async (_correlation: string, operation: (client: unknown) => Promise<unknown>) =>
+      operation({ query })) } as unknown as DatabaseService;
+    const notification = { deliverAppointmentReminderSms: jest.fn().mockResolvedValue({ outcome: 'accepted' }) } as unknown as
+      NotificationOtpClient;
+    expect(await new AppointmentNoticeDispatcher(db, notification).dispatchSms('correlation-1'))
+      .toEqual({ claimed: 1, delivered: 0, retried: 0, failed: 0 });
   });
 
   it('maps delivery answers and safe codes to what 0161 records', () => {

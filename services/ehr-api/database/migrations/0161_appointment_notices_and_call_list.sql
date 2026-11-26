@@ -52,21 +52,35 @@
 --    and only for an active patient with notices on (the email's rule, 0063;
 --    the inbox, 0037, needs an active patient too), at most one unsent per
 --    appointment (a rescheduled appointment keeps its unsent one, which
---    carries the new time; after a sent one it gets a new row), and one
---    system audit row (ehr.appointment.reminder) naming the channels.
+--    carries the new time, and one whose lease has lapsed goes back to the
+--    queue; after a sent one it gets a new row), and one system audit row
+--    (ehr.appointment.reminder) naming the channels, sms only when the sweep
+--    wrote the SMS row. An appointment whose unsent SMS is under a live lease
+--    (moved while its sender sends the old time) is left for the next sweep:
+--    no notice, no reminder_sent_at and no audit row yet, so the moved time
+--    is sent once that lease is answered or has lapsed.
 -- B4 SMS, built but switched off. The control appointment_sms_reminders_enabled
 --    is added and seeded OFF (the control_settings key CHECK and
 --    platform.control_enabled carry the 11 existing keys plus this one: 0086's
 --    rule; 0115 is the last file that set them, both md5-pinned).
 --    ehr.appointment_sms_outbox gets a row only while it is on, and only for an
 --    active patient with notices on and a phone this facility recorded.
---    identity.appointment_sms_claim and identity.appointment_sms_record (system
---    actor, Identity runtime) are what identity-api's sender uses, only while
---    the control is on; each send is audited (notification.appointment-sms.send).
---    The claim checks the patient again: a row whose patient is no longer
---    active (inactive, merged, deceased, deleted) or has turned notices off is
---    closed unsent (failed, PATIENT_NOT_REACHABLE) and never claimed, as a row
---    whose appointment is no longer booked is (APPOINTMENT_NOT_BOOKED).
+--    identity.appointment_sms_claim(worker, batch) and
+--    identity.appointment_sms_record(id, worker, outcome, code) (system actor,
+--    Identity runtime) are what identity-api's sender uses, only while the
+--    control is on; each send is audited (notification.appointment-sms.send).
+--    A lease is always answered, as the email claim's: the claim leases only
+--    rows it can send, between 07:00 and 21:00 Lagos (none at night), for an
+--    appointment still booked that the sweep has reminded and that starts
+--    within the next 24 hours (an unsent SMS kept by a move further ahead
+--    waits), whose patient is active with notices on, whose facility contact
+--    is unerased and which has attempts left. A row that can never be sent is
+--    closed unsent (failed), at any hour: APPOINTMENT_NOT_BOOKED (moved away,
+--    cancelled, checked in), APPOINTMENT_STARTED, PATIENT_NOT_REACHABLE
+--    (inactive, merged, deceased, deleted, or notices off), CONTACT_ERASED
+--    (0114's erasure, or an account deletion) and ATTEMPTS_EXHAUSTED (5
+--    attempts and the lease lapsed). Only the sender that holds a lease records
+--    it; any other record answers stale and changes nothing.
 --    The fixed message: "Reminder: you have an appointment at {facility} on
 --    {day} at {time}." No clinic or reason. Switching it on waits for the SMS
 --    budget, the Termii sender ID and the DPO's NDPA notice.
@@ -124,7 +138,9 @@
 -- The whole file is one statement (do $appt0161$):
 -- 0. The locks.
 -- 1. Preconditions (55000, nothing applied): 0160 applied; "0161: already
---    applied" or "0161: the schema is not in the reviewed state"; the control
+--    applied" when every object of this file is there (the two tables, the
+--    nine functions, the control key CHECK and the notice trigger), or "0161:
+--    the schema is not in the reviewed state" for any part of it; the control
 --    CHECK and the bodies it replaces or calls md5-pinned; exactly the 11
 --    controls.
 -- 2. B1-B6.
@@ -137,8 +153,13 @@
 --    nine functions are the owner's; the notice trigger by tgtype, its WHEN
 --    condition (tgqual, compared as the whole definition), tgattr, tgnargs,
 --    tgfoid and tgenabled, with 0160's two triggers the only others on the
---    history; exactly one audit row (platform.control.add, as the system
---    actor, naming the control key only); grants exactly as runtime-grants.sql.
+--    history; the trigger's function and the notice helper by body, neither
+--    SECURITY DEFINER, with the fixed search_path; the seven entry points
+--    SECURITY DEFINER with the fixed search_path, and EXECUTE exactly as
+--    runtime-grants.sql grants it (each runtime that exists holds it on its
+--    own functions, never with grant option, and no other role holds any);
+--    exactly one audit row (platform.control.add, as the system actor, naming
+--    the control key only).
 
 do $appt0161$
 declare
@@ -161,6 +182,7 @@ declare
   v_function_rows_before text;
   v_was_forced boolean;
   v_owner name;
+  v_grants_wrong boolean;
   v_correlation constant text := '0161-appointment-notices-appt1';
 begin
   -- 0160's tables are what this file locks first; without them there is nothing to lock (a catalog read only).
@@ -201,25 +223,35 @@ begin
      or not exists (select 1 from auth.permissions where code = 'ehr.appointment.write') then
     raise exception using errcode = '55000', message = '0161: 0160 must be applied first';
   end if;
+  -- Every object of this file, by name and signature: the two tables, the nine functions and the control key CHECK
+  -- (and, below, the notice trigger). All of them is "already applied"; any part of them is a half state.
   select count(*) into v_present
     from (values (to_regclass('ehr.appointment_email_outbox')::oid), (to_regclass('ehr.appointment_sms_outbox')::oid),
+                 (to_regprocedure('ehr.appointment_notice(uuid, text, timestamptz)')::oid),
+                 (to_regprocedure('ehr.appointment_events_notify()')::oid),
                  (to_regprocedure('ehr.appointment_send_reminders(integer)')::oid),
                  (to_regprocedure('ehr.appointment_my_list(uuid, text, integer, timestamptz, uuid)')::oid),
                  (to_regprocedure('identity.appointment_call_list(date, uuid, uuid)')::oid),
+                 (to_regprocedure('identity.appointment_sms_claim(text, integer)')::oid),
+                 (to_regprocedure('identity.appointment_sms_record(uuid, text, text, text)')::oid),
+                 (to_regprocedure('identity.appointment_email_claim(text, integer, integer)')::oid),
+                 (to_regprocedure('identity.appointment_email_record(uuid, text, text, text)')::oid),
                  ((select 1::oid where exists (select 1 from pg_constraint
                                                 where conrelid = 'platform.control_settings'::regclass
                                                   and conname = 'control_settings_control_key_check'
                                                   and pg_get_constraintdef(oid) like '%appointment_sms_reminders_enabled%'))))
          present(object_id)
    where present.object_id is not null;
-  if v_present = 6
+  if v_present = 12
      and exists (select 1 from pg_trigger where tgrelid = 'ehr.appointment_events'::regclass
                   and tgname = 'appointment_events_notify') then
     raise exception using errcode = '55000', message = '0161: already applied';
   end if;
   if v_present <> 0
      or exists (select 1 from pg_trigger where tgrelid = 'ehr.appointment_events'::regclass
-                 and tgname = 'appointment_events_notify') then
+                 and tgname = 'appointment_events_notify')
+     or exists (select 1 from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
+                 where namespace.nspname = 'identity' and proc.proname like 'appointment%') then
     raise exception using errcode = '55000', message = '0161: the schema is not in the reviewed state (part of 0161 is there); nothing applied';
   end if;
 
@@ -334,14 +366,17 @@ begin
     created_at timestamptz not null default clock_timestamp(),
     state text not null default 'pending' check (state in ('pending', 'claimed', 'sent', 'failed')),
     attempt_count integer not null default 0 check (attempt_count between 0 and 5),
+    claimed_by text check (claimed_by is null or length(claimed_by) between 3 and 128),
     claimed_until timestamptz,
     sent_at timestamptz,
     last_error_code text check (last_error_code is null or last_error_code ~ '^[A-Z][A-Z0-9_]{1,79}$'),
-    constraint appointment_sms_outbox_claimed_ck check ((state = 'claimed') = (claimed_until is not null)),
+    constraint appointment_sms_outbox_claimed_ck
+      check ((state = 'claimed') = (claimed_until is not null and claimed_by is not null)),
     constraint appointment_sms_outbox_sent_ck check ((state = 'sent') = (sent_at is not null))
   );
   -- At most one unsent reminder SMS per appointment. A sent or failed one stays as it was: a reschedule clears
-  -- reminder_sent_at (0160), and the moved appointment's reminder is a new row.
+  -- reminder_sent_at (0160), and the moved appointment's reminder is a new row. claimed_by is the lease's sender
+  -- (only it records the outcome).
   create unique index appointment_sms_outbox_open_ux on ehr.appointment_sms_outbox (appointment_id)
     where state in ('pending', 'claimed');
   create index appointment_sms_outbox_pending_idx on ehr.appointment_sms_outbox (created_at)
@@ -350,7 +385,7 @@ begin
   alter table ehr.appointment_sms_outbox enable row level security;
   revoke all on ehr.appointment_sms_outbox from public;
   comment on table ehr.appointment_sms_outbox is
-    '0161 (APPT-1): reminder SMS to send, written only while appointment_sms_reminders_enabled is on (seeded off), only for a patient with a phone this facility recorded. identity-api drains it through identity.appointment_sms_claim and identity.appointment_sms_record.';
+    '0161 (APPT-1): reminder SMS to send, queued by the reminder sweep only while appointment_sms_reminders_enabled is on (seeded off), only for an active patient with notices on (0063) and a phone this facility recorded; at most one unsent per appointment. identity-api drains it through identity.appointment_sms_claim (07:00-21:00 Lagos, an appointment still booked, reminded and starting within 24 hours; a row that can never be sent is closed unsent) and identity.appointment_sms_record (only by the sender that holds the lease). Ids, the state and a code only.';
 
   -- B1. The notices, in the same transaction as the event.
   create function ehr.appointment_notice(requested_appointment_id uuid, requested_code text, requested_starts_at timestamptz)
@@ -416,6 +451,7 @@ begin
     sms_on boolean;
     inboxed boolean;
     contact uuid;
+    sms_written integer;
     channels text[];
     correlation text := platform.current_correlation_id();
   begin
@@ -444,14 +480,10 @@ begin
        limit requested_batch
        for update skip locked
     loop
-      channels := array[]::text[];
-      inboxed := ehr.appointment_notice(due.id, 'APPOINTMENT_REMINDER',
-        (select appointment.starts_at from ehr.appointments appointment where appointment.id = due.id));
-      if inboxed then
-        channels := channels || array['inbox', 'email'];
-      end if;
-      -- An SMS only for an active patient with notices on (the email's rule, 0063): never to a patient who is
+      -- The SMS first. Only for an active patient with notices on (the email's rule, 0063): never to a patient who is
       -- inactive, merged, deceased or deleted, or who turned notices off.
+      contact := null;
+      sms_written := 0;
       if sms_on and exists (select 1 from identity.patients patient
                              where patient.id = due.patient_id and patient.status = 'active'
                                and patient.notifications_enabled) then
@@ -461,17 +493,29 @@ begin
            and facility_contact.erased_at is null and facility_contact.phone_ciphertext is not null
          order by facility_contact.created_at desc, facility_contact.id
          limit 1;
-        if contact is not null then
-          -- An unsent SMS of this appointment (queued before a reschedule) is kept, with the phone as now recorded:
-          -- the sender reads the start time when it claims, so it carries the new time. Never a second one, and
-          -- never an error that would stop the whole sweep.
-          insert into ehr.appointment_sms_outbox as sms (appointment_id, facility_id, patient_id, contact_id)
-          values (due.id, due.facility_id, due.patient_id, contact)
-          on conflict (appointment_id) where state in ('pending', 'claimed')
-          do update set contact_id = excluded.contact_id where sms.state = 'pending';
-          channels := channels || array['sms'];
+      end if;
+      if contact is not null then
+        -- At most one unsent SMS per appointment. One queued before a reschedule is kept, with the phone as now
+        -- recorded (the sender reads the start time when it claims, so it carries the new time); one whose lease
+        -- has lapsed goes back to the queue (its sender's late record is then stale). Never a second one, and never
+        -- an error that would stop the whole sweep.
+        insert into ehr.appointment_sms_outbox as sms (appointment_id, facility_id, patient_id, contact_id)
+        values (due.id, due.facility_id, due.patient_id, contact)
+        on conflict (appointment_id) where state in ('pending', 'claimed')
+        do update set contact_id = excluded.contact_id, state = 'pending', claimed_by = null, claimed_until = null
+         where sms.state = 'pending' or sms.claimed_until < clock_timestamp();
+        get diagnostics sms_written = row_count;
+        if sms_written = 0 then
+          -- The unsent SMS is under a live lease: its sender read the start time before the desk moved the
+          -- appointment. Nothing is done for this appointment now (no notice, no reminder_sent_at, no audit row);
+          -- the next sweep, once that lease is answered or has lapsed, reminds with the time as it is then.
+          continue;
         end if;
       end if;
+      inboxed := ehr.appointment_notice(due.id, 'APPOINTMENT_REMINDER',
+        (select appointment.starts_at from ehr.appointments appointment where appointment.id = due.id));
+      channels := case when inboxed then array['inbox', 'email'] else array[]::text[] end
+               || case when sms_written > 0 then array['sms'] else array[]::text[] end;
       update ehr.appointments appointment set reminder_sent_at = clock_timestamp() where appointment.id = due.id;
       insert into audit.events (correlation_id, actor_type, facility_id, patient_id, action, outcome, resource_type,
         resource_id, purpose_of_use, provenance, source_system, details)
@@ -484,11 +528,11 @@ begin
   end
   $fn$;
   comment on function ehr.appointment_send_reminders(integer) is
-    '0161 (APPT-1, Q-APPT-3 A): the reminder sweep, as system:auth only, between 07:00 and 21:00 Lagos: booked appointments that start within 24 hours, without a reminder, booked at least 12 hours before their start, at most the batch (1-500). Each gets APPOINTMENT_REMINDER (inbox, push, email), an SMS outbox row only while appointment_sms_reminders_enabled is on and only for an active patient with notices on and a phone this facility recorded (at most one unsent per appointment: a rescheduled appointment keeps its unsent one), reminder_sent_at, and one system audit row naming the channels. Answers how many.';
+    '0161 (APPT-1, Q-APPT-3 A): the reminder sweep, as system:auth only, between 07:00 and 21:00 Lagos: booked appointments that start within 24 hours, without a reminder, booked at least 12 hours before their start, at most the batch (1-500). Each gets APPOINTMENT_REMINDER (inbox, push, email), an SMS outbox row only while appointment_sms_reminders_enabled is on and only for an active patient with notices on and a phone this facility recorded (at most one unsent per appointment: a rescheduled appointment keeps its unsent one), reminder_sent_at, and one system audit row naming the channels (sms only when the row was written). An appointment whose unsent SMS is under a live lease waits for the next sweep. Answers how many were reminded.';
   revoke all on function ehr.appointment_send_reminders(integer) from public;
 
   -- B4. The SMS sender's two calls (identity-api, system:auth, only while the control is on).
-  create function identity.appointment_sms_claim(requested_batch integer)
+  create function identity.appointment_sms_claim(requested_worker text, requested_batch integer)
   returns table (sms_id uuid, facility_name text, starts_at timestamptz, registration_case_id uuid,
     phone_ciphertext bytea, key_version text)
   language plpgsql
@@ -496,11 +540,14 @@ begin
   set search_path = pg_catalog, pg_temp
   as $fn$
   #variable_conflict use_column
+  declare
+    lagos_hour integer := extract(hour from (clock_timestamp() at time zone 'Africa/Lagos'))::integer;
   begin
     if platform.current_actor_subject() is distinct from 'system:auth' or platform.current_correlation_id() is null then
       raise exception using errcode = '42501', message = 'APPOINTMENT_SMS_SYSTEM_ONLY';
     end if;
-    if requested_batch is null or requested_batch not between 1 and 100 then
+    if requested_worker is null or length(requested_worker) not between 3 and 128
+       or requested_batch is null or requested_batch not between 1 and 100 then
       raise exception using errcode = '22023', message = 'APPOINTMENT_INVALID';
     end if;
     -- An unreadable control counts as off (fail closed).
@@ -511,89 +558,125 @@ begin
     exception when others then
       return;
     end;
-    -- A reminder whose appointment is no longer booked (moved, cancelled, checked in) is closed unsent.
+    -- A reminder that can never be sent is closed unsent (failed), at any hour: its appointment is no longer booked
+    -- (moved away, cancelled, checked in) or has started; its patient is no longer active (inactive, merged,
+    -- deceased, deleted) or has turned notices off since it was queued (the email's rule, 0063); its facility
+    -- contact was erased (0114's erasure, or an account deletion); or its 5 attempts are spent and the last lease
+    -- has lapsed. This pass is bounded, as the email claim's; the lease below checks the same rules itself, so a row
+    -- this pass leaves is never leased (a later claim closes it).
     update ehr.appointment_sms_outbox sms
-       set state = 'failed', claimed_until = null, last_error_code = 'APPOINTMENT_NOT_BOOKED'
-     where (sms.state = 'pending' or (sms.state = 'claimed' and sms.claimed_until < clock_timestamp()))
-       and not exists (select 1 from ehr.appointments appointment
-                        where appointment.id = sms.appointment_id and appointment.status = 'booked');
-    -- So is one whose patient is no longer active (inactive, merged, deceased, deleted) or has turned notices off
-    -- since it was queued (the email's rule, 0063). The lease below checks the same rule itself, so such a row is
-    -- never claimed or sent.
-    update ehr.appointment_sms_outbox sms
-       set state = 'failed', claimed_until = null, last_error_code = 'PATIENT_NOT_REACHABLE'
-     where (sms.state = 'pending' or (sms.state = 'claimed' and sms.claimed_until < clock_timestamp()))
-       and not exists (select 1 from identity.patients patient
-                        where patient.id = sms.patient_id and patient.status = 'active' and patient.notifications_enabled);
+       set state = 'failed', claimed_by = null, claimed_until = null, last_error_code = closing.error_code
+      from (select candidate.id, reason.error_code
+              from ehr.appointment_sms_outbox candidate
+              join ehr.appointments appointment on appointment.id = candidate.appointment_id
+              cross join lateral (
+                select case
+                  when appointment.status <> 'booked' then 'APPOINTMENT_NOT_BOOKED'
+                  when appointment.starts_at <= clock_timestamp() then 'APPOINTMENT_STARTED'
+                  when not exists (select 1 from identity.patients patient
+                                    where patient.id = candidate.patient_id and patient.status = 'active'
+                                      and patient.notifications_enabled) then 'PATIENT_NOT_REACHABLE'
+                  when not exists (select 1 from identity.patient_facility_contacts facility_contact
+                                    where facility_contact.id = candidate.contact_id
+                                      and facility_contact.erased_at is null
+                                      and facility_contact.phone_ciphertext is not null) then 'CONTACT_ERASED'
+                  when candidate.attempt_count >= 5 then 'ATTEMPTS_EXHAUSTED'
+                end as error_code) reason
+             where (candidate.state = 'pending' or (candidate.state = 'claimed' and candidate.claimed_until < clock_timestamp()))
+               and reason.error_code is not null
+             order by candidate.created_at, candidate.id
+             limit requested_batch
+             for update of candidate skip locked) closing
+     where sms.id = closing.id;
+    -- No SMS at night: leases only between 07:00 and 21:00 Lagos, the hours the sweep reminds in (a row waits).
+    if lagos_hour < 7 or lagos_hour >= 21 then
+      return;
+    end if;
     return query
+      -- Only rows this claim can answer are leased, each with what it answers (a lease is always answered, as the
+      -- email claim's): the appointment still booked, reminded by the sweep since its last move, and starting within
+      -- the next 24 hours (an unsent SMS kept by a move further ahead waits for the sweep); the patient active with
+      -- notices on; the facility contact unerased; attempts left.
       with picked as (
-        select sms.id from ehr.appointment_sms_outbox sms
-         where (sms.state = 'pending' or (sms.state = 'claimed' and sms.claimed_until < clock_timestamp()))
-           and sms.attempt_count < 5
-           and exists (select 1 from identity.patients patient
-                        where patient.id = sms.patient_id and patient.status = 'active' and patient.notifications_enabled)
-         order by sms.created_at, sms.id
+        select candidate.id, facility.name as facility_name, appointment.starts_at,
+               facility_contact.registration_case_id, facility_contact.phone_ciphertext, facility_contact.key_version
+          from ehr.appointment_sms_outbox candidate
+          join ehr.appointments appointment on appointment.id = candidate.appointment_id
+          join identity.facilities facility on facility.id = candidate.facility_id
+          join identity.patients patient on patient.id = candidate.patient_id
+          join identity.patient_facility_contacts facility_contact on facility_contact.id = candidate.contact_id
+         where (candidate.state = 'pending' or (candidate.state = 'claimed' and candidate.claimed_until < clock_timestamp()))
+           and candidate.attempt_count < 5
+           and appointment.status = 'booked' and appointment.reminder_sent_at is not null
+           and appointment.starts_at > clock_timestamp() and appointment.starts_at <= clock_timestamp() + interval '24 hours'
+           and patient.status = 'active' and patient.notifications_enabled
+           and facility_contact.erased_at is null and facility_contact.phone_ciphertext is not null
+         order by candidate.created_at, candidate.id
          limit requested_batch
-         for update skip locked
+         for update of candidate skip locked
       ), claimed as (
         update ehr.appointment_sms_outbox sms
-           set state = 'claimed', claimed_until = clock_timestamp() + interval '5 minutes',
+           set state = 'claimed', claimed_by = requested_worker, claimed_until = clock_timestamp() + interval '5 minutes',
                attempt_count = sms.attempt_count + 1
           from picked where sms.id = picked.id
-        returning sms.id, sms.appointment_id, sms.facility_id, sms.contact_id
+        returning sms.id
       )
-      select claimed.id, facility.name, appointment.starts_at, facility_contact.registration_case_id,
-             facility_contact.phone_ciphertext, facility_contact.key_version
+      select claimed.id, picked.facility_name, picked.starts_at, picked.registration_case_id, picked.phone_ciphertext,
+             picked.key_version
         from claimed
-        join ehr.appointments appointment on appointment.id = claimed.appointment_id and appointment.status = 'booked'
-        join identity.facilities facility on facility.id = claimed.facility_id
-        join identity.patient_facility_contacts facility_contact
-          on facility_contact.id = claimed.contact_id and facility_contact.erased_at is null;
+        join picked on picked.id = claimed.id;
   end
   $fn$;
-  comment on function identity.appointment_sms_claim(integer) is
-    '0161 (APPT-1): claims up to the batch (1-100) of reminder SMS for identity-api''s sender, as system:auth, only while appointment_sms_reminders_enabled is on (otherwise none). Each with the facility name, the start time and the facility-recorded phone ciphertext and its registration case (the associated data). Lapsed claims come back; at most 5 attempts. A reminder whose appointment is no longer booked is closed unsent (failed, APPOINTMENT_NOT_BOOKED), and so is one whose patient is no longer active or has turned notices off (failed, PATIENT_NOT_REACHABLE); neither is claimed.';
-  revoke all on function identity.appointment_sms_claim(integer) from public;
+  comment on function identity.appointment_sms_claim(text, integer) is
+    '0161 (APPT-1): leases up to the batch (1-100) of reminder SMS to the sender (3-128 characters), as system:auth, only while appointment_sms_reminders_enabled is on (otherwise none), and only between 07:00 and 21:00 Lagos. Each with the facility name, the start time and the facility-recorded phone ciphertext and its registration case (the associated data); a lease is always answered. Leases only a row whose appointment is booked, reminded since its last move and starts within 24 hours, whose patient is active with notices on and whose contact is unerased; lapsed leases come back; at most 5 attempts. A row that can never be sent is closed unsent (failed): APPOINTMENT_NOT_BOOKED, APPOINTMENT_STARTED, PATIENT_NOT_REACHABLE, CONTACT_ERASED or ATTEMPTS_EXHAUSTED.';
+  revoke all on function identity.appointment_sms_claim(text, integer) from public;
 
-  create function identity.appointment_sms_record(requested_sms_id uuid, requested_outcome text,
+  create function identity.appointment_sms_record(requested_sms_id uuid, requested_worker text, requested_outcome text,
     requested_error_code text)
-  returns void
+  returns text
   language plpgsql
   security definer
   set search_path = pg_catalog, pg_temp
   as $fn$
   declare
     sms_row ehr.appointment_sms_outbox%rowtype;
+    next_state text;
   begin
     if platform.current_actor_subject() is distinct from 'system:auth' or platform.current_correlation_id() is null then
       raise exception using errcode = '42501', message = 'APPOINTMENT_SMS_SYSTEM_ONLY';
     end if;
-    if requested_sms_id is null or requested_outcome not in ('sent', 'failed', 'retry')
+    if requested_sms_id is null or requested_worker is null
+       or requested_outcome is null or requested_outcome not in ('sent', 'failed', 'retry')
        or (requested_error_code is not null and requested_error_code !~ '^[A-Z][A-Z0-9_]{1,79}$') then
       raise exception using errcode = '22023', message = 'APPOINTMENT_INVALID';
     end if;
+    -- Only the sender that holds the lease records it. A lease that lapsed and went back to the queue or to another
+    -- sender answers stale, and the row stays as it is.
     select sms.* into sms_row from ehr.appointment_sms_outbox sms where sms.id = requested_sms_id for update;
-    if not found or sms_row.state <> 'claimed' then
-      raise exception using errcode = '55000', message = 'APPOINTMENT_SMS_CLAIM_STALE';
+    if not found or sms_row.state <> 'claimed' or sms_row.claimed_by is distinct from requested_worker then
+      return 'stale';
     end if;
+    next_state := case when requested_outcome = 'sent' then 'sent'
+                       when requested_outcome = 'failed' or sms_row.attempt_count >= 5 then 'failed'
+                       else 'pending' end;
     update ehr.appointment_sms_outbox sms
-       set state = case when requested_outcome = 'sent' then 'sent'
-                        when requested_outcome = 'failed' or sms.attempt_count >= 5 then 'failed' else 'pending' end,
-           claimed_until = null,
-           sent_at = case when requested_outcome = 'sent' then clock_timestamp() end,
+       set state = next_state, claimed_by = null, claimed_until = null,
+           sent_at = case when next_state = 'sent' then clock_timestamp() end,
            last_error_code = requested_error_code
      where sms.id = requested_sms_id;
     insert into audit.events (correlation_id, actor_type, facility_id, patient_id, action, outcome, resource_type,
       resource_id, purpose_of_use, provenance, source_system, details)
     values (platform.current_correlation_id(), 'system', sms_row.facility_id, sms_row.patient_id,
-      'notification.appointment-sms.send', case when requested_outcome = 'sent' then 'success' else 'failure' end,
+      'notification.appointment-sms.send', case when next_state = 'sent' then 'success' else 'failure' end,
       'appointment', sms_row.appointment_id::text, 'healthcare-operations', 'system', 'identity-api',
-      jsonb_build_object('outcome', requested_outcome, 'errorCode', requested_error_code, 'attempt', sms_row.attempt_count));
+      jsonb_build_object('outcome', requested_outcome, 'state', next_state, 'errorCode', requested_error_code,
+        'attempt', sms_row.attempt_count));
+    return next_state;
   end
   $fn$;
-  comment on function identity.appointment_sms_record(uuid, text, text) is
-    '0161 (APPT-1): records one reminder SMS as sent, failed or to retry, as system:auth, with one audit row (notification.appointment-sms.send; never the phone or the message).';
-  revoke all on function identity.appointment_sms_record(uuid, text, text) from public;
+  comment on function identity.appointment_sms_record(uuid, text, text, text) is
+    '0161 (APPT-1): records one leased reminder SMS as sent, failed or to retry (at most 5 attempts), as system:auth, only for the sender that holds the lease, with one audit row (notification.appointment-sms.send; never the phone or the message). Answers sent, pending, failed or stale (no lease of this sender: nothing recorded).';
+  revoke all on function identity.appointment_sms_record(uuid, text, text, text) from public;
 
   -- B2. The email sender's two calls (identity-api, system:auth).
   create function identity.appointment_email_claim(requested_worker text, requested_limit integer,
@@ -875,8 +958,8 @@ begin
     execute format('alter function ehr.appointment_events_notify() owner to %I', v_owner);
     execute format('alter function ehr.appointment_send_reminders(integer) owner to %I', v_owner);
     execute format('alter function ehr.appointment_my_list(uuid, text, integer, timestamptz, uuid) owner to %I', v_owner);
-    execute format('alter function identity.appointment_sms_claim(integer) owner to %I', v_owner);
-    execute format('alter function identity.appointment_sms_record(uuid, text, text) owner to %I', v_owner);
+    execute format('alter function identity.appointment_sms_claim(text, integer) owner to %I', v_owner);
+    execute format('alter function identity.appointment_sms_record(uuid, text, text, text) owner to %I', v_owner);
     execute format('alter function identity.appointment_email_claim(text, integer, integer) owner to %I', v_owner);
     execute format('alter function identity.appointment_email_record(uuid, text, text, text) owner to %I', v_owner);
     execute format('alter function identity.appointment_call_list(date, uuid, uuid) owner to %I', v_owner);
@@ -887,7 +970,7 @@ begin
   end if;
   if exists (select 1 from pg_roles where rolname = 'hid_identity_runtime') then
     grant execute on function identity.appointment_call_list(date, uuid, uuid),
-      identity.appointment_sms_claim(integer), identity.appointment_sms_record(uuid, text, text),
+      identity.appointment_sms_claim(text, integer), identity.appointment_sms_record(uuid, text, text, text),
       identity.appointment_email_claim(text, integer, integer),
       identity.appointment_email_record(uuid, text, text, text) to hid_identity_runtime;
   end if;
@@ -940,8 +1023,8 @@ begin
                           to_regprocedure('ehr.appointment_send_reminders(integer)'),
                           to_regprocedure('ehr.appointment_my_list(uuid, text, integer, timestamptz, uuid)'),
                           to_regprocedure('identity.appointment_call_list(date, uuid, uuid)'),
-                          to_regprocedure('identity.appointment_sms_claim(integer)'),
-                          to_regprocedure('identity.appointment_sms_record(uuid, text, text)'),
+                          to_regprocedure('identity.appointment_sms_claim(text, integer)'),
+                          to_regprocedure('identity.appointment_sms_record(uuid, text, text, text)'),
                           to_regprocedure('identity.appointment_email_claim(text, integer, integer)'),
                           to_regprocedure('identity.appointment_email_record(uuid, text, text, text)'))
          and proc.proowner = (select role_row.oid from pg_roles role_row where role_row.rolname = v_owner)) <> 9 then
@@ -968,30 +1051,58 @@ begin
                    and trigger_row.tgrelid in ('ehr.appointment_email_outbox'::regclass, 'ehr.appointment_sms_outbox'::regclass)) then
     raise exception using errcode = '55000', message = '0161: post-check failed (the notice trigger)';
   end if;
-  if exists (select 1 from pg_proc proc, lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
-              where proc.oid in ('ehr.appointment_send_reminders(integer)'::regprocedure,
-                                 'ehr.appointment_my_list(uuid, text, integer, timestamptz, uuid)'::regprocedure)
-                and acl.grantee <> proc.proowner and (acl.grantee = 0 or pg_get_userbyid(acl.grantee) <> 'hid_ehr_runtime'))
-     or exists (select 1 from pg_proc proc, lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
-              where proc.oid in ('identity.appointment_call_list(date, uuid, uuid)'::regprocedure,
-                                 'identity.appointment_sms_claim(integer)'::regprocedure,
-                                 'identity.appointment_sms_record(uuid, text, text)'::regprocedure,
-                                 'identity.appointment_email_claim(text, integer, integer)'::regprocedure,
-                                 'identity.appointment_email_record(uuid, text, text, text)'::regprocedure)
-                and acl.grantee <> proc.proowner and (acl.grantee = 0 or pg_get_userbyid(acl.grantee) <> 'hid_identity_runtime'))
-     or exists (select 1 from pg_proc proc, lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
-              where proc.oid in ('ehr.appointment_notice(uuid, text, timestamptz)'::regprocedure,
-                                 'ehr.appointment_events_notify()'::regprocedure)
-                and acl.grantee <> proc.proowner)
-     or (select count(*) from pg_proc
-          where oid in ('ehr.appointment_send_reminders(integer)'::regprocedure,
-                        'ehr.appointment_my_list(uuid, text, integer, timestamptz, uuid)'::regprocedure,
-                        'identity.appointment_call_list(date, uuid, uuid)'::regprocedure,
-                        'identity.appointment_sms_claim(integer)'::regprocedure,
-                        'identity.appointment_sms_record(uuid, text, text)'::regprocedure,
-                        'identity.appointment_email_claim(text, integer, integer)'::regprocedure,
-                        'identity.appointment_email_record(uuid, text, text, text)'::regprocedure)
-            and prosecdef and proconfig = array['search_path=pg_catalog, pg_temp']) <> 7 then
+  -- The trigger's function and the notice helper it calls (0152's and 0160's form): the bodies made here, neither
+  -- SECURITY DEFINER (they run as the appointment function that wrote the history row, as the owner), the fixed
+  -- search_path.
+  if (select count(*) from pg_proc proc
+       where ((proc.oid = 'ehr.appointment_events_notify()'::regprocedure
+               and md5(proc.prosrc) = 'd27bc8323db3cc583fe29409719a7993')
+              or (proc.oid = 'ehr.appointment_notice(uuid, text, timestamptz)'::regprocedure
+                  and md5(proc.prosrc) = '498550a171d26998a276844f3a23e292'))
+         and not proc.prosecdef and proc.proconfig = array['search_path=pg_catalog, pg_temp']) <> 2 then
+    raise exception using errcode = '55000', message = '0161: post-check failed (the notice trigger''s function or the notice helper)';
+  end if;
+  -- The seven entry points: SECURITY DEFINER with the fixed search_path. EXECUTE exactly as runtime-grants.sql grants
+  -- it (0148's form): the sweep and the portal list to hid_ehr_runtime, the call list and the four sender calls to
+  -- hid_identity_runtime, each held by that runtime when it exists and never with grant option (so no default
+  -- privilege of the schema adds one); no other role holds any, PUBLIC included, and nobody the two helpers.
+  with expected(function_id, grantee_name) as (values
+         ('ehr.appointment_send_reminders(integer)'::regprocedure, 'hid_ehr_runtime'),
+         ('ehr.appointment_my_list(uuid, text, integer, timestamptz, uuid)'::regprocedure, 'hid_ehr_runtime'),
+         ('identity.appointment_call_list(date, uuid, uuid)'::regprocedure, 'hid_identity_runtime'),
+         ('identity.appointment_sms_claim(text, integer)'::regprocedure, 'hid_identity_runtime'),
+         ('identity.appointment_sms_record(uuid, text, text, text)'::regprocedure, 'hid_identity_runtime'),
+         ('identity.appointment_email_claim(text, integer, integer)'::regprocedure, 'hid_identity_runtime'),
+         ('identity.appointment_email_record(uuid, text, text, text)'::regprocedure, 'hid_identity_runtime')),
+       new_functions as (
+         select proc.oid, proc.proowner, proc.proacl from pg_proc proc
+          where proc.oid in (select expected.function_id from expected)
+             or proc.oid in ('ehr.appointment_notice(uuid, text, timestamptz)'::regprocedure,
+                             'ehr.appointment_events_notify()'::regprocedure)),
+       granted as (
+         select new_functions.oid, privilege.grantee, privilege.privilege_type, privilege.is_grantable
+           from new_functions
+          cross join aclexplode(coalesce(new_functions.proacl, acldefault('f', new_functions.proowner))) privilege
+          where privilege.grantee <> new_functions.proowner)
+  select exists (select 1 from granted
+                  where not exists (select 1 from expected join pg_roles role_row on role_row.rolname = expected.grantee_name
+                                     where expected.function_id = granted.oid and role_row.oid = granted.grantee
+                                       and granted.privilege_type = 'EXECUTE' and not granted.is_grantable))
+      or exists (select 1 from expected join pg_roles role_row on role_row.rolname = expected.grantee_name
+                  where not exists (select 1 from granted
+                                     where granted.oid = expected.function_id and granted.grantee = role_row.oid
+                                       and granted.privilege_type = 'EXECUTE'))
+      or (select count(*) from pg_proc proc
+           where proc.oid in ('ehr.appointment_send_reminders(integer)'::regprocedure,
+                              'ehr.appointment_my_list(uuid, text, integer, timestamptz, uuid)'::regprocedure,
+                              'identity.appointment_call_list(date, uuid, uuid)'::regprocedure,
+                              'identity.appointment_sms_claim(text, integer)'::regprocedure,
+                              'identity.appointment_sms_record(uuid, text, text, text)'::regprocedure,
+                              'identity.appointment_email_claim(text, integer, integer)'::regprocedure,
+                              'identity.appointment_email_record(uuid, text, text, text)'::regprocedure)
+             and proc.prosecdef and proc.proconfig = array['search_path=pg_catalog, pg_temp']) <> 7
+    into v_grants_wrong;
+  if v_grants_wrong then
     raise exception using errcode = '55000', message = '0161: post-check failed (the functions'' security or grants)';
   end if;
   if (select count(*) from audit.events where correlation_id = v_correlation) <> 1 then

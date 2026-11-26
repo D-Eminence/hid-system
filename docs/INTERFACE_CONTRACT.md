@@ -12518,11 +12518,17 @@ for check-in or no-show; a patient with no account gets nothing. SMS: the Platfo
 `appointment_sms_reminders_enabled` (seeded off, switchable in the Platform console) gates both the queue and the
 sender; the text is "Reminder: you have an appointment at {facility} on {day} at {time}." to the phone this facility
 recorded, never the clinic or reason, and only to an active patient with notices on (the email's rule, 0063), checked
-when the sweep queues it and again when the sender claims it: a queued SMS whose patient has since become inactive,
-merged, deceased or deleted, or turned notices off, is closed unsent (`PATIENT_NOT_REACHABLE`), as one whose
-appointment is no longer booked is (`APPOINTMENT_NOT_BOOKED`). At most one unsent SMS per appointment: a rescheduled
-appointment keeps its unsent one (the sender reads the new time when it claims it), and gets a new one only after the
-earlier one was sent or failed.
+when the sweep queues it and again when the sender claims it. The sender claims only between 07:00 and 21:00 Lagos,
+only an SMS whose appointment is still booked, was reminded by the sweep since its last move and starts within the
+next 24 hours (an unsent SMS kept by a move further ahead waits), and only one it can send; each lease is held by one
+sender, and only that sender records the outcome (any other record answers `stale` and changes nothing). An SMS that
+can never be sent is closed unsent: `APPOINTMENT_NOT_BOOKED` (moved away, cancelled, checked in),
+`APPOINTMENT_STARTED`, `PATIENT_NOT_REACHABLE` (the patient has since become inactive, merged, deceased or deleted, or
+turned notices off), `CONTACT_ERASED` (the facility's recorded phone was erased) or `ATTEMPTS_EXHAUSTED` (5 attempts).
+At most one unsent SMS per appointment: a rescheduled appointment keeps its unsent one (the sender reads the new time
+when it claims it), and gets a new one only after the earlier one was sent or failed; an appointment moved while its
+SMS is being sent waits for the next sweep, which then sends the new time. The reminder audit row names `sms` only
+when the sweep queued the SMS.
 
 Deviation from the planned contract, for the reviewers: the planned email path was a producer `ehr` on
 `integration.outbox_envelopes` for the event-dispatcher and notification-worker. The worker's claim functions are
