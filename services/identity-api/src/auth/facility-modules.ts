@@ -32,7 +32,8 @@ export type FacilityModuleKey =
   | 'migrate'
   | 'outreach'
   | 'admin'
-  | 'audit';
+  | 'audit'
+  | 'emergencyBoard';
 
 export interface FacilityModuleRule {
   key: FacilityModuleKey;
@@ -81,6 +82,10 @@ export const FACILITY_MODULE_RULES: readonly FacilityModuleRule[] = Object.freez
   rule('admin', 'Facility profile and staff', ['workforce.manage'], ['organization.manage']),
   // The facility's audit trail (Akos's "View (audit)" cells).
   rule('audit', 'Audit trail', ['audit.read']),
+  // ED-1 (0168, 0169; Q-ED-2 A): the emergency department board (ehr-api's ed-board routes). Shown with the board;
+  // used in full by those who can also triage and record where the patient goes next (clinicians and doctors).
+  rule('emergencyBoard', 'Emergency department board', ['ehr.ed.read'],
+    ['ehr.ed.arrive', 'ehr.ed.triage', 'ehr.ed.disposition']),
 ]);
 
 /** How far a set of permission codes can use one area. */

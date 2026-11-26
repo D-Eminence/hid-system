@@ -14,6 +14,7 @@
 import { Pool, type PoolClient } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
+import { resetEnvironmentForTests } from '../../config/environment';
 import type { DatabaseService } from '../../database/database.service';
 import { MATCH_REF_PATTERN } from './visit-queue.dto';
 import { VisitQueueService } from './visit-queue.service';
@@ -49,7 +50,13 @@ describeRehearsal('EHR-C7 the waiting list on PostgreSQL (0135)', () => {
   let client: PoolClient;
   let service: VisitQueueService;
 
+  const originalEnvironment = { ...process.env };
+
   beforeAll(async () => {
+    // The service reads ED_BOARD_ENABLED (0168's kill switch); the board is on here, as before.
+    Object.assign(process.env, { NODE_ENV: 'test', DATABASE_URL: 'postgresql://ehr:test@localhost:5432/hid',
+      CORS_ORIGINS: 'http://localhost:3000', STORAGE_MODE: 'disabled', ED_BOARD_ENABLED: 'true' });
+    resetEnvironmentForTests();
     pool = new Pool({ connectionString: url, max: 1 });
     client = await pool.connect();
     await client.query('begin');
@@ -134,6 +141,9 @@ describeRehearsal('EHR-C7 the waiting list on PostgreSQL (0135)', () => {
   });
 
   afterAll(async () => {
+    for (const name of Object.keys(process.env)) if (!(name in originalEnvironment)) delete process.env[name];
+    Object.assign(process.env, originalEnvironment);
+    resetEnvironmentForTests();
     await client?.query('rollback');
     client?.release();
     await pool?.end();

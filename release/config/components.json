@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0153",
-    "count": 154,
+    "last": "0169",
+    "count": 156,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -713,6 +713,14 @@
       {
         "name": "0153_clinician_recent_diagnoses.sql",
         "sha256": "45faa6a739056cc07426fdb5363b58c7dda1dbcbc096fb6d1769ae746798500b"
+      },
+      {
+        "name": "0168_emergency_department_board.sql",
+        "sha256": "84790e95ec22711b31cf1172acb8bb2883ab5fc353ae6cc7e9cd29d15bdb44d9"
+      },
+      {
+        "name": "0169_emergency_department_board_access.sql",
+        "sha256": "9aa42c47c4e6ed38a6c2a51333ce777066f3b97cb982cb3db27efff220d7d72b"
       }
     ]
   },

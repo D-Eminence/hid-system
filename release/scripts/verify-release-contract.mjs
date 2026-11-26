@@ -670,6 +670,12 @@ export async function verifyMachineConfiguration(configuration) {
     // Novu never used 0065. Full filenames/checksums below remain authoritative;
     // do not renumber historical SQL to manufacture a contiguous numeric series.
     if (number === 65) continue
+    // Release D's sprint branches (25 November 2026) carry provisional numbers while the numbers before them are
+    // booked by open pull requests (ORD-12's 0154 and the Release D department files cut before ED-1's 0168 and
+    // 0169). A booked number may be absent until its pull request merges; the merge order then renumbers (numbers
+    // are closed up in release order), and this exception goes with the last of them. 0152 and 0153 are live
+    // (Release E), so they are not exempt.
+    if (number >= 154 && number <= 167) continue
     if (!numbers.includes(String(number).padStart(4, '0'))) fail('components config.migration.files', 'missing migration prefix')
   }
   const migrationDirectory = resolve(repositoryRoot, 'services', 'ehr-api', 'database', 'migrations')

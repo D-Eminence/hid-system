@@ -12,7 +12,8 @@ import { seededRolePermissions } from '../../test/role-matrix.fixtures';
 import { AuthController } from './auth.controller';
 import type { AuthService } from './auth.service';
 import type { AuthSessionAuditService } from './auth-session-audit.service';
-import { FACILITY_MODULE_RULES, facilityModules, withFacilityModules, type FacilityModuleKey } from './facility-modules';
+import { FACILITY_MODULE_RULES, facilityModuleAccess, facilityModules, withFacilityModules, type FacilityModuleKey }
+  from './facility-modules';
 import type { GoogleAuthenticationService } from './google-authentication.service';
 import type { TokenService } from './token.service';
 import type { TurnstileService } from './turnstile.service';
@@ -24,7 +25,9 @@ import type { WorkloadAuthService } from './workload-auth.service';
 const SEEDS = seededRolePermissions();
 const permissionsOf = (role: string): readonly string[] => SEEDS.get(role) ?? [];
 const KEYS: FacilityModuleKey[] = ['patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage', 'consultation',
-  'orders', 'lab', 'labResults', 'pharmacy', 'prescriptions', 'migrate', 'outreach', 'admin', 'audit'];
+  'orders', 'lab', 'labResults', 'pharmacy', 'prescriptions', 'migrate', 'outreach', 'admin', 'audit',
+  // ED-1 (0169, Q-ED-2 A): the emergency department board.
+  'emergencyBoard'];
 const only = (...shown: FacilityModuleKey[]) => Object.fromEntries(KEYS.map((key) => [key, shown.includes(key)]));
 
 describe('facility areas for each seeded role (SX-1)', () => {
@@ -36,14 +39,15 @@ describe('facility areas for each seeded role (SX-1)', () => {
 
   it.each<[string, FacilityModuleKey[]]>([
     // 0136 (Q103 A, Q112 A): the front desk sees vitals (triage) and scans paper records into the file.
-    ['receptionist', ['patients', 'registration', 'accessRequests', 'triage', 'outreach']],
+    // ED-1 (0169, Q-ED-2 A): the front desk, nurses, clinicians and doctors see the emergency department board.
+    ['receptionist', ['patients', 'registration', 'accessRequests', 'triage', 'outreach', 'emergencyBoard']],
     ['nurse', ['patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage', 'consultation', 'labResults',
-      'prescriptions', 'migrate', 'outreach']],
+      'prescriptions', 'migrate', 'outreach', 'emergencyBoard']],
     // 0136 (Q103 A): doctors lose the leftover Outreach permissions.
     ['doctor', ['patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage', 'consultation', 'orders',
-      'labResults', 'prescriptions', 'migrate']],
+      'labResults', 'prescriptions', 'migrate', 'emergencyBoard']],
     ['clinician', ['patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage', 'consultation', 'orders',
-      'labResults', 'prescriptions', 'migrate', 'outreach']],
+      'labResults', 'prescriptions', 'migrate', 'outreach', 'emergencyBoard']],
     ['lab', ['patients', 'accessRequests', 'lab', 'labResults']],
     ['pharmacist', ['patients', 'accessRequests', 'pharmacy', 'prescriptions']],
     ['admin', ['registration', 'labResults', 'outreach', 'admin', 'audit']],
@@ -81,7 +85,16 @@ describe('facility areas for each seeded role (SX-1)', () => {
   it('a membership holding two roles shows what either role shows', () => {
     const both = [...new Set([...permissionsOf('nurse'), ...permissionsOf('lab')])];
     expect(facilityModules(both)).toEqual(only('patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage',
-      'consultation', 'lab', 'labResults', 'prescriptions', 'migrate', 'outreach'));
+      'consultation', 'lab', 'labResults', 'prescriptions', 'migrate', 'outreach', 'emergencyBoard'));
+  });
+
+  it('ED-1 (0169, Q-ED-2 A): the board is used in full by clinicians and doctors, shown to the front desk and nurses', () => {
+    const board = FACILITY_MODULE_RULES.find((area) => area.key === 'emergencyBoard')!;
+    expect([board.label, board.show, board.act]).toEqual(['Emergency department board', ['ehr.ed.read'],
+      ['ehr.ed.read', 'ehr.ed.arrive', 'ehr.ed.triage', 'ehr.ed.disposition']]);
+    expect(['receptionist', 'nurse', 'clinician', 'doctor', 'lab', 'pharmacist', 'admin', 'org_admin']
+      .map((role) => facilityModuleAccess(permissionsOf(role), board)))
+      .toEqual(['view', 'view', 'full', 'full', 'hidden', 'hidden', 'hidden', 'hidden']);
   });
 });
 

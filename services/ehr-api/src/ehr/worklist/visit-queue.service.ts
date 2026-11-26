@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
+import { getEnvironment } from '../../config/environment';
 import { DatabaseService } from '../../database/database.service';
 import type { CheckInToVisitQueueDto, UpdateVisitQueueEntryDto, VisitQueueStage } from './visit-queue.dto';
 
@@ -24,8 +25,12 @@ export interface VisitQueueCard {
   stage: VisitQueueStage;
   triageLevel: number | null;
   assignedMembershipId: string | null;
-  /** How the patient was checked in: from a search, or already this facility's patient. */
-  checkInBasis: 'search' | 'own-facility';
+  /**
+   * How the patient was checked in: from a search, already this facility's
+   * patient, or (ED-1, 0168) put on the emergency board from an emergency
+   * search with the member's break-glass grant.
+   */
+  checkInBasis: 'search' | 'own-facility' | 'emergency';
   checkedInAt: string;
   /** The Lagos calendar day of the check-in (YYYY-MM-DD). */
   checkInDay: string;
@@ -38,6 +43,13 @@ export interface VisitQueueCard {
   recordKind: 'standard' | 'unknown';
   /** 0145 (ID-7): the date of birth is estimated (an unknown record's age). */
   dateOfBirthEstimated: boolean;
+  /**
+   * ED-1 (0168): the open or decided emergency department record of this row,
+   * or null. The waiting list marks the row "Emergency department" and links
+   * to the board. Always null while ED_BOARD_ENABLED is off: the board is not
+   * served then, so its patients' rows are ordinary waiting-list rows.
+   */
+  edAttendanceId: string | null;
 }
 
 export interface VisitQueueCheckIn {
@@ -62,7 +74,7 @@ interface CardRow extends QueryResultRow {
   stage: VisitQueueStage;
   triage_level: number | null;
   assigned_membership_id: string | null;
-  check_in_basis: 'search' | 'own_facility';
+  check_in_basis: 'search' | 'own_facility' | 'emergency';
   checked_in_at: Date;
   queue_day: string;
   stage_changed_at: Date;
@@ -71,6 +83,7 @@ interface CardRow extends QueryResultRow {
   chart_blocked: boolean;
   record_kind?: string | null;
   dob_estimated?: boolean | null;
+  ed_attendance_id?: string | null;
 }
 
 interface OutcomeRow extends CardRow {
@@ -83,14 +96,41 @@ const CARD_COLUMNS = `entry_id, patient_id, full_name, sex, date_of_birth::text 
   stage_changed_at, closed_at, row_version::text as row_version, chart_blocked`;
 
 export const CHECK_IN_SQL = `select outcome, ${CARD_COLUMNS} from ehr.visit_queue_check_in($1, $2)`;
-/** 0145 (ID-7): the record kinds of the cards' entries, read only where 0145 is applied. */
+/**
+ * 0145 (ID-7): the record kinds of the cards' entries, read only where 0145 is
+ * applied; ED-1 (0168): their emergency department records, read only where
+ * 0168 is applied.
+ */
 export const RECORD_KINDS_PRESENT_SQL =
-  `select to_regprocedure('ehr.visit_queue_record_kinds(uuid[])') is not null as present`;
+  `select to_regprocedure('ehr.visit_queue_record_kinds(uuid[])') is not null as present,
+     to_regprocedure('ehr.visit_queue_ed_attendances(uuid[])') is not null as ed_present`;
 export const RECORD_KINDS_SQL =
   'select entry_id::text as entry_id, record_kind, dob_estimated from ehr.visit_queue_record_kinds($1::uuid[])';
+export const ED_ATTENDANCES_SQL =
+  'select entry_id::text as entry_id, attendance_id::text as attendance_id from ehr.visit_queue_ed_attendances($1::uuid[])';
 export const LIST_SQL = `select ${CARD_COLUMNS}, has_more from ehr.visit_queue_list($1) order by ord`;
 export const UPDATE_SQL = `select outcome, ${CARD_COLUMNS}
   from ehr.visit_queue_update($1, $2, $3, $4::smallint, $5, $6, $7)`;
+/**
+ * ED-1 (0168), the kill switch: while ED_BOARD_ENABLED is off, a change goes
+ * through 0168's ehr.visit_queue_ed_board_off_update (0135's update under the
+ * board's marker; when the row is updated it closes the row's open or decided
+ * ED record, with an event and an audit row), so a board patient's row is
+ * never stuck while the board is off. Only where 0168 is applied.
+ */
+export const BOARD_OFF_PRESENT_SQL =
+  `select to_regprocedure('ehr.visit_queue_ed_board_off_update(uuid,bigint,text,smallint,boolean,uuid,boolean)')
+     is not null as present`;
+export const BOARD_OFF_UPDATE_SQL = `select outcome, ${CARD_COLUMNS}
+  from ehr.visit_queue_ed_board_off_update($1, $2, $3, $4::smallint, $5, $6, $7)`;
+
+/** ED_BOARD_ENABLED: only while it is on does a waiting-list row belong to the board (one switch, every facility). */
+export function edBoardOn(): boolean {
+  return getEnvironment().ED_BOARD_ENABLED;
+}
+
+/** A statement, or (chosen in the transaction) the statement to run. */
+type Statement = string | ((client: PoolClient) => Promise<string>);
 
 /** The one answer for every refused check-in, so it never tells whether a patient exists. */
 export function checkInRefused(): DomainProblem {
@@ -124,7 +164,12 @@ export class VisitQueueService {
     return { items: rows.map(toCard), hasMore: rows.some((row) => row.has_more), limit: VISIT_QUEUE_LIST_LIMIT };
   }
 
-  /** Moves a row between stages, closes it, or sets or clears its triage level or assignee. */
+  /**
+   * Moves a row between stages, closes it, or sets or clears its triage level
+   * or assignee. While the board is on, 0168's guard refuses this for a row
+   * with an open or decided ED record (409 VISIT_QUEUE_ON_ED_BOARD). While it
+   * is off, the change is made and that record closes (BOARD_OFF_UPDATE_SQL).
+   */
   async update(context: DataAccessContext, entryId: string, input: UpdateVisitQueueEntryDto): Promise<VisitQueueCard> {
     const clearTriage = input.triageLevel === null;
     const clearAssignee = input.assignedMembershipId === null;
@@ -132,7 +177,11 @@ export class VisitQueueService {
       throw new DomainProblem(400, 'VISIT_QUEUE_NOTHING_TO_CHANGE',
         'Choose a stage, a triage level or a person to see the patient.');
     }
-    const row = await this.call<OutcomeRow>(context, UPDATE_SQL, [
+    const boardOn = edBoardOn();
+    const sql = boardOn ? UPDATE_SQL : async (client: PoolClient) =>
+      ((await client.query<{ present: boolean }>(BOARD_OFF_PRESENT_SQL)).rows[0]?.present === true
+        ? BOARD_OFF_UPDATE_SQL : UPDATE_SQL);
+    const row = await this.call<OutcomeRow>(context, sql, [
       entryId, input.expectedRowVersion, input.stage ?? null, clearTriage ? null : input.triageLevel ?? null,
       clearTriage, clearAssignee ? null : input.assignedMembershipId ?? null, clearAssignee,
     ]);
@@ -153,28 +202,42 @@ export class VisitQueueService {
     }
   }
 
-  private async call<Row extends QueryResultRow>(context: DataAccessContext, sql: string,
+  private async call<Row extends QueryResultRow>(context: DataAccessContext, sql: Statement,
     values: readonly unknown[]): Promise<Row | undefined> {
     return (await this.query<Row>(context, sql, values))[0];
   }
 
-  private async query<Row extends QueryResultRow>(context: DataAccessContext, sql: string,
+  private async query<Row extends QueryResultRow>(context: DataAccessContext, sql: Statement,
     values: readonly unknown[]): Promise<Row[]> {
+    const boardOn = edBoardOn();
     try {
       return await this.database.withTransaction(context, async (client: PoolClient) => {
-        const rows = (await client.query<Row>(sql, [...values])).rows;
+        const statement = typeof sql === 'string' ? sql : await sql(client);
+        const rows = (await client.query<Row>(statement, [...values])).rows;
         const entryIds = rows.map((row) => (row as { entry_id?: unknown }).entry_id).filter(
           (id): id is string => typeof id === 'string');
-        if (entryIds.length === 0
-            || (await client.query<{ present: boolean }>(RECORD_KINDS_PRESENT_SQL)).rows[0]?.present !== true) {
-          return rows;
+        if (entryIds.length === 0) return rows;
+        const presence = (await client.query<{ present: boolean; ed_present?: boolean }>(RECORD_KINDS_PRESENT_SQL))
+          .rows[0];
+        let merged = rows;
+        if (presence?.present === true) {
+          const kinds = new Map((await client.query<{ entry_id: string; record_kind: string; dob_estimated: boolean }>(
+            RECORD_KINDS_SQL, [entryIds])).rows.map((kind) => [kind.entry_id, kind]));
+          merged = merged.map((row) => {
+            const kind = kinds.get(String((row as { entry_id?: unknown }).entry_id));
+            return kind ? { ...row, record_kind: kind.record_kind, dob_estimated: kind.dob_estimated } : row;
+          });
         }
-        const kinds = new Map((await client.query<{ entry_id: string; record_kind: string; dob_estimated: boolean }>(
-          RECORD_KINDS_SQL, [entryIds])).rows.map((kind) => [kind.entry_id, kind]));
-        return rows.map((row) => {
-          const kind = kinds.get(String((row as { entry_id?: unknown }).entry_id));
-          return kind ? { ...row, record_kind: kind.record_kind, dob_estimated: kind.dob_estimated } : row;
-        });
+        // While the board is off its patients' rows are ordinary rows: no ED record is shown for them.
+        if (boardOn && presence?.ed_present === true) {
+          const attendances = new Map((await client.query<{ entry_id: string; attendance_id: string }>(
+            ED_ATTENDANCES_SQL, [entryIds])).rows.map((attendance) => [attendance.entry_id, attendance.attendance_id]));
+          merged = merged.map((row) => {
+            const attendance = attendances.get(String((row as { entry_id?: unknown }).entry_id));
+            return attendance ? { ...row, ed_attendance_id: attendance } : row;
+          });
+        }
+        return merged;
       });
     } catch (error) {
       throw translate(error);
@@ -193,7 +256,8 @@ function toCard(row: CardRow): VisitQueueCard {
     stage: row.stage,
     triageLevel: row.triage_level === null ? null : Number(row.triage_level),
     assignedMembershipId: row.assigned_membership_id,
-    checkInBasis: row.check_in_basis === 'own_facility' ? 'own-facility' : 'search',
+    checkInBasis: row.check_in_basis === 'own_facility' ? 'own-facility'
+      : row.check_in_basis === 'emergency' ? 'emergency' : 'search',
     checkedInAt: new Date(row.checked_in_at).toISOString(),
     checkInDay: row.queue_day,
     stageChangedAt: new Date(row.stage_changed_at).toISOString(),
@@ -202,6 +266,7 @@ function toCard(row: CardRow): VisitQueueCard {
     chartBlocked: row.chart_blocked === true,
     recordKind: row.record_kind === 'unknown' ? 'unknown' : 'standard',
     dateOfBirthEstimated: row.dob_estimated === true,
+    edAttendanceId: row.ed_attendance_id ?? null,
   };
 }
 
@@ -224,6 +289,11 @@ export function translate(error: unknown): unknown {
   if (code === '22023' && message === 'VISIT_QUEUE_UPDATE_INVALID') {
     return new DomainProblem(400, 'VISIT_QUEUE_UPDATE_INVALID',
       'Choose a stage, a triage level from 1 to 5, or a person to see the patient.');
+  }
+  if (code === '55000' && message === 'VISIT_QUEUE_ON_ED_BOARD') {
+    // 0168's guard: an emergency department patient's stage, triage level and who sees them belong to the board.
+    return new DomainProblem(409, 'VISIT_QUEUE_ON_ED_BOARD',
+      'This patient is on the emergency department board. Make this change on the board.');
   }
   if (code === '42883' || code === '42P01') {
     // A new image on a schema without 0135: the routes stay closed until the migration is applied.

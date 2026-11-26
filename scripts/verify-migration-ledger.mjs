@@ -166,6 +166,9 @@ const acceptedMigrations = new Map([
   ['0151_sealed_qa_front_desk_and_nurse_logins.sql', 'abab517679255cec2d67aadae9d44f1b629e8e3e9ee30d77cfee33817b2c75f2'],
   ['0152_catalog_diagnoses.sql', 'abfecc3571808e4ad29fdf8c1e202f65b3cdf890e9f3106b74bd6ef1bd19f9c9'],
   ['0153_clinician_recent_diagnoses.sql', '45faa6a739056cc07426fdb5363b58c7dda1dbcbc096fb6d1769ae746798500b'],
+  // ED-1 (Release D), numbers provisional (given at merge, after 0152-0154 and the files cut before them), unsigned.
+  ['0168_emergency_department_board.sql', '84790e95ec22711b31cf1172acb8bb2883ab5fc353ae6cc7e9cd29d15bdb44d9'],
+  ['0169_emergency_department_board_access.sql', '9aa42c47c4e6ed38a6c2a51333ce777066f3b97cb982cb3db27efff220d7d72b'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

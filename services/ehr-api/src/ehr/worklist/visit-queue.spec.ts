@@ -8,8 +8,9 @@ import { createValidationPipe } from '../../common/validation-pipe';
 import type { DatabaseService } from '../../database/database.service';
 import { VisitQueueController } from './visit-queue.controller';
 import { CheckInToVisitQueueDto, ListVisitQueueQueryDto, UpdateVisitQueueEntryDto } from './visit-queue.dto';
-import { CHECK_IN_SQL, LIST_SQL, RECORD_KINDS_PRESENT_SQL, RECORD_KINDS_SQL, UPDATE_SQL, VisitQueueService,
-  translate } from './visit-queue.service';
+import { resetEnvironmentForTests } from '../../config/environment';
+import { BOARD_OFF_PRESENT_SQL, BOARD_OFF_UPDATE_SQL, CHECK_IN_SQL, ED_ATTENDANCES_SQL, LIST_SQL, RECORD_KINDS_PRESENT_SQL,
+  RECORD_KINDS_SQL, UPDATE_SQL, VisitQueueService, translate } from './visit-queue.service';
 
 // Fictional identifiers only.
 const facilityId = '123e4567-e89b-42d3-a456-426614174002';
@@ -69,6 +70,20 @@ async function problemOf(promise: Promise<unknown>): Promise<DomainProblem> {
   }
   throw new Error('expected a refusal');
 }
+
+const originalEnvironment = { ...process.env };
+/** ED_BOARD_ENABLED for one test (on unless a test turns it off). */
+function boardEnabled(on: boolean): void {
+  Object.assign(process.env, { NODE_ENV: 'test', DATABASE_URL: 'postgresql://ehr:test@localhost:5432/hid',
+    CORS_ORIGINS: 'http://localhost:3000', STORAGE_MODE: 'disabled', ED_BOARD_ENABLED: on ? 'true' : 'false' });
+  resetEnvironmentForTests();
+}
+beforeEach(() => boardEnabled(true));
+afterEach(() => {
+  for (const name of Object.keys(process.env)) if (!(name in originalEnvironment)) delete process.env[name];
+  Object.assign(process.env, originalEnvironment);
+  resetEnvironmentForTests();
+});
 
 describe('EHR-C7 the waiting list (0135)', () => {
   describe('routes', () => {
@@ -139,6 +154,7 @@ describe('EHR-C7 the waiting list (0135)', () => {
           stage: 'waiting', triageLevel: null, assignedMembershipId: null, checkInBasis: 'search',
           checkedInAt: '2026-11-18T09:00:00.000Z', checkInDay: '2026-11-18', stageChangedAt: '2026-11-18T09:00:00.000Z',
           closedAt: null, rowVersion: 1, chartBlocked: false, recordKind: 'standard', dateOfBirthEstimated: false,
+          edAttendanceId: null,
         },
       });
     });
@@ -250,12 +266,87 @@ describe('EHR-C7 the waiting list (0135)', () => {
     });
   });
 
+  describe('ED-1 (0168): the board on and off (ED_BOARD_ENABLED, the kill switch)', () => {
+    const attendanceId = '123e4567-e89b-42d3-a456-426614174071';
+    /** 0168 applied (its helper and the board-off update), or not; one row with an open ED record. */
+    function boardDatabase(rows: readonly Record<string, unknown>[], applied = true) {
+      const calls: string[] = [];
+      const values: unknown[][] = [];
+      const database = {
+        withTransaction: jest.fn(async (_given: DataAccessContext, operation: (client: unknown) => Promise<unknown>) =>
+          operation({
+            query: async (sql: string, given: unknown[]) => {
+              calls.push(sql);
+              values.push(given);
+              if (sql === RECORD_KINDS_PRESENT_SQL) return { rows: [{ present: applied, ed_present: applied }] };
+              if (sql === RECORD_KINDS_SQL) return { rows: [] };
+              if (sql === ED_ATTENDANCES_SQL) return { rows: [{ entry_id: entryId, attendance_id: attendanceId }] };
+              if (sql === BOARD_OFF_PRESENT_SQL) return { rows: [{ present: applied }] };
+              return { rows };
+            },
+          })),
+      } as unknown as DatabaseService;
+      return { database, calls, values };
+    }
+
+    it('while the board is on, marks the board patient\'s row and sends a change to 0135\'s update (the guard decides)',
+      async () => {
+        const listed = boardDatabase([cardRow()]);
+        const list = await new VisitQueueService(listed.database).list(context, false);
+        expect(list.items[0]?.edAttendanceId).toBe(attendanceId);
+        const changed = boardDatabase([{ outcome: 'updated', ...cardRow({ stage: 'finished' }) }]);
+        await new VisitQueueService(changed.database).update(context, entryId, { expectedRowVersion: 2, stage: 'finished' });
+        expect(changed.calls[0]).toBe(UPDATE_SQL);
+        expect(changed.calls).not.toContain(BOARD_OFF_PRESENT_SQL);
+        expect(changed.calls).not.toContain(BOARD_OFF_UPDATE_SQL);
+      });
+
+    it('while the board is off, shows the board patient\'s row as an ordinary row', async () => {
+      boardEnabled(false);
+      const { database, calls } = boardDatabase([cardRow()]);
+      const list = await new VisitQueueService(database).list(context, false);
+      expect(list.items[0]?.edAttendanceId).toBeNull();
+      expect(calls).not.toContain(ED_ATTENDANCES_SQL);
+    });
+
+    it('while the board is off, sends a change through 0168\'s board-off update, so the row can be finished', async () => {
+      boardEnabled(false);
+      const { database, calls, values } = boardDatabase([{ outcome: 'updated',
+        ...cardRow({ stage: 'finished', closed_at: new Date('2026-11-18T10:00:00Z'), row_version: '4' }) }]);
+      const card = await new VisitQueueService(database).update(context, entryId, { expectedRowVersion: 3, stage: 'finished' });
+      expect(calls.slice(0, 2)).toEqual([BOARD_OFF_PRESENT_SQL, BOARD_OFF_UPDATE_SQL]);
+      expect(values[1]).toEqual([entryId, 3, 'finished', null, false, null, false]);
+      expect(calls).not.toContain(UPDATE_SQL);
+      expect(card).toMatchObject({ stage: 'finished', closedAt: '2026-11-18T10:00:00.000Z', rowVersion: 4,
+        edAttendanceId: null });
+      expect(BOARD_OFF_UPDATE_SQL).toContain('ehr.visit_queue_ed_board_off_update($1, $2, $3, $4::smallint, $5, $6, $7)');
+    });
+
+    it('while the board is off on a schema without 0168, sends a change to 0135\'s update', async () => {
+      boardEnabled(false);
+      const { database, calls } = boardDatabase([{ outcome: 'updated', ...cardRow({ stage: 'triage' }) }], false);
+      await new VisitQueueService(database).update(context, entryId, { expectedRowVersion: 3, stage: 'triage' });
+      expect(calls.slice(0, 2)).toEqual([BOARD_OFF_PRESENT_SQL, UPDATE_SQL]);
+    });
+  });
+
   describe('database refusals', () => {
     it('answers a member without encounter read and write in plain words', async () => {
       const { database } = fakeDatabase(Object.assign(new Error('VISIT_QUEUE_NOT_PERMITTED'), { code: '42501' }));
       const problem = await problemOf(new VisitQueueService(database).list(context, false));
       expect(problem.getStatus()).toBe(403);
       expect(problem.code).toBe('VISIT_QUEUE_NOT_PERMITTED');
+    });
+
+    it('answers a change of an emergency department patient\'s row as 409, in plain words (0168\'s guard)', async () => {
+      const { database } = fakeDatabase(Object.assign(new Error('VISIT_QUEUE_ON_ED_BOARD'), { code: '55000' }));
+      const problem = await problemOf(new VisitQueueService(database).update(context, entryId,
+        { expectedRowVersion: 2, stage: 'finished' }));
+      expect(problem.getStatus()).toBe(409);
+      expect(problem.code).toBe('VISIT_QUEUE_ON_ED_BOARD');
+      expect(problem.message).toBe('This patient is on the emergency department board. Make this change on the board.');
+      const other = Object.assign(new Error('something else'), { code: '55000' });
+      expect(translate(other)).toBe(other);
     });
 
     it('keeps the routes closed (503) on a schema without 0135', () => {

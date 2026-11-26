@@ -69,10 +69,13 @@ create function pg_temp.expect(case_name text, expected text, actual text) retur
 $$;
 grant execute on function pg_temp.expect(text, text, text) to public;
 
--- A role's permissions as one sorted, space-separated line.
+-- A role's permissions as one sorted, space-separated line. The four
+-- emergency board codes of a later file (0169, ED-1) are left out here and
+-- checked on their own in 1m.
 create function pg_temp.role_line(role text) returns text language sql as $$
   select string_agg(permission_code, ' ' order by permission_code) from auth.role_permissions
-   where role_code = role and permission_code <> 'identity.patient.open-own-facility';
+   where role_code = role and permission_code <> 'identity.patient.open-own-facility'
+     and permission_code not like 'ehr.ed.%';
 $$;
 -- The twelve rows 0136 removes, the eight it adds and the three codes it creates.
 create function pg_temp.removed_present() returns integer language sql as $$
@@ -161,6 +164,15 @@ select pg_temp.expect('1j who holds the new codes', 'ehr.document.read-own: rece
      from (select permission_code as code, string_agg(role_code, ' ' order by role_code) as holders
              from auth.role_permissions
             where permission_code in ('ocr.job.start', 'ocr.job.read-own', 'ehr.document.read-own')
+            group by permission_code) held));
+select pg_temp.expect('1m the emergency board codes: none before 0169, its thirteen rows after',
+  case when not exists (select 1 from auth.permissions where code = 'ehr.ed.read') then ''
+       else 'ehr.ed.arrive: clinician doctor nurse receptionist | ehr.ed.disposition: clinician doctor | '
+         || 'ehr.ed.read: clinician doctor nurse receptionist | ehr.ed.triage: clinician doctor nurse' end,
+  (select coalesce(string_agg(code || ': ' || holders, ' | ' order by code), '')
+     from (select permission_code as code, string_agg(role_code, ' ' order by role_code) as holders
+             from auth.role_permissions
+            where permission_code like 'ehr.ed.%'
             group by permission_code) held));
 select pg_temp.expect('1k org_admin holds neither work list (untouched)', '0',
   (select count(*)::text from auth.role_permissions

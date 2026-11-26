@@ -2065,3 +2065,52 @@ grant execute on function ehr.record_recent_diagnosis(text, text, text), ehr.rec
   to hid_ehr_runtime, hid_schema_test_runtime;
 revoke all on function ehr.record_recent_diagnosis(text, text, text), ehr.recent_diagnoses(integer) from public;
 revoke all on ehr.clinician_recent_diagnoses from public;
+
+-- The emergency department board (0168, ED-1 of Release D; built at the
+-- recommended options Q-ED-1 A, Q-ED-3 A, Q-ED-4 A, Q-ED-5 A, Q-ED-6 A and
+-- Q-ED-7 A, not yet answered by the owner), exactly as 0168 grants and revokes
+-- them: arrival, the board, one record, triage, move, the visit link, the
+-- disposition, leave, cancel, the waiting list's helper and the waiting
+-- list's update while the board is switched off to the EHR runtime only. No privilege for any runtime on ehr.ed_attendances,
+-- ehr.ed_attendance_events or the history's sequence (only these functions
+-- read and write them, as their owner), and none on the card, caller, audit and idempotency helpers, the
+-- history's immutability trigger or the waiting-list close mirror. 0169 (who
+-- holds the four codes) adds no grant.
+grant execute on function
+  ehr.ed_arrive(text, uuid, text, timestamptz, smallint, text, text, text),
+  ehr.ed_board(boolean),
+  ehr.ed_read(uuid),
+  ehr.ed_triage(uuid, bigint, smallint, text, boolean, text, text),
+  ehr.ed_move(uuid, bigint, text, uuid, boolean, text, text),
+  ehr.ed_link_visit(uuid, bigint, uuid, text, text),
+  ehr.ed_record_disposition(uuid, bigint, text, text, uuid, text, text, text, text),
+  ehr.ed_leave(uuid, bigint, text, text),
+  ehr.ed_cancel(uuid, bigint, text, text, text),
+  ehr.visit_queue_ed_attendances(uuid[]),
+  ehr.visit_queue_ed_board_off_update(uuid, bigint, text, smallint, boolean, uuid, boolean) to hid_ehr_runtime;
+revoke all on function
+  ehr.ed_arrive(text, uuid, text, timestamptz, smallint, text, text, text),
+  ehr.ed_board(boolean),
+  ehr.ed_read(uuid),
+  ehr.ed_triage(uuid, bigint, smallint, text, boolean, text, text),
+  ehr.ed_move(uuid, bigint, text, uuid, boolean, text, text),
+  ehr.ed_link_visit(uuid, bigint, uuid, text, text),
+  ehr.ed_record_disposition(uuid, bigint, text, text, uuid, text, text, text, text),
+  ehr.ed_leave(uuid, bigint, text, text),
+  ehr.ed_cancel(uuid, bigint, text, text, text),
+  ehr.visit_queue_ed_attendances(uuid[]),
+  ehr.visit_queue_ed_board_off_update(uuid, bigint, text, smallint, boolean, uuid, boolean),
+  ehr.ed_cards(uuid[], uuid, uuid, uuid, boolean),
+  ehr.ed_caller(text, text[]),
+  ehr.ed_audit(text, uuid, uuid, uuid, uuid, text, text, uuid, text, text, text, text, jsonb),
+  ehr.ed_idempotency(uuid, text, text),
+  ehr.ed_attendance_events_immutable(),
+  ehr.visit_queue_ed_close_mirror(),
+  ehr.visit_queue_ed_guard() from public;
+revoke all on ehr.ed_attendances, ehr.ed_attendance_events from public;
+-- The history's identity sequence (sequence_no): 0168 grants nothing on it and
+-- only the history's owner uses it, but the schema-wide grants above (USAGE and
+-- SELECT on all sequences in schema ehr, to hid_ehr_runtime and to
+-- hid_schema_test_runtime) would give both its last_value, a platform-wide
+-- count of ED history events, and nextval. Taken back here, after them.
+revoke all on sequence ehr.ed_attendance_events_sequence_no_seq from public, hid_ehr_runtime, hid_schema_test_runtime;

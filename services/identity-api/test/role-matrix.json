@@ -283,12 +283,27 @@
         "facilityAdmin": "full"
       },
       "derived": "Not a row of Akos's table: taken from its \"View (audit)\" cells, which give the facility admin the audit trail. The audit trail is read only, so holding audit.read is its full use."
+    },
+    {
+      "label": "Emergency department board",
+      "module": "emergencyBoard",
+      "cells": {
+        "frontDesk": "view",
+        "nurse": "view",
+        "doctor": "full",
+        "lab": "hidden",
+        "pharmacy": "hidden",
+        "facilityAdmin": "hidden"
+      },
+      "derived": "Not a row of Akos's table: ED-1 (migrations 0168 and 0169, owner sprint approval of 25 November 2026, built at the recommended option Q-ED-2 A, not yet answered by the owner) adds the emergency department board; each cell is the contract's role table (docs/EHR_PLANNED_CONTRACT.md, ED-1, Roles and access codes): the front desk puts patients on the board and sees it, nurses also triage, clinicians and doctors also record where the patient goes next."
     }
   ],
   "todayRolePermissions": {
     "receptionist": [
       "ehr.document.read-own",
       "ehr.document.write",
+      "ehr.ed.arrive",
+      "ehr.ed.read",
       "ehr.encounter.read",
       "ehr.encounter.write",
       "ehr.vital.read",
@@ -309,6 +324,9 @@
       "ehr.diagnosis.read",
       "ehr.document.read",
       "ehr.document.write",
+      "ehr.ed.arrive",
+      "ehr.ed.read",
+      "ehr.ed.triage",
       "ehr.encounter.read",
       "ehr.encounter.write",
       "ehr.lab-request.read",
@@ -349,6 +367,10 @@
       "ehr.diagnosis.write",
       "ehr.document.read",
       "ehr.document.write",
+      "ehr.ed.arrive",
+      "ehr.ed.disposition",
+      "ehr.ed.read",
+      "ehr.ed.triage",
       "ehr.encounter.read",
       "ehr.encounter.write",
       "ehr.lab-request.read",
@@ -386,6 +408,10 @@
       "ehr.diagnosis.write",
       "ehr.document.read",
       "ehr.document.write",
+      "ehr.ed.arrive",
+      "ehr.ed.disposition",
+      "ehr.ed.read",
+      "ehr.ed.triage",
       "ehr.encounter.read",
       "ehr.encounter.write",
       "ehr.lab-request.read",
