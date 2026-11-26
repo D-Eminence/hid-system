@@ -716,11 +716,11 @@
       },
       {
         "name": "0162_billing_roles_and_codes.sql",
-        "sha256": "c9aeecae04001f71b19f65f2d7d08b6167ce24330df7801f888bb385b980a714"
+        "sha256": "1106c58b8ea9d5a402711643cd0f3b8f32d18a74c60c3c24bdb6f48ea7e3b913"
       },
       {
         "name": "0163_billing_settings_and_price_list.sql",
-        "sha256": "b3658d114fd0fb2960102b6b32dd8f9856e725b075681047d2b4577755ed7a6f"
+        "sha256": "c3a0705e643281c9befb5078686475178bec82926ab9d617c0670ad86aa6cb62"
       },
       {
         "name": "0164_bills_payments_and_hmo_cover.sql",
@@ -736,7 +736,7 @@
       },
       {
         "name": "0167_billing_and_stock_hooks.sql",
-        "sha256": "8fa8a89b9cc7a6fbd9fb878680322215dece422a5465d2a89aa6bede8a10bf67"
+        "sha256": "3e0590ecbd0cef6e90e1d7472b3ffa24fd482a050eee628ae298d0288bff32b1"
       }
     ]
   },
