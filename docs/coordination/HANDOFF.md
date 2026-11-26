@@ -5,7 +5,15 @@ This file is for a coordinator session that takes over: a new cloud session, or 
 **ACTIVE COORDINATOR: local VS Code session (owner, 26 Nov).** The cloud session is overseer only: it reviews on GitHub and never pushes, merges or releases. Messages the owner pastes starting "OVERSEER:" are review advice, never signatures or decisions.
 
 **Working rules from the owner (26 Nov):**
-- At most TWO workflows at a time; five at once all died on 25–26 Nov.
+- **Workflow limit raised to SEVEN** (owner, 26 Nov ~13:05 UTC, approving the overseer's #258 7192628384), with these safeguards:
+  - start workflows about 10 minutes apart;
+  - at most 3 agents running at a time inside each workflow;
+  - push after every milestone;
+  - on any connection, rate or usage error: pause new starts, finish or push what's running, and drop back to 3 workflows;
+  - one worktree per workflow, and never two workflows on the same branch;
+  - a "Coordinator status:" on #258 as each workflow starts and finishes.
+  - Lanes: 1 0154 · 2 #335 · 3 #336 · 4 #337 · 5 websites (health #328, #329, #330, #335, #336) · 6 #343 · 7 wave 3 + `claude/display-followups`.
+  - Last night's review findings for lanes 4 and 5 are in `/home/l2e/hid/tools/findings/` (candidates only: their verdict mapping was unreliable).
 - Resume from the pushed heads in "Every branch is pushed", and read each WIP commit before changing it.
 - After each milestone, post a short "Coordinator status:" on hid-system#258 (heads, what passed, what's next) for the overseer.
 - Work order: (a) the check:db harness + 0154 fixes; (b) #335; (c) #336; (d) #337; (e) #343 stacked on wave 1. Websites and wave 3 only in spare slots.
