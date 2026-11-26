@@ -35,6 +35,8 @@ import { CatalogModule } from './catalog/catalog.module';
 
 import { ConsultationDraftsModule } from './consultation-drafts/consultation-drafts.module';
 import { MyOrdersModule } from './my-orders/my-orders.module';
+// ORD-11 (0159): notices to the ordering doctor.
+import { OrderNoticesModule } from './order-notices/order-notices.module';
 @Module({
   imports: [
     ClinicalInfrastructureModule,
@@ -50,6 +52,8 @@ import { MyOrdersModule } from './my-orders/my-orders.module';
     OrderRoutesModule,
     ConsultationDraftsModule,
     MyOrdersModule,
+    // ORD-11 (0159): notices to the ordering doctor.
+    OrderNoticesModule,
     ConsultationsModule,
     // EHR-C7 (0135): the waiting list.
     VisitQueueModule,

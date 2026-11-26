@@ -114,6 +114,9 @@ const environmentSchema = z
     // Refills on new prescriptions (ORD-12, needs 0154): off by default, separate from 0125's setting; off is exactly
     // as before (refillsAllowed refused like any field the route does not take).
     PRESCRIPTION_REFILLS_ENABLED: booleanString,
+    // Notices to the ordering doctor (ORD-11, needs 0159): off by default. Off, the four routes answer 503
+    // ORDER_NOTICES_UNAVAILABLE without reading the database, and the sweep does not run.
+    ORDER_NOTICES_ENABLED: booleanString,
   })
   .superRefine((environment, context) => {
     if (environment.AI_ENABLED) {
