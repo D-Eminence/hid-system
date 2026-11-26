@@ -1048,6 +1048,17 @@ select pg_temp.check_case('10 a payment beyond what is due is still refused', 'H
     '{"method": "cash", "amountKobo": 100}'::jsonb, null, 'ward-suite-pay-key-0001', repeat('3', 64))$s$,
     pg_temp.bill_of(7)), 'healthcare-operations')));
 reset role;
+select pg_temp.check_case('10 the credit is the admission bill''s own (BILL-1 bd427a88''s money over is for other bills): no refund due or cover over, the totals agree',
+  'admission/0/0/true/true',
+  (select bill.source || '/' || bill.refund_due_kobo || '/' || bill.cover_over_kobo || '/'
+          || (bill.credit_kobo = bill.paid_kobo + bill.pending_check_kobo + bill.waived_kobo + bill.hmo_covered_kobo
+                                 - bill.total_kobo and bill.credit_kobo > 0)::text || '/'
+          || commercial.bill_totals_agree(bill.id)::text
+     from commercial.bills bill where bill.id = pg_temp.bill_of(7)));
+select pg_temp.check_case('10 BILL-1''s money-over CHECK, as 0172 leaves it, refuses a credit on any other bill', '23514',
+  pg_temp.try($s$update commercial.bills set credit_kobo = 1
+    where id = (select id from commercial.bills where source <> 'admission' limit 1)
+       or id = (select id from commercial.bills where source = 'admission' and credit_kobo = 0 limit 1)$s$));
 -- A facility with no payment settings gets no bill (B).
 select pg_temp.check_case('10 no bill at a facility without billing', '0',
   (select count(*)::text from commercial.bills where facility_id = 'a1700000-0000-4000-8000-000000000012'));
