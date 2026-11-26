@@ -672,9 +672,10 @@ try {
     // it. This branch's runner rolls back and runs the dry run again (dry-run-attempts.mjs). Here, on a copy of
     // the live base with a real (unsealed) facility's staff: while 0136 is pending, its stop for active real staff
     // (owner Q113 A) is not retried; with those staff ended, a reader of identity.consent_grants (the table that
-    // stopped production's dry run, read by identity-api on every chart opening) is in flight, and the dry run
-    // must retry and pass; and with that reader never leaving, it must stop after its bound with the file's own
-    // refusal. Each run must leave nothing applied.
+    // stopped production's dry run, read by identity-api on every chart opening), a token refresh's write to
+    // auth.sessions and the OCR worker's poll of ehr.documents are each in flight in turn, and the dry run must
+    // pass, retrying whenever a pending file locks that table against them; and with the reader never leaving,
+    // it must stop after its bound with the file's own refusal. Each run must leave nothing applied.
     const dryDb = 'hid_live_dry';
     command('copy the live database for the dry runs', join(pgBindir, 'createdb'), ['-T', 'hid_live_base', dryDb]);
     const pendingFiles = files.slice(liveFiles.length);
@@ -721,35 +722,64 @@ try {
     await withClient(dryDb, (client) => client.query(`begin;
       set local session_replication_role = replica;
       update identity.staff_facility_memberships set active = false where facility_id = 'fa100000-0000-4000-8000-0000000000f1';
+      insert into auth.sessions (id, account_id, family_id, refresh_token_sha256, access_jti, account_token_version,
+        authentication_method, issued_at, expires_at, absolute_expires_at)
+      values ('fa600000-0000-4000-8000-000000000001', 'fa200000-0000-4000-8000-000000000002',
+        'fa610000-0000-4000-8000-000000000001', repeat('a', 64), 'fa620000-0000-4000-8000-000000000001', 1,
+        'password', now(), now() + interval '1 hour', now() + interval '1 day');
       commit;`));
-    // A reader in flight: its own psql process (a synchronous child would stall this one's event loop), holding
-    // ACCESS SHARE on identity.consent_grants for holdSeconds from its first statement.
-    const reader = async (holdSeconds) => {
+    // What each pending file locks, from its own LOCK TABLE statements, so each case below knows whether a
+    // session in flight must cost the dry run an attempt (Ola, #306 nit 2 and #302 round 3): a case asserts a
+    // retry only when a pending file locks that table in a mode the session's lock conflicts with.
+    const lockStatements = Object.fromEntries(await Promise.all(pendingFiles.map(async (name) => [name,
+      ((await readFile(join(service, 'database/migrations', name), 'utf8')).match(/lock table[^;]*;/gi) ?? [])
+        .map((statement) => statement.replace(/\s+/g, ' ').toLowerCase())])));
+    const lockedAgainst = (table, modes) => pendingFiles.filter((name) => lockStatements[name]
+      .some((statement) => statement.includes(table) && modes.some((mode) => statement.includes(` in ${mode} mode`))));
+    const againstReaders = ['access exclusive'];
+    const againstWriters = ['share', 'share row exclusive', 'exclusive', 'access exclusive'];
+    // A session in flight: its own psql process (a synchronous child would stall this one's event loop), holding
+    // its statement's lock on `table` for holdSeconds. Long enough that the dry run reaches the locking file while
+    // it is held, even on a slow runner (Ola, #306 nit 2).
+    const inFlight = async (table, mode, statement, holdSeconds) => {
       const child = spawn(join(pgBindir, 'psql'), ['-X', '-q', '-d', dryDb, '-c',
-        `begin; select count(*) from identity.consent_grants; select pg_sleep(${holdSeconds}); commit;`],
+        `begin; ${statement}; select pg_sleep(${holdSeconds}); commit;`],
       { env: baseEnvironment, stdio: 'ignore' });
       const exited = new Promise((done) => child.on('exit', done));
       for (let tries = 0; ; tries += 1) {
         const held = (await withClient(dryDb, (client) => client.query(`select pid from pg_locks
-          where locktype = 'relation' and relation = 'identity.consent_grants'::regclass and granted
-            and pid <> pg_backend_pid() and mode = 'AccessShareLock'`))).rows;
+          where locktype = 'relation' and relation = $1::regclass and granted
+            and pid <> pg_backend_pid() and mode = $2`, [table, mode]))).rows;
         if (held.length) return { pid: held[0].pid, exited };
-        assert(tries < 100, 'The reader never took its lock');
+        assert(tries < 100, `The session in flight never took its lock on ${table}`);
         await new Promise((done) => setTimeout(done, 50));
       }
     };
-    const briefReader = await reader(4);
-    migration('live base dry run with a reader in flight', 'apply-migrations.mjs', dryDb, {}, 0, ['--dry-run']);
-    const passed = dryOutput();
-    await briefReader.exited;
-    assert.match(passed, /Dry run succeeded; all changes were rolled back/);
-    assert.equal(await appliedBeyondLive(), 0);
-    liveDry.reader_in_flight = { reader: 'identity.consent_grants, 4 s', attempt_lines: attemptLines(passed),
-      result: 'passed, nothing applied' };
-    if (attemptLines(passed).length) {
-      // That reader stopped an attempt, so a reader that never leaves must stop the dry run after its bound (here
-      // three attempts, 100 ms apart: test-only bounds), with the file's own refusal as the runner's last words.
-      const longReader = await reader(120);
+    const dryRunWith = async (label, session) => {
+      const held = await inFlight(...session.lock, session.holdSeconds);
+      migration(`live base dry run with ${label} in flight`, 'apply-migrations.mjs', dryDb, {}, 0, ['--dry-run']);
+      const output = dryOutput();
+      await held.exited;
+      assert.match(output, /Dry run succeeded; all changes were rolled back/);
+      assert.equal(await appliedBeyondLive(), 0);
+      const lines = attemptLines(output);
+      if (session.locking.length) {
+        assert(lines.length >= 1, `${label}: ${session.locking.join(', ')} locks it, so an attempt must be retried`);
+        assert(lines.every((line) => /^Dry run attempt \d+ of \d+: \d{4}_[a-z0-9_]+\.sql was busy after \d+ ms; rolled back, trying again in \d+ ms$/.test(line)));
+      }
+      return { held: `${session.lock[0]}, ${session.holdSeconds} s`, locked_by_pending: session.locking,
+        attempt_lines: lines, result: 'passed, nothing applied' };
+    };
+    // 1. A reader of identity.consent_grants (identity-api, on every chart opening; it stopped production's dry run).
+    const consentLocking = lockedAgainst('identity.consent_grants', againstReaders);
+    liveDry.reader_in_flight = await dryRunWith('a consent_grants reader', {
+      lock: ['identity.consent_grants', 'AccessShareLock', 'select count(*) from identity.consent_grants'],
+      holdSeconds: 10, locking: consentLocking });
+    if (consentLocking.length) {
+      // A reader that never leaves must stop the dry run after its bound (here three attempts, 100 ms apart:
+      // test-only bounds), with the file's own refusal as the runner's last words.
+      const longReader = await inFlight('identity.consent_grants', 'AccessShareLock',
+        'select count(*) from identity.consent_grants', 120);
       migration('live base dry run against a reader that never leaves', 'apply-migrations.mjs', dryDb,
         { HID_TEST_DRY_RUN_ATTEMPTS: '3', HID_TEST_DRY_RUN_PAUSE_MS: '100' }, 'failure', ['--dry-run']);
       const stopped = dryOutput();
@@ -757,13 +787,23 @@ try {
       await longReader.exited;
       const lines = attemptLines(stopped);
       assert.equal(lines.length, 3);
-      assert.match(lines.at(-1), /^Dry run attempt 3 of 3: \d{4}_[a-z0-9_]+\.sql was busy; no attempt left$/);
+      assert.match(lines.at(-1), /^Dry run attempt 3 of 3: \d{4}_[a-z0-9_]+\.sql was busy after \d+ ms; no attempt left$/);
       assert.match(stopped, /Migration failed: Migration (\d{4})_[a-z0-9_]+\.sql: \1: .*(so it does not wait|stayed busy for 5 seconds)(; nothing applied)?; run the release again at a quieter time/);
       assert.equal(await appliedBeyondLive(), 0);
       liveDry.bound = { attempts: 3, result: 'stopped with the file\'s own refusal, nothing applied' };
     } else {
       liveDry.bound = 'not run: no pending file locks identity.consent_grants against readers';
     }
+    // 2. A token refresh's write in flight (identity-api rotates the session row on every refresh).
+    liveDry.token_refresh_in_flight = await dryRunWith('a token refresh', {
+      lock: ['auth.sessions', 'RowExclusiveLock', `update auth.sessions set last_used_at = clock_timestamp(),
+        row_version = row_version + 1 where id = 'fa600000-0000-4000-8000-000000000001'`],
+      holdSeconds: 10, locking: lockedAgainst('auth.sessions', againstWriters) });
+    // 3. The OCR worker's poll (ocr.claim_worker_job_fair joins ehr.documents, every second by default).
+    liveDry.ocr_poll_in_flight = await dryRunWith('an OCR worker poll', {
+      lock: ['ehr.documents', 'AccessShareLock', `select count(*) from ocr.jobs job
+        join ehr.documents document on document.id = job.document_id`],
+      holdSeconds: 10, locking: lockedAgainst('ehr.documents', againstReaders) });
     evidence.checks.live_base_dry_run = liveDry;
   }
   const before = await snapshot(database);

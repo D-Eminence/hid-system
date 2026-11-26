@@ -11,7 +11,9 @@ const attempts = join(__dirname, '../../scripts/dry-run-attempts.test.mjs');
 
 describe('migration runner scripts', () => {
   it('pass their node:test suites', () => {
-    const child = spawnSync(process.execPath, ['--test', notices, attempts], {
+    // The tap reporter, named: Node 23 and later default to spec outside a TTY,
+    // which prints its totals another way (Ola, #306).
+    const child = spawnSync(process.execPath, ['--test', '--test-reporter=tap', notices, attempts], {
       encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: '' },
     });
     const output = `${child.stdout}\n${child.stderr}`;

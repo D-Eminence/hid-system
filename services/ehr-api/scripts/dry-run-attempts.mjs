@@ -35,8 +35,9 @@ export function isBusyRefusal(error) {
 
 /**
  * Runs attempt(number) until it succeeds; after a busy refusal it pauses and runs it again, at most `attempts`
- * times and never past `windowMs` from the first start. One line per refused attempt names the attempt and the
- * file. The last refusal is thrown unchanged, so the runner's failure text is the same as without retries.
+ * times and never past `windowMs` from the first start. One line per refused attempt names the attempt, the file
+ * and how long the attempt ran before the refusal, holding the earlier files' locks (Ola, #306). The last refusal
+ * is thrown unchanged, so the runner's failure text is the same as without retries.
  */
 export async function withDryRunAttempts(attempt, {
   attempts = DRY_RUN_ATTEMPTS,
@@ -49,16 +50,19 @@ export async function withDryRunAttempts(attempt, {
 } = {}) {
   const startedAt = now();
   for (let number = 1; ; number += 1) {
+    const attemptStartedAt = now();
     try {
       return await attempt(number);
     } catch (error) {
       if (!isBusyRefusal(error)) throw error;
+      const held = Math.max(0, Math.round(now() - attemptStartedAt));
       const pause = pauseMs.min + Math.floor(random() * (pauseMs.max - pauseMs.min + 1));
       if (number >= attempts || now() - startedAt + pause >= windowMs) {
-        log(`Dry run attempt ${number} of ${attempts}: ${error.version} was busy; no attempt left\n`);
+        log(`Dry run attempt ${number} of ${attempts}: ${error.version} was busy after ${held} ms; no attempt left\n`);
         throw error;
       }
-      log(`Dry run attempt ${number} of ${attempts}: ${error.version} was busy; rolled back, trying again in ${pause} ms\n`);
+      log(`Dry run attempt ${number} of ${attempts}: ${error.version} was busy after ${held} ms; rolled back, `
+        + `trying again in ${pause} ms\n`);
       await sleep(pause);
     }
   }
