@@ -36,15 +36,19 @@
 --      both (left); died closes both (finished); sent_to_outpatients closes
 --      the ED record only and puts the row back to waiting, with nobody down
 --      to see the patient; changing a decision needs a reason;
---   7. cancel: only open with no visit; the row the arrival made closes as
---      cancelled; a row moved from the outpatient waiting list stays open and
---      is put back as it was before the move (stage, level, assignee);
+--   7. cancel: only open with no visit; only the ED record closes, the
+--      waiting-list row stays open in both orders: a row moved from the
+--      outpatient waiting list is put back as it was before the move (stage,
+--      level, assignee); the row the arrival made goes back to waiting with no
+--      level and nobody down, so an outpatient check-in that claimed it after
+--      the arrival (0135's already_open, the same row) is not undone;
 --   8. the guard and the mirror: while a row has an open or decided ED
 --      record, 0135's waiting-list update is refused for it (stage, close,
 --      triage level, clearing it, assignee; front desk, nurse and doctor
 --      alike), so a board save from the record's version cannot overwrite a
 --      change made elsewhere; a row of a patient whose record is no longer
---      active (0145's cancel) still closes, and the mirror closes its ED
+--      active (0145's cancel) still closes (any other change of it is still
+--      refused), and the mirror closes its ED
 --      record once (closed_on_waiting_list, one audit row); an ED close does
 --      not run it; "left today" is the Lagos day the record left, whenever
 --      it arrived;
@@ -126,7 +130,7 @@ from b_members;
 
 -- Patients (Health IDs HID-ED + two letters): p1 found by the desk's search; p3 and p4 found by the doctor's
 -- emergency search (p3 with the doctor's break-glass grant, p4 with another member's and an expired one); p6 an
--- unknown record made at A; p7 sealed demo; p9 inactive; p10 a stranger; p2, p5 and p11-p23 registered at A's desk.
+-- unknown record made at A; p7 sealed demo; p9 inactive; p10 a stranger; p2, p5 and p11-p25 registered at A's desk.
 create temporary table b_patients (n integer primary key, hid text, first text, last text, sex text, status text,
   source text) on commit drop;
 insert into b_patients values
@@ -141,7 +145,7 @@ insert into b_patients values
 insert into b_patients
 select n, 'HID-EDB' || translate(lpad(n::text, 2, '0'), '0123456789', 'ABCDEFGHJK') || '2', 'Ola', 'Edperson' || n,
   case when n % 2 = 0 then 'female' else 'male' end, 'active', 'hid-desk-registration'
-from generate_series(11, 23) n;
+from generate_series(11, 25) n;
 insert into identity.patients (id, hid_code, first_name, last_name, full_name, gender, dob, status, source_system)
 select ('e1680400-0000-4000-8000-0000000000' || lpad(n::text, 2, '0'))::uuid, hid, first, last, first || ' ' || last,
   sex, date '1980-01-01' + n, status, source from b_patients;
@@ -156,7 +160,7 @@ values ('e1680400-0000-4000-8000-000000000006', 'e1680000-0000-4000-8000-0000000
   repeat('0', 64));
 insert into identity.sealed_demo_members (member_kind, member_id) values
   ('patient', 'e1680400-0000-4000-8000-000000000007');
--- Registered at A's desk without a NIN (0130), which created the record: p2, p5, p9, p11-p23.
+-- Registered at A's desk without a NIN (0130), which created the record: p2, p5, p9, p11-p25.
 insert into identity.registration_cases (id, facility_id, created_by_account_id, created_by_membership_id, status,
   first_name, last_name, full_name, dob, identity_evidence, no_nin_reason, idempotency_key, request_sha256,
   resolved_patient_id, review_idempotency_key, review_request_sha256, reviewed_by_account_id, reviewed_by_membership_id,
@@ -774,9 +778,10 @@ select pg_temp.check_case('6 p2 admission changed to died (reason)', 'updated/ow
 select pg_temp.check_case('7 p13 arrives', 'arrived/own_facility/waiting/waiting/-/HIDDEN/Ola Edperson13/standard/-/open',
   pg_temp.arrive(1, null, 13, 'walk_in', 'arrive-p13'));
 select pg_temp.check_case('7 cancel without a reason', '22023 ED_REASON_REQUIRED', pg_temp.cancel(1, 13, 'cancel-p13-none', null));
-select pg_temp.check_case('7 the nurse cancels the arrival (she holds ehr.ed.arrive), with a reason', 'updated/own_facility/closed/cancelled/-/-/Ola Edperson13/standard/-/closed',
+select pg_temp.check_case('7 the nurse cancels the arrival (she holds ehr.ed.arrive), with a reason', 'updated/own_facility/closed/waiting/-/-/Ola Edperson13/standard/-/closed',
   pg_temp.cancel(2, 13, 'cancel-p13', 'Added to the board by mistake'));
-select pg_temp.check_case('7 the row the arrival made is cancelled', 'cancelled/true/-/own_facility', pg_temp.queue_of(13));
+select pg_temp.check_case('7 the row the arrival made stays open, back to waiting, no level, nobody down', 'waiting/false/-/own_facility/-',
+  pg_temp.queue_of(13) || '/' || pg_temp.queue_assignee(13));
 select pg_temp.check_case('7 p5 (moved from the waiting list) cancelled', 'updated/own_facility/closed/waiting/3/HIDDEN/Ebere Edfive/standard/-/closed',
   pg_temp.cancel(1, 5, 'cancel-p5', 'Sent to the board by mistake'));
 select pg_temp.check_case('7 its row stays open as it was', 'waiting/false/3/own_facility', pg_temp.queue_of(5));
@@ -808,6 +813,25 @@ select pg_temp.check_case('7 p14 arrives, the visit is linked, cancel refused', 
   (select split_part(pg_temp.arrive(2, null, 14, 'walk_in', 'arrive-p14'), '/', 1) || '|'
      || split_part(pg_temp.link(2, 14, 'link-p14', 6), '/', 1) || '|'
      || pg_temp.cancel(1, 14, 'cancel-p14', 'Added by mistake')));
+-- p24, the other order (Rahman, #337 7175564791, should-fix 1): put on the board by mistake (a new waiting-list row,
+-- level 2), then checked in at the outpatient desk, where 0135's check-in answers already_open with that same row.
+-- The arrival's cancel must not take the patient off the outpatient waiting list.
+select pg_temp.check_case('7 p24 put on the board by mistake (nurse, level 2): a new waiting-list row',
+  'arrived/own_facility/waiting/ready/2/-/Ola Edperson24/standard/-/open',
+  pg_temp.arrive(2, null, 24, 'walk_in', 'arrive-p24', 2::smallint));
+select pg_temp.as_member(1);
+select pg_temp.check_case('7 the desk then checks p24 in for outpatients: already_open, the same row', 'already_open/true',
+  (select outcome || '/' || (entry_id = pg_temp.queue_entry(24))::text
+     from ehr.visit_queue_check_in(null, pg_temp.patient(24))));
+select pg_temp.check_case('7 p24''s arrival cancelled: only the ED record closes',
+  'updated/own_facility/closed/waiting/-/-/Ola Edperson24/standard/-/closed',
+  pg_temp.cancel(2, 24, 'cancel-p24', 'Put on the emergency board by mistake'));
+select pg_temp.check_case('7 p24 is still on the outpatient waiting list: open, waiting, no level, nobody down',
+  'waiting/false/-/own_facility/-', pg_temp.queue_of(24) || '/' || pg_temp.queue_assignee(24));
+select pg_temp.check_case('7 p24''s cancel event: from ready back to waiting', 'ready/waiting',
+  (select from_stage || '/' || to_stage from pg_temp.events_of(24) where kind = 'cancelled'));
+select pg_temp.check_case('7 the row is the waiting list''s again (0135''s update)', 'updated',
+  pg_temp.queue_update(1, 24, 'triage'));
 
 -- 8. The guard and the mirror.
 select pg_temp.check_case('8 p15 arrives', 'arrived', split_part(pg_temp.arrive(1, null, 15, 'walk_in', 'arrive-p15'), '/', 1));
@@ -854,6 +878,8 @@ select pg_temp.check_case('8 an ED patient''s waiting-list row no longer on the 
 reset role;
 update identity.patients set status = 'inactive'
  where id in ('e1680400-0000-4000-8000-000000000015', 'e1680400-0000-4000-8000-000000000016');
+select pg_temp.check_case('8 an inactive patient''s board row: a change that does not close it is still refused', '55000',
+  pg_temp.try($s$update ehr.visit_queue entry set triage_level = 2 where entry.id = pg_temp.queue_entry(15)$s$));
 set local role hid_ehr_api_runtime;
 select pg_temp.check_case('8 p15''s row (patient no longer active) closed on the waiting list', 'updated',
   pg_temp.queue_update(1, 15, 'cancelled'));
@@ -978,7 +1004,7 @@ select pg_temp.check_case('10 a decided record needs its disposition', '23514',
   pg_temp.try($s$update ehr.ed_attendances set status = 'decided' where id = pg_temp.att(17)$s$));
 
 -- 11. Audit.
-select pg_temp.check_case('11 arrival rows', 'denied:12/success:20',
+select pg_temp.check_case('11 arrival rows', 'denied:12/success:21',
   (select string_agg(format('%s:%s', outcome, count), '/' order by outcome)
      from (select outcome, count(*) from audit.events where action = 'ehr.ed.arrive'
              and facility_id = 'e1680000-0000-4000-8000-000000000002' group by outcome) counted));
@@ -988,11 +1014,11 @@ select pg_temp.check_case('11 arrival refusal kinds',
      from (select details ->> 'refusal' as kind, count(*) from audit.events
             where action = 'ehr.ed.arrive' and outcome = 'denied'
               and facility_id = 'e1680000-0000-4000-8000-000000000002' group by 1) counted));
-select pg_temp.check_case('11 0135''s check-in rows by the emergency department', '12',
+select pg_temp.check_case('11 0135''s check-in rows by the emergency department', '13',
   (select count(*)::text from audit.events where action = 'ehr.visit-queue.check-in'
      and details ->> 'by' = 'emergency_department' and facility_id = 'e1680000-0000-4000-8000-000000000002'));
 select pg_temp.check_case('11 every write''s outcomes',
-  'ehr.ed.cancel:denied:2,ehr.ed.cancel:success:3,ehr.ed.disposition:denied:5,ehr.ed.disposition:success:10,ehr.ed.leave:denied:2,ehr.ed.leave:success:1,ehr.ed.link-visit:denied:5,ehr.ed.link-visit:success:3,ehr.ed.move:denied:3,ehr.ed.move:success:3,ehr.ed.triage:denied:4,ehr.ed.triage:failure:1,ehr.ed.triage:success:6',
+  'ehr.ed.cancel:denied:2,ehr.ed.cancel:success:4,ehr.ed.disposition:denied:5,ehr.ed.disposition:success:10,ehr.ed.leave:denied:2,ehr.ed.leave:success:1,ehr.ed.link-visit:denied:5,ehr.ed.link-visit:success:3,ehr.ed.move:denied:3,ehr.ed.move:success:3,ehr.ed.triage:denied:4,ehr.ed.triage:failure:1,ehr.ed.triage:success:6',
   (select string_agg(format('%s:%s:%s', action, outcome, count), ',' order by action, outcome)
      from (select action, outcome, count(*) from audit.events
             where action in ('ehr.ed.triage', 'ehr.ed.move', 'ehr.ed.link-visit', 'ehr.ed.disposition', 'ehr.ed.leave',
@@ -1010,6 +1036,20 @@ select pg_temp.check_case('11 no name, date of birth, Health ID, complaint, refe
     where (action like 'ehr.ed.%' or (action = 'ehr.visit-queue.check-in' and details ->> 'by' = 'emergency_department'))
       and (details::text ~* 'ed(one|two|three|four|five|six|seven|person)|amaka|bayo|chika|tunde|HID-ED|1980-|1986-|chest pain|motorcycle|unresponsive|teaching hospital|mistake|arrested|no inpatient bed'
            or coalesce(reason, '') <> '')));
+
+select pg_temp.check_case('11 every cancel kept its waiting-list row (waitingListRowKept), moved or made by the arrival',
+  'false:2/true:2',
+  (select string_agg(format('%s:%s', moved, count), '/' order by moved)
+     from (select details ->> 'movedFromWaitingList' as moved, count(*) from audit.events
+            where action = 'ehr.ed.cancel' and outcome = 'success' and details ->> 'waitingListRowKept' = 'true'
+              and facility_id = 'e1680000-0000-4000-8000-000000000002' group by 1) counted));
+select pg_temp.check_case('11 the emergency arrival names the break-glass grant it relied on; no other arrival names one',
+  'e1680700-0000-4000-8000-000000000001|0',
+  (select string_agg(distinct details ->> 'consentGrantId', ',') from audit.events
+    where action = 'ehr.ed.arrive' and outcome = 'success' and details ->> 'basis' = 'emergency'
+      and facility_id = 'e1680000-0000-4000-8000-000000000002') || '|'
+  || (select count(*) from audit.events where action = 'ehr.ed.arrive' and details ? 'consentGrantId'
+        and details ->> 'basis' is distinct from 'emergency'));
 
 -- 12. The board switched off after use (the kill switch).
 set local role hid_ehr_api_runtime;

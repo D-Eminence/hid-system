@@ -6,7 +6,11 @@
 -- ORD-9, 0154 ORD-12 refills, APPT-1's 0160-0161 and any department file cut
 -- earlier). This file reads nothing 0152-0154 create or change, so it applies
 -- on 0001-0151 and on 0001-0154 alike; it applies with or without APPT-1's
--- 0160 (the waiting-list basis CHECK, below). The declaration in
+-- 0160 (the waiting-list basis CHECK, below). Release order (Rahman, #258
+-- 7175579690, accepted in 7177085826): 0154, APPT-1, BILL-1, then this file,
+-- one department per release, each on a staging that holds the one before;
+-- this file is proved on 0001-0153 alone, after APPT-1's 0160-0161 and after
+-- BILL-1's 0162-0167 too. The declaration in
 -- config/production-schema-compatibility.json stays unsigned until the owner
 -- signs this file. 0169 (who gets the board) is its own file.
 --
@@ -41,8 +45,9 @@
 --                              patient was moved from the outpatient waiting
 --                              list and, if so, that row's stage, triage
 --                              level, assignee and stage time before the move
---                              (a cancel puts them back), the presenting
---                              complaint (1-120, no
+--                              (a cancel puts them back; a cancel never closes
+--                              the waiting-list row, see ehr.ed_cancel), the
+--                              presenting complaint (1-120, no
 --                              control characters), who triaged and when (the
 --                              level itself stays on ehr.visit_queue), the
 --                              linked visit, the status (open, decided, closed),
@@ -91,10 +96,11 @@
 --                              record's row version covers every field the
 --                              board writes, and the board's roles, reasons
 --                              and cancel rule cannot be gone around on the
---                              waiting list. The one exception is a row of a
---                              patient whose record is no longer active
---                              (0145's cancel of an unknown record makes the
---                              patient inactive, then cancels the row). The
+--                              waiting list. The one exception is the close of
+--                              a row of a patient whose record is no longer
+--                              active (0145's cancel of an unknown record makes
+--                              the patient inactive, then cancels the row);
+--                              any other change of such a row is refused. The
 --                              mirror, visit_queue_ed_close_mirror (AFTER
 --                              UPDATE OF closed_at, only when a row closes),
 --                              closes the open or decided ED record of a row
@@ -136,8 +142,9 @@
 --    refuses: the database half of "built but switched off".
 -- E5 Audit, in the request's transaction (as 0135: a refusal the function
 --    raises is recorded by ehr-api's request audit; an answer that refuses is
---    recorded here): ehr.ed.arrive (basis, outcome; plus 0135's
---    ehr.visit-queue.check-in, by emergency_department, when a waiting-list
+--    recorded here): ehr.ed.arrive (basis, outcome; for basis emergency the
+--    id of the member's break-glass grant it relied on, consentGrantId; plus
+--    0135's ehr.visit-queue.check-in, by emergency_department, when a waiting-list
 --    row is made), ehr.ed.board (+ ehr.ed.board.shown per patient),
 --    ehr.ed.record-read, ehr.ed.triage, ehr.ed.move, ehr.ed.link-visit,
 --    ehr.ed.disposition, ehr.ed.leave, ehr.ed.cancel, and
@@ -202,13 +209,15 @@
 -- foreign key; the new CHECK's validation is the one read of its rows, and the
 -- "no row changed" post-check reads this transaction's own row counters, not
 -- the rows: on a throwaway database with 200,005 fictional waiting-list rows,
--- 39 MB, the whole file held its locks for 0.3-0.7 s, against 0.2-0.4 s with
--- an empty list, on a shared, loaded machine); ROW EXCLUSIVE on
--- audit.events (the audit helper's body names it; this file writes no audit
--- row); ACCESS SHARE on identity.unknown_patients, identity.consent_grants,
--- identity.consent_directives, identity.consent_directive_versions,
--- auth.permissions and auth.role_permissions (read by the preconditions or by
--- the card's body check). A busy table fails the attempt at once, and its subtransaction releases
+-- 39 MB, the whole file, applied by the migrator, held its locks for
+-- 0.07 s (three runs), against 0.04-0.05 s with an empty list and 2.6-2.7 s
+-- for the reviewed file's two row snapshots, on a shared machine); ROW
+-- EXCLUSIVE on audit.events (the audit helper's body names it; this file
+-- writes no audit row); ACCESS SHARE on identity.unknown_patients, identity.consent_grants,
+-- identity.consent_directives, identity.consent_directive_versions and
+-- auth.permissions (read by the preconditions or by the card's body check;
+-- auth.role_permissions is not read, now that 0150's marker is not required).
+-- A busy table fails the attempt at once, and its subtransaction releases
 -- what it took. The attempt is made 50 times, 100 ms apart (about 5 seconds),
 -- so the file never waits for one of its locks while holding the others; then
 -- 55P03 (nothing applied). When this transaction already holds an earlier
@@ -228,7 +237,15 @@
 -- and the mirror run inside 0135's and 0145's own functions for old and new
 -- images alike; the guard refuses only rows with an open or decided ED record
 -- and the mirror only writes ED rows, and none exist until the new image puts
--- a patient on the board.
+-- a patient on the board. Once board patients exist, Release E's image answers
+-- 500 for a change of their waiting-list rows (its waiting list knows no
+-- 55000), so before ehr-api is rolled back past this image: switch
+-- ED_BOARD_ENABLED off on this image and clear the board's patients through
+-- the waiting list (the board-off update closes each ED record). Before the
+-- board is switched off, list its decided admit_requested records and hand
+-- those patients over outside the board: with the board off, any waiting-list
+-- change of their rows closes the record, and a later arrival does not carry
+-- the request.
 --
 -- Undo (not in the ledger; a migration only if the owner signs it): drop the
 -- triggers, the functions and the two tables, and put back the CHECK found
@@ -244,7 +261,11 @@
 --    #258, 7168672285 item 3);
 --    "0168: already applied" when every object of this file is there with the
 --    CHECK it leaves, "0168: the schema is not in the reviewed state" for any
---    half state; the bodies this file calls md5-pinned; the waiting-list basis
+--    half state; the bodies this file calls md5-pinned, and the two
+--    waiting-list writers the guard and the mirror run inside (0135's
+--    check-in, whose one open row per patient the arrival shares, and 0145's
+--    decision on an unknown record, the one close of a board row the guard
+--    lets through); the waiting-list basis
 --    CHECK exactly 0135's or APPT-1's; the columns this file reads in 0135's,
 --    0145's and 0003's tables; the functions' owner may read ehr.encounters
 --    under its forced row-level security (the visit link).
@@ -303,7 +324,7 @@ begin
   lock table ehr.visit_queue in access exclusive mode nowait;
   lock table audit.events in row exclusive mode nowait;
   lock table identity.unknown_patients, identity.consent_grants, identity.consent_directives,
-    identity.consent_directive_versions, auth.permissions, auth.role_permissions
+    identity.consent_directive_versions, auth.permissions
     in access share mode nowait;
   exit;
   exception when lock_not_available then
@@ -311,14 +332,14 @@ begin
       raise exception using errcode = '55P03',
         message = '0168: identity.patients, identity.facilities, identity.staff_facility_memberships, '
           || 'ehr.encounters, ehr.visit_queue, audit.events or a table 0168 reads (the unknown patient records, consent '
-          || 'grants, consent directives, permissions and role permissions) is busy, and this transaction already holds an '
+          || 'grants, consent directives and permissions) is busy, and this transaction already holds an '
           || 'earlier migration''s locks, so it does not wait; nothing applied; run the release again at a quieter time';
     end if;
     if v_attempt >= 50 then
       raise exception using errcode = '55P03',
         message = '0168: identity.patients, identity.facilities, identity.staff_facility_memberships, '
           || 'ehr.encounters, ehr.visit_queue, audit.events or a table 0168 reads (the unknown patient records, consent '
-          || 'grants, consent directives, permissions and role permissions) stayed busy for 5 seconds; nothing applied; run '
+          || 'grants, consent directives and permissions) stayed busy for 5 seconds; nothing applied; run '
           || 'the release again at a quieter time';
     end if;
     perform pg_sleep(0.1);
@@ -380,7 +401,12 @@ begin
       ('identity.resolve_patient_search_ref(text,text)', '9a80a8997571565f0e99c96f1cba4697'),
       ('identity.own_facility_basis(uuid,uuid)', '16ec336ac3633a295bc4a89f0e9f7542'),
       ('identity.facility_departments_valid(text[])', '8c52c07209052d3045736fa26eb6ac52'),
-      ('ehr.visit_queue_update(uuid,bigint,text,smallint,boolean,uuid,boolean)', '6071d40ccdc0fca94d1bb91a1116df55')
+      ('ehr.visit_queue_update(uuid,bigint,text,smallint,boolean,uuid,boolean)', '6071d40ccdc0fca94d1bb91a1116df55'),
+      -- Not called, but the guard and the mirror run inside them: 0135's check-in (ehr.ed_arrive shares its lock and
+      -- its one open row per patient) and 0145's decision on an unknown record (its cancel is the one close of a board
+      -- patient's row the guard lets through).
+      ('ehr.visit_queue_check_in(text,uuid)', '298bbe24dc23835a1969951b453ec061'),
+      ('identity.decide_unknown_patient(uuid,text,bigint,text,text,text)', 'd14aa8da8806da914c451ec3351d377c')
     ) expected(signature, body_md5)
    where (select md5(proc.prosrc) from pg_proc proc where proc.oid = to_regprocedure(expected.signature))
          is distinct from expected.body_md5;
@@ -420,6 +446,7 @@ begin
       ('identity.patients', 'id', 'uuid'), ('identity.patients', 'status', 'text'),
       ('identity.unknown_patients', 'patient_id', 'uuid'), ('identity.unknown_patients', 'status', 'text'),
       ('identity.unknown_patients', 'label', 'text'),
+      ('identity.consent_grants', 'id', 'uuid'),
       ('identity.consent_grants', 'patient_id', 'uuid'), ('identity.consent_grants', 'account_id', 'uuid'),
       ('identity.consent_grants', 'membership_id', 'uuid'), ('identity.consent_grants', 'facility_id', 'uuid'),
       ('identity.consent_grants', 'scope', 'text'), ('identity.consent_grants', 'status', 'text'),
@@ -451,8 +478,10 @@ begin
       message = '0168: the owner of 0135''s functions cannot read ehr.encounters under its forced row-level security';
   end if;
   -- This transaction's own row counters for the waiting list (rows inserted, updated, deleted, subtransactions
-  -- included), for the post-check that this file writes none. Read from this backend's pending statistics, so no
-  -- scan of the table: under the ACCESS EXCLUSIVE lock above only the CHECK's validation reads it.
+  -- included; kept while track_counts is on, PostgreSQL's default), for the post-check that this file writes none.
+  -- Read from this backend's pending statistics, so no scan of the table: under the ACCESS EXCLUSIVE lock above only
+  -- the CHECK's validation reads it. (The reviewed file's two md5 snapshots of every row held the lock for 2.6-2.7 s
+  -- at 200,005 rows; header.)
   v_queue_writes := array[pg_stat_get_xact_tuples_inserted('ehr.visit_queue'::regclass),
                           pg_stat_get_xact_tuples_updated('ehr.visit_queue'::regclass),
                           pg_stat_get_xact_tuples_deleted('ehr.visit_queue'::regclass)];
@@ -756,6 +785,7 @@ begin
                  on directive_version.directive_id = directive.id
                 and directive_version.version_no = directive.current_version
               where directive.patient_id = attendance.patient_id
+                and directive_version.patient_id = attendance.patient_id
                 and directive_version.status = 'active'
                 and directive_version.provision_type = 'deny'
                 and directive_version.starts_at <= clock_timestamp()
@@ -817,6 +847,8 @@ begin
     complaint_value text := nullif(btrim(coalesce(requested_complaint, '')), '');
     patient_value uuid;
     basis_value text;
+    grant_value uuid;
+    grant_detail jsonb := '{}'::jsonb;
     refusal text;
     refusal_kind text;
     arrived_value timestamptz;
@@ -872,18 +904,23 @@ begin
           refusal := 'needs_search';
           refusal_kind := 'match_ref_not_valid';
         elsif caller.actor_purpose = 'emergency' then
-          -- Q-ED-3 A: this member's own active, unexpired break-glass grant for the patient here.
-          if exists (select 1 from identity.consent_grants grant_row
-                      where grant_row.patient_id = patient_value
-                        and grant_row.account_id = caller.actor_account
-                        and grant_row.membership_id = caller.actor_membership
-                        and grant_row.facility_id = caller.actor_facility
-                        and grant_row.scope = 'break_glass' and grant_row.break_glass
-                        and grant_row.purpose_of_use = 'emergency'
-                        and grant_row.status = 'active' and grant_row.revoked_at is null
-                        and grant_row.migration_hold_reason is null
-                        and grant_row.starts_at <= now_value and grant_row.expires_at > now_value) then
+          -- Q-ED-3 A: this member's own active, unexpired break-glass grant for the patient here. Its id goes into the
+          -- arrival's audit row (consentGrantId), so the grant an emergency arrival relied on is named, not inferred.
+          select grant_row.id into grant_value from identity.consent_grants grant_row
+           where grant_row.patient_id = patient_value
+             and grant_row.account_id = caller.actor_account
+             and grant_row.membership_id = caller.actor_membership
+             and grant_row.facility_id = caller.actor_facility
+             and grant_row.scope = 'break_glass' and grant_row.break_glass
+             and grant_row.purpose_of_use = 'emergency'
+             and grant_row.status = 'active' and grant_row.revoked_at is null
+             and grant_row.migration_hold_reason is null
+             and grant_row.starts_at <= now_value and grant_row.expires_at > now_value
+           order by grant_row.expires_at desc, grant_row.id
+           limit 1;
+          if grant_value is not null then
             basis_value := 'emergency';
+            grant_detail := jsonb_build_object('consentGrantId', grant_value);
           else
             refusal := 'needs_search';
             refusal_kind := 'no_break_glass';
@@ -946,7 +983,7 @@ begin
       perform ehr.ed_audit(caller.actor_subject, caller.actor_account, caller.actor_membership,
         caller.actor_organization, caller.actor_facility, caller.actor_correlation, caller.actor_purpose,
         patient_value, 'ehr.ed.arrive', 'success', 'ed-attendance', existing_row.id::text,
-        jsonb_build_object('by', case when ref_value is not null then 'match_ref' else 'patient_id' end, 'basis', basis_value, 'outcome', 'already_on_board'));
+        jsonb_build_object('by', case when ref_value is not null then 'match_ref' else 'patient_id' end, 'basis', basis_value, 'outcome', 'already_on_board') || grant_detail);
       return query select 'already_on_board', false, card.* from ehr.ed_cards(array[existing_row.id], caller.actor_facility, caller.actor_organization,
         caller.actor_staff, caller.can_triage) card;
       return;
@@ -1009,7 +1046,7 @@ begin
     perform ehr.ed_audit(caller.actor_subject, caller.actor_account, caller.actor_membership,
         caller.actor_organization, caller.actor_facility, caller.actor_correlation, caller.actor_purpose,
         patient_value, 'ehr.ed.arrive', 'success', 'ed-attendance', new_id::text,
-        jsonb_build_object('by', case when ref_value is not null then 'match_ref' else 'patient_id' end, 'basis', basis_value, 'outcome', outcome_value, 'arrivalMode', requested_arrival_mode, 'triageLevel', requested_triage_level, 'complaintRecorded', complaint_value is not null, 'visitQueueEntryId', entry_row.id));
+        jsonb_build_object('by', case when ref_value is not null then 'match_ref' else 'patient_id' end, 'basis', basis_value, 'outcome', outcome_value, 'arrivalMode', requested_arrival_mode, 'triageLevel', requested_triage_level, 'complaintRecorded', complaint_value is not null, 'visitQueueEntryId', entry_row.id) || grant_detail);
     return query select outcome_value, false, card.* from ehr.ed_cards(array[new_id], caller.actor_facility, caller.actor_organization,
         caller.actor_staff, caller.can_triage) card;
   end
@@ -1882,13 +1919,18 @@ begin
       return;
     end if;
 
-    -- The row the arrival made closes as cancelled; a row moved from the outpatient waiting list stays open and is
-    -- put back as it was before the move (its stage, triage level, assignee and stage time), so nothing the
-    -- mistaken arrival or the board wrote stays on another patient's outpatient row.
+    -- Only the ED record closes; the waiting-list row stays open in every case. Since the arrival, an outpatient
+    -- check-in may have claimed that same row (0135's check-in answers already_open with it, APPT-1's
+    -- already_on_list), and one member's cancel must not undo another's check-in. A row moved from the outpatient
+    -- waiting list is put back as it was before the move (its stage, triage level, assignee and stage time); the row
+    -- the arrival made goes back to waiting with no triage level and nobody down to see the patient. So nothing the
+    -- mistaken arrival or the board wrote stays on an outpatient row, and the desk cancels that row on the waiting
+    -- list if the patient is not waiting (the answer's card shows the row's stage).
     perform set_config('hid.ed_board_closing', entry_row.id::text, true);
     if not current_row.moved_from_waiting_list then
       update ehr.visit_queue entry
-         set stage = 'cancelled', stage_changed_at = now_value, closed_at = now_value,
+         set stage = 'waiting', triage_level = null, assigned_membership_id = null,
+             stage_changed_at = case when entry.stage <> 'waiting' then now_value else entry.stage_changed_at end,
              updated_by_membership_id = caller.actor_membership, updated_at = now_value,
              row_version = entry.row_version + 1
        where entry.id = entry_row.id;
@@ -1911,18 +1953,19 @@ begin
       by_membership_id, from_stage, to_stage, reason, idempotency_key, request_sha256)
     values (current_row.id, caller.actor_facility, current_row.patient_id, 'cancelled', now_value,
       caller.actor_account, caller.actor_membership, entry_row.stage,
-      case when current_row.moved_from_waiting_list then current_row.moved_from_stage else 'cancelled' end, reason_value,
+      case when current_row.moved_from_waiting_list then current_row.moved_from_stage else 'waiting' end, reason_value,
       requested_idempotency_key, requested_request_sha256);
     perform ehr.ed_audit(caller.actor_subject, caller.actor_account, caller.actor_membership,
         caller.actor_organization, caller.actor_facility, caller.actor_correlation, caller.actor_purpose,
         current_row.patient_id, 'ehr.ed.cancel', 'success', 'ed-attendance', current_row.id::text,
-        jsonb_build_object('waitingListRowKept', current_row.moved_from_waiting_list));
+        jsonb_build_object('waitingListRowKept', true, 'movedFromWaitingList', current_row.moved_from_waiting_list,
+          'visitQueueEntryId', entry_row.id));
     return query select 'updated', false, card.* from ehr.ed_cards(array[current_row.id], caller.actor_facility, caller.actor_organization,
         caller.actor_staff, caller.can_triage) card;
   end
   $fn$;
   comment on function ehr.ed_cancel(uuid, bigint, text, text, text) is
-    '0168 (ED-1): cancel an arrival made in error: only an open ED record with no visit linked and no disposition, with a reason (8-500). The waiting-list row the arrival made closes as cancelled; a row moved from the outpatient waiting list stays open and is put back as it was before the move (stage, triage level, assignee). The record is kept. Needs ehr.ed.arrive. Outcomes updated (replayed), not_found, closed, cancel_not_allowed, changed, key_reused. Audited (ehr.ed.cancel; never the reason).';
+    '0168 (ED-1): cancel an arrival made in error: only an open ED record with no visit linked and no disposition, with a reason (8-500). Only the ED record closes; the waiting-list row stays open, as an outpatient check-in may have claimed it since: a row moved from the outpatient waiting list is put back as it was before the move (stage, triage level, assignee), and the row the arrival made goes back to waiting with no triage level and no assignee (the desk cancels it on the waiting list if the patient is not waiting). The record is kept. Needs ehr.ed.arrive. Outcomes updated (replayed), not_found, closed, cancel_not_allowed, changed, key_reused. Audited (ehr.ed.cancel; never the reason).';
   revoke all on function ehr.ed_cancel(uuid, bigint, text, text, text) from public;
 
   -- The waiting-list helper: the open or decided ED record of each given waiting-list row at this facility.
@@ -2040,8 +2083,8 @@ begin
   -- the row sets it, and so may a later file that closes an ED record itself (ADT-1's admission).
   -- So the ED record's row version covers every field the board writes, the triage on the board is the only triage
   -- (with its history and who did it), and the board's roles, reasons and cancel rule cannot be gone around on the
-  -- waiting list. One exception: a row of a patient whose record is no longer active (0145's cancel of an unknown
-  -- record makes the patient inactive, then cancels the row; the mirror then closes the ED record).
+  -- waiting list. One exception: the close of a row of a patient whose record is no longer active (0145's cancel of an
+  -- unknown record makes the patient inactive, then cancels the row; the mirror then closes the ED record).
   create function ehr.visit_queue_ed_guard()
   returns trigger
   language plpgsql
@@ -2056,14 +2099,17 @@ begin
                     where attendance.visit_queue_entry_id = old.id and attendance.status <> 'closed') then
       return new;
     end if;
-    if exists (select 1 from identity.patients patient where patient.id = old.patient_id and patient.status <> 'active') then
+    -- Only the close of the row (0145's cancel sets stage and closed_at together); any other change of an inactive
+    -- patient's board row is refused like any other.
+    if new.closed_at is not null and old.closed_at is null
+       and exists (select 1 from identity.patients patient where patient.id = old.patient_id and patient.status <> 'active') then
       return new;
     end if;
     raise exception using errcode = '55000', message = 'VISIT_QUEUE_ON_ED_BOARD';
   end
   $fn$;
   comment on function ehr.visit_queue_ed_guard() is
-    '0168 (ED-1): refuses (55000 VISIT_QUEUE_ON_ED_BOARD) a change of the stage, triage level, assignee or close of a waiting-list row that has an open or decided ED record, unless it comes from an ED function (its transaction-local marker names the row) or the patient''s record is no longer active (0145''s cancel of an unknown record). No role may execute it.';
+    '0168 (ED-1): refuses (55000 VISIT_QUEUE_ON_ED_BOARD) a change of the stage, triage level, assignee or close of a waiting-list row that has an open or decided ED record, unless it comes from an ED function (its transaction-local marker, hid.ed_board_closing, names the row) or it closes the row of a patient whose record is no longer active (0145''s cancel of an unknown record). No role may execute it.';
   revoke all on function ehr.visit_queue_ed_guard() from public;
   create trigger visit_queue_ed_guard
     before update of stage, triage_level, assigned_membership_id, closed_at on ehr.visit_queue
@@ -2274,13 +2320,13 @@ begin
   select string_agg(coalesce(expected.signature, made.signature), ', ' order by coalesce(expected.signature, made.signature))
     into v_mismatch_after
     from (values
-      ('ehr.ed_arrive(text,uuid,text,timestamp with time zone,smallint,text,text,text)', true, 'v', '2ab8eb0318e0f442472115c59f868e49'),
+      ('ehr.ed_arrive(text,uuid,text,timestamp with time zone,smallint,text,text,text)', true, 'v', '5460391b30348a2678673b192f8e85ce'),
       ('ehr.ed_attendance_events_immutable()', false, 'v', '26d7f4d6be70feacd37dc3b11dce4cce'),
       ('ehr.ed_audit(text,uuid,uuid,uuid,uuid,text,text,uuid,text,text,text,text,jsonb)', false, 'v', '2aa7b8bf69f9d3352457af2a7d13ef13'),
       ('ehr.ed_board(boolean)', true, 'v', '5f5f6f61c6efe7a298e24d350728e119'),
       ('ehr.ed_caller(text,text[])', false, 's', '338d8b237da6d511a55c365c78987621'),
-      ('ehr.ed_cancel(uuid,bigint,text,text,text)', true, 'v', 'd29b9982ce45c778cde791d116856178'),
-      ('ehr.ed_cards(uuid[],uuid,uuid,uuid,boolean)', false, 's', '3ad96b9bc5905b044520a048f4dfea27'),
+      ('ehr.ed_cancel(uuid,bigint,text,text,text)', true, 'v', '5dada20c6fd4b65246fb6e9b6121b922'),
+      ('ehr.ed_cards(uuid[],uuid,uuid,uuid,boolean)', false, 's', 'c6600d3e9c941c772029bfbe87c0cf9e'),
       ('ehr.ed_idempotency(uuid,text,text)', false, 'v', '7713a08a26b7a26acd4f7e16e6b728f4'),
       ('ehr.ed_leave(uuid,bigint,text,text)', true, 'v', '31fe957131f3b2e054e1f14a5abd6826'),
       ('ehr.ed_link_visit(uuid,bigint,uuid,text,text)', true, 'v', '1f9a5f2a3e15a909b83f1f89887f4d4c'),
@@ -2291,7 +2337,7 @@ begin
       ('ehr.visit_queue_ed_attendances(uuid[])', true, 's', '8f7a33d87ffaccca9686c43925d13b38'),
       ('ehr.visit_queue_ed_board_off_update(uuid,bigint,text,smallint,boolean,uuid,boolean)', true, 'v', '59a569a1fdf0cd41521d106439e62103'),
       ('ehr.visit_queue_ed_close_mirror()', true, 'v', '6aaaeb33d1318136fb7fba5ad405fc8e'),
-      ('ehr.visit_queue_ed_guard()', true, 'v', '350b9590c1ef10d0e658de6e4283f62b')
+      ('ehr.visit_queue_ed_guard()', true, 'v', 'b5d0c7b9edf8ca3ca48b33f50ed2c250')
     ) expected(signature, security_definer, volatility, body_md5)
     full join (select proc.oid::regprocedure::text as signature, proc.prosecdef, proc.provolatile::text as provolatile,
                       md5(proc.prosrc) as body_md5, proc.proowner, proc.proconfig, proc.prokind

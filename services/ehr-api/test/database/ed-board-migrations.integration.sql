@@ -28,8 +28,10 @@
 --      codes, thirteen role rows, thirteen audit rows; it takes no lock beyond
 --      its header's and every lock its header declares;
 --   4. 0168 taken away too (the CHECK found put back without 'emergency'): a
---      half state, a changed pinned body and an unknown extra waiting-list
---      basis refuse; then 0168 applies, in its own savepoint, on APPT-1's
+--      half state, a changed pinned body (one it calls, 0135's update, and
+--      the two waiting-list writers its guard and mirror run inside: 0135's
+--      check-in and 0145's decision) and an unknown extra waiting-list basis
+--      refuse; then 0168 applies, in its own savepoint, on APPT-1's
 --      CHECK (search, own_facility, appointment, emergency) and on the CHECK
 --      found (0135's: search, own_facility, emergency; or APPT-1's), each time
 --      keeping every waiting-list row; it takes no lock beyond its header's
@@ -198,7 +200,7 @@ select pg_temp.expect('2b 0168''s triggers as made',
 select pg_temp.expect('2c the guard, the mirror and the board-off update as made',
   'ehr.visit_queue_ed_board_off_update(uuid,bigint,text,smallint,boolean,uuid,boolean) 59a569a1fdf0cd41521d106439e62103 | '
   || 'ehr.visit_queue_ed_close_mirror() 6aaaeb33d1318136fb7fba5ad405fc8e | '
-  || 'ehr.visit_queue_ed_guard() 350b9590c1ef10d0e658de6e4283f62b',
+  || 'ehr.visit_queue_ed_guard() b5d0c7b9edf8ca3ca48b33f50ed2c250',
   (select string_agg(proc.oid::regprocedure::text || ' ' || md5(proc.prosrc), ' | ' order by proc.proname)
      from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
     where namespace.nspname = 'ehr'
@@ -253,7 +255,6 @@ insert into declared_locks values
   ('0168', 'audit.events', 'RowExclusiveLock'), ('0168', 'identity.unknown_patients', 'AccessShareLock'),
   ('0168', 'identity.consent_grants', 'AccessShareLock'), ('0168', 'identity.consent_directives', 'AccessShareLock'),
   ('0168', 'identity.consent_directive_versions', 'AccessShareLock'), ('0168', 'auth.permissions', 'AccessShareLock'),
-  ('0168', 'auth.role_permissions', 'AccessShareLock'),
   ('0169', 'auth.role_permissions', 'ShareRowExclusiveLock'), ('0169', 'auth.permissions', 'RowExclusiveLock'),
   ('0169', 'audit.events', 'RowExclusiveLock'), ('0169', 'auth.roles', 'RowShareLock'),
   ('0169', 'auth.accounts', 'RowShareLock'), ('0169', 'identity.staff_facility_memberships', 'RowShareLock'),
@@ -420,6 +421,29 @@ end $$;
 rollback to savepoint s168;
 select pg_temp.expect('4e2 0135''s update changed (the board-off update calls it) is refused, nothing applied',
   '55000 0168: these bodies are not as 0001-0151 left them: ehr.visit_queue_update(uuid,bigint,text,smallint,boolean,uuid,boolean) | '
+  || '0 tables, 0 functions, 0 triggers, basis ' || :'basis_before',
+  pg_temp.answer('0168', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0168());
+-- The two waiting-list writers the guard and the mirror run inside, pinned though 0168 calls neither.
+do $$
+begin
+  execute regexp_replace(pg_get_functiondef('ehr.visit_queue_check_in(text,uuid)'::regprocedure),
+    '\mselect\M', 'select /* changed */');
+end $$;
+:run0168
+rollback to savepoint s168;
+select pg_temp.expect('4e3 0135''s check-in changed (the arrival shares its lock and its one open row) is refused, nothing applied',
+  '55000 0168: these bodies are not as 0001-0151 left them: ehr.visit_queue_check_in(text,uuid) | '
+  || '0 tables, 0 functions, 0 triggers, basis ' || :'basis_before',
+  pg_temp.answer('0168', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0168());
+do $$
+begin
+  execute regexp_replace(pg_get_functiondef('identity.decide_unknown_patient(uuid,text,bigint,text,text,text)'::regprocedure),
+    '\mselect\M', 'select /* changed */');
+end $$;
+:run0168
+rollback to savepoint s168;
+select pg_temp.expect('4e4 0145''s decision changed (the one close of a board row the guard lets through) is refused, nothing applied',
+  '55000 0168: these bodies are not as 0001-0151 left them: identity.decide_unknown_patient(uuid,text,bigint,text,text,text) | '
   || '0 tables, 0 functions, 0 triggers, basis ' || :'basis_before',
   pg_temp.answer('0168', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0168());
 select pg_temp.set_basis(:'basis_before' || ', walk_in');

@@ -190,11 +190,14 @@ try {
   const gone = (await board.disposition(context('doctor'), three.attendance.attendanceId,
     { expectedRowVersion: three.attendance.rowVersion, outcome: 'left_before_seen' }, key('lbs-3'))).attendance;
   assert.deepEqual([gone.status, gone.stage], ['closed', 'left']);
-  // Cancel an arrival made in error.
+  // Cancel an arrival made in error: only the ED record closes; the waiting-list row the arrival made stays open,
+  // back to waiting (an outpatient check-in may have claimed it since), for the desk to cancel there if need be.
   const four = await board.arrive(context('desk'), { patientId: ids.p4, arrivalMode: 'walk_in' }, key('arrive-4'));
   const cancelled = (await board.cancel(context('desk'), four.attendance.attendanceId,
     { expectedRowVersion: four.attendance.rowVersion, reason: 'Added to the board by mistake' }, key('cancel-4'))).attendance;
-  assert.deepEqual([cancelled.status, cancelled.stage], ['closed', 'cancelled']);
+  assert.deepEqual([cancelled.status, cancelled.stage], ['closed', 'waiting']);
+  const kept = (await queue.list(context('desk'), false)).items.find((item) => item.patientId === ids.p4);
+  assert.deepEqual([kept?.stage, kept?.closedAt ?? null, kept?.edAttendanceId ?? null], ['waiting', null, null]);
   // The waiting list marks an open board patient, and refuses to change its row (the guard): the stage, the triage
   // level and who sees the patient belong to the board. The board then closes it.
   const five = await board.arrive(context('desk'), { patientId: ids.p5, arrivalMode: 'police' }, key('arrive-5'));
