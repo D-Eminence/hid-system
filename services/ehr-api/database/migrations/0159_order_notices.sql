@@ -163,7 +163,7 @@
 --    work-item tables, the lab tables the own path reads, the three route
 --    tables, the order tables, identity.patients, the memberships and the
 --    audit log, owning or able to run every pinned function, with CREATE on
---    ehr; no hid_ role a member of that owner.
+--    ehr; no hid_ role but a superuser a member of that owner.
 -- 1. Act as the owner for the rest of the transaction.
 -- 2. Locks (below).
 -- 3. Under the locks: 0154's fill_number CHECK by its definition (printing
@@ -562,8 +562,10 @@ begin
   end if;
   -- i. No hid_ role is a member of that owner (0133's form): the owner's
   -- functions are not reachable by a runtime role except through EXECUTE.
+  -- A superuser counts as a member of every role and needs no membership,
+  -- so it is left out; no runtime role is one (the runtime-roles suite).
   select string_agg(role_row.rolname, ', ' order by role_row.rolname) into missing from pg_roles role_row
-   where role_row.rolname like 'hid\_%' and role_row.oid <> owner_oid
+   where role_row.rolname like 'hid\_%' and role_row.oid <> owner_oid and not role_row.rolsuper
      and pg_has_role(role_row.oid, owner_oid, 'MEMBER');
   if missing is not null then
     raise exception using errcode = '55000',
