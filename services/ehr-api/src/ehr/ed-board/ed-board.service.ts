@@ -212,6 +212,10 @@ export const DISPOSITION_SQL = `select outcome, replayed, ${CARD_COLUMNS}
 export const LEAVE_SQL = `select outcome, replayed, ${CARD_COLUMNS} from ehr.ed_leave($1, $2, $3, $4)`;
 export const CANCEL_SQL = `select outcome, replayed, ${CARD_COLUMNS} from ehr.ed_cancel($1, $2, $3, $4, $5)`;
 
+/**
+ * ED_BOARD_ENABLED: one switch for the whole process. It does not look at the facility, so in production (one
+ * deployment, the sealed demo and QA facilities beside the real ones) it is on for every facility or for none.
+ */
 export function edBoardEnabled(): boolean {
   return getEnvironment().ED_BOARD_ENABLED;
 }

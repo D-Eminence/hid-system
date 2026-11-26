@@ -3790,7 +3790,7 @@ All routes are under `/api/v1`. Staff routes need `X-Facility-Id` and `X-Purpose
 
 No Health ID or NIN appears in any path, query, body or answer. Patients are named by UUID, ED records by UUID, and new arrivals by a search card's `matchRef`.
 
-Until the owner's go-live, the service flag `ED_BOARD_ENABLED` (ehr-api) is off in production. With the flag off, every route below answers 503 `ED_BOARD_NOT_AVAILABLE`. It is on in staging and at the sealed demo and QA facilities.
+Until the owner's go-live, the service flag `ED_BOARD_ENABLED` (ehr-api) is off in production. With the flag off, every route below answers 503 `ED_BOARD_NOT_AVAILABLE`. It is one switch for the whole ehr-api: it does not look at the facility. Production is the one deployment (it has no separate staging backend) and serves the sealed demo and QA facilities beside the real ones (0098), so the flag cannot be on for the demo and QA facilities alone. They get the board at the go-live, with every other facility. The flag is on only for local development and tests.
 
 **The board card** (every answer):
 
@@ -3840,9 +3840,10 @@ Answer `201 { "outcome": "arrived" | "moved_from_waiting_list" | "already_on_boa
 - Answer `{ "items": [card], "counts": { "waiting": 4, "beingSeen": 2, "disposition": 1 }, "hasMore": false, "limit": 200 }`. Sorted by column, then triage level (1 first, no level last), then arrival time.
 - The screen reads it again every 30 seconds while shown, as the waiting list does.
 
-**3. `GET /ehr/ed-attendances/:attendanceId`**: one card plus `history`. Each history entry is `{ kind, at, byMembershipId, fromStage, toStage, triageLevel, outcome, reason }`.
+**3. `GET /ehr/ed-attendances/:attendanceId`**: one card plus `history`. Each history entry is `{ kind, at, byMembershipId, fromStage, toStage, triageLevel, outcome, reason, complaintChanged }`.
 - `kind` is `arrived`, `moved_from_waiting_list`, `triaged`, `moved`, `visit_linked`, `disposition`, `disposition_changed`, `left`, `cancelled` or `closed_on_waiting_list`.
-- The complaint text is never in the history. A triage entry says only that a complaint was recorded or changed.
+- The complaint text is never in the history. A triage entry says only that a complaint was recorded or changed (`complaintChanged`).
+- `reason` is the free text of a cancel or a changed disposition (8-500 characters), shown only to members who hold `ehr.ed.triage`, as the complaint is. For the front desk it is always `null`, even for a cancel the desk made (Rahman, #337 7175564791, nit "The front desk"; the card's `complaintHidden: true` tells the screen that both are hidden).
 
 **4. `POST /ehr/ed-attendances/:attendanceId/triage`**: body `{ "expectedRowVersion", "triageLevel": 1-5, "presentingComplaint"? (null clears) }`.
 - Needs `ehr.ed.triage`. Only while `open`.
@@ -3964,7 +3965,7 @@ Both files follow 0147, 0150 and 0151:
   - `arrived_by_membership_id`, `updated_by_membership_id`, `updated_at`, `row_version`.
   - Indexes: (facility, status, arrived_at) where not closed; (facility, arrival_day) where closed; (patient); (visit_queue_entry_id) unique where not closed; (facility, status) where `disposition_outcome = 'admit_requested'` (for ADT later).
 - `ehr.ed_attendance_events`: one row per arrival, move, triage, link, disposition, leave, cancel or mirrored close.
-  - It holds the kind, the from and to stage, the triage level, whether the complaint changed (never its text), the outcome, the reason (8-500 for a change of disposition and cancel), the actor, and when.
+  - It holds the kind, the from and to stage, the triage level, whether the complaint changed (never its text), the outcome, the reason (8-500 for a change of disposition and cancel; route 3 shows it only to members who hold `ehr.ed.triage`), the actor, and when.
   - It also holds the `Idempotency-Key` with the request's SHA-256 (unique per membership and key).
   - Triggers refuse any update, delete or truncate, even by the owner.
 - Both tables have row-level security enabled (not forced, the same exception as 0135's `ehr.visit_queue`) and no policy or privilege for any runtime role. Only the functions read or write them, as their owner (0135's rule).
@@ -4064,7 +4065,8 @@ Rules for the screens:
   - arrival by each basis; an emergency `matchRef` without an active break-glass grant, another member's grant, or an expired one, all answering `ED_ARRIVAL_NEEDS_SEARCH`;
   - an ED arrival racing 0135's check-in for the same patient (one open row); a patient moved from the outpatient waiting list; `already_on_board`;
   - an unknown record (0145) arriving by `patientId`, then identified (the name shows), with `recordKind` and label on the card;
-  - the complaint hidden from the front desk on every answer; its text never in an event or audit row;
+  - the complaint hidden from the front desk on every answer; its text never in an event or audit row; the history's reasons hidden from the front desk too (a cancel's, its own included, and a changed disposition's), shown to nurses, clinicians and doctors;
+  - what the clinical lead's checklist and the DPO items below ask about: the front desk cancelling an arrival a nurse triaged at level 1 (the level leaves the outpatient row), and a cancelled emergency-basis arrival's row staying open on the facility's outpatient waiting list;
   - every stage move, triage, visit link (another patient's visit, another facility's visit, a cancelled visit, all `ED_VISIT_INVALID`), and each disposition outcome with its waiting-list stage;
   - `sent_to_outpatients` leaving the waiting-list row open; cancel leaving the waiting-list row open in both orders (after a move from the waiting list, put back as it was; after an arrival that an outpatient check-in then claimed, back to waiting);
   - the mirror trigger: a row closed on the waiting list closes the ED record; an ED close does not run it twice;
@@ -4098,10 +4100,14 @@ Rules for the screens:
 - That the board shows time in the department with no target or alarm until the lead names one.
 - The unknown patient flow on arrival (ID-7), and the merge afterwards.
 - That emergency and unknown patients are served now and billed later (B3), which the board itself does not enforce.
+- **The front desk may cancel any open arrival** (Rahman, #337 7175564791, nit "The front desk"). It holds `ehr.ed.arrive`, which is all a cancel needs. That includes an arrival a nurse has already triaged, even at level 1. The cancel puts the outpatient row back to `waiting` with no level and nobody down to see the patient, so the patient then waits on the outpatient list with no level. The alternative is to refuse the cancel of a triaged arrival unless the member holds `ehr.ed.triage`.
 
 ### DPO items
 
-- **Q-ED-3:** putting a patient found by emergency search on the board, while the member's break-glass grant is active. The board gives no chart access. The patient already sees the emergency search and the break-glass in their access history. Reviewed with Rahman before 0168 is signed.
+- **Q-ED-3:** putting a patient found by emergency search on the board, while the member's break-glass grant is active. The board gives no chart access. The patient already sees the emergency search and the break-glass in their access history. Rahman (#337 7175564791) answered A on two conditions:
+  1. the arrival's audit row names the break-glass grant it relied on (`consentGrantId`). Done in 0168.
+  2. the DPO explicitly accepts facility-wide visibility for the stay, including the open outpatient row. **Still open.** The patient's waiting-list row (basis `emergency`) shows their name, sex, date of birth and the last 4 characters of their Health ID to every member at the facility who holds the waiting list's pair, while they are on the board. The row also stays open on the outpatient waiting list in two cases, until the desk cancels it there: after a `sent_to_outpatients` disposition, and after a cancel of the arrival, for example when the wrong patient was picked from the emergency search.
+- **Reasons in the history** (Rahman, #337 7175564791, nit "The front desk"): the free text of a cancel or a changed disposition is shown only to nurses, clinicians and doctors, never to the front desk (route 3), as the complaint (Q-ED-4). It is never in an audit row.
 - **Q-ED-4:** a short presenting complaint shown on the board to the facility's nurses, clinicians and doctors without a chart grant. It is never shown to the front desk, and never in an audit row, log or notice.
 - **Q-ED-7:** writing care for a patient who cannot consent and is not this facility's own stays as today (break-glass read only, or an unknown record merged later). A new emergency write basis needs its own section.
 - **Public screens:** the board names patients. It must not be shown where patients or visitors can see it; the screen says so.
@@ -4114,7 +4120,7 @@ Release D, Phase 1 sprint (from 25 Nov 2026). Size **M**.
 - Backend: 0168 and 0169, ehr-api routes (`src/ehr/ed-board/`) and the waiting-list card field, the SX-1 area and the role matrix.
 - Website: Lekan.
 - Review: Rahman (database, identity and security, release cut), an independent agent review per change, and the owner's verbatim signature on each migration.
-- Go-live: production flag `ED_BOARD_ENABLED` on only after the clinical lead's checklist (the triage scale first) and the owner's go-live.
+- Go-live: production flag `ED_BOARD_ENABLED` on only after the clinical lead's checklist (the triage scale first) and the owner's go-live. It is one switch for every facility: switching it on opens the board at the real facilities and the sealed demo and QA ones together.
 
 # Not planned yet
 

@@ -12447,8 +12447,11 @@ five-level scale before real patients use the board. The Triage & Vitals page's 
 Emergency) is replaced by the same five levels, not mapped onto them.
 
 One service flag, `ED_BOARD_ENABLED` in ehr-api, off by default. While off, every route below answers 503
-`ED_BOARD_NOT_AVAILABLE`. On in staging and at the sealed demo and QA facilities; in production only after the
-clinical lead's checklist (the triage scale first) and the owner's go-live. A database without 0168 also answers 503
+`ED_BOARD_NOT_AVAILABLE`. It is one switch for the whole ehr-api and does not look at the facility: production is
+the one deployment and serves the sealed demo and QA facilities beside the real ones (0098), so the demo and QA
+facilities get the board at the go-live with every other facility, not before. Off in production until the clinical
+lead's checklist (the triage scale first) and the owner's go-live; on only for local development and tests. A
+database without 0168 also answers 503
 `ED_BOARD_NOT_AVAILABLE`. (A 503 answer's `detail` is the service's generic text; screens show their own words for
 the code: "The emergency board is not available yet.")
 
@@ -12532,7 +12535,9 @@ every 30 seconds while shown.
 "byMembershipId", "fromStage", "toStage", "triageLevel", "outcome", "reason", "complaintChanged" }] }`. `kind`:
 `arrived`, `moved_from_waiting_list`, `triaged`, `moved`, `visit_linked`, `disposition`, `disposition_changed`,
 `left`, `cancelled`, `closed_on_waiting_list`. The complaint's text is never in the history: `complaintChanged` says
-only that one was recorded or changed.
+only that one was recorded or changed. `reason` (the free text of a cancel or a changed disposition) is shown only to
+members who hold `ehr.ed.triage`, as the complaint is; for the front desk it is always `null`, even for its own cancel
+(the card's `complaintHidden: true` says both are hidden).
 
 Every write below answers 200 `{ "attendance": card, "replayed": false }` and takes `expectedRowVersion` (the card's
 `rowVersion`; another answers 412 `ED_VERSION_CONFLICT`, "Someone else changed this patient's place on the board.

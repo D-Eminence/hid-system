@@ -124,7 +124,7 @@ export const BOARD_OFF_PRESENT_SQL =
 export const BOARD_OFF_UPDATE_SQL = `select outcome, ${CARD_COLUMNS}
   from ehr.visit_queue_ed_board_off_update($1, $2, $3, $4::smallint, $5, $6, $7)`;
 
-/** ED_BOARD_ENABLED: only while it is on does a waiting-list row belong to the board. */
+/** ED_BOARD_ENABLED: only while it is on does a waiting-list row belong to the board (one switch, every facility). */
 export function edBoardOn(): boolean {
   return getEnvironment().ED_BOARD_ENABLED;
 }
