@@ -230,11 +230,17 @@
 -- it stops at once (32 ms) with the one-attempt text; an open reader of
 -- pharmacy.dispensings does not stop it (55 ms).
 -- Subtransactions: each firing opens one, a gap one more. The most firings
--- in one transaction come from a 0088 or 0090 correction: one invalidation
--- per result of the route's work item (one requested test per work item,
--- one result per specimen run, so usually one) and one reversal. Past 64
--- in one transaction a backend's subtransaction cache overflows (slower
--- visibility checks elsewhere until it ends; no error).
+-- in one transaction come from an 0088 report or an 0090 correction of a
+-- routed lab work item: one invalidation per released result. lab-api takes
+-- at most 50 specimen requirements an accession (one specimen, run and
+-- result each), so at most 50 firings, merged into one lab_result_withdrawn
+-- notice; a pharmacy one writes one reversal. Measured on both owner kinds
+-- with pg_stat_get_backend_subxact before the command's transaction ended:
+-- K results give K + 1 subtransactions with an XID (one per firing and the
+-- command's own; 1 with the switch off), so 51 at most (0088 and 0090
+-- alike), no gap, and the cache was not overflowed. A backend's cache holds
+-- 64: 64 or 70 results, beyond any real path, overflowed it (slower
+-- visibility checks elsewhere until the transaction ends; no error).
 -- Index plans, 100,000 notices: the summary and the unread list read
 -- order_notices_unread_idx, state 'all' reads order_notices_recipient_idx;
 -- each under 1 ms for a recipient with 500 notices.
