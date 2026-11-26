@@ -177,8 +177,9 @@
 --
 -- Locks. Section 2, one DO block, each attempt in its own subtransaction:
 -- ACCESS SHARE NOWAIT on ehr.order_routes, lab.order_route_result_reports,
--- pharmacy.order_route_dispensing_reports (section 3 prints their policies)
--- and auth.permissions (section 3 reads the two codes); then SHARE ROW
+-- pharmacy.order_route_dispensing_reports (section 3 prints their policies),
+-- auth.permissions (section 3 reads the two codes) and platform.legal_holds
+-- (the post-check prints its owner policy); then SHARE ROW
 -- EXCLUSIVE NOWAIT on lab.result_releases, lab.result_invalidations,
 -- pharmacy.dispensings and pharmacy.dispensing_reversals (CREATE TRIGGER;
 -- it also covers the print of 0154's CHECK) and identity.patients (the new
@@ -198,10 +199,11 @@
 -- What waits, from section 2 to commit: lab releases, invalidations,
 -- dispensings and reversals, and every insert or update of a patient (SHARE
 -- ROW EXCLUSIVE stops writes). Reads of all five go on, and so do reads and
--- writes of the route tables (ACCESS SHARE stops only DDL). Nothing fails
--- unless its own lock_timeout or statement_timeout is shorter than the
--- hold. Behind an open writer of one of the five tables, an autovacuum of
--- one (SHARE UPDATE EXCLUSIVE), or DDL on any of the nine, the file stops
+-- writes of the route tables, the permissions and the holds (ACCESS SHARE
+-- stops only DDL). Nothing fails unless its own lock_timeout or
+-- statement_timeout is shorter than the hold. Behind an open writer of one
+-- of the five tables, an autovacuum of one (SHARE UPDATE EXCLUSIVE), or DDL
+-- on any of the ten, the file stops
 -- after 5 seconds, nothing applied. In the dry run the locks last until the
 -- dry run ends. 0159 ships in a release of its own, so the dry-run hold is
 -- 0159's alone.
@@ -561,10 +563,11 @@ begin
 end
 $$;
 
--- 2. Locks (see Locks), NOWAIT, at most 5 s: ACCESS SHARE on the four tables
--- section 3 reads, then SHARE ROW EXCLUSIVE on the five this file adds a
--- trigger or a foreign key to, so an attempt that fails never holds the
--- strong ones. A failed attempt's subtransaction releases what it took.
+-- 2. Locks (see Locks), NOWAIT, at most 5 s: ACCESS SHARE on the five
+-- tables section 3 and the post-check read, then SHARE ROW EXCLUSIVE on the
+-- five this file adds a trigger or a foreign key to, so an attempt that
+-- fails never holds the strong ones. A failed attempt's subtransaction
+-- releases what it took.
 -- When this transaction already holds a lock that stops other sessions'
 -- reads or writes of a table (an earlier migration in the same transaction,
 -- as in the runner's dry run; the runner's own ledger table aside), one
@@ -586,7 +589,7 @@ begin
     attempt := attempt + 1;
     begin
       lock table ehr.order_routes, lab.order_route_result_reports, pharmacy.order_route_dispensing_reports,
-        auth.permissions in access share mode nowait;
+        auth.permissions, platform.legal_holds in access share mode nowait;
       lock table lab.result_releases, lab.result_invalidations, pharmacy.dispensings, pharmacy.dispensing_reversals,
         identity.patients in share row exclusive mode nowait;
       exit;
@@ -594,13 +597,13 @@ begin
       if holding then
         raise exception using errcode = '55P03',
           message = '0159: a lab result, dispensing or patient table, or a table 0159 reads (the order routes, '
-            || 'their reports or the permissions), is busy, and this transaction already holds an earlier '
+            || 'their reports, the permissions or the legal holds), is busy, and this transaction already holds an earlier '
             || 'migration''s locks, so it does not wait; nothing applied; run the release again at a quieter time';
       end if;
       if attempt >= 50 then
         raise exception using errcode = '55P03',
           message = '0159: a lab result, dispensing or patient table, or a table 0159 reads (the order routes, '
-            || 'their reports or the permissions), stayed busy for 5 seconds; nothing applied; run the release '
+            || 'their reports, the permissions or the legal holds), stayed busy for 5 seconds; nothing applied; run the release '
             || 'again at a quieter time';
       end if;
       perform pg_sleep(0.1);
@@ -1880,6 +1883,7 @@ begin
   end if;
   -- The hold test can read the holds: its owner is the holds' owner, whose
   -- policy alone reads them (or that owner bypasses row-level security).
+  -- Printing the policy opens platform.legal_holds, which section 2 holds.
   if not ((select role_row.rolsuper or role_row.rolbypassrls from pg_roles role_row where role_row.oid = holds_owner)
           or exists (select 1 from pg_policy policy_row
                       where policy_row.polrelid = 'platform.legal_holds'::regclass
