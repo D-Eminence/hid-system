@@ -130,7 +130,10 @@ select pg_temp.expect('1f lab', 'ehr.document.read ehr.document.write ehr.lab-re
   || 'lab.result.entered-in-error lab.result.release lab.result.released.read lab.result.revise-released '
   || 'lab.result.verify lab.specimen.collect lab.specimen.receive lab.specimen.reject lab.work-item.accept '
   || 'lab.work-item.read', pg_temp.role_line('lab'));
-select pg_temp.expect('1g admin (keeps ocr.job.read: unchanged by Q112 A)', 'audit.read identity.registration.approve '
+-- 0155 (ORD-7) gives admin ehr.catalog.facility-item.write (a facility's own
+-- medicines and lab tests); nothing else of admin's changes after 0136.
+select pg_temp.expect('1g admin (keeps ocr.job.read: unchanged by Q112 A; with 0155''s ehr.catalog.facility-item.write)',
+  'audit.read ehr.catalog.facility-item.write identity.registration.approve '
   || 'identity.registration.write lab.accession.read lab.execution.read lab.import.read lab.result.released.read '
   || 'ocr.job.read organization.manage outreach.campaign.read outreach.campaign.write outreach.registration.read '
   || 'outreach.registration.write pharmacy.dispensing.read pharmacy.import.read workforce.manage',
