@@ -1107,12 +1107,16 @@ select gen_random_uuid(), ('e4c30000-0000-4000-8000-00000000000' || c.patient)::
 select set_config('hid.test.gaps_before', pg_temp.gaps()::text, true);
 
 -- 1. Who may run and read what.
+-- Superusers and the owners are left out of 1a and 1b: the rehearsal applies
+-- as a superuser named hid_, then gives everything to a hid_ owner.
 select pg_temp.same('1a EXECUTE on the new functions: the five definers to the EHR runtime and its login role only',
   (select string_agg(role_row.rolname || ':' || proc.proname, ' ' order by role_row.rolname, proc.proname)
      from pg_roles role_row
      cross join pg_proc proc
      join pg_namespace namespace on namespace.oid = proc.pronamespace
-    where namespace.nspname = 'ehr' and role_row.rolname like 'hid\_%'
+    where namespace.nspname = 'ehr' and role_row.rolname like 'hid\_%' and not role_row.rolsuper
+      and role_row.oid not in (proc.proowner, (select relation.relowner from pg_class relation
+                                                where relation.oid = 'ehr.order_notices'::regclass))
       and (proc.proname like 'order\_notice\_%' or proc.proname in ('list_order_notices', 'mark_order_notices_read',
              'mark_order_notice_seen', 'sweep_order_notices'))
       and has_function_privilege(role_row.oid, proc.oid, 'EXECUTE')),
@@ -1124,7 +1128,9 @@ select pg_temp.same('1b no runtime role may read or write the notices, the gaps 
   (select count(*)::text from pg_roles role_row
      cross join (values ('ehr.order_notices'), ('ehr.order_notice_gaps'), ('ehr.order_notice_switch')) t(name)
      cross join (values ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) p(privilege)
-    where role_row.rolname like 'hid\_%' and has_table_privilege(role_row.oid, t.name, p.privilege)), '0');
+    where role_row.rolname like 'hid\_%' and not role_row.rolsuper
+      and role_row.oid <> (select relation.relowner from pg_class relation where relation.oid = t.name::regclass)
+      and has_table_privilege(role_row.oid, t.name, p.privilege)), '0');
 select pg_temp.same('1c each zz_order_notice fires after its table''s route return (AFTER INSERT, origin, name order)',
   (select string_agg(trigger_row.tgrelid::regclass::text || ':' || (select string_agg(after_row.tgname, ',' order by
             after_row.tgname collate "C") from pg_trigger after_row
