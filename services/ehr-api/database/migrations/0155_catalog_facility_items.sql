@@ -42,9 +42,9 @@
 --    0180).
 -- F2 ehr.catalog_facility_item_guard(), BEFORE INSERT OR UPDATE for each
 --    row (runs as the writing role):
---    a. an INSERT starts at row_version 1, created now, with no change
---       recorded (55000 otherwise), and each route 1-100 characters
---       (23514 FACILITY_ITEM_ROUTES_INVALID);
+--    a. an INSERT is set to row_version 1 and created now, whatever it
+--       gave; a change recorded on it is 55000 FACILITY_ITEM_IMMUTABLE; each
+--       route 1-100 characters (23514 FACILITY_ITEM_ROUTES_INVALID);
 --    b. an UPDATE may change only active, row_version (to the old value
 --       + 1) and the three "changed" columns; anything else is 55000
 --       FACILITY_ITEM_IMMUTABLE, so the id, facility, kind, names, creator,
