@@ -48,6 +48,9 @@
 --      REFILL_BILLING_NOT_AVAILABLE and takes no stock; a second dispensing
 --      recorded where no hook acts is not the line's, so its reversal leaves
 --      the line and the bill; the first one's reversal takes the line off.
+--      With the first one paid, the second one's reversal leaves the paid bill
+--      as it was (no refund due, on the bill, its log, the audit rows or the
+--      badge); the first one's own reversal makes what was paid the refund.
 --  12. bill and receipt numbers past 999999 have seven digits.
 --
 -- Each case records its outcome; the suite fails at the end listing every
@@ -1242,6 +1245,107 @@ select pg_temp.check_case('11 after the first one''s reversal a refill is still 
 select pg_temp.check_case('11 the stock ledger still agrees', 'true',
   (select pharmacy.stock_ledger_agrees('b1620000-0000-4000-8000-000000000002')::text));
 select pg_temp.check_case('11 every bill''s totals agree at the end', '0', pg_temp.agree());
+
+-- 11, paid: p9's prescription 9 (2 capsules), its own pharmacy bill paid in full for the first dispensing. A second
+-- dispensing (recorded where no hook acts) and its reversal leave the paid bill as it was: the first one's charge stays
+-- on, and nothing shows as refund due (bill, its log, the audit rows, the badge). A refill is refused. Only the first
+-- dispensing's own reversal takes the line off, and then what was paid for it is the refund due.
+set local session_replication_role = replica;
+insert into ehr.prescriptions (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  medication_code_system, medication_code, medication_display, frequency, instructions, status, quantity_to_dispense,
+  quantity_unit)
+values ('b1620610-0000-4000-8000-000000000009', 'b1620600-0000-4000-8000-000000000009', pg_temp.patient(9),
+  'b1620000-0000-4000-8000-000000000002', 'b1620100-0000-4000-8000-000000000004', pg_temp.member(4), 'HID-MED',
+  'MED-00042', 'Amoxicillin 500 mg capsule', 'twice a day', 'After food', 'active', 2, 'Capsule');
+set local session_replication_role = origin;
+select set_config('app.facility_id', 'b1620000-0000-4000-8000-000000000002', true),
+  set_config('app.correlation_id', 'billing-suite-fixture', true);
+insert into pharmacy.work_items (id, patient_id, facility_id, ordering_facility_id, source_ehr_prescription_id,
+  source_ehr_prescription_version, source_encounter_id, source_status, status, medication_code_system, medication_code,
+  medication_display, frequency, instructions, prescribed_by, prescribed_at, accepted_by, accepted_by_membership_id,
+  accepted_at, acceptance_reason, idempotency_key, request_sha256, correlation_id)
+values ('b1620620-0000-4000-8000-000000000009', pg_temp.patient(9), 'b1620000-0000-4000-8000-000000000002',
+  'b1620000-0000-4000-8000-000000000002', 'b1620610-0000-4000-8000-000000000009', 1,
+  'b1620600-0000-4000-8000-000000000009', 'active', 'accepted', 'HID-MED', 'MED-00042', 'Amoxicillin 500 mg capsule',
+  'twice a day', 'As directed', 'b1620100-0000-4000-8000-000000000004', clock_timestamp(),
+  'b1620100-0000-4000-8000-000000000004', pg_temp.member(4), clock_timestamp(),
+  'Sent automatically when the prescription was activated', 'own-pharmacy-send:billing-9', repeat('0', 64),
+  'billing-suite-correlation');
+select pg_temp.accept(9, 9);
+create function pg_temp.paid_line() returns text language sql as $f$
+  select format('%s/%s/%s/%s/%s', origin, total_kobo, cancelled, dispensing_reversed_at is not null,
+    coalesce(dispensing_id::text, 'none'))
+    from commercial.bill_lines where work_item_id = 'b1620620-0000-4000-8000-000000000009'
+$f$;
+create function pg_temp.paid_bill() returns uuid language sql as $f$
+  select bill_id from commercial.bill_lines where work_item_id = 'b1620620-0000-4000-8000-000000000009'
+$f$;
+create function pg_temp.fill9(fill integer, in_session boolean) returns text language plpgsql as $f$
+begin
+  perform pg_temp.as_member(3, 'direct-care');
+  if not in_session then
+    perform set_config('app.facility_id', '', true);
+  end if;
+  insert into pharmacy.dispensings (id, work_item_id, work_item_version, patient_id, facility_id, medication_code_system,
+    medication_code, medication_display, quantity_dispensed, quantity_unit, status, dispensed_by,
+    dispensed_by_membership_id, reason, idempotency_key, request_sha256, correlation_id, fill_number)
+  values (('b162064' || fill || '-0000-4000-8000-000000000009')::uuid, 'b1620620-0000-4000-8000-000000000009', 1,
+    pg_temp.patient(9), 'b1620000-0000-4000-8000-000000000002', 'HID-MED', 'MED-00042', 'Amoxicillin 500 mg capsule', 2,
+    'capsule', 'dispensed', 'b1620100-0000-4000-8000-000000000003', pg_temp.member(3), 'Next supply as prescribed',
+    'billing-refill-key-9000' || fill, repeat('0', 64), 'billing-suite-correlation', fill);
+  return 'dispensed';
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end
+$f$;
+create function pg_temp.reverse9(fill integer) returns text language plpgsql as $f$
+begin
+  perform pg_temp.as_member(3, 'direct-care');
+  insert into pharmacy.dispensing_reversals (dispensing_id, dispensing_version, work_item_id, patient_id, facility_id,
+    status, reversed_by, reversed_by_membership_id, reason, idempotency_key, request_sha256, correlation_id)
+  values (case when fill = 1 then 'b1620640-0000-4000-8000-000000000009'
+               else ('b162064' || fill || '-0000-4000-8000-000000000009') end::uuid, 1,
+    'b1620620-0000-4000-8000-000000000009', pg_temp.patient(9), 'b1620000-0000-4000-8000-000000000002', 'reversed',
+    'b1620100-0000-4000-8000-000000000003', pg_temp.member(3), 'Supply given in error',
+    'billing-reverse-key-900' || fill, repeat('0', 64), 'billing-suite-correlation');
+  return 'reversed';
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end
+$f$;
+select pg_temp.check_case('11 paid: the first dispensing is given', 'dispensed', pg_temp.dispense(9, 9, 2));
+select pg_temp.check_case('11 paid: the line bills the first dispensing',
+  'pharmacy/30000/f/f/b1620640-0000-4000-8000-000000000009', pg_temp.paid_line());
+select pg_temp.check_case('11 paid: the bill is paid in cash', 'ok',
+  pg_temp.ehr('paid9', 3, format($s$select commercial.payment_record('%s', '{"method":"cash","amountKobo":30000}', null, 'kbillingrefillpaid0001', repeat('1', 64))$s$, pg_temp.paid_bill())));
+select pg_temp.check_case('11 paid: the bill', '30000/30000/0/0/0/0/0/paid', pg_temp.money(pg_temp.paid_bill()));
+insert into pg_temp.b_saved (label, value) values ('paid-badge', to_jsonb(pg_temp.badge(9)));
+select pg_temp.check_case('11 paid: the badge shows no refund', 'false/0/0', pg_temp.v('paid-badge') #>> '{}');
+select pg_temp.check_case('11 paid: a refill of the paid medicine is refused', 'HB409 REFILL_BILLING_NOT_AVAILABLE',
+  pg_temp.fill9(2, true));
+select pg_temp.check_case('11 paid: a second dispensing where no hook acts is recorded', 'dispensed',
+  pg_temp.fill9(2, false));
+select pg_temp.check_case('11 paid: reversing the second dispensing', 'reversed', pg_temp.reverse9(2));
+select pg_temp.check_case('11 paid: the first dispensing''s charge stays on the bill',
+  'pharmacy/30000/f/f/b1620640-0000-4000-8000-000000000009', pg_temp.paid_line());
+select pg_temp.check_case('11 paid: nothing shows as refund due', '30000/30000/0/0/0/0/0/paid',
+  pg_temp.money(pg_temp.paid_bill()));
+select pg_temp.check_case('11 paid: nor on the badge', 'false/0/0', pg_temp.badge(9));
+select pg_temp.check_case('11 paid: nor in the bill''s log or the audit rows', '0/0',
+  (select format('%s/%s',
+     (select count(*) from commercial.bill_events where bill_id = pg_temp.paid_bill()
+         and kind in ('dispensing-reversed', 'line-cancel')),
+     (select count(*) from audit.events where resource_id = pg_temp.paid_bill()::text
+         and action in ('commercial.bill.dispensing-reversed', 'commercial.bill.line-cancel')))));
+select pg_temp.check_case('11 paid: the first dispensing''s own reversal', 'reversed', pg_temp.reverse9(1));
+select pg_temp.check_case('11 paid: takes the line off',
+  'pharmacy/30000/t/t/b1620640-0000-4000-8000-000000000009', pg_temp.paid_line());
+select pg_temp.check_case('11 paid: and what was paid for it is the refund due', '0/30000/0/0/0/30000/0',
+  (select string_agg(part, '/') from (select unnest((string_to_array(pg_temp.money(pg_temp.paid_bill()), '/'))[1:7]) part) parts));
+select pg_temp.check_case('11 paid: the badge then shows the refund', 'true/30000/0', pg_temp.badge(9));
+select pg_temp.check_case('11 paid: after it a refill is still refused', 'HB409 REFILL_BILLING_NOT_AVAILABLE',
+  pg_temp.fill9(3, true));
+select pg_temp.check_case('11 paid: every bill''s totals agree', '0', pg_temp.agree());
 
 -- 12. Bill and receipt numbers past 999999: seven digits, never cut to six (which would repeat a number).
 update commercial.number_counters set next_value = 999999
