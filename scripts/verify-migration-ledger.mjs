@@ -167,8 +167,8 @@ const acceptedMigrations = new Map([
   ['0152_catalog_diagnoses.sql', 'abfecc3571808e4ad29fdf8c1e202f65b3cdf890e9f3106b74bd6ef1bd19f9c9'],
   ['0153_clinician_recent_diagnoses.sql', '45faa6a739056cc07426fdb5363b58c7dda1dbcbc096fb6d1769ae746798500b'],
   // APPT-1 (Release D), numbers provisional (given at integration, in release order: #258), unsigned.
-  ['0160_appointments.sql', '399200223eeb2916e1e84ffe7cf8b2d81db842d882e67ab8f86290ca3cf47b0e'],
-  ['0161_appointment_notices_and_call_list.sql', '7343d3ccba0e7936917125a15dd883a7b8ae5749f47bd254bbe7189efd00080c'],
+  ['0160_appointments.sql', 'f850d3af28488838a219662115aeb89000d4b52c8e2cd4802782ad54dc58ac14'],
+  ['0161_appointment_notices_and_call_list.sql', 'a9703e87d3555a85d8c3e900715405d37621c35a9ae8a5b1b2143bc91df58f2c'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))
