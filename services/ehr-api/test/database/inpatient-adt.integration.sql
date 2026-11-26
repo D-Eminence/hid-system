@@ -45,7 +45,16 @@
 --      no bill;
 --  11. census, version conflicts, idempotent replays, a reused key, another
 --      facility, the runtime cannot read the tables or run the helpers;
---  12. audit: every write's rows; no name, date of birth, Health ID, reason,
+--  12. the waiting list and the emergency board (ED-1's 0168): a patient
+--      requested from the waiting list and then put on the board while
+--      waiting for a bed is admitted; 0171 names the row in 0168's marker
+--      (hid.ed_board_closing), the row finishes, the ED record closes via
+--      admission with one admitted event, the mirror stays out and the marker
+--      is cleared; a waiting-list admission with no board row touches no ED
+--      record; the guard still refuses an unmarked change of a board row (a
+--      marker naming anything else, the ED record's id included, opens
+--      nothing);
+--  13. audit: every write's rows; no name, date of birth, Health ID, reason,
 --      handover, summary or cause in any inpatient audit row.
 --
 -- Each case records its outcome; the suite fails at the end listing every
@@ -164,6 +173,27 @@ values ('a1700a00-0000-4000-8000-000000000005', 'a1700000-0000-4000-8000-0000000
   'decided', 'admit_requested', 'inpatient', 'a1700300-0000-4000-8000-000000000003', clock_timestamp(),
   'a1700300-0000-4000-8000-000000000002', 'a1700100-0000-4000-8000-000000000005', 'a1700300-0000-4000-8000-000000000005',
   'a1700300-0000-4000-8000-000000000002');
+-- Section 12: p9's waiting-list row is on the emergency board (an open ED record moved from the waiting list), with
+-- no admission; p10 waits on the waiting list (its ED record is made in section 12, after the request).
+insert into ehr.visit_queue (id, facility_id, patient_id, queue_day, stage, check_in_basis, checked_in_by_account_id,
+  checked_in_by_membership_id, checked_in_at, stage_changed_at, updated_by_membership_id, updated_at) values
+  ('a1700900-0000-4000-8000-000000000009', 'a1700000-0000-4000-8000-000000000002', 'a1700400-0000-4000-8000-000000000009',
+   (clock_timestamp() at time zone 'Africa/Lagos')::date, 'waiting', 'search', 'a1700100-0000-4000-8000-000000000005',
+   'a1700300-0000-4000-8000-000000000005', clock_timestamp(), clock_timestamp(), 'a1700300-0000-4000-8000-000000000005',
+   clock_timestamp()),
+  ('a1700900-0000-4000-8000-000000000010', 'a1700000-0000-4000-8000-000000000002', 'a1700400-0000-4000-8000-000000000010',
+   (clock_timestamp() at time zone 'Africa/Lagos')::date, 'waiting', 'search', 'a1700100-0000-4000-8000-000000000005',
+   'a1700300-0000-4000-8000-000000000005', clock_timestamp(), clock_timestamp(), 'a1700300-0000-4000-8000-000000000005',
+   clock_timestamp());
+insert into ehr.ed_attendances (id, facility_id, organization_id, patient_id, visit_queue_entry_id, arrival_basis,
+  arrival_mode, arrived_at, arrival_day, moved_from_waiting_list, moved_from_stage, moved_from_stage_changed_at, status,
+  arrived_by_account_id, arrived_by_membership_id, updated_by_membership_id)
+values ('a1700a00-0000-4000-8000-000000000009', 'a1700000-0000-4000-8000-000000000002',
+  'a1700000-0000-4000-8000-000000000001', 'a1700400-0000-4000-8000-000000000009', 'a1700900-0000-4000-8000-000000000009',
+  'own_facility', 'walk_in', now() - interval '30 minutes',
+  ((now() - interval '30 minutes') at time zone 'Africa/Lagos')::date, true, 'waiting',
+  now() - interval '40 minutes', 'open', 'a1700100-0000-4000-8000-000000000001',
+  'a1700300-0000-4000-8000-000000000001', 'a1700300-0000-4000-8000-000000000001');
 -- p14 has an active allergy recorded.
 insert into ehr.recorded_allergies (patient_id, facility_id, created_by, created_by_membership_id, substance, severity)
 values ('a1700400-0000-4000-8000-000000000014', 'a1700000-0000-4000-8000-000000000002',
@@ -1044,22 +1074,92 @@ select pg_temp.check_case('11 the ICU page: the ICU ward, its occupied beds, and
      from pg_temp.run(1, $s$select ehr.bed_board(null, 'icu')$s$) answer));
 reset role;
 
--- 12. Audit.
-select pg_temp.check_case('12 every board and list read has a collection row and a row per patient shown', 'true',
+-- 12. The waiting list and the emergency board (ED-1's 0168). p10 is requested from the waiting list, then put on
+-- the board while waiting for a bed (its row gets an open ED record, as 0168's arrival from the waiting list leaves
+-- it); 0168's guard now refuses any change of the row the board's marker does not name.
+set local role hid_ehr_api_runtime;
+select pg_temp.check_case('12 p10 requested from the waiting list (no board row yet)', 'created/waiting_list',
+  (select pg_temp.o(answer) || '/' || (answer->'admission'->>'source')
+     from pg_temp.run(2, format($s$select ehr.admission_request(%L, 'waiting_list', null, null, %L,
+       'Sickle cell crisis (fictional)', null, %L, %L, null, %L, %L)$s$, pg_temp.patient(10),
+       'a1700900-0000-4000-8000-000000000010', pg_temp.member(2), pg_temp.ward('ICU'), pg_temp.key('r-p10'),
+       pg_temp.sha('r-p10'))) answer));
+reset role;
+insert into ehr.ed_attendances (id, facility_id, organization_id, patient_id, visit_queue_entry_id, arrival_basis,
+  arrival_mode, arrived_at, arrival_day, moved_from_waiting_list, moved_from_stage, moved_from_stage_changed_at, status,
+  arrived_by_account_id, arrived_by_membership_id, updated_by_membership_id)
+values ('a1700a00-0000-4000-8000-000000000010', 'a1700000-0000-4000-8000-000000000002',
+  'a1700000-0000-4000-8000-000000000001', 'a1700400-0000-4000-8000-000000000010', 'a1700900-0000-4000-8000-000000000010',
+  'own_facility', 'walk_in', now(), (now() at time zone 'Africa/Lagos')::date, true, 'waiting',
+  now() - interval '10 minutes', 'open', 'a1700100-0000-4000-8000-000000000001',
+  'a1700300-0000-4000-8000-000000000001', 'a1700300-0000-4000-8000-000000000001');
+select pg_temp.check_case('12 the guard refuses an unmarked change of p10''s board row', '55000',
+  pg_temp.try($s$update ehr.visit_queue set stage = 'finished', closed_at = clock_timestamp()
+    where id = 'a1700900-0000-4000-8000-000000000010'$s$));
+select pg_temp.check_case('12 a marker naming the ED record (not the row) opens nothing', '55000',
+  pg_temp.try($s$update ehr.visit_queue set stage = 'finished', closed_at = clock_timestamp()
+    where id = 'a1700900-0000-4000-8000-000000000010'
+      and set_config('hid.ed_board_closing', 'a1700a00-0000-4000-8000-000000000010', true) is not null$s$));
+select pg_temp.check_case('12 a marker naming another row opens nothing', '55000',
+  pg_temp.try($s$update ehr.visit_queue set stage = 'ready'
+    where id = 'a1700900-0000-4000-8000-000000000010'
+      and set_config('hid.ed_board_closing', 'a1700900-0000-4000-8000-000000000009', true) is not null$s$));
+set local role hid_ehr_api_runtime;
+select pg_temp.check_case('12 nurse 8 (no chart grant) admits p10 from the waiting list while on the board',
+  'updated/admitted/ICU/ICU Bed 2/in_progress',
+  pg_temp.o(pg_temp.run(8, format($s$select ehr.admission_admit(%L, %s, %L, false, %L, %L)$s$, pg_temp.adm(10),
+    pg_temp.adm_version(10), pg_temp.bed('ICU', 'ICU Bed 2'), pg_temp.key('a-p10'), pg_temp.sha('a-p10'))))
+  || '/' || pg_temp.adm_state(10));
+reset role;
+select pg_temp.check_case('12 p10''s row finished and its ED record closed via admission, versions raised',
+  'finished/true/closed/admission/true/2/2',
+  (select entry.stage || '/' || (entry.closed_at is not null)::text || '/' || attendance.status || '/'
+          || attendance.closed_via || '/' || (attendance.left_at = entry.closed_at)::text || '/' || entry.row_version
+          || '/' || attendance.row_version
+     from ehr.ed_attendances attendance join ehr.visit_queue entry on entry.id = attendance.visit_queue_entry_id
+    where attendance.id = 'a1700a00-0000-4000-8000-000000000010'));
+select pg_temp.check_case('12 one admitted event (waiting to finished, the admit''s key), no mirrored close',
+  '1/waiting/finished/true/0',
+  (select count(*) filter (where event.kind = 'admitted') || '/'
+          || max(event.from_stage) filter (where event.kind = 'admitted') || '/'
+          || max(event.to_stage) filter (where event.kind = 'admitted') || '/'
+          || (max(event.idempotency_key) filter (where event.kind = 'admitted') = pg_temp.key('a-p10'))::text || '/'
+          || count(*) filter (where event.kind = 'closed_on_waiting_list')
+     from ehr.ed_attendance_events event where event.attendance_id = 'a1700a00-0000-4000-8000-000000000010'));
+select pg_temp.check_case('12 the mirror wrote no audit row for p10', '0',
+  (select count(*)::text from audit.events
+    where action = 'ehr.ed.closed-on-waiting-list' and patient_id = pg_temp.patient(10)));
+select pg_temp.check_case('12 the marker is cleared after the admission', '(empty)',
+  coalesce(nullif(current_setting('hid.ed_board_closing', true), ''), '(empty)'));
+select pg_temp.check_case('12 without a board row (p4, section 3): its row finished and no ED record was made', 'finished/true/0',
+  pg_temp.queue_state('a1700900-0000-4000-8000-000000000004') || '/'
+  || (select count(*) from ehr.ed_attendances where visit_queue_entry_id = 'a1700900-0000-4000-8000-000000000004'));
+select pg_temp.check_case('12 the guard still refuses an unmarked change of p9''s board row (stage, close, triage)',
+  '55000/55000/55000/waiting/false/false/1',
+  pg_temp.try($s$update ehr.visit_queue set stage = 'ready' where id = 'a1700900-0000-4000-8000-000000000009'$s$)
+  || '/' || pg_temp.try($s$update ehr.visit_queue set stage = 'finished', closed_at = clock_timestamp()
+    where id = 'a1700900-0000-4000-8000-000000000009'$s$)
+  || '/' || pg_temp.try($s$update ehr.visit_queue set triage_level = 2 where id = 'a1700900-0000-4000-8000-000000000009'$s$)
+  || '/' || pg_temp.queue_state('a1700900-0000-4000-8000-000000000009')
+  || '/' || (select status <> 'open' from ehr.ed_attendances where id = 'a1700a00-0000-4000-8000-000000000009')::text
+  || '/' || (select row_version from ehr.visit_queue where id = 'a1700900-0000-4000-8000-000000000009'));
+
+-- 13. Audit.
+select pg_temp.check_case('13 every board and list read has a collection row and a row per patient shown', 'true',
   (select (count(*) filter (where action = 'ehr.bed-board.shown')
            = coalesce(sum((details->>'resultCount')::integer) filter (where action = 'ehr.bed-board'), 0))::text
      from audit.events where action in ('ehr.bed-board', 'ehr.bed-board.shown')
        and facility_id = 'a1700000-0000-4000-8000-000000000002'));
-select pg_temp.check_case('12 a sex mismatch confirmation is audited', '1',
+select pg_temp.check_case('13 a sex mismatch confirmation is audited', '1',
   (select count(*)::text from audit.events where action = 'ehr.admission.sex-mismatch-confirmed'));
-select pg_temp.check_case('12 no name, date of birth, Health ID, reason, handover, summary or cause in an inpatient audit row', '0',
+select pg_temp.check_case('13 no name, date of birth, Health ID, reason, handover, summary or cause in an inpatient audit row', '0',
   (select count(*)::text from audit.events
     where (action like 'ehr.ward%' or action like 'ehr.bed%' or action like 'ehr.admission%' or action like 'ehr.census%'
            or action like 'ehr.discharge%' or action like 'ehr.wristband%' or action like 'ehr.newborn%'
            or action like 'ehr.death-record%' or action like 'identity.ward-stay%' or action like 'commercial.bed-day%')
       and (details::text ~* 'wardperson|ngozi|dami|HID-WD|19[78][0-9]-|pneumonia|malaria|cellulitis|oxygen|cough|antibiotic|head injury|traffic|another hospital|fictional'
            or coalesce(reason, '') <> '')));
-select pg_temp.check_case('12 every write was audited', 'true',
+select pg_temp.check_case('13 every write was audited', 'true',
   (select (count(*) > 40)::text from audit.events where action like 'ehr.admission.%' or action like 'ehr.ward.%'
      or action like 'ehr.bed.%'));
 

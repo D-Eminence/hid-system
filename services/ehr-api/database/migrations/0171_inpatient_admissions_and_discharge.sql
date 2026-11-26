@@ -128,6 +128,22 @@
 --    then the ED record and the waiting-list row, FOR UPDATE, always in that
 --    order; it checks row_version and raises the versions of the rows it
 --    changes.
+--    The board's marker (0168's stable interface, its header "The board's
+--    marker"): 0168's guard refuses any change of a waiting-list row that has
+--    an open or decided ED record unless the transaction-local setting
+--    hid.ed_board_closing names that row, and its mirror then stays out.
+--    ehr.admission_admit finishes the row of an admission from the emergency
+--    board, and of one from the waiting list whose patient was put on the
+--    board while waiting for a bed, under that marker: it sets the setting to
+--    the row's id just before its UPDATE of ehr.visit_queue and back to ''
+--    straight after, and closes the ED record itself (closed_via admission,
+--    one admitted event with the request's key). For a waiting-list
+--    admission it reads the row's open or decided ED record FOR UPDATE, then
+--    locks the row, then reads the record again (one that arrived on the
+--    board in between, after locking the row first, is closed too; that late
+--    lock is taken row first, as 0168's mirror takes it). A row with no board
+--    record is finished as before; the marker opens nothing else. The guard's
+--    and the mirror's bodies are md5-pinned below.
 -- A10 Audit, in the request's transaction, refusals included (as 0170):
 --    ehr.admission.request (the source), .read, .list (+ .list.shown per
 --    patient), .admit, .transfer (whether a handover was given),
@@ -179,7 +195,9 @@
 -- however the file is run, applies nothing:
 -- 0. The locks (one attempt, made up to 50 times while a table is busy).
 -- 1. Preconditions (55000, nothing applied): 0170 applied and its three
---    helpers as 0170 wrote them (md5); 0135, 0145 and 0168 applied;
+--    helpers as 0170 wrote them (md5); 0135 (the waiting list), 0145 (the
+--    unknown records the cards label) and 0168 (the ED records, the guard and
+--    the mirror, whose marker this file uses) applied;
 --    "0171: already applied" when every object of this file is there,
 --    "0171: the schema is not in the reviewed state" for any half state; the
 --    two ED CHECKs exactly 0168's; the bodies this file calls md5-pinned; the
@@ -276,6 +294,7 @@ begin
   end if;
   if to_regclass('ehr.ed_attendances') is null or to_regclass('ehr.ed_attendance_events') is null
      or to_regprocedure('ehr.visit_queue_ed_close_mirror()') is null
+     or to_regprocedure('ehr.visit_queue_ed_guard()') is null
      or to_regclass('ehr.visit_queue') is null or to_regclass('identity.unknown_patients') is null then
     raise exception using errcode = '55000', message = '0171: 0135, 0145 and ED-1''s 0168 must be applied first';
   end if;
@@ -325,7 +344,10 @@ begin
       ('auth.membership_has_permission(text,uuid,uuid,text)', '65e3eaff93fe729fd5c5b986b80c9dd6'),
       ('ehr.context_allows(uuid,uuid,text)', '75016690184a80bd246c365b4d108082'),
       ('ehr.capture_record_version()', 'cae99883d00e70ab1d20ed6fbc97ad7b'),
+      -- 0168's board marker (its header, "The board's marker"): the mirror and the guard honour
+      -- hid.ed_board_closing, which ehr.admission_admit sets to close a board patient's waiting-list row.
       ('ehr.visit_queue_ed_close_mirror()', '6aaaeb33d1318136fb7fba5ad405fc8e'),
+      ('ehr.visit_queue_ed_guard()', 'b5d0c7b9edf8ca3ca48b33f50ed2c250'),
       -- 0170's three parts this file replaces, as 0170 wrote them.
       ('ehr.inpatient_bed_occupants(uuid,uuid[])', 'ef7fdc71d0e22a5f7ea179a432da1125'),
       ('ehr.inpatient_waiting(uuid,uuid[])', '4fe910433909cce113d9bbdeff3902d9'),
@@ -1347,14 +1369,44 @@ begin
           requested_request_sha256);
       end if;
     elsif admission_row.source = 'waiting_list' then
+      -- The patient may have been put on the emergency board (0168) while waiting for a bed: the row then has an open
+      -- or decided ED record, and 0168's guard refuses any change of the row that the board's marker does not name.
+      -- 0168's interface (its header, "The board's marker"): lock the ED record, then the row, FOR UPDATE; set
+      -- hid.ed_board_closing to the row's id (transaction-local) just before the UPDATE and back to '' straight
+      -- after; close the ED record here (the mirror stays out while the marker names the row). The record is read
+      -- again under the row's lock, so one that arrived on the board after the first read (its arrival locks the row
+      -- first) is closed too; that late lock is taken row first, as 0168's mirror takes it.
+      select attendance.* into attendance_row from ehr.ed_attendances attendance
+       where attendance.visit_queue_entry_id = admission_row.visit_queue_entry_id and attendance.status <> 'closed'
+       for update;
       select entry.* into entry_row from ehr.visit_queue entry
        where entry.id = admission_row.visit_queue_entry_id for update;
-      if found and entry_row.closed_at is null then
-        update ehr.visit_queue entry
-           set stage = 'finished', stage_changed_at = now_value, closed_at = now_value,
-               updated_by_membership_id = caller.actor_membership, updated_at = now_value,
-               row_version = entry.row_version + 1
-         where entry.id = entry_row.id;
+      if found then
+        select attendance.* into attendance_row from ehr.ed_attendances attendance
+         where attendance.visit_queue_entry_id = entry_row.id and attendance.status <> 'closed'
+         for update;
+        if entry_row.closed_at is null then
+          perform set_config('hid.ed_board_closing', entry_row.id::text, true);
+          update ehr.visit_queue entry
+             set stage = 'finished', stage_changed_at = now_value, closed_at = now_value,
+                 updated_by_membership_id = caller.actor_membership, updated_at = now_value,
+                 row_version = entry.row_version + 1
+           where entry.id = entry_row.id;
+          perform set_config('hid.ed_board_closing', '', true);
+        end if;
+        if attendance_row.id is not null then
+          update ehr.ed_attendances attendance
+             set status = 'closed', left_at = now_value, closed_via = 'admission',
+                 updated_by_membership_id = caller.actor_membership, updated_at = now_value,
+                 row_version = attendance.row_version + 1
+           where attendance.id = attendance_row.id;
+          insert into ehr.ed_attendance_events (attendance_id, facility_id, patient_id, kind, at, by_account_id,
+            by_membership_id, from_stage, to_stage, idempotency_key, request_sha256)
+          values (attendance_row.id, caller.actor_facility, admission_row.patient_id, 'admitted', now_value,
+            caller.actor_account, caller.actor_membership, entry_row.stage,
+            case when entry_row.closed_at is null then 'finished' else entry_row.stage end, requested_idempotency_key,
+            requested_request_sha256);
+        end if;
       end if;
     end if;
 
@@ -1371,7 +1423,7 @@ begin
   end
   $fn$;
   comment on function ehr.admission_admit(uuid, bigint, uuid, boolean, text, text) is
-    '0171 (ADT-1, Q185 A, Q186 A, Q-ADT-11 A, Q-ADT-18 A): give a requested admission a free bed or overflow space of an active ward here: the admission admitted, the bed occupied, the encounter in progress; an ED record closes (closed_via admission) and its waiting-list row finishes; a waiting-list row finishes. A ward that takes one sex and a patient of the other needs the confirmation (audited). Needs ehr.bed.allocate; no chart access. Outcomes updated (replayed), not_found, changed, state_invalid, bed_not_found, bed_not_available, sex_mismatch, key_reused. Audited (ehr.admission.admit).';
+    '0171 (ADT-1, Q185 A, Q186 A, Q-ADT-11 A, Q-ADT-18 A): give a requested admission a free bed or overflow space of an active ward here: the admission admitted, the bed occupied, the encounter in progress; an ED record closes (closed_via admission) and its waiting-list row finishes; a waiting-list row finishes, under 0168''s board marker when the patient was put on the emergency board while waiting (its ED record closes too, closed_via admission). A ward that takes one sex and a patient of the other needs the confirmation (audited). Needs ehr.bed.allocate; no chart access. Outcomes updated (replayed), not_found, changed, state_invalid, bed_not_found, bed_not_available, sex_mismatch, key_reused. Audited (ehr.admission.admit).';
   revoke all on function ehr.admission_admit(uuid, bigint, uuid, boolean, text, text) from public;
 
   -- Route 14: "Transfer bed", with an optional nursing handover (clinical: needs chart write access).
