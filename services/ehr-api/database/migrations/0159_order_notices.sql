@@ -119,9 +119,12 @@
 --      row per patient of the rows changed.
 --    - Seen: the session must be able to read the order now (42501
 --      ORDER_NOTICE_CONSENT_REQUIRED otherwise; ehr-api answers 403
---      CONSENT_REQUIRED). Records the time, account and membership, marks
---      the notice read if it was not, and is final. One ehr.order-notice.seen
---      audit row naming the patient. Answers the notice.
+--      CONSENT_REQUIRED). Records the time, account and membership, and is
+--      final. A critical notice, which never merges, is marked read too if
+--      it was not. An ordinary one is not: an event may have merged in since
+--      the list showed it, so only mark read, with the version, reads it.
+--      One ehr.order-notice.seen audit row naming the patient. Answers the
+--      notice.
 --    The list and Seen read ehr.lab_requests and ehr.prescriptions by id;
 --    0133's S7 list, 0148's 1g and 0154's 1d gain those two.
 -- N6 ehr.sweep_order_notices(batch), for hid_ehr_runtime, as 0141's: up to
@@ -1424,8 +1427,8 @@ begin
 end
 $$;
 
--- N5: Seen. The session must be able to read the order now. Final; marks the
--- notice read too.
+-- N5: Seen. The session must be able to read the order now. Final; marks a
+-- critical notice read too.
 create function ehr.mark_order_notice_seen(requested_notice_id uuid)
 returns table (notice_id uuid, kind text, order_kind text, order_id uuid, order_route_id uuid, encounter_id uuid,
   display text, event_count integer, first_event_at timestamptz, last_event_at timestamptz, read_at timestamptz,
@@ -1474,10 +1477,14 @@ begin
      or not coalesce(ehr.context_allows(order_patient, actor.actor_facility, 'read_records'), false) then
     raise exception using errcode = '42501', message = 'ORDER_NOTICE_CONSENT_REQUIRED';
   end if;
+  -- A critical notice never merges, so it is marked read too. An ordinary
+  -- one may have merged an event since the list showed it, so only mark
+  -- read, with the version shown, reads it.
   if found_seen_at is null then
     update ehr.order_notices notice
        set seen_at = clock_timestamp(), seen_by_account_id = actor.actor_account,
-           seen_by_membership_id = actor.actor_membership, read_at = coalesce(notice.read_at, clock_timestamp()),
+           seen_by_membership_id = actor.actor_membership,
+           read_at = case when notice.needs_seen then coalesce(notice.read_at, clock_timestamp()) else notice.read_at end,
            row_version = notice.row_version + 1
      where notice.id = requested_notice_id;
   end if;
@@ -1616,7 +1623,7 @@ comment on function ehr.list_order_notices(text, uuid, integer) is
 comment on function ehr.mark_order_notices_read(uuid[], bigint[]) is
   '0159 ORD-11: marks the session''s notices read, for 1-100 (notice id, version) pairs; only rows at that version and unread change. Never needs access; never clears needs_seen. Answers how many changed. Audited: one ehr.order-notice.read row per patient.';
 comment on function ehr.mark_order_notice_seen(uuid) is
-  '0159 ORD-11: marks one of the session''s notices Seen (final; read too), only while the session may read the order now (42501 ORDER_NOTICE_CONSENT_REQUIRED). P0002 ORDER_NOTICE_NOT_FOUND for a notice that is not the session''s. Audited: ehr.order-notice.seen naming the patient.';
+  '0159 ORD-11: marks one of the session''s notices Seen (final; a critical notice is marked read too, an ordinary one only by mark read), only while the session may read the order now (42501 ORDER_NOTICE_CONSENT_REQUIRED). P0002 ORDER_NOTICE_NOT_FOUND for a notice that is not the session''s. Audited: ehr.order-notice.seen naming the patient.';
 comment on function ehr.sweep_order_notices(integer) is
   '0159 ORD-11: deletes up to batch (1-1000) notices past their time (read: 90 days after reading; critical: 90 days after Seen; unread ordinary: 90 days after the last event; critical never Seen: kept), none under a legal hold on the recipient, the Seen account or the patient, with one ehr.order-notice.expire audit row each; then up to batch gap rows older than 90 days. Answers how many rows went.';
 comment on function ehr.order_notice_held(uuid, uuid, uuid) is
@@ -1661,7 +1668,7 @@ begin
            || 'date, health_id_last4 text, has_more boolean)', 'runtime'),
          ('mark_order_notices_read', 'uuid[], bigint[]', 'bdb2c8ede0e823b2d562f5203485a87c', 'v', 'integer',
            'runtime'),
-         ('mark_order_notice_seen', 'uuid', '8ff82bc42dff480c49c1716a9c903156', 'v',
+         ('mark_order_notice_seen', 'uuid', '5e2695adee178d8c35e4c608ac295b91', 'v',
            'TABLE(notice_id uuid, kind text, order_kind text, order_id uuid, order_route_id uuid, encounter_id uuid, '
            || 'display text, event_count integer, first_event_at timestamp with time zone, last_event_at timestamp '
            || 'with time zone, read_at timestamp with time zone, needs_seen boolean, seen_at timestamp with time '

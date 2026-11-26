@@ -3738,7 +3738,8 @@ Mark read:
 - Reading does not clear `needsSeen`. A critical notice read but not Seen stays counted in `criticalNotSeen` and stays on top.
 
 Mark Seen:
-- Body `{}`; it is not read. Answer: the notice with `seenAt` set, and `readAt` if it was unread.
+- Body `{}`; it is not read. Answer: the notice with `seenAt` set.
+- A critical notice that was unread is marked read too (critical notices never merge). An ordinary notice stays as it was: an event may have merged into it since the list showed it, so only mark read, with the version, reads it.
 - Only Seen needs access: the recipient must be able to read the patient's records now, because Seen means they saw the result. Otherwise 403 `CONSENT_REQUIRED`.
 - Allowed on any notice. Required only for critical ones (owner decision Q128 A, 19 Nov 2026).
 - Seen is final. It records the time, the account and the membership. Seen again changes nothing.

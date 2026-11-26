@@ -49,7 +49,9 @@
 --      notice was read starts a new one;
 --  12. a critical notice read but not Seen stays counted and on top; Seen
 --      records the account and membership (version 3, read time kept); Seen
---      again changes nothing; Seen through the sibling membership;
+--      again changes nothing; Seen through the sibling membership; Seen on
+--      an ordinary notice that merged an event since the list showed it
+--      leaves it unread (only mark read, with the version, reads it);
 --  13. access ended (DA's consents for Q end): Q's notices are listed with
 --      no patient, card, visit or display, the critical one in its place;
 --      mark read works; Seen is refused (42501 ORDER_NOTICE_CONSENT_REQUIRED);
@@ -1647,6 +1649,42 @@ select pg_temp.same('12g Seen records the sibling membership, and marks it read'
   (select format('%s %s', notice ->> 'seen_by_membership_id', notice ->> 'read_at' is not null)
      from pg_temp.notice(pg_temp.id('lr_a'), 'lab_result_critical') notice),
   'e4c13000-0000-4000-8000-000000000053 t');
+-- 12h. Seen on an ordinary notice reads nothing. DA's list showed A's new
+-- ready notice (11e) at version 1; A4's release then merges into it (2
+-- events, version 2). Seen from that list records Seen, but the notice stays
+-- unread, so the merged event is not marked read unseen; mark read with the
+-- stale version changes nothing, with the current one it reads it. Undone.
+savepoint seen_ordinary;
+select set_config('hid.test.n_a_ready_new', (select notice.id::text from ehr.order_notices notice
+  where notice.order_id = pg_temp.id('lr_a') and notice.kind = 'lab_result_ready' and notice.read_at is null), true);
+select set_config('hid.test.res_a4', pg_temp.own_result(pg_temp.id('item_a'), 'a4', 'normal', 13.1)::text, true);
+set local role hid_lab_api_runtime;
+select pg_temp.as_member(14);
+select pg_temp.same('12h LA releases A4 v1', pg_temp.try(format($s$select pg_temp.release_as(%L, 1, %L,
+  'order-notices-release-a4-1')$s$, pg_temp.id('res_a4'), pg_temp.id('a4_check_1'))), 'ok');
+reset role;
+select pg_temp.same('12h it merged into the unread ready notice (2 events, version 2)', pg_temp.notices(pg_temp.id('lr_a')),
+  'lab_result_ready:2:3:read lab_result_corrected:1:1 lab_result_critical:1:2:read:seen:needs-seen lab_result_ready:2:2');
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(11);
+select pg_temp.same('12h Seen on it: Seen at version 3, still unread, both events',
+  (select format('%s %s %s %s %s', seen.notice_id = pg_temp.id('n_a_ready_new'), seen.seen_at is not null,
+     seen.read_at is null, seen.event_count, seen.version)
+     from ehr.mark_order_notice_seen(pg_temp.id('n_a_ready_new')) seen), 't t t 2 3');
+reset role;
+select pg_temp.same('12h so it is still unread, counted and listed',
+  pg_temp.notices(pg_temp.id('lr_a')) || ' | ' || (select count(*) from pg_temp.notice(pg_temp.id('lr_a'),
+    'lab_result_ready') notice where notice ->> 'seen_by_account_id' = 'e4c10000-0000-4000-8000-000000000011'),
+  'lab_result_ready:2:3:read lab_result_corrected:1:1 lab_result_critical:1:2:read:seen:needs-seen '
+  || 'lab_result_ready:2:3:seen | 1');
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(11);
+select pg_temp.same('12h mark read with the version the list showed (1): nothing; with 3: read',
+  pg_temp.value_of(format('select ehr.mark_order_notices_read(array[%L]::uuid[], array[1]::bigint[])',
+    pg_temp.id('n_a_ready_new'))) || ' ' || pg_temp.value_of(format(
+    'select ehr.mark_order_notices_read(array[%L]::uuid[], array[3]::bigint[])', pg_temp.id('n_a_ready_new'))), '0 1');
+reset role;
+rollback to savepoint seen_ordinary;
 
 -- 13. Access ended: DA's consents for Q end (each of DA's memberships;
 -- owner SQL, ended before this transaction began, since the consent test
@@ -2072,9 +2110,9 @@ select pg_temp.same('18h 0159 is back as it was', pg_temp.made_0159(), '3 tables
 
 do $$
 begin
-  if currval('pg_temp.order_notices_passed') is distinct from 112 then
+  if currval('pg_temp.order_notices_passed') is distinct from 117 then
     raise exception 'ORD-11 order notices suite failed: % cases ran in the first transaction, % expected',
-      currval('pg_temp.order_notices_passed'), 112;
+      currval('pg_temp.order_notices_passed'), 117;
   end if;
   raise notice 'ORD-11 order notices suite: % cases passed (READ COMMITTED)', currval('pg_temp.order_notices_passed');
 end $$;
