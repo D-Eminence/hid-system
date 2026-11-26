@@ -57,11 +57,15 @@
 --       index is checked on re-activation too, as on any insert of an index
 --       entry. The count is read after the lock in its own statement, so
 --       under READ COMMITTED (ehr-api's default) it sees every item another
---       transaction committed before letting the lock go. An add whose
---       creator's Idempotency-Key is already on a row (the same request
---       again, which waited for the first) is not counted: the key index
---       refuses it (23505), or the service's ON CONFLICT inserts nothing, so
---       a replay at the cap answers as a replay, not FACILITY_ITEM_LIMIT.
+--       transaction committed before letting the lock go. Under REPEATABLE
+--       READ it would read the transaction's snapshot and could let a 501st
+--       in, so there an add or re-activation is refused (55000
+--       FACILITY_ITEM_READ_COMMITTED); under SERIALIZABLE such a clash ends
+--       in a serialization failure (40001). An add whose creator's
+--       Idempotency-Key is already on a row (the same request again, which
+--       waited for the first) is not counted: the key index refuses it
+--       (23505), or the service's ON CONFLICT inserts nothing, so a replay at
+--       the cap answers as a replay, not FACILITY_ITEM_LIMIT.
 --    Class key 7410 is new. At 0cfddcc9, #331 9d41866c, #335 d50825fa, #336
 --    f804c9e8, #337 6038c85e and #343 ad5080bc the only two-key advisory
 --    lock is 0153's 7409. PostgreSQL keeps the one-key and two-key spaces
@@ -325,7 +329,7 @@ begin
        and (select md5(proc.prosrc) from pg_proc proc where proc.oid = to_regprocedure('ehr.catalog_status()'))
            = '99e0abe265d0006f77ff6f279986dea2'
        and (select md5(proc.prosrc) from pg_proc proc
-             where proc.oid = to_regprocedure('ehr.catalog_facility_item_guard()')) = '7c542dcf3cc6586d88c3d384cf9f245f'
+             where proc.oid = to_regprocedure('ehr.catalog_facility_item_guard()')) = 'a1e4e99c07cb978f4eedb910dbf3c23c'
        and (select md5(proc.prosrc) from pg_proc proc
              where proc.oid = to_regprocedure('ehr.facility_item_write_allowed()')) = 'b6ed2869600110b6399835bd4c4f6d7e'
        and (select md5(proc.prosrc) from pg_proc proc
@@ -488,6 +492,11 @@ begin
   end if;
   -- At most 500 active items of a kind at a facility, counted after the facility's lock.
   if new.active and (tg_op = 'INSERT' or not old.active) then
+    -- Under REPEATABLE READ the count would read this transaction's snapshot, not what another transaction
+    -- committed before letting the lock go, so the cap could be passed.
+    if current_setting('transaction_isolation') = 'repeatable read' then
+      raise exception using errcode = '55000', message = 'FACILITY_ITEM_READ_COMMITTED';
+    end if;
     perform pg_advisory_xact_lock(7410, hashtext(new.facility_id::text));
     -- The same add again (its creator's Idempotency-Key is on a row, perhaps one that committed while this waited):
     -- the key index refuses it, or ON CONFLICT inserts nothing, so it is not counted.
@@ -799,7 +808,7 @@ begin
   -- The four bodies exactly, with their owner, SECURITY DEFINER, volatility and search_path.
   select string_agg(expected.signature, ', ' order by expected.signature) into mismatch
     from (values
-      ('ehr.catalog_facility_item_guard()', '7c542dcf3cc6586d88c3d384cf9f245f', false, 'v'),
+      ('ehr.catalog_facility_item_guard()', 'a1e4e99c07cb978f4eedb910dbf3c23c', false, 'v'),
       ('ehr.facility_item_write_allowed()', 'b6ed2869600110b6399835bd4c4f6d7e', true, 's'),
       ('ehr.search_catalog_facility_items(text,text,integer)', '56d5b39e176c83b02a12df1c8a3e3e77', true, 's'),
       ('ehr.catalog_status()', '99e0abe265d0006f77ff6f279986dea2', true, 's')

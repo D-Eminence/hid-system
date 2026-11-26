@@ -47,7 +47,8 @@
 --      row for row, with no item or no session facility, with and without a
 --      national list; one active name per kind (re-activation too), the
 --      Idempotency-Key per creator, at most 500 active items of a kind
---      (re-activation counted); the guard keeps every column but active,
+--      (re-activation counted, an add whose key was used not counted, an add
+--      under REPEATABLE READ refused); the guard keeps every column but active,
 --      row_version (old + 1) and the changed columns; no DELETE or TRUNCATE;
 --      the session ties on the creator and changer columns; a session at A
 --      cannot insert a B row (without RETURNING) or change B's rows with an
@@ -433,7 +434,7 @@ select pg_temp.expect('2g the four functions: the write check, the search and th
 select pg_temp.expect('2h the write check takes no argument, so it cannot be asked about another member or facility',
   '1 0', (select count(*) || ' ' || min(pronargs) from pg_proc
            where proname = 'facility_item_write_allowed' and pronamespace = 'ehr'::regnamespace));
-select pg_temp.expect('2i the bodies are the ones 0155''s post-check pins', '7c542dcf3cc6586d88c3d384cf9f245f '
+select pg_temp.expect('2i the bodies are the ones 0155''s post-check pins', 'a1e4e99c07cb978f4eedb910dbf3c23c '
   || '99e0abe265d0006f77ff6f279986dea2 b6ed2869600110b6399835bd4c4f6d7e 56d5b39e176c83b02a12df1c8a3e3e77',
   (select string_agg(md5(prosrc), ' ' order by oid::regprocedure::text) from pg_proc
     where oid in ('ehr.catalog_facility_item_guard()'::regprocedure, 'ehr.catalog_status()'::regprocedure,
@@ -1342,6 +1343,37 @@ select pg_temp.expect('4ar at the cap, an add whose key x already used: ON CONFL
   || ' | new key: ' || pg_temp.add('medicine', 'Cap medicine three', 'c155-key-x-0016-medicine')
   || ' | ' || pg_temp.active_count('medicine'));
 reset role;
+\if :c155_dblink_available
+-- Under REPEATABLE READ the count would read the transaction's snapshot, not
+-- what another transaction committed before letting the lock go, so an add is
+-- refused there; under READ COMMITTED the same add passes the guard (a
+-- foreign key then refuses its made-up facility). Another session, since
+-- this transaction's level is set.
+select public.dblink_connect('c155_isolation',
+  format('dbname=%s user=%s host=%s port=%s', quote_ident(current_database()), quote_ident(current_user),
+         coalesce(nullif(btrim(split_part(current_setting('unix_socket_directories'), ',', 1)), ''), '127.0.0.1'),
+         current_setting('port'))) as connected \gset
+create function pg_temp.add_elsewhere(isolation text) returns text language plpgsql as $$
+declare
+  answer text := 'inserted';
+begin
+  perform public.dblink_exec('c155_isolation', 'begin isolation level ' || isolation);
+  if public.dblink_exec('c155_isolation', format('insert into ehr.catalog_facility_items (facility_id, kind, display, '
+       || 'idempotency_key, request_sha256, created_by, created_by_membership_id) values (%L, %L, %L, %L, %L, %L, %L)',
+       'c1551000-0000-4000-8000-0000000000ee', 'lab_test', 'Isolation test (facility)', 'c155-key-iso-0001-lab-test',
+       repeat('a', 64), gen_random_uuid(), gen_random_uuid()), false) = 'ERROR' then
+    answer := split_part(public.dblink_error_message('c155_isolation'), chr(10), 1);
+  end if;
+  perform public.dblink_exec('c155_isolation', 'rollback');
+  return case when answer ~ 'violates foreign key constraint' then 'past the guard' else answer end;
+end
+$$;
+select pg_temp.expect('4as an add under REPEATABLE READ is refused before the count; under READ COMMITTED it passes the guard',
+  'repeatable read: ERROR:  FACILITY_ITEM_READ_COMMITTED | read committed: past the guard',
+  'repeatable read: ' || pg_temp.add_elsewhere('repeatable read')
+  || ' | read committed: ' || pg_temp.add_elsewhere('read committed'));
+select public.dblink_disconnect('c155_isolation') as disconnected \gset
+\endif
 
 -- 5. The table's owner: it reads every facility's items (its read policy,
 -- which the definer search and status need under FORCE); under FORCE its
@@ -1481,7 +1513,7 @@ rollback to savepoint undo;
 
 do $$
 declare
-  wanted integer := case when exists (select 1 from pg_extension where extname = 'dblink') then 83 else 78 end;
+  wanted integer := case when exists (select 1 from pg_extension where extname = 'dblink') then 84 else 78 end;
 begin
   if currval('pg_temp.c155_passed') is distinct from wanted then
     raise exception '0155 facility items suite failed: % cases ran, % expected', currval('pg_temp.c155_passed'), wanted;
