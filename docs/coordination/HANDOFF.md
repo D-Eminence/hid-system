@@ -34,7 +34,7 @@ This file is for a coordinator session that takes over: a new cloud session, or 
 - **GitHub flakiness (25 Nov afternoon):** merge and comment calls returned 500/502/504 or empty bodies but often succeeded anyway. Re-read state before retrying, and guard merges with `sha=`. Once, a push to health main started no release run; dispatch `production-frontends.yml` on main.
 
 ## Next releases, in order (one at a time; Rahman's 21:48 order, accepted in #258 7177085826)
-1. **0154 refills** (Ola's #331, `9d41866c`). The fixes are **not started**: `wt-ord12` is empty.
+1. **0154 refills** (Ola's #331, `9d41866c`). The fixes are **not started**: `claude/ord12-refills-fixes` is at Ola's head.
    - Needed: Rahman's #331 review 7168468937 (lock `pharmacy.dispensing_reversals` with a busy case; a flat progress statement; contiguous fill numbers; no future `dispensed_at`; wording; case 14f).
    - Also: accept exactly `zz_billing_stock_and_gate:commercial.hook_dispensing():7:O` as an optional sixth trigger on `pharmacy.dispensings`.
    - Then the interim gate (below), the owner's signature on the new sha256s, the release, and the re-pin.
@@ -45,7 +45,7 @@ This file is for a coordinator session that takes over: a new cloud session, or 
 - **The owner wrote "signed" at about 00:30 UTC on 26 Nov, with nothing ready to sign. It is not recorded as a signature:** no file or sha256 was named. Post exact signing text on #332 when 0154 is ready.
 
 ## Overnight (25–26 Nov): what got done, and what died
-- **Pushed:** only #335, `claude/sprint-appointments-backend` at `d7511876`. It has Release E merged in, Rahman's four should-fix points and nits, and round 1 review fixes, with an unsigned declaration: 0160 `39920022…`, 0161 `7343d3cc…`, runtime-grants `e65d9f52…`.
+- **Pushed at the time:** only #335 (`d7511876`). On 26 Nov ~10:45 UTC every branch was pushed with WIP commits (see the next section). It has Release E merged in, Rahman's four should-fix points and nits, and round 1 review fixes, with an unsigned declaration: 0160 `39920022…`, 0161 `7343d3cc…`, runtime-grants `e65d9f52…`.
 - **Decisions posted on #258:**
   - wave 1 tolerant preconditions (7174680244);
   - Rahman's release order, and the exact trigger pins (7177085826);
@@ -59,25 +59,37 @@ This file is for a coordinator session that takes over: a new cloud session, or 
   - One verifier in wf_9f4a817c-565 attached reasons to the wrong findings, so re-verify anything taken from that run.
 - **Lesson:** five workflows (about 30 agents) at once coincided with the connection failures. Run at most two at a time.
 
-## Local work not yet on GitHub (checked 26 Nov 10:27 UTC)
-| Worktree (`/home/l2e/hid/…`) | Branch | Local state | Where it stopped / next |
-|---|---|---|---|
-| wt-appt | claude/sprint-appointments-backend | pushed at `d7511876`; 1 uncommitted file | Round 2: security clean; mechanics found 2, both confirmed. The fix died midway. Finish the 2 fixes, re-hash, update the declaration, push. |
-| wt-bill | claude/sprint-billing-backend | 5 local commits (`f804c9e8`), clean | The first pass is committed: the 0164 temp-table escalation removed, tolerant 0162/0167, the declaration. Security review r1 found nothing; mechanics review r1 died. Next: the mechanics review, then Rahman's full check 7175546496, his 21:48 items (0162 compares only its own rows; a fill-aware refill hook in 0167; Emergency's two triggers accepted exactly), and option 2 (0163 accepts `HID-FACILITY`). Then push. |
-| wt-ed | claude/sprint-emergency-backend | no new commits; 6 uncommitted files | Review r1 confirmed 10 of 11, including the ED history sequence grant (reported twice). The fix died midway. Redo the fix from the confirmed list, then apply Rahman's #337 check 7175564791. |
-| (none) | claude/sprint-inpatient-backend (#343) | untouched | Known bug: 0171's waiting-list admission doesn't set 0168's board closing marker. Fix it against Emergency's final 0168. |
-| wt-web-328 | claude/sprint-appointments-web | 23 local commits (`ef04d47d`), clean | Release F merged in, the display helpers, and round 1 fixes (9 confirmed). The round 2 review died. Review, then push. |
-| wt-web-329 | claude/sprint-billing-web | 6 local commits (`8a9afb18`), clean | 15 confirmed (1 blocking: after payment, the sale hand-over fails on a stale version). The fix died after some commits. Check which of the 15 remain, finish, push. |
-| wt-web-330 | claude/sprint-emergency-web | 14 uncommitted files | 11 confirmed; the fix died midway. Finish, commit, review. |
-| wt-web-335 | claude/sprint-adt-web | 4 local commits (`5f4fb89e`), clean | 14 confirmed and fixed. The round 2 review found 3, and their verification died. Verify, fix, push. |
-| wt-web-336 | claude/sprint-nursing-web | 4 local commits (`a7f736f6`); 1 uncommitted | 12 confirmed; the fix died partway. Finish, review, push. |
-| wt-display | claude/display-followups (new) | 1 commit (`338f2a98`: age from the Lagos day) | Still to do: Nigerian landlines, foreign number grouping and the `(0)` trunk, `isAdult` on the Lagos day. |
-| wt-w3-*-be | claude/sprint-{radiology,bloodbank,referrals,dental,quality,hr,reports}-backend (new) | a contract commit each; quality and hr also have their first migration commit | Partial builds are **uncommitted**: dental 12 files, hr 10, quality 4, referrals 9, reports 8. Radiology and blood bank have only their contracts. |
-| wt-w3-*-web | claude/sprint-{dental,hr,quality,referrals,reports}-web (new) | uncommitted: dental 13, hr 15, quality 13, referrals 16, reports 1 commit plus 10 | Partial. Radiology and blood bank websites were never started. |
-| wt-blue-q132a | claude/blue-q132a-changed-after-dispensing (new) | 2 uncommitted files | The builder died early. |
-| created, nothing done | wt-ord12, wt-ord11, wt-ord7fac, wt-nameonly, wt-ord9rank, wt-selfcheck, wt-sx6(-web), wt-sx7(-web), wt-id8(-web), wt-chw1(-web), wt-blue-c8, wt-blue-id6, wt-blue-my1, wt-blue-sx10 | at their base | Nothing built. The check:db harness wasn't built, and #342 wasn't reviewed. |
+## Every branch is pushed (26 Nov ~10:45 UTC, on the owner's instruction)
+The owner asked for every uncommitted file in every local worktree to be committed as **"WIP (unreviewed)"** on its own `claude/` branch, and for every branch to be pushed. No merges, PR state changes or releases. Done: 15 WIP commits, and 40 branches pushed with plain pushes, each remote head checked against the local one. The open PRs below are still drafts; only their heads moved, so CI re-runs on them.
 
-**How to pick this up:** start fresh agents on the existing worktrees, telling each where its predecessor stopped (this table plus `git status` / `git log`). Don't discard uncommitted files: a new agent should read them first. Keep the order: 0154 and the harness, then #335's round 2, then #336, then #337. Website and wave 3 work can run alongside, one workflow at a time.
+**WIP commits are unreviewed and partly untested. Never sign or merge from one.** The next coordinator starts fresh agents from these heads (the commit messages say where each stopped). The local worktrees under `/home/l2e/hid/wt-*` now match the remote heads and can be deleted.
+
+| Branch | PR | Head | Contents |
+|---|---|---|---|
+| claude/sprint-appointments-backend | hid-system#335 | `d50825fa` (WIP) | `d7511876` (Rahman's fixes + round 1 fixes, unsigned declaration: 0160 `39920022…`, 0161 `7343d3cc…`, grants `e65d9f52…`) plus a WIP start on round 2's 2 confirmed findings (suite file only; DB files unchanged) |
+| claude/sprint-billing-backend | hid-system#336 | `f804c9e8` | First fix pass (0164 temp-table escalation removed, tolerant 0162/0167, declaration). The mechanics review died. Still to do: Rahman's full check 7175546496, his 21:48 items, option 2 (0163 accepts `HID-FACILITY`) |
+| claude/sprint-emergency-backend | hid-system#337 | `6038c85e` (WIP) | Partial round 1 fixes (10 confirmed, incl. the sequence grant). **Declaration sha256s are not updated.** Then Rahman's 7175564791 |
+| claude/sprint-inpatient-backend | hid-system#343 | `ad5080bc` | Untouched. 0171 board-marker bug still open |
+| claude/sprint-appointments-web | health#328 | `ef04d47d` | Release F merged, display helpers, round 1 fixes (9 confirmed). Not re-reviewed |
+| claude/sprint-billing-web | health#329 | `8a9afb18` | Part of round 1's 15 confirmed fixes (1 blocking: hand-over version after payment). Check what remains |
+| claude/sprint-emergency-web | health#330 | `74f15627` (WIP) | Partial round 1 fixes (11 confirmed) |
+| claude/sprint-adt-web | health#335 | `5f4fb89e` | Round 1 fixes (14 confirmed). Round 2 found 3; not verified |
+| claude/sprint-nursing-web | health#336 | `3eaa68bf` (WIP) | Partial round 1 fixes (12 confirmed) |
+| claude/display-followups | none | `338f2a98` | Age from the Lagos day only; landlines, foreign grouping and `isAdult` still to do |
+| claude/blue-q132a-changed-after-dispensing | none | `d32c2498` (WIP) | First edits only |
+| claude/sprint-radiology-backend | none | `31b3f95a` | Contract only |
+| claude/sprint-bloodbank-backend | none | `b950a108` | Contract only |
+| claude/sprint-referrals-backend / -web | none | `0df3156b` (WIP) / `fbceb29d` (WIP) | Contract + partial build (0191–0193) / partial website |
+| claude/sprint-dental-backend / -web | none | `20b1b77c` (WIP) / `91358b5f` (WIP) | Contract + partial build (0194–0196) / partial website |
+| claude/sprint-quality-backend / -web | none | `81e9fa1d` (WIP) / `ed3a5b29` (WIP) | Contract + 0197–0198 + partial module / partial website |
+| claude/sprint-hr-backend / -web | none | `ca410dfe` (WIP) / `6ccaaca0` (WIP) | Contract + 0199–0202 + partial workforce module / partial website |
+| claude/sprint-reports-backend / -web | none | `2865b0a5` (WIP) / `aa60dbb0` (WIP) | Contract + partial build (0203–0204) / partial website |
+| claude/ord12-refills-fixes | none | `9d41866c` | Same as Ola's #331 head; no fixes yet |
+| claude/ord11-notices-backend, claude/ord7-facility-items-backend, claude/ord-name-only-backend, claude/ord9-ranking-backend, claude/lab-self-check-backend, claude/sx6-own-profile-backend, claude/sx7-preferences-backend, claude/id8-merge-backend, claude/chw1-role-backend | none | `0cfddcc9` | Empty (at the release base); nothing built |
+| claude/sx6-own-profile-web, claude/sx7-preferences-web, claude/id8-merge-web, claude/chw1-role-web, claude/blue-ehr-c8-entered-in-error, claude/blue-id6-verify-nin, claude/blue-my1-ordered-by-me, claude/blue-sx10-registrations | none | `b44b0d56` | Empty (at health main); nothing built |
+
+- **Not built:** the check:db harness (needed for the interim release gate), the #342 review, the 0158/0179/0180 branches, and the radiology and blood bank websites.
+- **WIP commits on the open PRs:** #335 `d50825fa`, #337 `6038c85e`, health#330 `74f15627` and #336 `3eaa68bf` each end in a WIP commit. Reviewers should look at the commit before it for the last reviewed state.
 
 ## Two-week sprint (approved 25 Nov; ends about 9 Dec)
 - 100% means classic parity, plus Akos's EHR list, plus every new department (Q146 B), each as a first working version. Items that need outside approval (video provider, SMS sender ID, live HMO portals, offline legal) are built but switched off.
@@ -87,9 +99,9 @@ This file is for a coordinator session that takes over: a new cloud session, or 
 ### Wave 1: outpatient and cashier (backend unsigned)
 | Department | Backend | Migrations | Website | State |
 |---|---|---|---|---|
-| Appointments | hid-system#335 (`d7511876`, pushed) | 0160–0161 | health#328 | Rahman's fixes and round 1 fixes pushed; round 2's 2 fixes still to do (see the local work table) |
-| Billing release 1 and pharmacy stock | hid-system#336 (GitHub `6b253568`; local `f804c9e8`) | 0162–0167 | health#329 | Blocking items from Rahman remain; VEX re-bound to its nginx routes in `d0516f81` (Q291 A) |
-| Emergency board and triage | hid-system#337 (`db83d733`) | 0168–0169 | health#330 | Review r1: 10 confirmed; fix not finished; Rahman's check 7175564791 pending |
+| Appointments | hid-system#335 (`d50825fa`, WIP on top of `d7511876`) | 0160–0161 | health#328 | Rahman's fixes and round 1 fixes in; round 2's 2 fixes started (WIP) |
+| Billing release 1 and pharmacy stock | hid-system#336 (`f804c9e8`) | 0162–0167 | health#329 | Blocking items from Rahman remain; VEX re-bound to its nginx routes in `d0516f81` (Q291 A) |
+| Emergency board and triage | hid-system#337 (`6038c85e`, WIP) | 0168–0169 | health#330 | Review r1: 10 confirmed; fix not finished; Rahman's check 7175564791 pending |
 
 - On sprint branches, release tests 45, 53 and 99 fail with `missing migration prefix`. This is expected from the numbering gap and closes at integration.
 
