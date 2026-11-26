@@ -3,41 +3,51 @@
 -- written (psql \ir) the way the runner runs them inside its transaction.
 -- Rollback-only, apart from the dblink extension below. On a migrated
 -- database both have run already:
---   1. busy refusals, first, before this transaction locks any table: a
---      second session (dblink) holds ehr.visit_queue (for 0160) or
---      platform.control_settings (for 0161) in ACCESS SHARE mode (readers go
---      on; the file's ACCESS EXCLUSIVE cannot be had): the file tries for
---      about 5 seconds and refuses with 55P03 "0160: ... stayed busy for 5
---      seconds; nothing applied; run the release again at a quieter time";
---      when this transaction already holds another file's strong lock, it
---      refuses at once ("... so it does not wait; ..."). Both messages are
---      the ones the runner's dry run retries (its own number first, its
---      wording last; hid-system#306), and nothing is applied. The same when
---      the other session holds identity.sealed_qa_members, and again when it
---      holds identity.sealed_demo_members (each in ACCESS EXCLUSIVE, one at a
---      time: 0160 takes both sealed-member tables up front, NOWAIT; without
---      one of them in that step, 0160 would get past it here and answer
---      "already applied", and on production its closing count would wait
---      for the table under the runner's lock timeout, which the dry run does
---      not retry);
+--   1. busy refusals, first, before this transaction locks any table:
+--      every lock each header declares is taken in the file's NOWAIT lock
+--      step at exactly its declared mode (1a2): a second session (dblink)
+--      holds one declared table at a time, while this transaction holds an
+--      earlier file's lock so the file makes one attempt; in each mode that
+--      conflicts with the declared one the file refuses at once (busy), and
+--      in the strongest mode compatible with it the file gets past its lock
+--      step and answers "already applied" (a lock taken late, or weaker or
+--      stronger than declared, fails a case; a late lock that would wait
+--      meets the 3-second lock timeout set for these cases); the cases are
+--      compared with the declared list. Then the second session holds
+--      ehr.visit_queue (for 0160) or platform.control_settings (for 0161) in
+--      ACCESS SHARE mode (readers go on; the file's ACCESS EXCLUSIVE cannot be
+--      had): the file tries for about 5 seconds and refuses with 55P03
+--      "0160: ... stayed busy for 5 seconds; nothing applied; run the release
+--      again at a quieter time"; when this transaction already holds another
+--      file's strong lock, it refuses at once ("... so it does not wait;
+--      ..."). Both messages are the ones the runner's dry run retries (its
+--      own number first, its wording last; hid-system#306), and nothing is
+--      applied. The same when the other session holds
+--      identity.sealed_qa_members, and again when it holds
+--      identity.sealed_demo_members (each in ACCESS EXCLUSIVE, one at a time);
 --   2. a second run of each answers "already applied" (55000) and changes
---      nothing;
+--      nothing; "already applied" only for the whole of a file: seven
+--      appointment role rows held by other roles than 0160's, a helper of
+--      0160 missing, an appointment code 0160 does not add, or one of 0161's
+--      sender calls missing is a half state;
 --   3. 0161 taken away for this transaction: a half state ("not in the
---      reviewed state") and a changed pinned body refuse with 55000 and apply
---      nothing; then 0161 applies: its objects, the control seeded off, one
---      audit row; it takes no lock beyond its header's and every lock its
---      header declares;
+--      reviewed state"), a changed pinned body, not exactly the 11 controls,
+--      and a default privilege of schema identity that grants EXECUTE with
+--      grant option refuse with 55000 and apply nothing; then 0161 applies:
+--      its objects, the control seeded off, one audit row; it takes no lock
+--      beyond its header's and holds every lock its header declares (3g and
+--      3h see only what the setup above has not already locked, hence 1a2);
 --   4. 0160 taken away too, with a fictional active membership at a real
 --      facility holding one of the four roles (so 0160's closing count reads
 --      the seals, as on production): a half state, a changed pinned body, a
---      front-desk code 0001-0151 give taken away and a waiting-list CHECK
---      without own_facility refuse; another lane's additions (an extra
---      front-desk code, as Billing's 0162; an extra basis value, as
---      Emergency's 0168) are accepted, and the CHECK keeps the extra value
---      after appointment; then 0160 applies: the four tables, the 18
---      functions, the seven role rows and seven audit rows, the CHECK; it
---      takes no lock beyond its header's and every lock its header declares;
---      then 0161 applies on top.
+--      front-desk code 0001-0151 give taken away, a waiting-list CHECK
+--      without own_facility, with another condition or with a value no lane
+--      adds refuse; another lane's additions (an extra front-desk code, as
+--      Billing's 0162; 'emergency', as Emergency's 0168) are accepted, and the
+--      CHECK keeps 'emergency' after appointment; then 0160 applies: the four
+--      tables, the 18 functions, the seven role rows and seven audit rows, the
+--      CHECK; it takes no lock beyond its header's and holds every lock its
+--      header declares (as 3g and 3h); then 0161 applies on top.
 -- Synthetic values only.
 set plpgsql.variable_conflict = error;
 
@@ -114,6 +124,92 @@ create function pg_temp.made0161() returns text language sql as $$
       || ' audit rows';
 $$;
 
+-- The locks each file's header declares (pg_locks' names), the one list 1a2, 3 and 4 compare with.
+create function pg_temp.declared_all() returns table (file text, table_name text, mode text) language sql immutable as $$
+  values
+  ('0160', 'identity.patients', 'ShareRowExclusiveLock'), ('0160', 'identity.facilities', 'ShareRowExclusiveLock'),
+  ('0160', 'identity.staff_facility_memberships', 'ShareRowExclusiveLock'),
+  ('0160', 'auth.role_permissions', 'ShareRowExclusiveLock'), ('0160', 'ehr.visit_queue', 'AccessExclusiveLock'),
+  ('0160', 'auth.permissions', 'RowExclusiveLock'), ('0160', 'audit.events', 'RowExclusiveLock'),
+  ('0160', 'auth.roles', 'RowShareLock'), ('0160', 'auth.accounts', 'RowShareLock'),
+  ('0160', 'identity.organizations', 'RowShareLock'), ('0160', 'identity.consent_directives', 'AccessShareLock'),
+  ('0160', 'identity.consent_directive_versions', 'AccessShareLock'),
+  ('0160', 'identity.facility_profiles', 'AccessShareLock'), ('0160', 'auth.account_roles', 'AccessShareLock'),
+  ('0160', 'identity.sealed_demo_members', 'AccessShareLock'), ('0160', 'identity.sealed_qa_members', 'AccessShareLock'),
+  ('0161', 'platform.control_settings', 'AccessExclusiveLock'),
+  ('0161', 'ehr.appointment_events', 'ShareRowExclusiveLock'), ('0161', 'ehr.appointments', 'ShareRowExclusiveLock'),
+  ('0161', 'identity.patients', 'ShareRowExclusiveLock'), ('0161', 'identity.facilities', 'ShareRowExclusiveLock'),
+  ('0161', 'identity.patient_facility_contacts', 'AccessShareLock'), ('0161', 'identity.staff', 'AccessShareLock'),
+  ('0161', 'auth.accounts', 'AccessShareLock'), ('0161', 'auth.permissions', 'AccessShareLock'),
+  ('0161', 'audit.events', 'RowExclusiveLock');
+$$;
+-- A pg_locks mode name as LOCK TABLE writes it ('ShareRowExclusiveLock': 'share row exclusive').
+create function pg_temp.lock_words(mode text) returns text language sql immutable as $$
+  select lower(regexp_replace(regexp_replace(mode, 'Lock$', ''), '([a-z])([A-Z])', '\1 \2', 'g'));
+$$;
+-- PostgreSQL's table lock conflicts (the manual's table 13.2).
+create function pg_temp.lock_conflicts(held text, wanted text) returns boolean language sql immutable as $$
+  select case held
+    when 'access share' then wanted = 'access exclusive'
+    when 'row share' then wanted in ('exclusive', 'access exclusive')
+    when 'row exclusive' then wanted in ('share', 'share row exclusive', 'exclusive', 'access exclusive')
+    when 'share update exclusive' then wanted in ('share update exclusive', 'share', 'share row exclusive', 'exclusive',
+      'access exclusive')
+    when 'share' then wanted in ('row exclusive', 'share update exclusive', 'share row exclusive', 'exclusive',
+      'access exclusive')
+    when 'share row exclusive' then wanted in ('row exclusive', 'share update exclusive', 'share', 'share row exclusive',
+      'exclusive', 'access exclusive')
+    when 'exclusive' then wanted in ('row share', 'row exclusive', 'share update exclusive', 'share',
+      'share row exclusive', 'exclusive', 'access exclusive')
+    when 'access exclusive' then true
+  end;
+$$;
+-- The modes another session holds a declared table in for 1a2: each mode that conflicts with the declared one but with
+-- as few weaker modes as possible (together they admit only the declared mode or a stronger one), and the strongest
+-- mode compatible with it (which admits nothing stronger). Every declared lock is then shown taken in the file's
+-- NOWAIT lock step, at exactly its declared mode.
+create function pg_temp.lock_holds(declared text) returns table (hold text) language sql immutable as $$
+  select hold from (values
+    ('access share', 'access exclusive'), ('access share', 'exclusive'),
+    ('row share', 'exclusive'), ('row share', 'share row exclusive'),
+    ('row exclusive', 'share'), ('row exclusive', 'share update exclusive'),
+    ('share row exclusive', 'row exclusive'), ('share row exclusive', 'share'), ('share row exclusive', 'row share'),
+    ('access exclusive', 'access share')) holds(declared_mode, hold)
+   where holds.declared_mode = pg_temp.lock_words(declared);
+$$;
+-- 1a2's answer for one case: another session held the table in the given mode while this transaction held an earlier
+-- file's lock. The file must refuse at once, as busy, exactly when the held mode conflicts with the declared one, and
+-- otherwise go past its lock step to "already applied". Each case is listed, so the cases can be compared with the
+-- declared locks.
+create function pg_temp.lock_case(file text, table_name text, hold text, sqlstate text, message text) returns void
+language plpgsql as $$
+declare
+  declared text := (select pg_temp.lock_words(declared_row.mode) from pg_temp.declared_all() declared_row
+                     where declared_row.file = lock_case.file and declared_row.table_name = lock_case.table_name);
+begin
+  perform pg_temp.expect(format('1a2 %s, %s held in %s mode by another session (declared: %s)', file, table_name, hold,
+      coalesce(declared, 'none')),
+    case when declared is null then 'declared'
+         when pg_temp.lock_conflicts(hold, declared) then 'busy refusal: so it does not wait'
+         else '55000 ' || file || ': already applied' end,
+    pg_temp.answer(file, sqlstate, message));
+  perform set_config('m160.lock_cases', coalesce(nullif(current_setting('m160.lock_cases', true), ''), '')
+    || file || ' ' || table_name || ' ' || hold || ';', true);
+end
+$$;
+-- Holds a table in the other session, in its own transaction (begun here, ended by lock_release).
+create function pg_temp.lock_hold(table_name text, hold text) returns void language plpgsql as $$
+begin
+  perform public.dblink_exec('m160_blocker', 'begin');
+  perform public.dblink_exec('m160_blocker', format('lock table %s in %s mode nowait', table_name, hold));
+end
+$$;
+create function pg_temp.lock_release() returns void language plpgsql as $$
+begin
+  perform public.dblink_exec('m160_blocker', 'rollback');
+end
+$$;
+
 -- 1. Busy refusals.
 \if :m160_dblink_available
 select pg_temp.expect('1a this transaction holds no strong table lock yet', '0',
@@ -124,6 +220,212 @@ select public.dblink_connect('m160_blocker',
   format('dbname=%s user=%s host=%s port=%s', quote_ident(current_database()), quote_ident(current_user),
          coalesce(nullif(btrim(split_part(current_setting('unix_socket_directories'), ',', 1)), ''), '127.0.0.1'),
          current_setting('port'))) as connected \gset
+-- 1a2. Every lock each header declares is taken in the file's NOWAIT lock step, first, at exactly its declared mode.
+-- Before this transaction locks any table (so nothing the setup in 3 and 4 takes can hide one), another session holds
+-- one declared table at a time while this transaction holds an earlier file's lock, so the file makes one attempt:
+-- in each mode that conflicts with the declared one (as few weaker modes as possible), the lock step refuses at once
+-- (busy); in the strongest mode compatible with it, the file gets past its lock step and answers "already applied".
+-- A lock taken later than the lock step, or weaker or stronger than declared, fails a case (a late lock that has to
+-- wait meets the lock timeout set here, which is not the busy refusal). Then the cases are compared with the list.
+select public.dblink_exec('m160_blocker', 'set lock_timeout = ''3s''') as blocker_timeout \gset
+set local lock_timeout = '3s';
+-- Each case: the other session holds the table (lc_table, lc_hold) while this transaction holds an earlier file's
+-- lock; the file runs; then both let go and the answer is checked. (SQL and the file's run on separate lines: a
+-- psql meta-command takes the rest of its line as arguments.)
+\set hold 'select pg_temp.lock_hold(:''lc_table'', :''lc_hold''); savepoint holding; lock table ehr.catalog_versions in share mode;'
+\set check0160 'rollback to savepoint holding; select pg_temp.lock_release(); select pg_temp.lock_case(''0160'', :''lc_table'', :''lc_hold'', :''LAST_ERROR_SQLSTATE'', :''LAST_ERROR_MESSAGE'');'
+\set check0161 'rollback to savepoint holding; select pg_temp.lock_release(); select pg_temp.lock_case(''0161'', :''lc_table'', :''lc_hold'', :''LAST_ERROR_SQLSTATE'', :''LAST_ERROR_MESSAGE'');'
+\pset tuples_only on
+\pset format unaligned
+\set lc_table identity.patients \set lc_hold 'row exclusive'
+:hold :run0160
+:check0160
+\set lc_table identity.patients \set lc_hold share
+:hold :run0160
+:check0160
+\set lc_table identity.patients \set lc_hold 'row share'
+:hold :run0160
+:check0160
+\set lc_table identity.facilities \set lc_hold 'row exclusive'
+:hold :run0160
+:check0160
+\set lc_table identity.facilities \set lc_hold share
+:hold :run0160
+:check0160
+\set lc_table identity.facilities \set lc_hold 'row share'
+:hold :run0160
+:check0160
+\set lc_table identity.staff_facility_memberships \set lc_hold 'row exclusive'
+:hold :run0160
+:check0160
+\set lc_table identity.staff_facility_memberships \set lc_hold share
+:hold :run0160
+:check0160
+\set lc_table identity.staff_facility_memberships \set lc_hold 'row share'
+:hold :run0160
+:check0160
+\set lc_table auth.role_permissions \set lc_hold 'row exclusive'
+:hold :run0160
+:check0160
+\set lc_table auth.role_permissions \set lc_hold share
+:hold :run0160
+:check0160
+\set lc_table auth.role_permissions \set lc_hold 'row share'
+:hold :run0160
+:check0160
+\set lc_table ehr.visit_queue \set lc_hold 'access share'
+:hold :run0160
+:check0160
+\set lc_table auth.permissions \set lc_hold share
+:hold :run0160
+:check0160
+\set lc_table auth.permissions \set lc_hold 'share update exclusive'
+:hold :run0160
+:check0160
+\set lc_table audit.events \set lc_hold share
+:hold :run0160
+:check0160
+\set lc_table audit.events \set lc_hold 'share update exclusive'
+:hold :run0160
+:check0160
+\set lc_table auth.roles \set lc_hold exclusive
+:hold :run0160
+:check0160
+\set lc_table auth.roles \set lc_hold 'share row exclusive'
+:hold :run0160
+:check0160
+\set lc_table auth.accounts \set lc_hold exclusive
+:hold :run0160
+:check0160
+\set lc_table auth.accounts \set lc_hold 'share row exclusive'
+:hold :run0160
+:check0160
+\set lc_table identity.organizations \set lc_hold exclusive
+:hold :run0160
+:check0160
+\set lc_table identity.organizations \set lc_hold 'share row exclusive'
+:hold :run0160
+:check0160
+\set lc_table identity.consent_directives \set lc_hold 'access exclusive'
+:hold :run0160
+:check0160
+\set lc_table identity.consent_directives \set lc_hold exclusive
+:hold :run0160
+:check0160
+\set lc_table identity.consent_directive_versions \set lc_hold 'access exclusive'
+:hold :run0160
+:check0160
+\set lc_table identity.consent_directive_versions \set lc_hold exclusive
+:hold :run0160
+:check0160
+\set lc_table identity.facility_profiles \set lc_hold 'access exclusive'
+:hold :run0160
+:check0160
+\set lc_table identity.facility_profiles \set lc_hold exclusive
+:hold :run0160
+:check0160
+\set lc_table auth.account_roles \set lc_hold 'access exclusive'
+:hold :run0160
+:check0160
+\set lc_table auth.account_roles \set lc_hold exclusive
+:hold :run0160
+:check0160
+\set lc_table identity.sealed_demo_members \set lc_hold 'access exclusive'
+:hold :run0160
+:check0160
+\set lc_table identity.sealed_demo_members \set lc_hold exclusive
+:hold :run0160
+:check0160
+\set lc_table identity.sealed_qa_members \set lc_hold 'access exclusive'
+:hold :run0160
+:check0160
+\set lc_table identity.sealed_qa_members \set lc_hold exclusive
+:hold :run0160
+:check0160
+\set lc_table platform.control_settings \set lc_hold 'access share'
+:hold :run0161
+:check0161
+\set lc_table ehr.appointment_events \set lc_hold 'row exclusive'
+:hold :run0161
+:check0161
+\set lc_table ehr.appointment_events \set lc_hold share
+:hold :run0161
+:check0161
+\set lc_table ehr.appointment_events \set lc_hold 'row share'
+:hold :run0161
+:check0161
+\set lc_table ehr.appointments \set lc_hold 'row exclusive'
+:hold :run0161
+:check0161
+\set lc_table ehr.appointments \set lc_hold share
+:hold :run0161
+:check0161
+\set lc_table ehr.appointments \set lc_hold 'row share'
+:hold :run0161
+:check0161
+\set lc_table identity.patients \set lc_hold 'row exclusive'
+:hold :run0161
+:check0161
+\set lc_table identity.patients \set lc_hold share
+:hold :run0161
+:check0161
+\set lc_table identity.patients \set lc_hold 'row share'
+:hold :run0161
+:check0161
+\set lc_table identity.facilities \set lc_hold 'row exclusive'
+:hold :run0161
+:check0161
+\set lc_table identity.facilities \set lc_hold share
+:hold :run0161
+:check0161
+\set lc_table identity.facilities \set lc_hold 'row share'
+:hold :run0161
+:check0161
+\set lc_table identity.patient_facility_contacts \set lc_hold 'access exclusive'
+:hold :run0161
+:check0161
+\set lc_table identity.patient_facility_contacts \set lc_hold exclusive
+:hold :run0161
+:check0161
+\set lc_table identity.staff \set lc_hold 'access exclusive'
+:hold :run0161
+:check0161
+\set lc_table identity.staff \set lc_hold exclusive
+:hold :run0161
+:check0161
+\set lc_table auth.accounts \set lc_hold 'access exclusive'
+:hold :run0161
+:check0161
+\set lc_table auth.accounts \set lc_hold exclusive
+:hold :run0161
+:check0161
+\set lc_table auth.permissions \set lc_hold 'access exclusive'
+:hold :run0161
+:check0161
+\set lc_table auth.permissions \set lc_hold exclusive
+:hold :run0161
+:check0161
+\set lc_table audit.events \set lc_hold share
+:hold :run0161
+:check0161
+\set lc_table audit.events \set lc_hold 'share update exclusive'
+:hold :run0161
+:check0161
+\pset format aligned
+\pset tuples_only off
+set local lock_timeout = default;
+select pg_temp.expect('1a2 the cases above are exactly the declared locks, each in every mode its check needs', '',
+  (select coalesce(string_agg(difference.item, ', ' order by difference.item), '') from (
+     (select declared_row.file || ' ' || declared_row.table_name || ' ' || hold_row.hold as item
+        from pg_temp.declared_all() declared_row cross join lateral pg_temp.lock_holds(declared_row.mode) hold_row
+      except
+      select unnest(string_to_array(rtrim(current_setting('m160.lock_cases'), ';'), ';')))
+     union all
+     (select unnest(string_to_array(rtrim(current_setting('m160.lock_cases'), ';'), ';'))
+      except
+      select declared_row.file || ' ' || declared_row.table_name || ' ' || hold_row.hold
+        from pg_temp.declared_all() declared_row cross join lateral pg_temp.lock_holds(declared_row.mode) hold_row))
+     difference(item)));
 select pg_temp.made0160() as made0160_before \gset
 select pg_temp.made0161() as made0161_before \gset
 select public.dblink_exec('m160_blocker', 'begin') as began \gset
@@ -246,23 +548,7 @@ create function pg_temp.lock_rank(mode text) returns integer language sql immuta
 $$;
 -- A lock the header declares covers the same table at the same or a weaker mode (a file that takes SHARE ROW
 -- EXCLUSIVE on a table also reads it).
-create temporary table declared_locks (file text, table_name text, mode text);
-insert into declared_locks values
-  ('0160', 'identity.patients', 'ShareRowExclusiveLock'), ('0160', 'identity.facilities', 'ShareRowExclusiveLock'),
-  ('0160', 'identity.staff_facility_memberships', 'ShareRowExclusiveLock'),
-  ('0160', 'auth.role_permissions', 'ShareRowExclusiveLock'), ('0160', 'ehr.visit_queue', 'AccessExclusiveLock'),
-  ('0160', 'auth.permissions', 'RowExclusiveLock'), ('0160', 'audit.events', 'RowExclusiveLock'),
-  ('0160', 'auth.roles', 'RowShareLock'), ('0160', 'auth.accounts', 'RowShareLock'),
-  ('0160', 'identity.organizations', 'RowShareLock'), ('0160', 'identity.consent_directives', 'AccessShareLock'),
-  ('0160', 'identity.consent_directive_versions', 'AccessShareLock'),
-  ('0160', 'identity.facility_profiles', 'AccessShareLock'), ('0160', 'auth.account_roles', 'AccessShareLock'),
-  ('0160', 'identity.sealed_demo_members', 'AccessShareLock'), ('0160', 'identity.sealed_qa_members', 'AccessShareLock'),
-  ('0161', 'platform.control_settings', 'AccessExclusiveLock'),
-  ('0161', 'ehr.appointment_events', 'ShareRowExclusiveLock'), ('0161', 'ehr.appointments', 'ShareRowExclusiveLock'),
-  ('0161', 'identity.patients', 'ShareRowExclusiveLock'), ('0161', 'identity.facilities', 'ShareRowExclusiveLock'),
-  ('0161', 'identity.patient_facility_contacts', 'AccessShareLock'), ('0161', 'identity.staff', 'AccessShareLock'),
-  ('0161', 'auth.accounts', 'AccessShareLock'), ('0161', 'auth.permissions', 'AccessShareLock'),
-  ('0161', 'audit.events', 'RowExclusiveLock');
+create temporary table declared_locks as select * from pg_temp.declared_all();
 -- Every table that exists now, before 3 and 4 take the files away (their own new tables are left out of the
 -- comparison because they do not exist before the run).
 create temporary table existing_tables as
