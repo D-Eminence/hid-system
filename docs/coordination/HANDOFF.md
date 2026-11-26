@@ -1,8 +1,10 @@
-# Coordinator handoff: state at 25 Nov 2026, about 17:20 UTC (local VS Code coordinator handing back)
+# Coordinator handoff: state at 26 Nov 2026, about 10:30 UTC
 
 This file is for a coordinator session that takes over: a new cloud session, or the owner's local Claude Code in VS Code. It is not product documentation. The clinical lead's and DPO's names stay out of the repository and GitHub. The owner knows them.
 
-**ACTIVE COORDINATOR: the local VS Code session, since 25 Nov ~21:00 UTC (the owner chose "Hand over to this session" in the local chat). The cloud session must not merge, release or push until the owner hands over again.** Website release F (health#334, `b44b0d56`, run 45670779345) is live; the cloud coordinator shipped it at 18:01 UTC.
+**ACTIVE COORDINATOR: the local VS Code session, since 25 Nov ~21:00 UTC (the owner chose "Hand over to this session" in the local chat). The cloud session must not merge, release or push until the owner hands over again.**
+
+**Read "Overnight" and "Local work not yet on GitHub" first.** Five local workflows were running. From about 23:30 UTC on 25 Nov their agents failed with "API Error: Connection refused", and the session then restarted. Workflow runs resume only within the same session, so treat all five as dead. Their partial work exists only in local worktrees under `/home/l2e/hid/`. Nothing has been merged or released since website release F (25 Nov 18:01 UTC).
 
 ## Only one coordinator acts at a time
 - Before acting, the owner tells this session it is the active coordinator.
@@ -26,58 +28,79 @@ This file is for a coordinator session that takes over: a new cloud session, or 
 - **Wording:** plain English; "NIN Verified"/"NIN Not Verified"; no "permission" wording on staff screens; Health IDs never in URLs.
 - **Website-only fixes** ship once reviewed and green (Q94 4).
 
-## Live in production
-- **Backend:** Release E, `backend-45657497614-1-9ad293c7963d6f06`, hid-system `0cfddcc9` (staging `staging-novu-ci-20261005`), migrations 0001–0153. It went live 25 Nov 17:04 UTC; 0152 and 0153 applied with no stop, and the fallback declaration was not used. All 13 components were rebuilt from `0cfddcc9`.
-  - Before it: #339 gateway pins, `backend-45649090315-1-03d2b78867300345` (`557cddb5`), live 16:06 UTC, no migration.
-- **Website:** re-pin health#333 merged as `42c548d0`, with all nine pins on `0cfddcc9`. Its release, run 45661915015, succeeded (`frontend-45661915015-1-121b98b576f44645`). Release F (Lekan's batch #313, #314, #234, #331) followed at 18:01 UTC (`b44b0d56`, run 45670779345, success).
-  - Last confirmed live: `frontend-45654205866-1-68900f164538dd64` (`59cc1b04`, pins on `557cddb5`) at about 16:50 UTC.
-- **GitHub flakiness on 25 Nov afternoon:** merge and comment calls returned 500/502/504 or empty bodies, but often succeeded anyway. Always re-read state before retrying, and guard merges with `sha=`. Once, a push to health main started no release run; the coordinator dispatched `production-frontends.yml` on main.
+## Live in production (unchanged since 25 Nov 18:01 UTC)
+- **Backend:** Release E, `backend-45657497614-1-9ad293c7963d6f06`, hid-system `0cfddcc9` (release branch `staging-novu-ci-20261005`), migrations 0001–0153. Live 25 Nov 17:04 UTC; 0152 and 0153 applied with no stop.
+- **Website:** release F, health main `b44b0d56` (run 45670779345, 25 Nov 18:01 UTC): Lekan's #313, #314, #234 and P2-4 #331. All nine backend pins are on `0cfddcc9` (health#333).
+- **GitHub flakiness (25 Nov afternoon):** merge and comment calls returned 500/502/504 or empty bodies but often succeeded anyway. Re-read state before retrying, and guard merges with `sha=`. Once, a push to health main started no release run; dispatch `production-frontends.yml` on main.
 
-## Next releases, in order (one at a time)
-1. **Confirm website run 45661915015** (above).
-2. **Lekan's website batch:** health #313 (role labels, `9ea9c69a`), #314 (routed details warning, `a45112d7`), #234 (own-work Health ID, `dc1ca553`) and #331 (P2-4 Lagos time, `a3ea3039`). Merge them as one website release.
-   - All four passed independent review. #331's review (25 Nov ~16:00) said ship. Two low-severity follow-ups for Lekan:
-     - Nigerian landlines (`+2341…`) show in international form, not `01 234 5678`.
-     - Some foreign numbers group oddly, and a stored `(0)` trunk stays in.
-     - Also unconfirmed: zoneless timestamps still use the device zone; `ageInYears` would be off by one if a date of birth ever arrives as an instant; `paperRecordsWording.ts:110` `isAdult` uses UTC.
-   - Check each PR is still at the reviewed head and green; refresh against main with a merge commit if needed.
-3. **0154 refills (#331 in hid-system, Ola):** Rahman reviewed it (#331 7168468937). Before signing, 0154 must lock `pharmacy.dispensing_reversals`, then be re-hashed. The progress statement grows with fills (about 1.8 s at 12 fills); a better shape was suggested. `check:db` on Release E plus #331 passed. Then: owner signature, Rahman's final check, release, re-pin. The clinical lead countersigns the refill calls (Q158) before `PRESCRIPTION_REFILLS_ENABLED` goes on.
-4. **Sprint wave 1** (#335–#337): each needs its agent review, then Rahman's final check, then the signature. #336 still needs the VEX re-bind for its nginx routes (Q291 A), now on top of #339's VEX.
+## Next releases, in order (one at a time; Rahman's 21:48 order, accepted in #258 7177085826)
+1. **0154 refills** (Ola's #331, `9d41866c`). The fixes are **not started**: `wt-ord12` is empty.
+   - Needed: Rahman's #331 review 7168468937 (lock `pharmacy.dispensing_reversals` with a busy case; a flat progress statement; contiguous fill numbers; no future `dispensed_at`; wording; case 14f).
+   - Also: accept exactly `zz_billing_stock_and_gate:commercial.hook_dispensing():7:O` as an optional sixth trigger on `pharmacy.dispensings`.
+   - Then the interim gate (below), the owner's signature on the new sha256s, the release, and the re-pin.
+2. **Appointments #335**, renumbered at integration to follow 0154. 3. **Billing #336.** 4. **Emergency #337.** One department per release, each built on a staging that holds the previous one. Then wave 2 (#343).
+- **Interim release gate (owner, 25 Nov ~23:10 UTC, "Agent check stands in"):** Rahman's `check:db` (from `a8d99ac1`) in a Docker harness, plus an independent agent review of the final renumbered files. **The harness was never built** (its agent failed), and pgvector isn't on the host. Build it first: image `hid-pg16-vector:local` (postgres:16 plus pgvector) exists, and needs Node 24 added.
+- **Sprint websites** (health #328, #329, #330, #335, #336) go out only after their backends are live. Their features stay behind flags that are off.
 - Follow-up: `security/production-runtime-assessment.json` still says 3.5.9-r0 for the gateway. Update it with the next backend-image change.
-- Rahman's #340 (`createdByMembershipId`, no migration) and #341 (SX-8 Terraform flag, into #323) are green and await coordinator review. #340 asks for a yes from the coordinator or the owner before adding `createdByName` (it shows a colleague's name on each case). Not yet answered.
+- **The owner wrote "signed" at about 00:30 UTC on 26 Nov, with nothing ready to sign. It is not recorded as a signature:** no file or sha256 was named. Post exact signing text on #332 when 0154 is ready.
+
+## Overnight (25–26 Nov): what got done, and what died
+- **Pushed:** only #335, `claude/sprint-appointments-backend` at `d7511876`. It has Release E merged in, Rahman's four should-fix points and nits, and round 1 review fixes, with an unsigned declaration: 0160 `39920022…`, 0161 `7343d3cc…`, runtime-grants `e65d9f52…`.
+- **Decisions posted on #258:**
+  - wave 1 tolerant preconditions (7174680244);
+  - Rahman's release order, and the exact trigger pins (7177085826);
+  - facility items reach Billing by option 2: 0163 accepts `HID-FACILITY`, and 0166/0167 match by code pair (7177222281);
+  - CHW-1's registration number is optional;
+  - #340's `createdByName`: yes;
+  - revoking TEMP from PUBLIC comes after wave 1.
+- **Review findings worth knowing:**
+  - #337's 0168 leaves its new identity sequence open to the runtime grants (the same bug Rahman found in 0160).
+  - The Billing website showed stock batches as expired a day early.
+  - One verifier in wf_9f4a817c-565 attached reasons to the wrong findings, so re-verify anything taken from that run.
+- **Lesson:** five workflows (about 30 agents) at once coincided with the connection failures. Run at most two at a time.
+
+## Local work not yet on GitHub (checked 26 Nov 10:27 UTC)
+| Worktree (`/home/l2e/hid/…`) | Branch | Local state | Where it stopped / next |
+|---|---|---|---|
+| wt-appt | claude/sprint-appointments-backend | pushed at `d7511876`; 1 uncommitted file | Round 2: security clean; mechanics found 2, both confirmed. The fix died midway. Finish the 2 fixes, re-hash, update the declaration, push. |
+| wt-bill | claude/sprint-billing-backend | 5 local commits (`f804c9e8`), clean | The first pass is committed: the 0164 temp-table escalation removed, tolerant 0162/0167, the declaration. Security review r1 found nothing; mechanics review r1 died. Next: the mechanics review, then Rahman's full check 7175546496, his 21:48 items (0162 compares only its own rows; a fill-aware refill hook in 0167; Emergency's two triggers accepted exactly), and option 2 (0163 accepts `HID-FACILITY`). Then push. |
+| wt-ed | claude/sprint-emergency-backend | no new commits; 6 uncommitted files | Review r1 confirmed 10 of 11, including the ED history sequence grant (reported twice). The fix died midway. Redo the fix from the confirmed list, then apply Rahman's #337 check 7175564791. |
+| (none) | claude/sprint-inpatient-backend (#343) | untouched | Known bug: 0171's waiting-list admission doesn't set 0168's board closing marker. Fix it against Emergency's final 0168. |
+| wt-web-328 | claude/sprint-appointments-web | 23 local commits (`ef04d47d`), clean | Release F merged in, the display helpers, and round 1 fixes (9 confirmed). The round 2 review died. Review, then push. |
+| wt-web-329 | claude/sprint-billing-web | 6 local commits (`8a9afb18`), clean | 15 confirmed (1 blocking: after payment, the sale hand-over fails on a stale version). The fix died after some commits. Check which of the 15 remain, finish, push. |
+| wt-web-330 | claude/sprint-emergency-web | 14 uncommitted files | 11 confirmed; the fix died midway. Finish, commit, review. |
+| wt-web-335 | claude/sprint-adt-web | 4 local commits (`5f4fb89e`), clean | 14 confirmed and fixed. The round 2 review found 3, and their verification died. Verify, fix, push. |
+| wt-web-336 | claude/sprint-nursing-web | 4 local commits (`a7f736f6`); 1 uncommitted | 12 confirmed; the fix died partway. Finish, review, push. |
+| wt-display | claude/display-followups (new) | 1 commit (`338f2a98`: age from the Lagos day) | Still to do: Nigerian landlines, foreign number grouping and the `(0)` trunk, `isAdult` on the Lagos day. |
+| wt-w3-*-be | claude/sprint-{radiology,bloodbank,referrals,dental,quality,hr,reports}-backend (new) | a contract commit each; quality and hr also have their first migration commit | Partial builds are **uncommitted**: dental 12 files, hr 10, quality 4, referrals 9, reports 8. Radiology and blood bank have only their contracts. |
+| wt-w3-*-web | claude/sprint-{dental,hr,quality,referrals,reports}-web (new) | uncommitted: dental 13, hr 15, quality 13, referrals 16, reports 1 commit plus 10 | Partial. Radiology and blood bank websites were never started. |
+| wt-blue-q132a | claude/blue-q132a-changed-after-dispensing (new) | 2 uncommitted files | The builder died early. |
+| created, nothing done | wt-ord12, wt-ord11, wt-ord7fac, wt-nameonly, wt-ord9rank, wt-selfcheck, wt-sx6(-web), wt-sx7(-web), wt-id8(-web), wt-chw1(-web), wt-blue-c8, wt-blue-id6, wt-blue-my1, wt-blue-sx10 | at their base | Nothing built. The check:db harness wasn't built, and #342 wasn't reviewed. |
+
+**How to pick this up:** start fresh agents on the existing worktrees, telling each where its predecessor stopped (this table plus `git status` / `git log`). Don't discard uncommitted files: a new agent should read them first. Keep the order: 0154 and the harness, then #335's round 2, then #336, then #337. Website and wave 3 work can run alongside, one workflow at a time.
 
 ## Two-week sprint (approved 25 Nov; ends about 9 Dec)
 - 100% means classic parity, plus Akos's EHR list, plus every new department (Q146 B), each as a first working version. Items that need outside approval (video provider, SMS sender ID, live HMO portals, offline legal) are built but switched off.
 - Second reviewer: an independent agent review plus Rahman's final check.
-- Readiness (Q147 A, three equal parts, live features only): about 43%. Classic 100%; EHR list about 29% (19 of 66); departments 0 of 20.
+- Readiness (Q147 A, three equal parts, live features only): **about 43%, unchanged since 25 Nov.** Classic 100%; EHR list about 29% (19 of 66); departments 0 of 20. Release E's diagnosis search is live, but its list is empty in production. Release F was labels, warnings and date/phone formats. No department is live yet.
 
 ### Wave 1: outpatient and cashier (backend unsigned)
 | Department | Backend | Migrations | Website | State |
 |---|---|---|---|---|
-| Appointments | hid-system#335 (`63312e5f`) | 0160–0161 | health#328 | Review fixes done; next is Rahman's check, then the signature |
-| Billing release 1 and pharmacy stock | hid-system#336 (`9b36fa6e`) | 0162–0167 | health#329 | Adds 7 `/api/v1/commercial/*` nginx routes. #339 is live, so the VEX re-bind (Q291 A) can be done now |
-| Emergency board and triage | hid-system#337 | 0168–0169 | health#330 | CI green; next is Rahman's check, then the signature |
+| Appointments | hid-system#335 (`d7511876`, pushed) | 0160–0161 | health#328 | Rahman's fixes and round 1 fixes pushed; round 2's 2 fixes still to do (see the local work table) |
+| Billing release 1 and pharmacy stock | hid-system#336 (GitHub `6b253568`; local `f804c9e8`) | 0162–0167 | health#329 | Blocking items from Rahman remain; VEX re-bound to its nginx routes in `d0516f81` (Q291 A) |
+| Emergency board and triage | hid-system#337 (`db83d733`) | 0168–0169 | health#330 | Review r1: 10 confirmed; fix not finished; Rahman's check 7175564791 pending |
 
 - On sprint branches, release tests 45, 53 and 99 fail with `missing migration prefix`. This is expected from the numbering gap and closes at integration.
 
-### Wave 2: inpatient (being built)
-- ADT 0170–0173 and nursing 0174–0177, on branch `claude/sprint-inpatient-backend` and its website branch.
-
-### Running on the local machine (25 Nov ~22:00 UTC; local commits until the coordinator pushes)
-| Workflow | Work | Worktrees |
-|---|---|---|
-| wf_877a0c93-e09 | #335 Appointments and #336 Billing: Rahman's fixes, 2-lens review + adversarial verify, then a six-order wave 1 apply check | /home/l2e/hid/wt-appt, wt-bill |
-| wf_9f4a817c-565 | #337 Emergency, then #343 Inpatient (0171 board-marker fix); health #328 #329 #330 #335 #336 | wt-ed, wt-inpatient, wt-web-<pr> |
-| wf_3ebd077f-b91 | Cover: 0154 fixes (claude/ord12-refills-fixes), ORD-11 0159, display follow-ups, Lekan's five blue screens, check:db Docker harness, #342 review | wt-ord12, wt-ord11, wt-display, wt-blue-* |
-| wf_71155cf4-e48 | Cover: Ola's 0155, 0156, 0157, 0158, 0178, 0179, 0180; Rahman's SX-6 0205, SX-7 0206, ID-8 0207-0208, CHW-1 0209 | wt-ord7fac, wt-nameonly, wt-ord9rank, wt-ord6, wt-selfcheck, wt-discussed, wt-ord8, wt-sx6(-web), wt-sx7(-web), wt-id8(-web), wt-chw1(-web) |
-| wf_3cbe4e94-299 | Wave 3: radiology, blood bank, referrals, dental, quality, HR/rosters, reports (backend + website each) | wt-w3-<dept>-be, wt-w3-<dept>-web |
-If this session dies, these commits exist only in those local worktrees: push each branch before anything else.
+### Wave 2: inpatient
+- ADT 0170–0173 and nursing 0174–0177 on hid-system#343 (`ad5080bc`), with websites health#335 (ADT) and #336 (nursing). It depends on wave 1 (0171 needs 0168) and has the board-marker bug above.
 
 ### Wave 3 (provisional numbers, #258 7175611427)
 Radiology 0181–0185, Blood bank 0186–0190, Referrals 0191–0193, Dental 0194–0196, Quality 0197–0198, HR/rosters 0199–0202, Reports 0203–0204. Branches `claude/sprint-<dept>-backend` and `claude/sprint-<dept>-web`.
 
-### Later waves (wave 4: maternity, theatre, ICU, telemedicine, ambulance, claims, stock)
-Maternity, theatre, blood bank, radiology, claims, stock and procurement, roster and HR, quality, dental, reports, referrals, telemedicine, ambulance, i18n, P2-1, facility setup, subscription and the staff inbox. Surveys are in `roadmap.json`.
+### Wave 4 and later
+Maternity, theatre, ICU, telemedicine, ambulance, claims, and stock and procurement (they build on admission or billing), then i18n, P2-1, facility setup, subscription and the staff inbox. Surveys are in `roadmap.json`.
 
 ## Migration numbering (settled 25 Nov ~17:00 UTC, #258 7168672285)
 Numbers are bookings, given finally at integration in release order. A later release closes up to the next free numbers if an earlier booked file isn't ready, and the owner signs after renumbering. A file requires markers only for the earlier files whose objects it uses.
@@ -95,13 +118,14 @@ Numbers are bookings, given finally at integration in release order. A later rel
 | 0210+ | Free. ORD-10 phase 2 takes the next number when WHOCC answers; wave 4 booked per department on #258 |
 
 ## Team (sessions don't wake from GitHub; the owner relays, and the team reads hid-system#258)
-- **Rahman** (database, identity, release): #338 and #339 done. He has reviewed all six of Ola's design notes (0155/0156, 0158, 0159, 0181/0182 now 0178/0179, 0183 now 0180); 0159 has one blocking point (each notice stores its recipient). Next: 0154's lock fix, then final checks on wave 1; then refills #331, `createdByMembershipId` and the SX-8 flag for #323; then SX-6, SX-7, ID-8 and CHW-1; then his tooling fixes #325 and #326.
-- **Ola** (orders, pharmacy, lab; clinical owner for medicines): renumber the notes to 0178/0179/0180 (#258 7168672285) and apply Rahman's review points; 0154 lock fix; brings ORD-8 and ORD-11 forward. ORD-10 phase 2 is blocked on the WHOCC terms (Q165 A); the owner has the drafted email. Also #312 (code list) and #315 (OCR drug list).
-- **Lekan** (website): five screens (ID-6, SX-10, MY-1, EHR-C8a/b, Q132 A), plus front desk marking a visit entered in error.
+- **Rahman, Ola and Lekan have been away since about 23:00 UTC on 25 Nov.** The owner asked the coordinator to carry their waiting work (#258 7177085826 and 7177222281 list the assignments and branches). Overnight, none of it got further than the local work table shows.
+- **Rahman** (database, identity, release): his last posts are the wave 1 release order (#258 7175579690), his #336 full check (7175546496), his #337 check (7175564791) and #340's `createdByName` (7175912738, done). Coordinator-assigned in his absence: SX-6 0205, SX-7 0206, ID-8 0207–0208, CHW-1 0209, the check:db harness, and a review of #342. When he's back: he re-checks anything released under the interim gate.
+- **Ola** (orders, pharmacy, lab; clinical owner for medicines): his last post is 7170418151 (working on 0154's fixes, then the notes). Assigned in his absence: the 0154 fixes, ORD-11 0159 (blocking: each notice stores its recipient), 0155, 0156 (released alone), 0157, 0158 and 0179 (on 0156), 0178, and 0180 (on all of them). ORD-10 phase 2 waits for WHOCC (Q165 A). Also #312 and #315.
+- **Lekan** (website): said on 24 Nov (7147764788) that his five blue screens (ID-6, SX-10, MY-1, EHR-C8a/b, Q132 A) were being built locally. They were never pushed. Rebuilds were assigned (`claude/blue-*`) but not done. **Ask Lekan for his local versions before rebuilding.** SX-10 should show #340's `createdByName`. C8a is offered to whoever holds `ehr.encounter.write`, front desk included. Also the display follow-ups.
 
 ## Owner queue: hid-system#332
 - **Ready now:** activate the `frontdesk@` and `nurse@` QA logins (Forgot password); test a doctor starting a reading on Migrate; turn on Usage credits; send the WHOCC email.
-- **Coming:** sign 0154 and 0160–0177 as each is ready; apply #323 after Rahman adds the SX-8 flag.
+- **Coming:** sign 0154, then each wave 1 department's renumbered files, as each is ready. Apply #323 together with #341 (the SX-8 flag is done, in #341). **Nothing is ready to sign now.**
 - **Clinical lead and DPO packs:** plain English, never code. The lists are in #332.
 
 ## Plan files in this folder
