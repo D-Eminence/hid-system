@@ -432,7 +432,7 @@ select pg_temp.expect('2g the four functions: the write check, the search and th
 select pg_temp.expect('2h the write check takes no argument, so it cannot be asked about another member or facility',
   '1 0', (select count(*) || ' ' || min(pronargs) from pg_proc
            where proname = 'facility_item_write_allowed' and pronamespace = 'ehr'::regnamespace));
-select pg_temp.expect('2i the bodies are the ones 0155''s post-check pins', '4a3cbcd62eaac9695c87c6ed7124eb02 '
+select pg_temp.expect('2i the bodies are the ones 0155''s post-check pins', '7c542dcf3cc6586d88c3d384cf9f245f '
   || '99e0abe265d0006f77ff6f279986dea2 b6ed2869600110b6399835bd4c4f6d7e 56d5b39e176c83b02a12df1c8a3e3e77',
   (select string_agg(md5(prosrc), ' ' order by oid::regprocedure::text) from pg_proc
     where oid in ('ehr.catalog_facility_item_guard()'::regprocedure, 'ehr.catalog_status()'::regprocedure,
@@ -1309,6 +1309,21 @@ select pg_temp.expect('4aq a withdrawn item keeps its row and id and comes back 
   || ' | back: ' || pg_temp.set_active(:'c155_item3'::uuid, true)
   || ' | offered: ' || pg_temp.found('medicine', 'ceftriaxone', 10)
   || ' | ' || pg_temp.item_line(:'c155_item3'::uuid));
+-- At the cap again: the same add sent twice (its creator's key already on a
+-- row, as when a second request waited for the first) is not counted, so the
+-- service's ON CONFLICT inserts nothing and it answers as a replay; without
+-- ON CONFLICT the key index refuses it; a new key is still the 501st.
+select pg_temp.expect('4ar at the cap, an add whose key x already used: ON CONFLICT inserts nothing (a replay, not the cap); without it the key index refuses it; a new key is still refused',
+  '500 | replay: ok 0 | without ON CONFLICT: 23505 catalog_facility_items_key_uq | new key: P0001 FACILITY_ITEM_LIMIT | 500',
+  pg_temp.active_count('medicine')
+  || ' | replay: ' || pg_temp.try($s$insert into ehr.catalog_facility_items (facility_id, kind, display, generic_name,
+      idempotency_key, request_sha256, created_by, created_by_membership_id)
+    values (pg_temp.f('a'), 'medicine', 'Cap medicine 3', 'Cap medicine 3', 'c155-key-x-cap-0003', repeat('f', 64),
+      platform.current_account_id(), platform.current_membership_id())
+    on conflict on constraint catalog_facility_items_key_uq do nothing$s$)
+  || ' | without ON CONFLICT: ' || pg_temp.add('medicine', 'Cap medicine three', 'c155-key-x-cap-0003')
+  || ' | new key: ' || pg_temp.add('medicine', 'Cap medicine three', 'c155-key-x-0016-medicine')
+  || ' | ' || pg_temp.active_count('medicine'));
 reset role;
 
 -- 5. The table's owner: it reads every facility's items (its read policy,
@@ -1449,7 +1464,7 @@ rollback to savepoint undo;
 
 do $$
 declare
-  wanted integer := case when exists (select 1 from pg_extension where extname = 'dblink') then 81 else 76 end;
+  wanted integer := case when exists (select 1 from pg_extension where extname = 'dblink') then 82 else 77 end;
 begin
   if currval('pg_temp.c155_passed') is distinct from wanted then
     raise exception '0155 facility items suite failed: % cases ran, % expected', currval('pg_temp.c155_passed'), wanted;

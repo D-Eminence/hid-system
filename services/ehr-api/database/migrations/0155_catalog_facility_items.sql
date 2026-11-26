@@ -57,7 +57,11 @@
 --       index is checked on re-activation too, as on any insert of an index
 --       entry. The count is read after the lock in its own statement, so
 --       under READ COMMITTED (ehr-api's default) it sees every item another
---       transaction committed before letting the lock go.
+--       transaction committed before letting the lock go. An add whose
+--       creator's Idempotency-Key is already on a row (the same request
+--       again, which waited for the first) is not counted: the key index
+--       refuses it (23505), or the service's ON CONFLICT inserts nothing, so
+--       a replay at the cap answers as a replay, not FACILITY_ITEM_LIMIT.
 --    Class key 7410 is new. At 0cfddcc9, #331 9d41866c, #335 d50825fa, #336
 --    f804c9e8, #337 6038c85e and #343 ad5080bc the only two-key advisory
 --    lock is 0153's 7409. PostgreSQL keeps the one-key and two-key spaces
@@ -319,7 +323,7 @@ begin
        and (select md5(proc.prosrc) from pg_proc proc where proc.oid = to_regprocedure('ehr.catalog_status()'))
            = '99e0abe265d0006f77ff6f279986dea2'
        and (select md5(proc.prosrc) from pg_proc proc
-             where proc.oid = to_regprocedure('ehr.catalog_facility_item_guard()')) = '4a3cbcd62eaac9695c87c6ed7124eb02'
+             where proc.oid = to_regprocedure('ehr.catalog_facility_item_guard()')) = '7c542dcf3cc6586d88c3d384cf9f245f'
        and (select md5(proc.prosrc) from pg_proc proc
              where proc.oid = to_regprocedure('ehr.facility_item_write_allowed()')) = 'b6ed2869600110b6399835bd4c4f6d7e'
        and (select md5(proc.prosrc) from pg_proc proc
@@ -483,6 +487,13 @@ begin
   -- At most 500 active items of a kind at a facility, counted after the facility's lock.
   if new.active and (tg_op = 'INSERT' or not old.active) then
     perform pg_advisory_xact_lock(7410, hashtext(new.facility_id::text));
+    -- The same add again (its creator's Idempotency-Key is on a row, perhaps one that committed while this waited):
+    -- the key index refuses it, or ON CONFLICT inserts nothing, so it is not counted.
+    if tg_op = 'INSERT' and exists (select 1 from ehr.catalog_facility_items item
+                                     where item.facility_id = new.facility_id and item.created_by = new.created_by
+                                       and item.idempotency_key = new.idempotency_key) then
+      return new;
+    end if;
     select count(*) into active_items
       from ehr.catalog_facility_items item
      where item.facility_id = new.facility_id and item.kind = new.kind and item.active and item.id <> new.id;
@@ -786,7 +797,7 @@ begin
   -- The four bodies exactly, with their owner, SECURITY DEFINER, volatility and search_path.
   select string_agg(expected.signature, ', ' order by expected.signature) into mismatch
     from (values
-      ('ehr.catalog_facility_item_guard()', '4a3cbcd62eaac9695c87c6ed7124eb02', false, 'v'),
+      ('ehr.catalog_facility_item_guard()', '7c542dcf3cc6586d88c3d384cf9f245f', false, 'v'),
       ('ehr.facility_item_write_allowed()', 'b6ed2869600110b6399835bd4c4f6d7e', true, 's'),
       ('ehr.search_catalog_facility_items(text,text,integer)', '56d5b39e176c83b02a12df1c8a3e3e77', true, 's'),
       ('ehr.catalog_status()', '99e0abe265d0006f77ff6f279986dea2', true, 's')
