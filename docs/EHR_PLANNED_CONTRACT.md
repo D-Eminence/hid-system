@@ -1944,11 +1944,12 @@ file released alone.
     `codeSystem: "HID-FACILITY"`, `code` equal to `itemId`, `scope:
     "facility"`, and for a medicine `source: "facility"`.
   - `PATCH` asked for the state the item is already in answers it
-    unchanged and writes nothing.
-  - Audit rows: `ehr.catalog.facility-item.created` (with
-    `idempotentReplay`), `.changed` (the new state and both row versions)
-    and `.list-read` (the count), each with the item and the actor and
-    never a name, in the same transaction as the read or write.
+    unchanged and changes no row; it is still audited.
+  - Audit rows, one for every answer: `ehr.catalog.facility-item.created`
+    (with `idempotentReplay`), `.changed` (the new state, both row versions
+    and `unchanged`, `true` for a `PATCH` that changed nothing) and
+    `.list-read` (the count), each with the item and the actor and never a
+    name, in the same transaction as the read or write.
   - A refusal the database makes after the guards let the call in (the
     code removed since the session was read) is 403 `PERMISSION_DENIED`.
 - **The status and the searches** now run in a read-only transaction that

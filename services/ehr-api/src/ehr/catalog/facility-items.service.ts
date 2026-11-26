@@ -19,8 +19,9 @@ import { FACILITY_CODE_SYSTEM, catalogUnavailable, type CatalogCaller } from './
  * facility, account and membership (app.facility_id, app.actor_subject,
  * app.membership_id), which 0155's row security checks again: a session
  * reads and writes only its own facility's items, and writes only with the
- * permission. The list, each add and each change write their audit row in
- * the same transaction, so an answer is never sent unaudited.
+ * permission. The list, each add and each change (even one that changes
+ * nothing) write their audit row in the same transaction, so an answer is
+ * never sent unaudited.
  */
 
 /** The Idempotency-Key's operation, part of the request digest kept on the row. */
@@ -265,8 +266,9 @@ export class FacilityItemsService {
   /**
    * PATCH: withdraws an item or brings it back, at the row version the
    * screen loaded (412 VERSION_CONFLICT otherwise). Asked for the state it is
-   * already in, it answers the item unchanged and writes nothing. Bringing an
-   * item back is held to the name index and the 500-item limit, as an add is.
+   * already in, it answers the item unchanged and changes no row; its audit
+   * row says so (unchanged: true, the same row version). Bringing an item
+   * back is held to the name index and the 500-item limit, as an add is.
    */
   async update(caller: CatalogCaller, itemId: string, input: UpdateFacilityItemDto): Promise<FacilityItem> {
     try {
@@ -278,13 +280,19 @@ export class FacilityItemsService {
           throw missing?.found === true && missing.allowed !== true ? permissionDenied() : facilityItemNotFound();
         }
         if (Number(current.row_version) !== input.expectedRowVersion) throw facilityItemVersionConflict();
-        if (current.active === input.active) return facilityItem(current);
+        if (current.active === input.active) {
+          await this.record(client, caller, 'ehr.catalog.facility-item.changed', current.id, {
+            kind: current.kind, active: current.active, rowVersion: Number(current.row_version),
+            previousRowVersion: Number(current.row_version), unchanged: true,
+          });
+          return facilityItem(current);
+        }
         const changed = (await client.query<FacilityItemRow>(FACILITY_ITEM_UPDATE_SQL,
           [itemId, caller.facilityId, input.active, input.expectedRowVersion])).rows[0];
         if (!changed) throw facilityItemVersionConflict();
         await this.record(client, caller, 'ehr.catalog.facility-item.changed', changed.id, {
           kind: changed.kind, active: changed.active, rowVersion: Number(changed.row_version),
-          previousRowVersion: Number(current.row_version),
+          previousRowVersion: Number(current.row_version), unchanged: false,
         });
         return facilityItem(changed);
       });

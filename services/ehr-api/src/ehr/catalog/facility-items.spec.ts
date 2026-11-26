@@ -402,7 +402,7 @@ describe('ORD-7 facility items (0155): withdrawing an item or bringing it back',
       + 'changed_by = platform.current_account_id()');
     expect(FACILITY_ITEM_UPDATE_SQL).toContain('changed_by_membership_id = platform.current_membership_id()');
     expect(audits).toEqual([{ client, event: auditEvent('ehr.catalog.facility-item.changed',
-      { kind: 'medicine', active: false, rowVersion: 2, previousRowVersion: 1 }, itemId) }]);
+      { kind: 'medicine', active: false, rowVersion: 2, previousRowVersion: 1, unchanged: false }, itemId) }]);
   });
 
   it('brings a withdrawn item back with the same id', async () => {
@@ -410,7 +410,8 @@ describe('ORD-7 facility items (0155): withdrawing an item or bringing it back',
       [FACILITY_ITEM_UPDATE_SQL]: [testRow({ active: true, row_version: '3', changed_at: addedAt })] });
     await expect(service.update(caller, testId, change(2, true))).resolves.toMatchObject({ itemId: testId, code: testId,
       active: true, rowVersion: 3 });
-    expect(audits[0]!.event.details).toEqual({ kind: 'lab_test', active: true, rowVersion: 3, previousRowVersion: 2 });
+    expect(audits[0]!.event.details).toEqual({ kind: 'lab_test', active: true, rowVersion: 3, previousRowVersion: 2,
+      unchanged: false });
   });
 
   it('another row version is 412 VERSION_CONFLICT, and nothing changes', async () => {
@@ -428,11 +429,12 @@ describe('ORD-7 facility items (0155): withdrawing an item or bringing it back',
     expect(audits).toEqual([]);
   });
 
-  it('asked for the state it is in, it answers the item unchanged and writes nothing', async () => {
-    const { service, calls, audits } = fakeStaff({ [FACILITY_ITEM_LOCK_SQL]: [medicineRow()] });
+  it('asked for the state it is in, it answers the item unchanged, changes no row and audits that', async () => {
+    const { service, calls, audits, client } = fakeStaff({ [FACILITY_ITEM_LOCK_SQL]: [medicineRow()] });
     await expect(service.update(caller, itemId, change(1, true))).resolves.toEqual(medicineAnswer);
     expect(calls.map((call) => call.sql)).toEqual([FACILITY_ITEM_LOCK_SQL]);
-    expect(audits).toEqual([]);
+    expect(audits).toEqual([{ client, event: auditEvent('ehr.catalog.facility-item.changed',
+      { kind: 'medicine', active: true, rowVersion: 1, previousRowVersion: 1, unchanged: true }, itemId) }]);
   });
 
   it('an item not at this facility (or no item) is 404 CATALOG_ITEM_NOT_FOUND', async () => {
