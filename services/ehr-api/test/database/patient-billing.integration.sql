@@ -55,6 +55,8 @@
 --  13. facility items (ORD-7's 0155, HID-FACILITY): priced by this
 --      facility's own active item of the kind only; the hooks and the stock
 --      match them by code pair; another facility's code is not counted here.
+--      The items are in 0155's own table when 0155 is applied, or else in a
+--      stand-in of its shape (row security forced, no owner write).
 --
 -- Each case records its outcome; the suite fails at the end listing every
 -- case whose outcome differs.
@@ -1375,8 +1377,9 @@ select pg_temp.check_case('12 every bill''s totals agree', '0', pg_temp.agree())
 -- 2026): a drug or a test is priced by one of this facility's own active items of its kind, never another facility's
 -- or a withdrawn one; the accepted prescription and the own lab work item find their price by the code pair, the
 -- dispensing takes the facility item's stock; another facility's facility code (a routed prescription) is not counted
--- as unpriced here, this facility's own unpriced one is. Without 0155 its table is made here (rolled back), with the
--- four columns 0155 keeps for Billing and its owner read policy (every facility), owned by the schema owner.
+-- as unpriced here, this facility's own unpriced one is. With 0155 applied its own table is used; without it a
+-- stand-in of its shape is made here (rolled back). Neither takes a write from its owner, so the five items are
+-- written into either by the suite's superuser (below).
 select pg_temp.check_case('13 a facility code must be an item id', 'HB400 VALIDATION_FAILED',
   pg_temp.ehr('x', 2, $s$select commercial.catalogue_create('{"kind":"drug","name":"Facility mixture","prescriptionOnly":false,"nationalCodeSystem":"HID-FACILITY","nationalCode":"MIXTURE-1","prices":{"cashKobo":5000,"hmo":[]}}', 'kbillingfacility000001', repeat('1', 64))$s$));
 select pg_temp.check_case('13 a facility code is never for an other item', 'HB400 VALIDATION_FAILED',
@@ -1403,29 +1406,125 @@ do $$ begin
     drop table ehr.catalog_facility_items;
   end if;
 end $$;
+-- 0155's table when 0155 is applied; otherwise a stand-in of the shape Ola's 0155 note gives (#258, 26 November 2026,
+-- 12:44 UTC), made here and rolled back: owned by the schema owner, row security forced, read by the owner through
+-- an owner read policy only (as 0141's), read and written by the EHR runtime at its session's facility only, the
+-- display, key, request sha256 and creator NOT NULL, the creator a member of the item's facility.
 do $$
 declare
   owner_name text := (select pg_get_userbyid(nspowner) from pg_namespace where nspname = 'commercial');
 begin
   if to_regclass('ehr.catalog_facility_items') is null then
-    create table ehr.catalog_facility_items (id uuid primary key, facility_id uuid not null, kind text not null,
-      active boolean not null);
+    create table ehr.catalog_facility_items (
+      id uuid primary key default gen_random_uuid(),
+      facility_id uuid not null references identity.facilities(id),
+      kind text not null check (kind in ('medicine', 'lab_test')),
+      display text not null check (length(btrim(display)) between 1 and 500),
+      generic_name text check (generic_name is null or length(btrim(generic_name)) between 1 and 200),
+      category text check (category is null or category in ('haematology', 'chemistry', 'microbiology', 'serology',
+        'parasitology', 'urine-and-stool', 'hormones', 'molecular', 'blood-bank', 'immunology', 'histopathology', 'other')),
+      active boolean not null default true,
+      row_version integer not null default 1 check (row_version >= 1),
+      idempotency_key text not null check (idempotency_key ~ '^[A-Za-z0-9._:-]{16,128}$'),
+      request_sha256 text not null check (request_sha256 ~ '^[0-9a-f]{64}$'),
+      created_by uuid not null,
+      created_by_membership_id uuid not null,
+      created_at timestamptz not null default clock_timestamp(),
+      changed_by uuid,
+      changed_by_membership_id uuid,
+      changed_at timestamptz,
+      check ((changed_by is null) = (changed_by_membership_id is null) and (changed_by is null) = (changed_at is null)),
+      unique (facility_id, created_by, idempotency_key),
+      foreign key (created_by_membership_id, facility_id, created_by)
+        references identity.staff_facility_memberships(id, facility_id, account_id));
+    create unique index catalog_facility_items_active_name on ehr.catalog_facility_items (facility_id, kind,
+      lower(display)) where active;
     execute format('alter table ehr.catalog_facility_items owner to %I', owner_name);
     alter table ehr.catalog_facility_items enable row level security;
     alter table ehr.catalog_facility_items force row level security;
-    execute format('create policy catalog_facility_items_owner_read on ehr.catalog_facility_items for select '
-      || 'using (current_user = %L::name)', owner_name);
-    execute format('create policy catalog_facility_items_owner_write on ehr.catalog_facility_items for insert '
-      || 'with check (current_user = %L::name)', owner_name);
+    create policy catalog_facility_items_owner_read on ehr.catalog_facility_items for select
+      using (pg_has_role((select relation.relowner from pg_class relation
+                           where relation.oid = 'ehr.catalog_facility_items'::regclass), 'USAGE'));
+    create policy catalog_facility_items_read on ehr.catalog_facility_items for select to hid_ehr_runtime
+      using (facility_id = (select platform.current_facility_id()));
+    create policy catalog_facility_items_insert on ehr.catalog_facility_items for insert to hid_ehr_runtime
+      with check (facility_id = (select platform.current_facility_id())
+                  and created_by_membership_id = (select platform.current_membership_id()));
   end if;
-  execute format('set local role %I', owner_name);
-  insert into ehr.catalog_facility_items (id, facility_id, kind, active) values
-    ('b1621300-0000-4000-8000-000000000001', 'b1620000-0000-4000-8000-000000000002', 'medicine', true),
-    ('b1621300-0000-4000-8000-000000000002', 'b1620000-0000-4000-8000-000000000002', 'lab_test', true),
-    ('b1621300-0000-4000-8000-000000000003', 'b1620000-0000-4000-8000-000000000002', 'medicine', false),
-    ('b1621300-0000-4000-8000-000000000004', 'b1620000-0000-4000-8000-000000000012', 'medicine', true),
-    ('b1621300-0000-4000-8000-000000000005', 'b1620000-0000-4000-8000-000000000002', 'medicine', true);
-  reset role;
+end $$;
+select pg_temp.check_case('13 the facility items table is the schema owner''s, its row security forced', 'true',
+  (select (relation.relrowsecurity and relation.relforcerowsecurity
+           and relation.relowner = (select nspowner from pg_namespace where nspname = 'commercial'))::text
+     from pg_class relation where relation.oid = 'ehr.catalog_facility_items'::regclass));
+-- So its owner cannot write it (no owner write policy): the five items are written by the suite's superuser, to
+-- which row security does not apply, with triggers and foreign keys off for these rows only (0155's guard and its
+-- write path are 0155's suite's). Every NOT NULL column without a default is filled from the catalog, and a
+-- medicine's generic name (the contract requires one); the creator is facility A's admin, or facility B's cashier for
+-- B's item. A write that still fails is this case's outcome, and the suite goes on to report every case.
+do $$
+declare
+  column_names text := '';
+  value_list text := '';
+  target record;
+  item record;
+begin
+  for target in
+    select attribute.attname as name, format_type(attribute.atttypid, attribute.atttypmod) as type_name,
+           type_row.typname, type_row.typcategory, type_row.typtype, attribute.atttypid
+      from pg_attribute attribute
+      join pg_type type_row on type_row.oid = attribute.atttypid
+     where attribute.attrelid = 'ehr.catalog_facility_items'::regclass and attribute.attnum > 0
+       and not attribute.attisdropped and attribute.attgenerated = '' and attribute.attidentity = ''
+       and (attribute.attname in ('id', 'facility_id', 'kind', 'active', 'generic_name')
+            or (attribute.attnotnull and not attribute.atthasdef))
+     order by attribute.attnum
+  loop
+    column_names := column_names || case when column_names = '' then '' else ', ' end || quote_ident(target.name);
+    value_list := value_list || case when value_list = '' then '' else ', ' end || '(' || case
+      when target.name = 'id' then '$1'
+      when target.name = 'facility_id' then '$2'
+      when target.name = 'kind' then '$3'
+      when target.name = 'active' then '$4'
+      when target.name = 'generic_name' then 'case when $3 = ''medicine'' then $5 end'
+      when target.name like '%membership\_id' then '$6'
+      when target.typname = 'uuid' and (target.name like '%\_by' or target.name like '%account%') then '$7'
+      when target.name like '%sha256%' then quote_literal(repeat('0', 64))
+      when target.name like '%idempotency%' or target.name like '%\_key' then '''billing-suite-facility-item-'' || $8'
+      when target.name like '%code\_system' then quote_literal('HID-FACILITY')
+      when target.name = 'code' then '$1::text'
+      when target.name = 'category' then quote_literal('other')
+      when target.typtype = 'e' then quote_literal((select enum_row.enumlabel from pg_enum enum_row
+                                                     where enum_row.enumtypid = target.atttypid
+                                                     order by enum_row.enumsortorder limit 1))
+      when target.typname = 'uuid' then 'gen_random_uuid()'
+      when target.typname in ('json', 'jsonb') then quote_literal('{}')
+      when target.typname = 'tsvector' then quote_literal('')
+      when target.typcategory = 'A' then quote_literal('{}')
+      when target.typcategory = 'D' then 'clock_timestamp()'
+      when target.typcategory = 'N' then '1'
+      when target.typcategory = 'B' then 'false'
+      else '$5' end || ')::' || target.type_name;
+  end loop;
+  perform set_config('session_replication_role', 'replica', true);
+  for item in
+    select listed.* from (values
+      (1, 'b1620000-0000-4000-8000-000000000002', 'medicine', true, 'Facility mixture', 7),
+      (2, 'b1620000-0000-4000-8000-000000000002', 'lab_test', true, 'Facility malaria smear', 7),
+      (3, 'b1620000-0000-4000-8000-000000000002', 'medicine', false, 'Withdrawn mixture', 7),
+      (4, 'b1620000-0000-4000-8000-000000000012', 'medicine', true, 'Other facility mixture', 6),
+      (5, 'b1620000-0000-4000-8000-000000000002', 'medicine', true, 'Facility tonic', 7))
+      listed(n, facility, kind, active, display, creator)
+  loop
+    execute format('insert into ehr.catalog_facility_items (%s) values (%s)', column_names, value_list)
+      using ('b1621300-0000-4000-8000-00000000000' || item.n)::uuid, item.facility::uuid, item.kind, item.active,
+        item.display, pg_temp.member(item.creator),
+        ('b1620100-0000-4000-8000-0000000000' || lpad(item.creator::text, 2, '0'))::uuid, lpad(item.n::text, 4, '0');
+  end loop;
+  perform set_config('session_replication_role', 'origin', true);
+  perform pg_temp.check_case('13 the five facility items are written', 'ok', 'ok');
+exception when others then
+  perform set_config('session_replication_role', 'origin', true);
+  perform pg_temp.check_case('13 the five facility items are written', 'ok', sqlstate || ' ' || sqlerrm);
 end $$;
 select pg_temp.check_case('13 a drug priced by this facility''s own medicine', 'ok',
   pg_temp.ehr('fmed', 2, $s$select commercial.catalogue_create('{"kind":"drug","name":"Facility mixture","form":"liquid","prescriptionOnly":false,"nationalCodeSystem":"HID-FACILITY","nationalCode":"b1621300-0000-4000-8000-000000000001","prices":{"cashKobo":5000,"hmo":[]}}', 'kbillingfacility000004', repeat('4', 64))$s$));
