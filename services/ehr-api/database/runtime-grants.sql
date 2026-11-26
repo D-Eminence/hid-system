@@ -2065,3 +2065,23 @@ grant execute on function ehr.record_recent_diagnosis(text, text, text), ehr.rec
   to hid_ehr_runtime, hid_schema_test_runtime;
 revoke all on function ehr.record_recent_diagnosis(text, text, text), ehr.recent_diagnoses(integer) from public;
 revoke all on ehr.clinician_recent_diagnoses from public;
+
+-- Provider reports, operations figures first (0203, REP-1 of Release D;
+-- owner decisions Q237 A to Q241 A and Q149 A of 25 November 2026), exactly as
+-- 0203 grants and revokes them: route 1's report and route 2's download to the
+-- EHR runtime only; the counting helper and the waiting list's report stamp
+-- to no role (the helper runs only inside the two, as their owner; the
+-- trigger runs as the role that writes the row); no privilege for any role on
+-- the report marker table (only the helper and the marker check, as its
+-- owner, use it); the marker check to PUBLIC, because every role that reads
+-- the eight source tables evaluates their marker policies (it answers only
+-- whether this transaction holds a marker). 0204 (who holds the two codes)
+-- adds no grant.
+grant execute on function ehr.facility_report_operations(date, date, boolean),
+  ehr.facility_report_operations_export(date, date, text, boolean) to hid_ehr_runtime;
+revoke all on function ehr.facility_report_operations(date, date, boolean),
+  ehr.facility_report_operations_export(date, date, text, boolean),
+  ehr.facility_report_operations_figures(uuid, date, date, boolean),
+  ehr.visit_queue_report_stamp() from public;
+revoke all on ehr.report_scans from public;
+grant execute on function ehr.report_scan_open() to public;

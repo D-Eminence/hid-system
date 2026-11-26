@@ -13,6 +13,8 @@ import { OfflineModule } from './offline/offline.module';
 import { StorageModule } from './storage/storage.module';
 // EHR-C4: the chart summary.
 import { ChartSummaryModule } from './ehr/chart-summary/chart-summary.module';
+// REP-1 (0203, 0204): the facility's operations report.
+import { ReportsModule } from './reports/reports.module';
 
 @Module({
   imports: [
@@ -25,6 +27,8 @@ import { ChartSummaryModule } from './ehr/chart-summary/chart-summary.module';
     OfflineModule,
     // EHR-C4: the chart summary.
     ChartSummaryModule,
+    // REP-1 (0203, 0204): the facility's operations report.
+    ReportsModule,
   ],
   controllers: [HealthController],
   providers: [

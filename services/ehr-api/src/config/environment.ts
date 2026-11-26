@@ -111,6 +111,14 @@ const environmentSchema = z
     OFFLINE_ESCROW_KEYS: optionalString,
     // Prescription strength, form, duration, quantity and priority (0125): off by default, off is exactly as before.
     PRESCRIPTION_DISPENSING_DETAILS_ENABLED: booleanString,
+    // REP-1 (0203, 0204; owner decision Q149 A): the facility's operations report. Off by default; both report routes
+    // answer 503 REPORTS_NOT_AVAILABLE at real facilities (the sealed demo and QA facilities have them whatever the
+    // setting: the database decides from this value and the facility's seal). On only after the clinical lead's and
+    // Ola's sign-off of the figure definitions and the owner's go-live.
+    REPORTS_ENABLED: booleanString,
+    // REP-1: downloads of the report (CSV and PDF, small counts hidden). Off by default; while it or REPORTS_ENABLED is
+    // off, the download route is closed at real facilities. On only after the DPO's review.
+    REPORTS_EXPORT_ENABLED: booleanString,
   })
   .superRefine((environment, context) => {
     if (environment.AI_ENABLED) {
