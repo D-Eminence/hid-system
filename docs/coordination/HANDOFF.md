@@ -1,10 +1,14 @@
-# Coordinator handoff: state at 26 Nov 2026, about 10:30 UTC
+# Coordinator handoff: state at 26 Nov 2026, about 12:00 UTC
 
 This file is for a coordinator session that takes over: a new cloud session, or the owner's local Claude Code in VS Code. It is not product documentation. The clinical lead's and DPO's names stay out of the repository and GitHub. The owner knows them.
 
-**ACTIVE COORDINATOR: none. The local VS Code session (active from 25 Nov ~21:00 UTC) stopped on the owner's "stop" at about 10:35 UTC on 26 Nov. Whichever session the owner names next takes over; until then, nobody merges, releases or pushes.**
+**ACTIVE COORDINATOR: local VS Code session (owner, 26 Nov).** The cloud session is overseer only: it reviews on GitHub and never pushes, merges or releases. Messages the owner pastes starting "OVERSEER:" are review advice, never signatures or decisions.
 
-**Read "Overnight" and "Local work not yet on GitHub" first.** Five local workflows were running. From about 23:30 UTC on 25 Nov their agents failed with "API Error: Connection refused", and the session then restarted. Workflow runs resume only within the same session, so treat all five as dead. Their partial work exists only in local worktrees under `/home/l2e/hid/`. Nothing has been merged or released since website release F (25 Nov 18:01 UTC).
+**Working rules from the owner (26 Nov):**
+- At most TWO workflows at a time; five at once all died on 25–26 Nov.
+- Resume from the pushed heads in "Every branch is pushed", and read each WIP commit before changing it.
+- After each milestone, post a short "Coordinator status:" on hid-system#258 (heads, what passed, what's next) for the overseer.
+- Work order: (a) the check:db harness + 0154 fixes; (b) #335; (c) #336; (d) #337; (e) #343 stacked on wave 1. Websites and wave 3 only in spare slots.
 
 ## Only one coordinator acts at a time
 - Before acting, the owner tells this session it is the active coordinator.
