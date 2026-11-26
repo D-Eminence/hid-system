@@ -403,5 +403,11 @@ runtime roles. No role bootstrap is part of the release itself.
   and `hid_schema_test_runtime`, after the file's schema-wide sequence grants: no runtime role may read
   that sequence (its `last_value` counts every facility's appointment events) or take a number from it.
 - 0160 and 0161 accept what Billing (0162-0167) and Emergency (0168-0169) add to the shared role table
-  and to the waiting-list basis CHECK, so the Release D lanes ship in order of readiness (coordinator,
-  hid-system#258, 25 November 2026).
+  (codes added to the four roles) and to the waiting-list basis CHECK (`emergency` after `search` and
+  `own_facility`, nothing else), so they apply before or after either lane.
+- Release order (Rahman's order of 25 November 2026, accepted on hid-system#258): one department per
+  release, each built on a staging that holds the release before it, in the fixed order 0154
+  (prescription refills), Appointments, Billing, Emergency. The numbers here are provisional:
+  at integration each release's files are renumbered to close up the gap after the release before it
+  (Appointments' 0160 and 0161 become 0155 and 0156 after 0154), so their sha256s change and the
+  declaration is signed at the new numbers.
