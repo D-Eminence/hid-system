@@ -964,7 +964,7 @@ begin
   -- Route 18: the week's duties become exactly the list given (all or nothing). Outcomes: saved (replayed),
   -- not_found, edit_not_allowed, changed, member_invalid, shift_invalid, date_outside_week, shift_started, overlap,
   -- rest_too_short, member_on_leave, key_reused. details: the first duty refused ({membershipId, dutyDate,
-  -- shiftId}); never another department.
+  -- shiftId}; for rest_too_short also minRestHours, the rule in force); never another department.
   create function identity.duty_roster_assignments_set(requested_roster_id uuid, requested_row_version bigint,
     requested_assignments jsonb, requested_idempotency_key text, requested_request_sha256 text)
   returns table (outcome text, replayed boolean, roster jsonb, changes jsonb, details jsonb)
@@ -993,6 +993,7 @@ begin
     kept_count integer := 0;
     now_value timestamptz := clock_timestamp();
     error_message text;
+    error_detail text;
     stored_event identity.duty_roster_events%rowtype;
   begin
     select * into actor from identity.workforce_actor('workforce.roster.read');
@@ -1155,12 +1156,16 @@ begin
         end loop;
         refusal_details := null;
       exception when object_not_in_prerequisite_state then
-        get stacked diagnostics error_message = message_text;
+        get stacked diagnostics error_message = message_text, error_detail = pg_exception_detail;
         refusal := case error_message when 'DUTY_ROSTER_OVERLAP' then 'overlap'
                                       when 'DUTY_ROSTER_REST_TOO_SHORT' then 'rest_too_short'
                                       when 'DUTY_ROSTER_MEMBER_ON_LEAVE' then 'member_on_leave' end;
         if refusal is null then
           raise;
+        end if;
+        -- The rule in force (the guard's DETAIL, in minutes), for the refusal's words.
+        if refusal = 'rest_too_short' and error_detail ~ '^[0-9]{1,4}$' then
+          refusal_details := refusal_details || jsonb_build_object('minRestHours', round(error_detail::integer / 60.0, 2));
         end if;
         added_count := 0;
         removed_count := 0;

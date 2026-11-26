@@ -175,6 +175,12 @@ const environmentSchema = z.object({
   // The "your records were opened" email (0095, D9): a code default, on. While
   // false the inbox notice is still written and no email is sent.
   RECORD_ACCESS_EMAIL_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
+  // ROS-1 (0199-0202): HR & Credentials' licence renewals (routes 1-5) and the duty roster, leave and department
+  // in-charges (routes 6-22). Off by default: the routes answer 503 HR_CREDENTIALS_NOT_AVAILABLE and
+  // DUTY_ROSTER_NOT_AVAILABLE. On in staging; in production only at the sealed demo and QA facilities until the
+  // owner's go-live (Q160 A). DUTY_ROSTER_ENABLED also needs NUR-1's clinical shifts set up at the facility.
+  HR_CREDENTIALS_ENABLED: booleanString,
+  DUTY_ROSTER_ENABLED: booleanString,
   // Delete my account (B5, migration 0096): a code default, on; production's
   // task definitions set no new key. While false, the patient routes answer
   // 404 as an older Identity does and the website hides the card; deletions

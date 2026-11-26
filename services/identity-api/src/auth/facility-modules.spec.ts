@@ -12,7 +12,8 @@ import { seededRolePermissions } from '../../test/role-matrix.fixtures';
 import { AuthController } from './auth.controller';
 import type { AuthService } from './auth.service';
 import type { AuthSessionAuditService } from './auth-session-audit.service';
-import { FACILITY_MODULE_RULES, facilityModules, withFacilityModules, type FacilityModuleKey } from './facility-modules';
+import { FACILITY_MODULE_RULES, facilityModuleAccess, facilityModules, withFacilityModules, type FacilityModuleKey }
+  from './facility-modules';
 import type { GoogleAuthenticationService } from './google-authentication.service';
 import type { TokenService } from './token.service';
 import type { TurnstileService } from './turnstile.service';
@@ -24,7 +25,9 @@ import type { WorkloadAuthService } from './workload-auth.service';
 const SEEDS = seededRolePermissions();
 const permissionsOf = (role: string): readonly string[] => SEEDS.get(role) ?? [];
 const KEYS: FacilityModuleKey[] = ['patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage', 'consultation',
-  'orders', 'lab', 'labResults', 'pharmacy', 'prescriptions', 'migrate', 'outreach', 'admin', 'audit'];
+  'orders', 'lab', 'labResults', 'pharmacy', 'prescriptions', 'migrate', 'outreach', 'admin', 'audit',
+  // ROS-1 (0201, Q-ROS-9 A): the duty roster and leave.
+  'dutyRoster'];
 const only = (...shown: FacilityModuleKey[]) => Object.fromEntries(KEYS.map((key) => [key, shown.includes(key)]));
 
 describe('facility areas for each seeded role (SX-1)', () => {
@@ -36,18 +39,19 @@ describe('facility areas for each seeded role (SX-1)', () => {
 
   it.each<[string, FacilityModuleKey[]]>([
     // 0136 (Q103 A, Q112 A): the front desk sees vitals (triage) and scans paper records into the file.
-    ['receptionist', ['patients', 'registration', 'accessRequests', 'triage', 'outreach']],
+    // ROS-1 (0201, Q-ROS-9 A): every staff role and the administrators see the duty roster and leave.
+    ['receptionist', ['patients', 'registration', 'accessRequests', 'triage', 'outreach', 'dutyRoster']],
     ['nurse', ['patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage', 'consultation', 'labResults',
-      'prescriptions', 'migrate', 'outreach']],
+      'prescriptions', 'migrate', 'outreach', 'dutyRoster']],
     // 0136 (Q103 A): doctors lose the leftover Outreach permissions.
     ['doctor', ['patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage', 'consultation', 'orders',
-      'labResults', 'prescriptions', 'migrate']],
+      'labResults', 'prescriptions', 'migrate', 'dutyRoster']],
     ['clinician', ['patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage', 'consultation', 'orders',
-      'labResults', 'prescriptions', 'migrate', 'outreach']],
-    ['lab', ['patients', 'accessRequests', 'lab', 'labResults']],
-    ['pharmacist', ['patients', 'accessRequests', 'pharmacy', 'prescriptions']],
-    ['admin', ['registration', 'labResults', 'outreach', 'admin', 'audit']],
-    ['org_admin', ['registration', 'outreach', 'admin', 'audit']],
+      'labResults', 'prescriptions', 'migrate', 'outreach', 'dutyRoster']],
+    ['lab', ['patients', 'accessRequests', 'lab', 'labResults', 'dutyRoster']],
+    ['pharmacist', ['patients', 'accessRequests', 'pharmacy', 'prescriptions', 'dutyRoster']],
+    ['admin', ['registration', 'labResults', 'outreach', 'admin', 'audit', 'dutyRoster']],
+    ['org_admin', ['registration', 'outreach', 'admin', 'audit', 'dutyRoster']],
     ['org_admin_awaiting_review', ['outreach', 'admin', 'audit']],
     ['outreach_organiser', ['outreach']],
     ['outreach_volunteer', ['outreach']],
@@ -81,7 +85,16 @@ describe('facility areas for each seeded role (SX-1)', () => {
   it('a membership holding two roles shows what either role shows', () => {
     const both = [...new Set([...permissionsOf('nurse'), ...permissionsOf('lab')])];
     expect(facilityModules(both)).toEqual(only('patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage',
-      'consultation', 'lab', 'labResults', 'prescriptions', 'migrate', 'outreach'));
+      'consultation', 'lab', 'labResults', 'prescriptions', 'migrate', 'outreach', 'dutyRoster'));
+  });
+
+  it('ROS-1 (0201): the duty roster is used in full by administrators, shown to every staff role, not to the cashier', () => {
+    const roster = FACILITY_MODULE_RULES.find((area) => area.key === 'dutyRoster')!;
+    expect([roster.label, roster.show, roster.act]).toEqual(['Duty roster and leave', ['workforce.roster.read'],
+      ['workforce.roster.read', 'workforce.roster.manage']]);
+    expect(['receptionist', 'nurse', 'clinician', 'doctor', 'lab', 'pharmacist', 'admin', 'org_admin', 'cashier',
+      'billing_officer', 'outreach_volunteer'].map((role) => facilityModuleAccess(permissionsOf(role), roster)))
+      .toEqual(['view', 'view', 'view', 'view', 'view', 'view', 'full', 'full', 'hidden', 'hidden', 'hidden']);
   });
 });
 

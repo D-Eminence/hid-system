@@ -18,10 +18,13 @@ export interface ProblemDetails {
   correlationId: string;
   code: string;
   errors?: readonly { field: string; messages: readonly string[] }[];
+  /** A refusal's own facts (ROS-1: the leave clash's dates, a roster save's first refused duty). */
+  details?: Readonly<Record<string, unknown>>;
 }
 
 /** Problem members an extension can never replace. */
-const STANDARD_MEMBERS = new Set(['type', 'title', 'status', 'detail', 'instance', 'correlationId', 'code', 'errors']);
+const STANDARD_MEMBERS = new Set(['type', 'title', 'status', 'detail', 'instance', 'correlationId', 'code', 'errors',
+  'details']);
 
 export class DomainProblem extends HttpException {
   /**
@@ -30,16 +33,24 @@ export class DomainProblem extends HttpException {
    * Strings, numbers, booleans and null; never a standard member.
    */
   public readonly extensions?: Readonly<Record<string, string | number | boolean | null>>;
+  /**
+   * The `details` member: a JSON object of a refusal's own facts (ROS-1: the
+   * dates of a leave clash, the first duty a roster save refused). Never a
+   * name, a Health ID or free text.
+   */
+  public readonly details?: Readonly<Record<string, unknown>>;
 
   constructor(
     status: number,
     public readonly code: string,
     detail: string,
     public readonly errors?: ProblemDetails['errors'],
-    options?: { extensions?: Readonly<Record<string, string | number | boolean | null>> },
+    options?: { extensions?: Readonly<Record<string, string | number | boolean | null>>;
+      details?: Readonly<Record<string, unknown>> },
   ) {
     super(detail, status);
     if (options?.extensions) this.extensions = options.extensions;
+    if (options?.details) this.details = options.details;
   }
 }
 
@@ -89,6 +100,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       correlationId: request.correlationId ?? 'unavailable',
       code,
       ...(domainProblem?.errors ? { errors: domainProblem.errors } : {}),
+      ...(domainProblem?.details ? { details: domainProblem.details } : {}),
       ...extensionMembers(domainProblem),
     };
 

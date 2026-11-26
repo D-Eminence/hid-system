@@ -21,12 +21,14 @@ import { StaffProfileModule } from './staff-profile/staff-profile.module';
 // 0132 (lane B): staff patient search and emergency search.
 import { PatientSearchModule } from './patient-search/patient-search.module';
 import { OpenPatientModule } from './open-patient/open-patient.module';
+// ROS-1 (0199-0202): licence renewals, leave, department in-charges and the duty roster.
+import { WorkforceModule } from './workforce/workforce.module';
 
 @Module({
   imports: [DatabaseModule, AuditModule, IntegrationModule, AuthModule, ConsentModule, IdentityModule, AdminModule, CommercialModule,
     PatientSafetyModule, PatientProfileModule, WebPushModule, OutreachOrganisersModule,
     StaffProfileModule,
-    PatientSearchModule, OpenPatientModule],
+    PatientSearchModule, OpenPatientModule, WorkforceModule],
   controllers: [HealthController],
   providers: [
     { provide: APP_GUARD, useExisting: SecurityGuard },

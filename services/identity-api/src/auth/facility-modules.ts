@@ -32,7 +32,8 @@ export type FacilityModuleKey =
   | 'migrate'
   | 'outreach'
   | 'admin'
-  | 'audit';
+  | 'audit'
+  | 'dutyRoster';
 
 export interface FacilityModuleRule {
   key: FacilityModuleKey;
@@ -81,6 +82,11 @@ export const FACILITY_MODULE_RULES: readonly FacilityModuleRule[] = Object.freez
   rule('admin', 'Facility profile and staff', ['workforce.manage'], ['organization.manage']),
   // The facility's audit trail (Akos's "View (audit)" cells).
   rule('audit', 'Audit trail', ['audit.read']),
+  // ROS-1 (0200-0202; Q245 A, Q-ROS-8 A, Q-ROS-9 A): the duty roster and leave (identity-api's duty-roster and leave
+  // routes). Shown with the published rosters; used in full by the administrators, who make every department's
+  // roster and name the in-charges. An in-charge named by an administrator sees it as view; the roster answers say
+  // which departments they edit (canEdit, inChargeOf). HR & Credentials stays in admin.
+  rule('dutyRoster', 'Duty roster and leave', ['workforce.roster.read'], ['workforce.roster.manage']),
 ]);
 
 /** How far a set of permission codes can use one area. */

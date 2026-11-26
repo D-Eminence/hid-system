@@ -283,6 +283,19 @@
         "facilityAdmin": "full"
       },
       "derived": "Not a row of Akos's table: taken from its \"View (audit)\" cells, which give the facility admin the audit trail. The audit trail is read only, so holding audit.read is its full use."
+    },
+    {
+      "label": "Duty roster",
+      "module": "dutyRoster",
+      "cells": {
+        "frontDesk": "view",
+        "nurse": "view",
+        "doctor": "view",
+        "lab": "view",
+        "pharmacy": "view",
+        "facilityAdmin": "full"
+      },
+      "derived": "Not a row of Akos's table: ROS-1 (migrations 0199-0202, owner sprint approval of 25 November 2026, owner decisions Q245 A and Q193 A, built at the recommended options Q-ROS-8 A and Q-ROS-9 A, not yet answered by the owner) adds the duty roster and leave; each cell is the contract's role table (docs/EHR_PLANNED_CONTRACT.md, ROS-1, Roles and access codes): every staff role sees the published rosters and asks for leave, the facility admin makes every department's roster and names the in-charges. An in-charge (named per department, not a role) edits that department's rosters from the view cell."
     }
   ],
   "todayRolePermissions": {
@@ -303,7 +316,9 @@
       "outreach.campaign.read",
       "outreach.campaign.write",
       "outreach.registration.read",
-      "outreach.registration.write"
+      "outreach.registration.write",
+      "workforce.leave.request",
+      "workforce.roster.read"
     ],
     "nurse": [
       "ehr.diagnosis.read",
@@ -342,7 +357,9 @@
       "pharmacy.dispensing.read",
       "pharmacy.import.read",
       "pharmacy.import.write",
-      "pharmacy.work-item.read"
+      "pharmacy.work-item.read",
+      "workforce.leave.request",
+      "workforce.roster.read"
     ],
     "doctor": [
       "ehr.diagnosis.read",
@@ -379,7 +396,9 @@
       "ocr.validation.write",
       "pharmacy.dispensing.read",
       "pharmacy.import.read",
-      "pharmacy.import.write"
+      "pharmacy.import.write",
+      "workforce.leave.request",
+      "workforce.roster.read"
     ],
     "clinician": [
       "ehr.diagnosis.read",
@@ -422,7 +441,9 @@
       "pharmacy.dispensing.read",
       "pharmacy.import.read",
       "pharmacy.import.write",
-      "pharmacy.work-item.read"
+      "pharmacy.work-item.read",
+      "workforce.leave.request",
+      "workforce.roster.read"
     ],
     "lab": [
       "ehr.document.read",
@@ -452,7 +473,9 @@
       "lab.specimen.receive",
       "lab.specimen.reject",
       "lab.work-item.accept",
-      "lab.work-item.read"
+      "lab.work-item.read",
+      "workforce.leave.request",
+      "workforce.roster.read"
     ],
     "pharmacist": [
       "ehr.encounter.read",
@@ -468,7 +491,9 @@
       "pharmacy.import.write",
       "pharmacy.order-route.receive",
       "pharmacy.work-item.accept",
-      "pharmacy.work-item.read"
+      "pharmacy.work-item.read",
+      "workforce.leave.request",
+      "workforce.roster.read"
     ],
     "admin": [
       "audit.read",
@@ -486,7 +511,10 @@
       "outreach.registration.write",
       "pharmacy.dispensing.read",
       "pharmacy.import.read",
-      "workforce.manage"
+      "workforce.leave.request",
+      "workforce.manage",
+      "workforce.roster.manage",
+      "workforce.roster.read"
     ],
     "org_admin": [
       "audit.read",
@@ -497,7 +525,10 @@
       "outreach.campaign.write",
       "outreach.registration.read",
       "outreach.registration.write",
-      "workforce.manage"
+      "workforce.leave.request",
+      "workforce.manage",
+      "workforce.roster.manage",
+      "workforce.roster.read"
     ],
     "work_list_reader": [
       "lab.work-item.read",
