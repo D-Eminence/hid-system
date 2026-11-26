@@ -687,4 +687,18 @@ describe('0155: HIV rapid-test kits and dotted initialisms (S4)', () => {
     expect(clean([diagnosis('Essential hypertension'), diagnosis('R.V. infarct'), diagnosis('Malaria (uncomplicated)')]))
       .toHaveLength(3);
   });
+
+  it('reads a facility item by its name only: a UUID code whose letters look like a test name does not hide it', () => {
+    // "cd41..." matched cd4 when the code was read as a name; lab-api, which checks names only, showed the same test.
+    const code = '7d1c3a52-cd41-4c1b-9a63-2b8e4f6a9c01';
+    expect([isSensitiveTest('Full blood count', code, 'HID-FACILITY'), isSensitiveTest('Full blood count', code, ' hid-facility ')])
+      .toEqual([false, false]);
+    const shown = (test: string) => record('lab_result', { test, codeSystem: 'HID-FACILITY', code, specimen: 'Blood',
+      resultType: 'text', textValue: 'Synthetic value', releasedAt: '2026-10-01T10:00:00.000Z', verification: 'released' },
+    { title: test });
+    expect(clean([shown('Full blood count')])).toHaveLength(1);
+    // Its name still hides it; a code that is not a UUID, or a UUID under another code system, is still read.
+    expect([isSensitiveTest('Determine HIV 1/2', code, 'HID-FACILITY'), isSensitiveTest('Full blood count', 'HIV-AB', 'HID-FACILITY'),
+      isSensitiveTest('Full blood count', code, 'LOCAL')]).toEqual([true, true, true]);
+  });
 });

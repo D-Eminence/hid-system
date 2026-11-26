@@ -166,8 +166,14 @@ const SENSITIVE_MEDICINE = jsPattern(SENSITIVE_MEDICINE_FRAGMENTS);
 const text = (value: unknown) => typeof value === 'string' ? value : '';
 const LOINC_CODES = new Set<string>(SENSITIVE_LOINC_CODES);
 const LOINC_SYSTEM = new RegExp(LOINC_SYSTEM_SQL_PATTERN, 'i');
+/**
+ * A facility's own item (0155): code system HID-FACILITY and the item's id, a UUID that means nothing. Only its name
+ * can hide it, as lab-api's copy checks names only; a UUID's letter groups ("cd41") are not read as a test's name.
+ */
+const FACILITY_ITEM_CODE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export function isSensitiveTest(name: unknown, code?: unknown, codeSystem?: unknown): boolean {
-  return SENSITIVE_TEST.test(text(name)) || SENSITIVE_TEST.test(text(code))
+  const facilityItemCode = text(codeSystem).trim().toUpperCase() === 'HID-FACILITY' && FACILITY_ITEM_CODE.test(text(code).trim());
+  return SENSITIVE_TEST.test(text(name)) || (!facilityItemCode && SENSITIVE_TEST.test(text(code)))
     || (LOINC_SYSTEM.test(text(codeSystem).trim()) && LOINC_CODES.has(text(code).trim()));
 }
 
