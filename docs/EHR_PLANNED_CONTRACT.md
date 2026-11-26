@@ -3760,6 +3760,7 @@ Audit:
 |---|---|---|
 | 400 | `VALIDATION_FAILED` | Names the field (for example, more than 100 pairs). |
 | 400 | `INVALID_CURSOR` | Pagination cursor is invalid. Load the list from the start. |
+| 400 | `BAD_REQUEST` | `:noticeId` in the Seen path is not a UUID (the house-wide UUID check on path ids). |
 | 400 | `PURPOSE_OF_USE_REQUIRED` | As today (direct care only). |
 | 403 | `PERMISSION_DENIED` | As today. |
 | 403 | `CONSENT_REQUIRED` | Ask the patient for access to see this result first. (Seen only.) |
