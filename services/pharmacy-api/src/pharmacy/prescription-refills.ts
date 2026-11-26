@@ -104,7 +104,14 @@ export const OPEN_REFILLS_QUERY = `select work_item_id::text as work_item_id
  * refills' savepoint, and undone by rolling back to it (the reader's only
  * write, its scan marker, is deleted before it returns, and the rollback would
  * undo it as well), so no other statement of the request runs under it.
- * Exported for the tests.
+ * The per-item reader (read(), 0154's pharmacy.work_item_refills) runs under
+ * the same limit, in its own savepoint, with the same fallback (the clinical
+ * owner's call on hid-system#258, 26 November 2026, after Rahman's review of
+ * 25 November): for a session that may read only on consent it asks the
+ * consent test about 3 times an item (about 0.8-0.9 s for 200 own items it
+ * may read; about 40 ms for a pharmacist on the own-work basis), so a slow
+ * read answers without refills (the work list says `refillsUnavailable`)
+ * instead of holding the request. Exported for the tests.
  */
 export const OPEN_REFILLS_TIMEOUT_MS = 3_000;
 export const OPEN_REFILLS_TIMEOUT_QUERY =
@@ -199,9 +206,10 @@ interface RefillsWorkRow {
  * be reversed. On (only once 0154 is applied and both staff front ends handle
  * more than one fill):
  * - a dispensing may carry `fillNumber`, the fills already recorded plus one;
- * - an own item answers `refills` (0154's reader, in a savepoint, at most 200
- *   ids a statement: a failure leaves `refills` out and keeps no item open for
- *   a refill, and never fails the answer, as 0125's details do), a
+ * - an own item answers `refills` (0154's reader, in a savepoint and under
+ *   the open refills' time limit, OPEN_REFILLS_TIMEOUT_MS, at most 200 ids a
+ *   statement: a failure leaves `refills` out and keeps no item open for a
+ *   refill, and never fails the answer, as 0125's details do), a
  *   route-backed item `refills` with none allowed and one fill at most;
  * - an own item with a refill open is open work on the list, of any age
  *   (0154's open refills, asked once before the rows are chosen, in a
@@ -228,8 +236,15 @@ export class PharmacyRefills {
 
   /**
    * 0154's reader for these own items, in batches of 200; nothing while off.
-   * undefined when the reader failed (a warning; the caller leaves `refills`
-   * out, and the work list says `refillsUnavailable`).
+   * As openForList (the clinical owner's call, 26 November 2026): in a
+   * savepoint, under the same time limit (OPEN_REFILLS_TIMEOUT_QUERY, each
+   * statement at most OPEN_REFILLS_TIMEOUT_MS), which rolling back to the
+   * savepoint undoes once the rows are read (the reader's scan marker is
+   * deleted before it returns; a failure's is undone with the savepoint), so
+   * the rest of the request keeps the pool's limit. undefined when the reader
+   * failed (the time limit, a refusal, a schema without the reader), logged
+   * as an error: the caller leaves `refills` out, and the work list says
+   * `refillsUnavailable`.
    */
   async read(client: PoolClient, workItemIds: readonly string[], correlationId: string):
   Promise<Map<string, WorkItemRefillsRow> | undefined> {
@@ -237,15 +252,19 @@ export class PharmacyRefills {
     if (!this.enabled || workItemIds.length === 0) return found;
     await client.query('savepoint pharmacy_work_item_refills');
     try {
+      await client.query(OPEN_REFILLS_TIMEOUT_QUERY);
       for (let start = 0; start < workItemIds.length; start += REFILLS_BATCH) {
         const result = await client.query<WorkItemRefillsRow>(WORK_ITEM_REFILLS_QUERY,
           [workItemIds.slice(start, start + REFILLS_BATCH)]);
         for (const row of result.rows) found.set(row.work_item_id, row);
       }
+      await client.query('rollback to savepoint pharmacy_work_item_refills');
       await client.query('release savepoint pharmacy_work_item_refills');
     } catch (error) {
       await client.query('rollback to savepoint pharmacy_work_item_refills');
-      this.logger.warn({ message: 'Refills on own work could not be read', sqlState: sqlState(error), correlationId });
+      await client.query('release savepoint pharmacy_work_item_refills');
+      this.logger.error({ message: 'Refills on own work could not be read; they are left out, and the work list says '
+        + 'refillsUnavailable', sqlState: sqlState(error), correlationId });
       return undefined;
     }
     return found;
@@ -337,12 +356,13 @@ export function dispensingDigestInput(input: CreateDispensingInput): object {
 /**
  * 409: the fill asked for is not the next one (another fill was recorded
  * since the item was read: a second press, or another member). `fillsRecorded`
- * says how many there are now.
+ * says how many there are now (left out when the database's count is not a
+ * whole number).
  */
-export function fillNumberChanged(fillsRecorded: number): DomainProblem {
+export function fillNumberChanged(fillsRecorded?: number): DomainProblem {
   return new DomainProblem(409, 'PHARMACY_FILL_NUMBER_CHANGED',
     'Another fill was recorded on this prescription since it was read. Reload it before recording a fill.',
-    undefined, { extensions: { fillsRecorded } });
+    undefined, fillsRecorded === undefined ? undefined : { extensions: { fillsRecorded } });
 }
 
 /** 409: no further fill (0154's NO_REFILLS_LEFT), or an item from another facility's order route. */
@@ -408,8 +428,14 @@ export function dispensingKeyConflict(): DomainProblem {
 }
 
 /**
- * 0154's three refill refusals (23514, by message), answered with their own
- * codes; anything else is undefined (the caller's mapping goes on).
+ * 0154's refill refusals (23514, by message), answered with their own codes;
+ * anything else is undefined (the caller's mapping goes on). A refill whose
+ * number is not the next (REFILL_NOT_NEXT_FILL, DETAIL the fills recorded:
+ * the review of 25 November 2026) is PHARMACY_FILL_NUMBER_CHANGED, as this
+ * service's own check answers it; this service sends fills so far + 1 in the
+ * transaction that counted them, so it meets that refusal only if the
+ * database counts fills it cannot see. REFILL_DISPENSED_IN_FUTURE is not
+ * mapped: this service never names dispensed_at.
  */
 export function refillRefusal(error: unknown): DomainProblem | undefined {
   const { code, message, detail } = (typeof error === 'object' && error !== null ? error : {}) as { code?: unknown;
@@ -418,6 +444,9 @@ export function refillRefusal(error: unknown): DomainProblem | undefined {
   if (message === 'NO_REFILLS_LEFT') return noRefillsLeft();
   if (message === 'REFILL_PRESCRIPTION_ENDED') return refillPrescriptionEnded(typeof detail === 'string' ? detail : undefined);
   if (message === 'REFILL_TOO_SOON') return refillTooSoon(typeof detail === 'string' ? detail : undefined);
+  if (message === 'REFILL_NOT_NEXT_FILL') {
+    return fillNumberChanged(typeof detail === 'string' && /^\d{1,2}$/.test(detail) ? Number(detail) : undefined);
+  }
   return undefined;
 }
 

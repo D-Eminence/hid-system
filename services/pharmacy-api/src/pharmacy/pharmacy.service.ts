@@ -143,7 +143,9 @@ const WORK_LIST_ORDER = `order by o.open_work desc,o.refill_open asc,case when o
  * asks pharmacy.open_refill_work_items once before this query, under its own
  * 3-second limit (OPEN_REFILLS_TIMEOUT_MS, kept as a guard), and
  * pharmacy.work_item_refills once after it, for the own rows shown (at most
- * 200). Both read ehr.prescriptions under 0154's refill scan marker (the
+ * 200), under the same limit (a session on consent alone pays the consent
+ * test about 3 times an item there: about 0.8-0.9 s for 200 own items it may
+ * read). Both read ehr.prescriptions under 0154's refill scan marker (the
  * clinical owner's D8, 24 November 2026), so that table's read policies no
  * longer run per row under a NOBYPASSRLS owner (about 10 ms a row before).
  * The open refills read the facility's prescriptions that allow refills and
@@ -614,10 +616,9 @@ export class PharmacyService {
    * filled after them), and those are open work of any age, after the items
    * waiting for their first fill; each own row then carries `refills` (0154's
    * per-item reader, asked once, for the own rows shown), and each row
-   * `dispensing.fillNumber` and `lastFilledAt` once dispensed. The open
-   * refills run under their own time limit (OPEN_REFILLS_TIMEOUT_MS, a
-   * guard), and past it the list answers without them rather than not at
-   * all. When either reader fails, the answer says `refillsUnavailable: true`
+   * `dispensing.fillNumber` and `lastFilledAt` once dispensed. Both readers
+   * run under their own time limit (OPEN_REFILLS_TIMEOUT_MS, a guard), and
+   * past it the list answers without them rather than not at all. When either reader fails, the answer says `refillsUnavailable: true`
    * (logged as an error), so a due refill missing from the open work is shown
    * as such ("Refills could not be loaded"). Both readers write 0154's refill
    * scan marker (D8), so this transaction is READ COMMITTED and read-write
@@ -947,7 +948,9 @@ export class PharmacyService {
    *   replays fill 1 as before;
    * - the fill asked for must be the fills recorded plus one: else 409
    *   PHARMACY_WORK_ITEM_ALREADY_DISPENSED for a first fill, and
-   *   PHARMACY_FILL_NUMBER_CHANGED with `fillsRecorded` for a refill;
+   *   PHARMACY_FILL_NUMBER_CHANGED with `fillsRecorded` for a refill (the
+   *   database refuses such a refill too, 0154's REFILL_NOT_NEXT_FILL, which
+   *   is answered the same way);
    * - a refill while refills are off: 409 PHARMACY_REFILLS_NOT_AVAILABLE (no
    *   HTTP body can ask it then); on an item from another facility's order
    *   route: 409 PHARMACY_NO_REFILLS_LEFT (one fill);
