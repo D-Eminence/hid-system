@@ -177,8 +177,10 @@ function permissionDenied(): DomainProblem {
   return new DomainProblem(403, 'PERMISSION_DENIED', 'Required permission is missing');
 }
 
-function databaseError(error: unknown): { code?: unknown; message?: unknown; constraint?: unknown } {
-  return typeof error === 'object' && error !== null ? error as { code?: unknown; message?: unknown; constraint?: unknown } : {};
+interface DatabaseErrorFields { code?: unknown; message?: unknown; constraint?: unknown; schema?: unknown; table?: unknown }
+
+function databaseError(error: unknown): DatabaseErrorFields {
+  return typeof error === 'object' && error !== null ? error as DatabaseErrorFields : {};
 }
 
 /**
@@ -186,18 +188,22 @@ function databaseError(error: unknown): { code?: unknown; message?: unknown; con
  * catalog_facility_items_active_name_uq) is FACILITY_ITEM_EXISTS; the guard's
  * 501st active item (P0001) is FACILITY_ITEM_LIMIT; row security refusing a
  * write (42501: the database no longer finds the permission the session
- * named) is the guards' PERMISSION_DENIED; a table check the request's
- * validation should have caught (23514) is VALIDATION_FAILED. A schema
- * without 0155 (42P01, 42883) and any other failure is 503
+ * named) is the guards' PERMISSION_DENIED; a check of ehr.catalog_facility_items
+ * or the guard's route check (23514), which the request's validation should
+ * have caught, is VALIDATION_FAILED. A schema without 0155 (42P01, 42883) and
+ * any other failure, another table's check included (an audit row's), is 503
  * CATALOG_UNAVAILABLE, logged with its SQLSTATE only (never a name).
  */
 export function facilityItemProblem(error: unknown, logger: Logger): DomainProblem {
   if (error instanceof DomainProblem) return error;
-  const { code, message, constraint } = databaseError(error);
+  const { code, message, constraint, schema, table } = databaseError(error);
   if (code === '23505' && constraint === 'catalog_facility_items_active_name_uq') return facilityItemExists();
   if (code === 'P0001' && message === 'FACILITY_ITEM_LIMIT') return facilityItemLimit();
   if (code === '42501') return permissionDenied();
-  if (code === '23514') return new DomainProblem(400, 'VALIDATION_FAILED', 'One or more request fields are invalid.');
+  if (code === '23514' && ((schema === 'ehr' && table === 'catalog_facility_items')
+    || message === 'FACILITY_ITEM_ROUTES_INVALID')) {
+    return new DomainProblem(400, 'VALIDATION_FAILED', 'One or more request fields are invalid.');
+  }
   if (code !== '42P01' && code !== '42883') {
     logger.warn(`Facility items failed (${typeof code === 'string' ? code : 'no database code'})`);
   }

@@ -339,7 +339,11 @@ describe('ORD-7 facility items (0155): adding an item', () => {
       'This facility already has 500 items of this kind. Withdraw one first.'],
     ['row security refusing the write (42501)', databaseError('42501'), 403, 'PERMISSION_DENIED',
       'Required permission is missing'],
-    ['a table check (23514)', databaseError('23514'), 400, 'VALIDATION_FAILED', 'One or more request fields are invalid.'],
+    ['a check of the table (23514)', databaseError('23514', { schema: 'ehr', table: 'catalog_facility_items',
+      constraint: 'catalog_facility_items_display_check' }), 400, 'VALIDATION_FAILED',
+    'One or more request fields are invalid.'],
+    ['the guard\'s route check (23514)', databaseError('23514', { message: 'FACILITY_ITEM_ROUTES_INVALID' }), 400,
+      'VALIDATION_FAILED', 'One or more request fields are invalid.'],
   ])('%s is %s %s', async (_name, error, status, code, message) => {
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const { service, audits } = fakeStaff({ [FACILITY_ITEM_BY_KEY_SQL]: [], [FACILITY_ITEM_INSERT_SQL]: error });
@@ -350,7 +354,7 @@ describe('ORD-7 facility items (0155): adding an item', () => {
     warn.mockRestore();
   });
 
-  it.each(['42P01', '42883', '57014', '23503'])('%s is 503 CATALOG_UNAVAILABLE; only a failure other than a missing 0155 '
+  it.each(['42P01', '42883', '57014', '23503', '23514'])('%s is 503 CATALOG_UNAVAILABLE; only a failure other than a missing 0155 '
     + 'is logged, by its SQLSTATE, never the name', async (code) => {
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const { service } = fakeStaff({ [FACILITY_ITEM_BY_KEY_SQL]: databaseError(code) });
@@ -358,6 +362,16 @@ describe('ORD-7 facility items (0155): adding an item', () => {
     expect([problem.getStatus(), problem.code]).toEqual([503, 'CATALOG_UNAVAILABLE']);
     const logged = warn.mock.calls.map((call) => String(call[0]));
     expect(logged).toEqual(code === '42P01' || code === '42883' ? [] : [`Facility items failed (${code})`]);
+    warn.mockRestore();
+  });
+
+  it('another table\'s check (23514 on audit.events) is the server\'s: 503 CATALOG_UNAVAILABLE, logged, not 400', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const { service } = fakeStaff({ [FACILITY_ITEM_BY_KEY_SQL]: [], [FACILITY_ITEM_INSERT_SQL]: [medicineRow()] },
+      databaseError('23514', { schema: 'audit', table: 'events', constraint: 'events_correlation_id_check' }));
+    const problem = await problemOf(service.create(caller, input(), key));
+    expect([problem.getStatus(), problem.code]).toEqual([503, 'CATALOG_UNAVAILABLE']);
+    expect(warn.mock.calls.map((call) => String(call[0]))).toEqual(['Facility items failed (23514)']);
     warn.mockRestore();
   });
 
