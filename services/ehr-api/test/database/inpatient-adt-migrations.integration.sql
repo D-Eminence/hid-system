@@ -16,20 +16,26 @@
 --      nothing;
 --   3. 0173 taken away for this transaction (its rows, codes, functions, column
 --      and CHECKs, and 0131's three bodies put back): a half state, a changed
---      permission check and a changed grant-method CHECK refuse with 55000 and
---      apply nothing; then 0173 applies (seven codes, sixteen role rows, sixteen
+--      permission check, a notice-kind CHECK without one of 0131's values and a
+--      grant-method CHECK that already holds ward_stay refuse with 55000 and
+--      apply nothing; another lane's extra method and kind are kept; then 0173 applies (seven codes, sixteen role rows, sixteen
 --      audit rows), taking no lock beyond its header's and every lock its
 --      header declares;
---   4. 0172 taken away too (BILL-1's five bodies and four CHECKs put back): a
---      half state, a changed pinned body and a database without BILL-1 refuse;
---      a new admission function that names the commercial schema makes 0172's
---      scan refuse; then 0172 applies within its header's locks;
+--   4. 0172 taken away too (BILL-1's four bodies at claude/sprint-billing-backend
+--      bd427a88 and its CHECKs put back): a half state, a changed pinned body
+--      (a replaced one, or a BILL-1 helper the bodies call), BILL-1's changed
+--      money-over CHECK, a source CHECK without one of BILL-1's values and a
+--      database without BILL-1 refuse; another lane's extra source value is
+--      kept; a new admission function that names the commercial schema makes
+--      0172's scan refuse; then 0172 applies within its header's locks;
 --   5. 0171 taken away too (0170's three parts and 0168's two CHECKs put back):
---      an ED CHECK not as 0168 left it, a changed 0170 part and a half state
---      refuse; then 0171 applies within its header's locks;
+--      an ED CHECK without one of 0168's values, 0168's changed waiting-list
+--      guard, a changed 0170 part and a half state refuse; another lane's extra
+--      closed_via value is kept; then 0171 applies within its header's locks;
 --   6. all four taken away: 0171 without 0170 refuses; a half state of 0170
---      refuses; then 0170, 0171, 0172 and 0173 apply in order, each within its
---      header's locks.
+--      refuses; a runtime that would get the new histories' sequences (default
+--      privileges) makes 0170's post-check refuse; then 0170, 0171, 0172 and
+--      0173 apply in order, each within its header's locks.
 -- Synthetic values only.
 set plpgsql.variable_conflict = error;
 
@@ -518,6 +524,12 @@ begin
   alter table commercial.payments drop column kind;
   alter table commercial.number_counters drop constraint number_counters_kind_check,
     add constraint number_counters_kind_check check (kind in ('bill', 'receipt'));
+  -- BILL-1's money-over CHECK (dropped with credit_kobo), as BILL-1 wrote it.
+  alter table commercial.bills add constraint bills_over_ck check (
+    refund_due_kobo = least(greatest(paid_kobo + pending_check_kobo + waived_kobo + hmo_covered_kobo - total_kobo, 0),
+      paid_kobo + pending_check_kobo)
+    and cover_over_kobo = greatest(paid_kobo + pending_check_kobo + waived_kobo + hmo_covered_kobo - total_kobo, 0)
+      - refund_due_kobo);
   execute $orig$create or replace function commercial.bill_recompute(requested_bill uuid)
 returns void
 language plpgsql
@@ -527,23 +539,31 @@ declare
   sums record;
   bill commercial.bills%rowtype;
   due bigint;
+  over bigint;
+  refund bigint;
   status_value text;
 begin
   select * into sums from commercial.bill_sums(requested_bill);
   select bill_row.* into bill from commercial.bills bill_row where bill_row.id = requested_bill;
   due := greatest(sums.total_kobo - sums.paid_kobo - sums.pending_check_kobo - sums.waived_kobo - sums.hmo_covered_kobo, 0);
+  -- Collected beyond the total (a dispensing reversal took a line off): the patient's money is given back first.
+  over := greatest(sums.paid_kobo + sums.pending_check_kobo + sums.waived_kobo + sums.hmo_covered_kobo - sums.total_kobo, 0);
+  refund := least(over, sums.paid_kobo + sums.pending_check_kobo);
   status_value := case
     when bill.voided_at is not null then 'void'
     when sums.all_lines > 0 and sums.live_lines = 0 and sums.paid_kobo + sums.pending_check_kobo + sums.waived_kobo
          + sums.hmo_covered_kobo = 0 then 'void'
     when bill.deferred_reason is not null and due > 0 then 'deferred'
-    when due = 0 and sums.total_kobo > 0 then 'paid'
+    -- Nothing left to pay on live lines is paid, free lines too (a sale of
+    -- free programme medicines has nothing to take and is handed over); so
+    -- is a bill whose lines a reversal took off after money was taken.
+    when due = 0 and (sums.live_lines > 0 or over > 0) then 'paid'
     when sums.paid_kobo + sums.pending_check_kobo + sums.waived_kobo + sums.hmo_covered_kobo > 0 then 'part_paid'
     else 'unpaid' end;
   update commercial.bills bill_row
      set total_kobo = sums.total_kobo, paid_kobo = sums.paid_kobo, pending_check_kobo = sums.pending_check_kobo,
          waived_kobo = sums.waived_kobo, hmo_covered_kobo = sums.hmo_covered_kobo, due_kobo = due,
-         status = status_value, row_version = bill_row.row_version + 1, updated_at = clock_timestamp()
+         refund_due_kobo = refund, cover_over_kobo = over - refund, status = status_value, row_version = bill_row.row_version + 1, updated_at = clock_timestamp()
    where bill_row.id = requested_bill;
 end
 $$
@@ -558,7 +578,13 @@ as $$
          = (sums.total_kobo, sums.paid_kobo, sums.pending_check_kobo, sums.waived_kobo, sums.hmo_covered_kobo)
      and bill.due_kobo = greatest(sums.total_kobo - sums.paid_kobo - sums.pending_check_kobo - sums.waived_kobo
                                   - sums.hmo_covered_kobo, 0)
-     and bill.paid_kobo + bill.pending_check_kobo + bill.waived_kobo + bill.hmo_covered_kobo <= bill.total_kobo
+     and (bill.paid_kobo + bill.pending_check_kobo + bill.waived_kobo + bill.hmo_covered_kobo <= bill.total_kobo
+          or exists (select 1 from commercial.bill_lines line where line.bill_id = bill.id and line.cancelled
+                      and line.dispensing_reversed_at is not null))
+     and bill.refund_due_kobo = least(greatest(sums.paid_kobo + sums.pending_check_kobo + sums.waived_kobo
+           + sums.hmo_covered_kobo - sums.total_kobo, 0), sums.paid_kobo + sums.pending_check_kobo)
+     and bill.cover_over_kobo = greatest(sums.paid_kobo + sums.pending_check_kobo + sums.waived_kobo
+           + sums.hmo_covered_kobo - sums.total_kobo, 0) - bill.refund_due_kobo
     from commercial.bills bill, commercial.bill_sums(bill.id) sums
    where bill.id = requested_bill
 $$
@@ -572,7 +598,8 @@ as $$
   select jsonb_build_object(
     'id', bill.id, 'number', bill.number, 'source', bill.source, 'status', bill.status, 'counter', bill.counter,
     'patient', case when bill.patient_id is null then null else commercial.patient_card(bill.patient_id) end,
-    'displayName', case when bill.patient_id is null then coalesce(bill.anonymous_name, 'Counter sale')
+    'displayName', case when bill.patient_id is null
+                        then coalesce(bill.anonymous_name, case when bill.counter then 'Counter sale' else 'Walk-in' end)
                         else (select patient.full_name from identity.patients patient where patient.id = bill.patient_id) end,
     'visit', case when bill.visit_queue_entry_id is null then null
                   else (select jsonb_build_object('visitQueueEntryId', entry.id, 'queueDay', entry.queue_day)
@@ -580,11 +607,13 @@ as $$
     'lines', coalesce((select jsonb_agg(jsonb_build_object('id', line.id, 'catalogueItemId', line.catalogue_item_id,
                 'name', line.name, 'kind', line.kind, 'quantity', line.quantity, 'unitKobo', line.unit_kobo,
                 'totalKobo', line.total_kobo, 'workItemId', line.work_item_id, 'origin', line.origin,
-                'checkQuantity', line.check_quantity, 'note', line.note, 'cancelled', line.cancelled)
+                'checkQuantity', line.check_quantity, 'note', line.note, 'cancelled', line.cancelled,
+                'dispensingReversed', line.dispensing_reversed_at is not null)
                 order by line.created_at, line.id)
               from commercial.bill_lines line where line.bill_id = bill.id), '[]'::jsonb),
     'totalKobo', bill.total_kobo, 'paidKobo', bill.paid_kobo, 'waivedKobo', bill.waived_kobo,
     'hmoCoveredKobo', bill.hmo_covered_kobo, 'pendingCheckKobo', bill.pending_check_kobo, 'dueKobo', bill.due_kobo,
+    'refundDueKobo', bill.refund_due_kobo, 'coverOverKobo', bill.cover_over_kobo,
     'payments', coalesce((select jsonb_agg(jsonb_build_object('id', payment.id, 'method', payment.method,
                 'amountKobo', payment.amount_kobo, 'reference', payment.reference, 'hmoId', null,
                 'waivedBy', case when payment.method = 'waiver' then commercial.member_name(payment.received_by_membership_id) end,
@@ -744,7 +773,8 @@ begin
   if method_value <> 'hmo' then
     begin
       select * into scope_row from commercial.day_scope(actor.facility_id, actor.membership_id, till_value);
-      day_id := commercial.open_day(actor.facility_id, scope_row.scope, scope_row.membership_id, scope_row.till_id);
+      day_id := commercial.open_day_locked(actor.facility_id, scope_row.scope, scope_row.membership_id,
+        scope_row.till_id);
     exception when sqlstate 'HB400' then
       if method_value <> 'waiver' then raise; end if;
     end;
@@ -768,7 +798,9 @@ begin
     return commercial.bill_json(bill.id);
   end if;
 
-  receipt := 'R-' || year_value::text || '-' || lpad(commercial.next_number(actor.facility_id, 'receipt', year_value)::text, 6, '0');
+  -- Six digits at least, all of them past 999999 (never cut to six, which would repeat a number).
+  receipt := 'R-' || year_value::text || '-' || (select lpad(numbered.n::text, greatest(6, length(numbered.n::text)), '0')
+    from (select commercial.next_number(actor.facility_id, 'receipt', year_value) as n) numbered);
   insert into commercial.payments (facility_id, bill_id, method, amount_kobo, reference, reason, status, receipt_number,
     till_day_id, paper_receipt_number, received_by_membership_id, idempotency_key, request_sha256)
   values (actor.facility_id, bill.id, method_value, amount, reference_value,
@@ -964,12 +996,35 @@ select pg_temp.expect('3c the permission check changed: refused, nothing applied
   '55000 0173: these bodies are not as 0001-0151 left them: auth.membership_has_permission(text,uuid,uuid,text) | 0 codes, 0 role rows, 0 audit rows, 0 ward-stay functions',
   pg_temp.answer('0173', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0173());
 alter table identity.record_access_notices drop constraint record_access_notices_access_kind_check,
-  add constraint record_access_notices_access_kind_check check (access_kind in ('standard', 'share', 'pin', 'own_facility', 'other'));
+  add constraint record_access_notices_access_kind_check check (access_kind in ('standard', 'share', 'own_facility'));
 :run0173
 rollback to savepoint s173b;
-select pg_temp.expect('3d a notice kind CHECK not as 0131 left it: refused, nothing applied',
-  '55000 0173: the grant method or notice kind CHECK is not as 0131 left it; nothing applied | 0 codes, 0 role rows, 0 audit rows, 0 ward-stay functions',
+select pg_temp.expect('3d a notice kind CHECK without one of 0131''s values: refused, nothing applied',
+  '55000 0173: the grant method or notice kind CHECK is not as 0131 left it (with any value another lane added); nothing applied | 0 codes, 0 role rows, 0 audit rows, 0 ward-stay functions',
   pg_temp.answer('0173', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0173());
+alter table identity.consent_grants drop constraint consent_grants_authorization_method_ck,
+  add constraint consent_grants_authorization_method_ck
+    check (authorization_method is null or authorization_method in ('patient_access_pin', 'own_facility', 'ward_stay'));
+:run0173
+rollback to savepoint s173b;
+select pg_temp.expect('3d2 a grant method CHECK that already holds ward_stay: refused, nothing applied',
+  '55000 0173: the grant method or notice kind CHECK is not as 0131 left it (with any value another lane added); nothing applied | 0 codes, 0 role rows, 0 audit rows, 0 ward-stay functions',
+  pg_temp.answer('0173', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0173());
+alter table identity.consent_grants drop constraint consent_grants_authorization_method_ck,
+  add constraint consent_grants_authorization_method_ck
+    check (authorization_method is null or authorization_method in ('patient_access_pin', 'own_facility', 'referral'));
+alter table identity.record_access_notices drop constraint record_access_notices_access_kind_check,
+  add constraint record_access_notices_access_kind_check
+    check (access_kind in ('standard', 'share', 'pin', 'own_facility', 'referral'));
+:run0173
+select pg_temp.expect('3d3 another lane''s extra method and kind: 0173 applies and keeps them',
+  'applied | CHECK (((authorization_method IS NULL) OR (authorization_method = ANY (ARRAY[''patient_access_pin''::text, ''own_facility''::text, ''referral''::text, ''ward_stay''::text])))) | CHECK ((access_kind = ANY (ARRAY[''standard''::text, ''share''::text, ''pin''::text, ''own_facility''::text, ''referral''::text, ''ward_stay''::text])))',
+  pg_temp.answer('0173', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE')
+  || ' | ' || (select pg_get_constraintdef(oid) from pg_constraint where conrelid = 'identity.consent_grants'::regclass
+                and conname = 'consent_grants_authorization_method_ck')
+  || ' | ' || (select pg_get_constraintdef(oid) from pg_constraint where conrelid = 'identity.record_access_notices'::regclass
+                and conname = 'record_access_notices_access_kind_check'));
+rollback to savepoint s173b;
 delete from locks_seen;
 select pg_temp.record_locks('before');
 :run0173
@@ -1042,6 +1097,35 @@ rollback to savepoint s172b;
 select pg_temp.expect('4c BILL-1''s bill_for_work changed: refused',
   '55000 0172: these bodies are not as BILL-1 left them: commercial.bill_for_work(uuid,uuid,text)',
   pg_temp.answer('0172', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE'));
+do $$
+begin
+  execute regexp_replace(pg_get_functiondef('commercial.open_day_locked(uuid,text,uuid,uuid)'::regprocedure), '\mselect\M',
+    'select /* changed */');
+end $$;
+:run0172
+rollback to savepoint s172b;
+select pg_temp.expect('4c2 a BILL-1 helper the replaced bodies call changed (the till day lock): refused',
+  '55000 0172: these bodies are not as BILL-1 left them: commercial.open_day_locked(uuid,text,uuid,uuid)',
+  pg_temp.answer('0172', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE'));
+alter table commercial.bills drop constraint bills_over_ck, add constraint bills_over_ck check (refund_due_kobo >= 0);
+:run0172
+rollback to savepoint s172b;
+select pg_temp.expect('4c3 BILL-1''s money-over CHECK changed: refused',
+  '55000 0172: these CHECKs are not as BILL-1 left them: bills_over_ck',
+  pg_temp.answer('0172', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE'));
+alter table commercial.bills drop constraint bills_source_check, add constraint bills_source_check check (source in ('visit', 'pharmacy'));
+:run0172
+rollback to savepoint s172b;
+select pg_temp.expect('4c4 a source CHECK without one of BILL-1''s values: refused',
+  '55000 0172: this CHECK is not as BILL-1 left it (with any value another lane added): commercial.bills.bills_source_check',
+  pg_temp.answer('0172', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE'));
+alter table commercial.bills drop constraint bills_source_check,
+  add constraint bills_source_check check (source in ('visit', 'pharmacy', 'lab', 'radiology'));
+:run0172
+select pg_temp.expect('4c5 another lane''s extra source value: 0172 applies and keeps it',
+  'applied | 2 tables, 3 triggers, sources visit, pharmacy, lab, radiology, admission',
+  pg_temp.answer('0172', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0172());
+rollback to savepoint s172b;
 alter table commercial.till_days rename to till_days_suite;
 :run0172
 rollback to savepoint s172b;
@@ -1073,11 +1157,29 @@ select pg_temp.expect('5a the state before 0171', '0 tables, 0 functions, 0 poli
 savepoint s171b;
 alter table ehr.ed_attendances drop constraint ed_attendances_closed_via_check,
   add constraint ed_attendances_closed_via_check
-    check (closed_via is null or closed_via in ('board', 'disposition', 'cancel', 'waiting_list', 'transfer'));
+    check (closed_via is null or closed_via in ('board', 'disposition', 'waiting_list'));
 :run0171
 rollback to savepoint s171b;
-select pg_temp.expect('5b the ED record''s CHECK not as 0168 left it: refused',
-  '55000 0171: the ED record''s closed_via or history kind CHECK is not as 0168 left it; nothing applied',
+select pg_temp.expect('5b the ED record''s CHECK without one of 0168''s values: refused',
+  '55000 0171: the ED record''s closed_via or history kind CHECK is not as 0168 left it (with any value another lane added); nothing applied',
+  pg_temp.answer('0171', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE'));
+alter table ehr.ed_attendances drop constraint ed_attendances_closed_via_check,
+  add constraint ed_attendances_closed_via_check
+    check (closed_via is null or closed_via in ('board', 'disposition', 'cancel', 'waiting_list', 'transfer'));
+:run0171
+select pg_temp.expect('5b2 another lane''s extra closed_via value: 0171 applies and keeps it',
+  'applied | 7 tables, 30 functions, 3 policies, closed via board, disposition, cancel, waiting_list, transfer, admission',
+  pg_temp.answer('0171', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0171());
+rollback to savepoint s171b;
+do $$
+begin
+  execute regexp_replace(pg_get_functiondef('ehr.visit_queue_ed_guard()'::regprocedure), '\mbegin\M',
+    'begin /* changed */');
+end $$;
+:run0171
+rollback to savepoint s171b;
+select pg_temp.expect('5b3 0168''s waiting-list guard changed (the board''s marker): refused',
+  '55000 0171: these bodies are not as 0001-0170 left them: ehr.visit_queue_ed_guard()',
   pg_temp.answer('0171', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE'));
 do $$
 begin
@@ -1125,6 +1227,12 @@ create table ehr.inpatient_switches (key text);
 rollback to savepoint s170b;
 select pg_temp.expect('6d a half state of 0170 is refused',
   '55000 0170: the schema is not in the reviewed state (part of 0170 is there); nothing applied',
+  pg_temp.answer('0170', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE'));
+alter default privileges in schema ehr grant usage, select on sequences to hid_ehr_runtime;
+:run0170
+rollback to savepoint s170b;
+select pg_temp.expect('6d2 a runtime would get the new histories'' sequences: 0170''s post-check refuses',
+  '55000 0170: post-check failed (a sequence of the new tables is granted to a role or is not the owner''s)',
   pg_temp.answer('0170', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE'));
 delete from locks_seen;
 select pg_temp.record_locks('before');
