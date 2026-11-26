@@ -2065,3 +2065,85 @@ grant execute on function ehr.record_recent_diagnosis(text, text, text), ehr.rec
   to hid_ehr_runtime, hid_schema_test_runtime;
 revoke all on function ehr.record_recent_diagnosis(text, text, text), ehr.recent_diagnoses(integer) from public;
 revoke all on ehr.clinician_recent_diagnoses from public;
+
+-- Referrals between facilities (0191 and 0192, REF-1 of Release D; owner
+-- decisions Q261-Q266 A of 25 November 2026, and Q-REF-7 to Q-REF-15 at their
+-- recommended option), exactly as 0191 and 0192 grant and revoke them: the
+-- referring facility's steps (the agreement text, send, the sent list,
+-- withdraw, the letter), the receiving facility's (read, incoming, received,
+-- accept, decline, expected arrivals, arrive, complete), the patient page's
+-- list and the patient's own list and withdraw to the EHR runtime only; the
+-- directory search for referrals and support's lookup and listing lever to the
+-- Identity runtime only. No privilege for any runtime on the six REF-1 tables
+-- (row-level security forced, owner-only policies: only these functions read
+-- and write them, as their owner), and none on the helpers (limits, times, the
+-- caller, the control, the effective state, the cards, the package, the
+-- history, the package freeze, the lab snapshot, audit, idempotency, the
+-- patient's notice, the trigger functions, the listing and eligibility). 0193
+-- (who holds the four codes) adds no grant.
+grant execute on function
+  ehr.referral_attestation_text(text),
+  ehr.referral_send(uuid, uuid, text, uuid, text, text, text, text, text, text, text, uuid[], uuid[], uuid[], uuid[],
+    uuid[], text, boolean, text, text),
+  ehr.referral_sent_list(text[], integer, text),
+  ehr.referral_withdraw(uuid, bigint, text, text, text, text),
+  ehr.referral_letter(uuid),
+  ehr.referral_read(uuid),
+  ehr.referral_patient_list(uuid, uuid),
+  ehr.referral_incoming_list(),
+  ehr.referral_received_list(text[], integer, text),
+  ehr.referral_accept(uuid, bigint, text, text, text),
+  ehr.referral_decline(uuid, bigint, text, text, text, text),
+  ehr.referral_expected_list(),
+  ehr.referral_arrive(uuid, bigint, text, uuid, text, text),
+  ehr.referral_complete(uuid, bigint, text, text, text, text),
+  ehr.referral_my_list(),
+  ehr.referral_my_withdraw(uuid, bigint) to hid_ehr_runtime;
+grant execute on function
+  identity.search_referral_destinations(text),
+  identity.admin_find_referrals(text, text),
+  identity.admin_referral_destination(uuid),
+  identity.admin_set_referral_destination(uuid, boolean, text) to hid_identity_runtime;
+revoke all on function
+  ehr.referral_attestation_text(text),
+  ehr.referral_send(uuid, uuid, text, uuid, text, text, text, text, text, text, text, uuid[], uuid[], uuid[], uuid[],
+    uuid[], text, boolean, text, text),
+  ehr.referral_sent_list(text[], integer, text),
+  ehr.referral_withdraw(uuid, bigint, text, text, text, text),
+  ehr.referral_letter(uuid),
+  ehr.referral_read(uuid),
+  ehr.referral_patient_list(uuid, uuid),
+  ehr.referral_incoming_list(),
+  ehr.referral_received_list(text[], integer, text),
+  ehr.referral_accept(uuid, bigint, text, text, text),
+  ehr.referral_decline(uuid, bigint, text, text, text, text),
+  ehr.referral_expected_list(),
+  ehr.referral_arrive(uuid, bigint, text, uuid, text, text),
+  ehr.referral_complete(uuid, bigint, text, text, text, text),
+  ehr.referral_my_list(),
+  ehr.referral_my_withdraw(uuid, bigint),
+  identity.search_referral_destinations(text),
+  identity.admin_find_referrals(text, text),
+  identity.admin_referral_destination(uuid),
+  identity.admin_set_referral_destination(uuid, boolean, text),
+  ehr.referral_limits(),
+  ehr.referral_instant(timestamptz),
+  ehr.referral_caller(text),
+  ehr.referral_control_on(),
+  ehr.referral_effective(ehr.referrals),
+  ehr.referral_cards(uuid[], uuid, boolean, boolean),
+  ehr.referral_package(uuid),
+  ehr.referral_history(uuid, text),
+  ehr.referral_freeze_package(uuid, uuid, uuid[], uuid[], uuid[], uuid[], uuid[]),
+  lab.referral_result_snapshots(uuid, uuid, uuid[]),
+  ehr.referral_audit(text, uuid, uuid, uuid, uuid, text, text, uuid, text, text, text, jsonb),
+  ehr.referral_idempotency(uuid, text, text),
+  ehr.referral_notify_patient(uuid, text),
+  ehr.referral_guard(),
+  ehr.referral_package_item_guard(),
+  ehr.referral_source_marked(),
+  identity.referral_destination_listed(uuid),
+  identity.referral_destination_eligible(uuid),
+  ehr.referral_patient_audit(uuid, text, text, text, jsonb) from public;
+revoke all on ehr.referral_attestation_texts, ehr.referrals, ehr.referral_events, ehr.referral_package_items,
+  ehr.referral_source_marks, identity.referral_destination_settings from public;

@@ -111,6 +111,11 @@ const environmentSchema = z
     OFFLINE_ESCROW_KEYS: optionalString,
     // Prescription strength, form, duration, quantity and priority (0125): off by default, off is exactly as before.
     PRESCRIPTION_DISPENSING_DETAILS_ENABLED: booleanString,
+    // REF-1 (0191-0193): referrals between facilities. Off by default; every referral route answers 503
+    // REFERRALS_NOT_AVAILABLE. On in staging and at the sealed demo and QA facilities; in production only after the
+    // go-live gate (the clinical lead's checklist, the DPO's review and the owner's go-live). The printed letter can
+    // go live first with the platform control cross_facility_referrals_enabled still off (Q162 A).
+    REFERRALS_ENABLED: booleanString,
   })
   .superRefine((environment, context) => {
     if (environment.AI_ENABLED) {
