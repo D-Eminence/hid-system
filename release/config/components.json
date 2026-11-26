@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0153",
-    "count": 154,
+    "last": "0155",
+    "count": 155,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -713,6 +713,10 @@
       {
         "name": "0153_clinician_recent_diagnoses.sql",
         "sha256": "45faa6a739056cc07426fdb5363b58c7dda1dbcbc096fb6d1769ae746798500b"
+      },
+      {
+        "name": "0155_catalog_facility_items.sql",
+        "sha256": "44a5803516d4f8f45e14b1b4e56338602737666993edacb49d5dce05c95625b7"
       }
     ]
   },
