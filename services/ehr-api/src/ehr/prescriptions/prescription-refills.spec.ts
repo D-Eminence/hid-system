@@ -9,7 +9,11 @@ import { CreatePrescriptionDto, CreatePrescriptionWithDetailsAndRefillsDto, Crea
   CreatePrescriptionWithRefillsDto, OrderStatus, UpdatePrescriptionDto } from '../shared/clinical.dto';
 import { CreatePrescriptionBodyPipe, PRESCRIPTION_DISPENSING_DETAILS_OFF,
   PrescriptionDispensingDetails } from './prescription-dispensing-details';
-import { PRESCRIPTION_REFILLS_OFF, PrescriptionRefills, REFILLS_NEED_DURATION_MESSAGE } from './prescription-refills';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { Pool } from 'pg';
+import { PRESCRIPTION_REFILLS_OFF, PrescriptionRefills, REFILLS_COLLECTABLE_QUERY, REFILLS_NEED_DURATION_MESSAGE,
+  refillsCannotBeCollectedMessage } from './prescription-refills';
 import { PrescriptionsModule } from './prescriptions.module';
 import { PrescriptionsService } from './prescriptions.service';
 
@@ -67,10 +71,17 @@ const row = (sql: string, refillsAllowed: number | null) => ({
 });
 const TODAYS_KEYS = Object.keys(row('', null));
 
-const harness = (refills: boolean | undefined, options: { details?: boolean; stored?: number | null } = {}) => {
+/** The database's answer to REFILLS_COLLECTABLE_QUERY: collectable unless `never` names the two days. */
+type Collectable = { never?: { refillsEndOn: string; firstRefillOn: string } };
+const harness = (refills: boolean | undefined,
+  options: { details?: boolean; stored?: number | null } & Collectable = {}) => {
   const statements: { sql: string; values: unknown[] }[] = [];
   const client = { query: jest.fn(async (sql: string, parameters: unknown[] = []) => {
     statements.push({ sql, values: parameters });
+    if (sql === REFILLS_COLLECTABLE_QUERY) {
+      return { rows: [options.never ? { neverCollectable: true, ...options.never }
+        : { neverCollectable: false, refillsEndOn: '2027-01-11', firstRefillOn: '2026-11-25' }] };
+    }
     if (/ehr\.context_allows\(/.test(sql)) return { rows: [{ allowed: true }] };
     if (/pg_advisory_xact_lock|recorded_allergies|patient_reported_health_profiles|prescription_allergy_acknowledgements/
       .test(sql)) return { rows: [] };
@@ -277,6 +288,144 @@ describe('refills need a duration (the clinical owner\'s refill interval, 24 Nov
     expect(() => PRESCRIPTION_REFILLS_OFF.requireDuration({ refillsAllowed: 3 })).not.toThrow();
     expect(() => new PrescriptionRefills(true).requireDuration({ refillsAllowed: 3, durationValue: 10 }))
       .toThrow(expect.objectContaining({ code: 'REFILLS_NEED_DURATION' }));
+  });
+});
+
+/*
+ * Refills that can never be collected (Rahman's review of 25 November 2026;
+ * the clinical owner's call on hid-system#258, 26 November 2026): ehr-api
+ * refuses them at create, 400 REFILLS_CANNOT_BE_COLLECTED in plain words, by
+ * the database's own rule (0154's ehr.prescription_refills_end_on and its
+ * refill interval) on the row just written, never by a copy of the limit.
+ */
+describe('refills that can never be collected', () => {
+  const longFill = { ...details, durationValue: 487, durationUnit: 'day' };
+  const never = { refillsEndOn: '2027-11-26', firstRefillOn: '2027-11-27' };
+
+  it('E20 are refused 400 REFILLS_CANNOT_BE_COLLECTED, with both days, after the INSERT and before any send', async () => {
+    const { service, statements } = harness(true, { details: true, never });
+    let problem: unknown;
+    try {
+      await create(service, await pipe(true, true).transform({ ...body, ...longFill, refillsAllowed: 1 }));
+    } catch (error) { problem = error; }
+    expect(problem).toMatchObject({ code: 'REFILLS_CANNOT_BE_COLLECTED', extensions: never });
+    expect((problem as DomainProblem).getStatus()).toBe(400);
+    expect((problem as Error).message).toBe('No refill of this prescription could ever be collected: refills end on '
+      + '2027-11-26, before the first refill would be due (2027-11-27 at the earliest). Use a shorter duration of each '
+      + 'fill or a later end date, or set refills to 0.');
+    expect((problem as Error).message).toBe(refillsCannotBeCollectedMessage('2027-11-26', '2027-11-27'));
+    const asked = statements.findIndex(({ sql }) => sql === REFILLS_COLLECTABLE_QUERY);
+    expect(asked).toBeGreaterThan(statements.indexOf(insertOf(statements)));
+    expect(statements[asked]!.values).toEqual([prescriptionId]);
+    // Nothing after it: no send to the pharmacy, no audit of an acknowledgement (the transaction rolls back).
+    expect(statements).toHaveLength(asked + 1);
+  });
+
+  it('E21 a prescription whose refills can be collected is written and answered as before', async () => {
+    const { service, statements } = harness(true, { details: true, stored: 2 });
+    const created = await create(service, await pipe(true, true).transform({ ...body, ...details, refillsAllowed: 2 }));
+    expect(created.refillsAllowed).toBe(2);
+    expect(statements.filter(({ sql }) => sql === REFILLS_COLLECTABLE_QUERY).map(({ values }) => values))
+      .toEqual([[prescriptionId]]);
+  });
+
+  it('E22 nothing is asked while off, or with refills 0 or left out', async () => {
+    for (const [on, input] of [[false, { ...body }], [true, { ...body }], [true, { ...body, refillsAllowed: 0 }]] as const) {
+      const { service, statements } = harness(on, { never });
+      await create(service, await pipe(on).transform(input));
+      expect(statements.some(({ sql }) => sql === REFILLS_COLLECTABLE_QUERY)).toBe(false);
+    }
+    const asked = jest.fn();
+    await PRESCRIPTION_REFILLS_OFF.requireCollectable({ query: asked } as never, prescriptionId, { refillsAllowed: 3 });
+    expect(asked).not.toHaveBeenCalled();
+  });
+
+  it('E23 the rule is the database\'s: 0154\'s last day, called on the stored row, and 0154\'s own interval text', () => {
+    const migration = readFileSync(path.resolve(__dirname,
+      '../../../database/migrations/0154_prescription_refills.sql'), 'utf8');
+    const flat = (text: string) => text.replace(/\s+/g, ' ').trim();
+    const query = flat(REFILLS_COLLECTABLE_QUERY);
+    expect(query).toContain('ehr.prescription_refills_end_on(p.created_at, p.refills_allowed, p.duration_value, '
+      + 'p.duration_unit, p.ends_on) as refills_end_on');
+    expect(query).toContain('from ehr.prescriptions p where p.id = $1::uuid');
+    // The refill interval exactly as pharmacy.validate_dispensing (R4) writes it, on the prescription's own columns.
+    const validator = migration.slice(migration.indexOf('create or replace function pharmacy.validate_dispensing()'));
+    const interval = /\+ greatest\(1, ceil\(0\.75 \* source_row\.duration_value\s+\* case source_row\.duration_unit[^)]*\)\)::integer/
+      .exec(validator);
+    expect(interval).not.toBeNull();
+    expect(query).toContain(`(p.created_at at time zone 'Africa/Lagos')::date ${flat(interval![0])
+      .replaceAll('source_row.', 'p.')} as first_refill_on`);
+    expect(query).toContain('first_refill_on > refills_end_on as "neverCollectable"');
+    // No copy of the limit: no day count of its own.
+    expect(REFILLS_COLLECTABLE_QUERY).not.toMatch(/\b(365|366|486|487)\b/);
+  });
+});
+
+/*
+ * The same query on PostgreSQL, against 0154's own ehr.prescription_refills_end_on
+ * (its CREATE statement read from the migration file). Runs only when
+ * EHR_REFILLS_SCRATCH_DATABASE_URL names an empty scratch database whose name
+ * ends in `_scratch` (skipped otherwise, so CI without a database is
+ * unchanged); it makes an `ehr` schema there with the columns the query reads,
+ * and drops it afterwards. Fictional rows only.
+ */
+const scratchUrl = process.env.EHR_REFILLS_SCRATCH_DATABASE_URL;
+const describeScratch = scratchUrl !== undefined && /\/[A-Za-z0-9_]*_scratch(\?|$)/.test(scratchUrl)
+  ? describe : describe.skip;
+describeScratch('refills that can never be collected, on PostgreSQL with 0154\'s rule', () => {
+  let pool: Pool;
+  beforeAll(async () => {
+    pool = new Pool({ connectionString: scratchUrl, max: 1 });
+    const migration = readFileSync(path.resolve(__dirname,
+      '../../../database/migrations/0154_prescription_refills.sql'), 'utf8');
+    const start = migration.indexOf('create function ehr.prescription_refills_end_on(');
+    const end = migration.indexOf('$$;', migration.indexOf('as $$', start) + 5) + 3;
+    await pool.query('create schema ehr');
+    await pool.query(`create table ehr.prescriptions (id uuid primary key, created_at timestamptz not null,
+      refills_allowed smallint, duration_value integer, duration_unit text, ends_on date)`);
+    await pool.query(migration.slice(start, end));
+  });
+  afterAll(async () => {
+    await pool.query('drop schema if exists ehr cascade');
+    await pool.end();
+  });
+
+  it('E24 one fill of 486 days, 69 weeks or 16 months can be collected; 487 days, 70 weeks or 17 months cannot; an '
+    + 'end date on the first refill\'s day can, the day before cannot; the Lagos day written, whatever the time zone',
+  async () => {
+    // Written at 23:30 Lagos on 1 March 2027 (22:30 UTC): the Lagos day written is 1 March.
+    const written = '2027-03-01T22:30:00Z';
+    const cases: [string, number, number, string, string | null][] = [
+      ['486 days', 1, 486, 'day', null], ['487 days', 1, 487, 'day', null],
+      ['69 weeks', 11, 69, 'week', null], ['70 weeks', 11, 70, 'week', null],
+      ['16 months', 2, 16, 'month', null], ['17 months', 2, 17, 'month', null],
+      ['10 days, ends on day 8', 1, 10, 'day', '2027-03-09'], ['10 days, ends on day 7', 1, 10, 'day', '2027-03-08'],
+    ];
+    const answers: Record<string, unknown> = {};
+    for (const [index, [label, refills, value, unit, endsOn]] of cases.entries()) {
+      const id = `00000000-0000-4000-8000-0000000000${String(index).padStart(2, '0')}`;
+      await pool.query('insert into ehr.prescriptions values ($1, $2, $3, $4, $5, $6)',
+        [id, written, refills, value, unit, endsOn]);
+      for (const zone of ['UTC', 'Pacific/Kiritimati', 'Etc/GMT+12']) {
+        await pool.query(`set timezone = '${zone}'`);
+        const { rows } = await pool.query(REFILLS_COLLECTABLE_QUERY, [id]);
+        answers[`${label} ${zone}`] = rows[0];
+      }
+    }
+    await pool.query('reset timezone');
+    const expected = (label: string, never: boolean, refillsEndOn: string, firstRefillOn: string) =>
+      Object.fromEntries(['UTC', 'Pacific/Kiritimati', 'Etc/GMT+12'].map((zone) =>
+        [`${label} ${zone}`, { neverCollectable: never, refillsEndOn, firstRefillOn }]));
+    expect(answers).toEqual({
+      ...expected('486 days', false, '2028-02-29', '2028-02-29'),
+      ...expected('487 days', true, '2028-02-29', '2028-03-01'),
+      ...expected('69 weeks', false, '2028-02-29', '2028-02-27'),
+      ...expected('70 weeks', true, '2028-02-29', '2028-03-03'),
+      ...expected('16 months', false, '2028-02-29', '2028-02-24'),
+      ...expected('17 months', true, '2028-02-29', '2028-03-18'),
+      ...expected('10 days, ends on day 8', false, '2027-03-09', '2027-03-09'),
+      ...expected('10 days, ends on day 7', true, '2027-03-08', '2027-03-09'),
+    });
   });
 });
 
