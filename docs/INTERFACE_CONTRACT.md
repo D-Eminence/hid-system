@@ -12438,6 +12438,8 @@ presenting complaint, never shown to the front desk), Q-ED-5 A (two-step disposi
 is kept on the ED record until wards ship), Q-ED-7 A (no new write basis: break-glass stays read only). Numbers 0168
 and 0169 are provisional (given at merge, after 0152-0154 and the department files cut before them); neither file
 reads anything 0152-0167 create or change. 0168 applies on 0135's waiting-list basis CHECK and on APPT-1's (0160).
+Release order (Rahman, #258 7175579690, accepted in 7177085826): 0154, APPT-1, BILL-1, then ED-1; 0168 and 0169 are
+proved on 0001-0153 alone, after APPT-1's 0160-0161 and after BILL-1's 0162-0167 as well.
 
 **The triage scale.** The board uses the waiting list's live `triageLevel` (0135: 1 most urgent to 5) and its words
 ("Level 1: most urgent" to "Level 5: not urgent"). There is no second scale. The clinical lead must sign off the
@@ -12577,10 +12579,14 @@ admission request, "Handed over to the ward"). `ehr.ed.triage`; only while `deci
 
 **9. `POST /api/v1/ehr/ed-attendances/:attendanceId/cancel`**: `{ "expectedRowVersion", "reason" }` (8-500; 400
 `ED_REASON_REQUIRED`). For an arrival made in error. `ehr.ed.arrive`; only while `open` with no visit linked and no
-decision (409 `ED_CANCEL_NOT_ALLOWED`). The waiting-list row the arrival made closes as `cancelled`; a row moved from
-the outpatient waiting list stays open and is put back as it was before the move (its stage, triage level, assignee
-and stage time, kept on the ED record), so nothing the mistaken arrival wrote stays on the outpatient row. The record
-is kept.
+decision (409 `ED_CANCEL_NOT_ALLOWED`). Only the ED record closes; the waiting-list row stays open in every case,
+because an outpatient check-in may have claimed it since the arrival (0135's check-in answers `already_open` with that
+row, APPT-1's `already_on_list`), and one member's cancel must not undo another's check-in. A row moved from the
+outpatient waiting list is put back as it was before the move (its stage, triage level, assignee and stage time, kept
+on the ED record); the row the arrival made goes back to `waiting` with no triage level and nobody down to see the
+patient. So nothing the mistaken arrival wrote stays on the outpatient row. The answer's card shows the row's `stage`;
+the screen says "The patient is still on the outpatient waiting list. Cancel them there if they are not waiting." The
+record is kept.
 
 Other answers: 404 `ED_ATTENDANCE_NOT_FOUND` ("This patient is not on this facility's emergency board.", also another
 facility's record); 409 `ED_ATTENDANCE_CLOSED` ("This patient has left the emergency department. Add them again if they
@@ -12595,8 +12601,8 @@ or decided ED record, its stage, triage level, assignee and close belong to the 
 department board. Make this change on the board.") for it, for every role (0168's guard). So the ED record's
 `rowVersion` covers every field the board writes, the triage on the board is the only triage (with who did it in the
 history), and the board's roles, reasons and cancel rule cannot be gone around on the waiting list. The one exception
-is 0145's cancel of an unknown record, which makes the patient inactive and cancels the row: the ED record then closes
-too (history `closed_on_waiting_list`).
+is 0145's cancel of an unknown record, which makes the patient inactive and cancels the row: the guard lets that close
+through (and no other change of such a row), and the ED record then closes too (history `closed_on_waiting_list`).
 
 **The board's marker (database interface, stable).** Inside the database, the ED functions get past the guard by
 naming the row in the setting `hid.ed_board_closing`. A later file that finishes a board patient's row itself does the
@@ -12607,7 +12613,10 @@ same; ADT-1's 0171 does this to admit a patient from the board. The caller:
   under the marker;
 - locks the ED record and then the row, `FOR UPDATE`, in that order.
 
-The name and value of this setting change only together with 0171 (docs/EHR_PLANNED_CONTRACT.md, 0168).
+Under the marker the guard checks nothing else: the caller's own rules (who may close the row, and why) are the whole
+check. A marker naming any other value, the ED record's id included, opens nothing, and a waiting-list write of a board
+patient's row without it is refused (55000 `VISIT_QUEUE_ON_ED_BOARD`). The name and value of this setting change only
+together with 0171 (docs/EHR_PLANNED_CONTRACT.md, 0168).
 
 **The board switched off after use (the kill switch).** All of the above holds only while `ED_BOARD_ENABLED` is on.
 While it is off, the board's routes answer 503 and the waiting list treats every row as its own: `edAttendanceId` is
@@ -12619,10 +12628,17 @@ made, the row's open or decided ED record closes (`closed_via` `waiting_list`, h
 off the board when it is switched on again and no later board save can overwrite the waiting list's change. A refused
 or stale change leaves the ED record as it was. Switching the flag on again restores the guard at once.
 
+**Runbook** (Rahman, #337 7175564791). Before rolling ehr-api back past this image: switch `ED_BOARD_ENABLED` off on
+this image and clear the board's patients through the waiting list, because Release E's image answers 500 for a change
+of a board patient's waiting-list row (it has no branch for the guard's 55000). Before switching the board off: list
+the decided `admit_requested` records and hand those patients over outside the board, because with the board off any
+waiting-list change of their rows closes the record, and a later arrival does not carry the request.
+
 ### Audit
 
 Every route writes its rows in the request's transaction, refusals that are answers included (a refusal the database
-raises, for example a missing code, is in ehr-api's request audit): `ehr.ed.arrive` (basis, outcome; plus 0135's
+raises, for example a missing code, is in ehr-api's request audit): `ehr.ed.arrive` (basis, outcome; for basis
+`emergency`, `consentGrantId`, the id of the member's break-glass grant it relied on; plus 0135's
 `ehr.visit-queue.check-in` with `by: "emergency_department"` when a waiting-list row is made), `ehr.ed.board` (one
 collection row) and `ehr.ed.board.shown` (one row per patient shown), `ehr.ed.record-read`, `ehr.ed.triage`,
 `ehr.ed.move`, `ehr.ed.link-visit`, `ehr.ed.disposition` (outcome), `ehr.ed.leave`, `ehr.ed.cancel`, and
@@ -12640,10 +12656,12 @@ sends nothing to anyone; break-glass keeps its own emergency-contact alert (0084
 per patient and facility; CHECKs tie the status, the disposition, the admission request and the close together) and
 `ehr.ed_attendance_events` (append only; the Idempotency-Key with the request's SHA-256, unique per membership and
 key), row-level security on and no privilege for any runtime; the waiting-list basis CHECK gains `emergency` (every
-value found kept: 0135's or APPT-1's); the trigger `visit_queue_ed_close_mirror` on `ehr.visit_queue`; SECURITY DEFINER
+value found kept: 0135's or APPT-1's); the triggers `visit_queue_ed_guard` and `visit_queue_ed_close_mirror` on
+`ehr.visit_queue`; SECURITY DEFINER
 functions `ehr.ed_arrive`, `ehr.ed_board`, `ehr.ed_read`, `ehr.ed_triage`, `ehr.ed_move`, `ehr.ed_link_visit`,
-`ehr.ed_record_disposition`, `ehr.ed_leave`, `ehr.ed_cancel` and `ehr.visit_queue_ed_attendances`, EXECUTE for
-`hid_ehr_runtime` only (as `runtime-grants.sql`); helpers no role may execute. Without 0169 no role holds an ED code, so
+`ehr.ed_record_disposition`, `ehr.ed_leave`, `ehr.ed_cancel`, `ehr.visit_queue_ed_attendances` and
+`ehr.visit_queue_ed_board_off_update`, EXECUTE for `hid_ehr_runtime` only (as `runtime-grants.sql`, which also takes
+back the schema-wide sequence grants on the history's identity sequence); helpers no role may execute. Without 0169 no role holds an ED code, so
 every function refuses. 0168 writes no audit row. 0169: the four codes, the thirteen role rows of the table above, and
 thirteen `auth.role-permission.add` audit rows as the system actor (reason "ED-1 Emergency department board (Release
 D, recommended Q-ED-2 A)"); no grant. Both files take their locks first, NOWAIT, with busy refusals that begin with
