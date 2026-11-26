@@ -245,15 +245,15 @@
 --    ehr.catalog_versions (as 0153 requires). 0149's searches are neither
 --    called nor changed, so they are not pinned.
 -- 2. F1-F3. 3. F5 and F4. 4. F6 and F7. 5. F9. 6. F8. 7. Comments.
--- 8. Post-checks (55000): the owners; the grants; relrowsecurity and
---    relforcerowsecurity; each policy in full (name, command, roles,
---    permissive, expressions); the guard trigger (tgtype 23, its function,
---    no WHEN, no column list, no arguments, enabled 'O') and the guard's
---    md5, owner and search_path; the DELETE and TRUNCATE refusals pinned the
---    same way (tgtype 11 and 34); F5, F6 and F7's md5, owner, SECURITY
---    DEFINER, STABLE and search_path; the three foreign keys and the name
---    index by definition; admin's new row and the two audit rows; an empty
---    table.
+-- 8. Post-checks (55000): the owners; the grants (none but F9's, and F9's
+--    where each role exists); relrowsecurity and relforcerowsecurity; each
+--    policy in full (name, command, roles, permissive, expressions); the
+--    guard trigger (tgtype 23, its function, no WHEN, no column list, no
+--    arguments, enabled 'O') and the guard's md5, owner and search_path;
+--    the DELETE and TRUNCATE refusals pinned the same way (tgtype 11 and
+--    34); F5, F6 and F7's md5, owner, SECURITY DEFINER, STABLE and
+--    search_path; the three foreign keys and the name index by definition;
+--    admin's new row and the two audit rows; an empty table.
 
 -- 0. The locks, NOWAIT, at most 5 s; one attempt when this transaction
 -- already holds an earlier migration's locks.
@@ -768,6 +768,18 @@ begin
                      or pg_get_userbyid(acl.grantee) not in ('hid_ehr_runtime', 'hid_schema_test_runtime'))) then
     raise exception using errcode = '55000',
       message = '0155: a facility item function is granted to a role it is not for';
+  end if;
+  -- And the grants step 5 makes, where each role exists: both write policies call the write check, so without it
+  -- every add and change by the EHR runtime would fail (42501).
+  if (exists (select 1 from pg_roles where rolname = 'hid_ehr_runtime')
+      and not (has_function_privilege('hid_ehr_runtime', 'ehr.facility_item_write_allowed()', 'EXECUTE')
+               and has_function_privilege('hid_ehr_runtime', 'ehr.search_catalog_facility_items(text,text,integer)',
+                                          'EXECUTE')))
+     or (exists (select 1 from pg_roles where rolname = 'hid_schema_test_runtime')
+         and not has_function_privilege('hid_schema_test_runtime',
+                                        'ehr.search_catalog_facility_items(text,text,integer)', 'EXECUTE')) then
+    raise exception using errcode = '55000',
+      message = '0155: the write check or the facility search lacks a grant a runtime needs';
   end if;
   -- Row security, enabled and forced, and each policy in full: command, permissive, roles and both expressions (by
   -- md5 of the printed text); no other policy.
