@@ -2936,6 +2936,7 @@ Answer `201`:
 What a merge does (ID-8b):
 
 - **Rows that move:** every row that names the source patient in the clinical, order, lab, pharmacy, waiting-list and document tables moves to the target, and each moved row is recorded in the manifest.
+  - ORD-11's order notices (`ehr.order_notices`, 0159) are on the "moved" list (owner decision Q127 A). The table's foreign key to `identity.patients` is how the check below finds it. A notice moves with its order and is recorded in the manifest, so an undo moves it back; legal holds follow it. The doctor sees it again once they have a basis on the target (the merge creates none).
 - **The table list is checked:** the migration and a test both read pg_catalog. Every foreign key to `identity.patients(id)` must be on the "moved" list or the "kept" list, or the migration fails.
 - **Rows that never move:** consent grants, access requests, break-glass grants, Access PINs, shares, audit rows, identifiers and the source's Health ID.
   - The source's active grants and open access requests are ended with the words "Record merged".
@@ -3630,47 +3631,62 @@ Release C (lane C). Size **L**: three tables (sets, templates, favourites), ten 
 Akos items:
 - P1-6 (new lab result, critical value, prescription dispensed; a results list with read and unread)
 
-Status: planned, not live. Owner decision Q128 A, 19 Nov 2026: an in-app notice list first; critical results must be marked Seen.
+Status: planned, not live. Owner decision Q128 A, 19 Nov 2026: an in-app notice list first; critical results must be marked Seen. Q162 puts ORD-11 in Phase 1. Built from the clinical owner's design note on #258 (26 Nov 2026), after Rahman's review: migration 0159 (its number is a booking, given at integration after 0154), the four ehr-api routes below and their `@hid/api-client` calls. lab-api and pharmacy-api do not change.
 
-Today staff see only access requests as notifications (Akos P1-6). Lab writes a `LabResultReleased` outbox event when a result is released (`lab-executions.service.ts:167`). Pharmacy has no dispensing event (`pharmacy.service.ts` writes only `PharmacyWorkItemCreated` and import events). Lab's README says there is no critical-result acknowledgement today (`services/lab-api/src/lab/README.md:38`).
+Today staff see only access requests as notifications (Akos P1-6). Lab writes a `LabResultReleased` outbox event when a result is released (`lab-executions.service.ts:167`), and Pharmacy writes `MedicationDispensed` for every fill (`pharmacy.service.ts:828`). Both reach only the patient, as generic text. A reversal, a corrected result and a withdrawn result reach nobody. Lab's README says there is no critical-result acknowledgement today (`services/lab-api/src/lab/README.md:38`).
 
-Who gets a notice: only the person who placed the order (the lab request's or prescription's `createdBy` with `createdByMembershipId`), and only at the ordering facility. Nobody else sees it: not colleagues, admins or the patient.
+Who gets a notice:
+- The person who placed the order (its creator), at the ordering facility. The notice stores that account and facility when it is written:
+  - own lab and pharmacy work: the work item's `requested_by` or `prescribed_by` and its ordering facility. That account is the order's creator: the lab work-item check has compared it since 0018, and the pharmacy one since 0100 (older pharmacy items were not checked; the count check before switch-on confirms none differs);
+  - an order sent to another facility: the route's `orderer_account_id` (a copy of the order's creator) and its ordering facility.
+- It is shown to a session of that account at that facility whose active membership holds the kind's read permission: `ehr.lab-request.read` for lab notices, `ehr.prescription.read` for dispensing notices. Seen records that membership.
+- One person may hold several memberships at one facility. A sibling membership with the permission sees the same notices. That is the same person at the same facility, so it is allowed.
+- Nobody else sees a notice: not colleagues, admins, the laboratory, the pharmacy or the patient.
 
 When a notice is written:
-- lab-api writes it in the same transaction as the result release.
-- pharmacy-api writes it in the same transaction as the dispensing or reversal.
+- By four database triggers (0159), after each insert into `lab.result_releases`, `lab.result_invalidations`, `pharmacy.dispensings` and `pharmacy.dispensing_reversals`, in the same transaction as the event. Not by the services, because 0088 and 0090 write reversals and invalidations in SQL.
+- Routed work is found through the route reports that 0086's return triggers write just before, so 0090's late corrections write notices too.
+- A notice never stops the event. One that cannot be written leaves a row in an owner-only gaps table and a warning, with no patient id; the count check before switch-on must find none.
+- The owner can stop the triggers with a switch row in the database, without DDL.
 
 So no notice is lost, and no event bus is needed. This works for the hospital's own lab and pharmacy and for order routes to other facilities.
 
 | `kind` | When | Needs Seen |
 |---|---|---|
-| `lab_result_ready` | a result for the order is released | no |
 | `lab_result_critical` | the released version's `abnormalFlag` is `critical_candidate` (`lab-api/src/lab/dto/execution.dto.ts:31`) | **yes** (owner decision Q128 A, 19 Nov 2026) |
-| `lab_result_corrected` | a correction to an already released result is released | no |
+| `lab_result_corrected` | a later version of a result that was already released is released | no |
+| `lab_result_ready` | any other release | no |
+| `lab_result_withdrawn` | a released version is withdrawn as entered in error. Only 0088 and 0090 write these, so on routed orders only. A version never released gets no notice | no |
 | `prescription_dispensed` | the first fill is dispensed (refills, ORD-12, do not notify) | no |
-| `dispensing_reversed` | a dispensing is reversed | no |
+| `dispensing_reversed` | a dispensing is reversed, a refill's too (owner item 2, pending) | no |
 
-- Each order keeps at most one unread notice per kind. A later event updates its time and count, for example "3 results ready".
+- Precedence for a release: critical, then corrected, then ready.
+- Each order keeps at most one unread notice per kind, critical aside. A later event adds 1 to its count and moves its time and version, for example "3 results ready".
 - A critical notice is never merged with another notice.
+- `lab_result_withdrawn` is the clinical owner's call (a doctor who acted on a result later marked entered in error must be told). Rule 4 sends it to the owner to confirm, here and in SX-7.
 
 ### Routes
 
 | Method | Path | Who | Permission |
 |---|---|---|---|
-| GET | `/api/v1/ehr/me/order-notices?state=unread\|all[&cursor=<noticeId>][&limit=1-50]` | the recipient, at the session facility | `ehr.lab-request.read` or `ehr.prescription.read` |
+| GET | `/api/v1/ehr/me/order-notices?state=unread\|all[&cursor=<nextCursor>][&limit=1-50]` | the recipient, at the session facility | `ehr.lab-request.read` or `ehr.prescription.read` |
 | GET | `/api/v1/ehr/me/order-notices/summary` | the recipient | as above |
 | POST | `/api/v1/ehr/me/order-notices/read` | the recipient | as above |
 | POST | `/api/v1/ehr/me/order-notices/:noticeId/seen` | the recipient | as above |
 
-All routes take `X-Purpose-Of-Use: direct-care`. No Health ID appears in any path, body or answer. The only ids are UUIDs.
+- All routes take `X-Purpose-Of-Use: direct-care` and `X-Facility-ID`. Staff only. No Health ID appears in any path, body or answer. The only ids are UUIDs.
+- Lab notices need `ehr.lab-request.read` and dispensing notices `ehr.prescription.read`, as MY-1. A member with neither is 403 `PERMISSION_DENIED`.
+- The answers are not cached (`Cache-Control: no-store`).
+- ehr-api serves them only while its setting `ORDER_NOTICES_ENABLED` is on. It is off by default; off, every route answers 503 `ORDER_NOTICES_UNAVAILABLE` and the sweep does not run. The database writes notices either way. Switch it on only after 0159 is applied and the count check has passed.
 
 Notice:
 
 ```json
 {
-  "noticeId": "uuid", "kind": "lab_result_critical", "createdAt": "2026-11-19T10:42:00.000Z",
+  "noticeId": "uuid", "kind": "lab_result_critical", "version": 1,
+  "createdAt": "2026-11-19T10:42:00.000Z", "lastEventAt": "2026-11-19T10:42:00.000Z",
   "count": 1, "readAt": null, "needsSeen": true, "seenAt": null,
-  "order": { "type": "lab_request", "id": "uuid", "encounterId": "uuid", "display": "Potassium" },
+  "order": { "type": "lab_request", "id": "uuid", "routeId": null, "encounterId": "uuid", "display": "Potassium" },
   "patient": { "patientId": "uuid", "fullName": "Amaka Okafor", "sex": "female",
                "dateOfBirth": "1990-05-01", "healthIdLast4": "AA22" },
   "accessEnded": false,
@@ -3678,42 +3694,80 @@ Notice:
 }
 ```
 
-- `patient` is the waiting-list card shape (EHR-C7). `order.display` is the test or medicine name.
+- `version` changes whenever the notice does (a merged event, read, Seen). Mark read sends it back.
+- `createdAt` is the first event's time and `lastEventAt` the latest. A merged notice moves `lastEventAt`, and the list is sorted by it.
+- `order.type` is `lab_request` or `prescription`. `order.display` is the test or medicine name.
+- `order.routeId` is the order route for an order sent to another facility. "Open result" then opens the result returned through that route (sections 21-24). For the hospital's own work it is `null`, and the clinician opens the result with today's reads, for example `GET /api/v1/lab/ehr-orders/:sourceEhrOrderId/released-results`.
+- `patient` is the waiting-list card shape (EHR-C7). The patient and the display come from the order, as the recipient may read it now. So after an ID-8b merge a notice shows the kept record, never the old one.
 - Both are given only while the recipient may still read the patient's records here. That is checked on each read with the same consent check as other EHR reads, including own-facility access (0131). Consent rules are unchanged.
-- Otherwise `patient` and `order.display` are `null`, `accessEnded` is `true`, and the message is "A result is ready for a patient whose access has ended. Ask the patient for access to see it." For a critical notice it ends with ", or call the laboratory".
-- No result value is ever in a notice. The clinician opens the result with today's reads, for example `GET /api/v1/lab/ehr-orders/:sourceEhrOrderId/released-results`.
+- Otherwise `patient`, `order.encounterId` and `order.display` are `null`, and `accessEnded` is `true`.
+- No result value is ever in a notice.
 
-List answer: `{ "items": [notice], "nextCursor": "uuid or null" }`, newest first, with critical notices that are not yet Seen always on top. `limit` defaults to 20.
+`message`, by kind (with `count` above 1, the plural form):
 
-Summary answer: `{ "unread": 4, "criticalNotSeen": 1 }`. It names no patient. Like the patient bell count (`patient-self.controller.ts:32`), it is not audited when it succeeds, because it is polled.
+| `kind` | While access lasts | When `accessEnded` is true |
+|---|---|---|
+| `lab_result_critical` | "Critical result: Potassium. Open it and mark it Seen." Once Seen: "Critical result: Potassium. Marked Seen." | "A result is ready for a patient whose access has ended. Ask the patient for access to see it, or call the laboratory." (Once Seen, without ", or call the laboratory".) |
+| `lab_result_ready` | "Result ready: Potassium." / "3 results ready: Potassium." | "A result is ready for a patient whose access has ended. Ask the patient for access to see it." |
+| `lab_result_corrected` | "Corrected result: Potassium." / "2 corrected results: Potassium." | "A corrected result is ready for a patient whose access has ended. Ask the patient for access to see it." |
+| `lab_result_withdrawn` | "Result withdrawn: Potassium. It was entered in error." / "2 results withdrawn: Potassium. They were entered in error." | "A result was withdrawn for a patient whose access has ended. Ask the patient for access to see it." |
+| `prescription_dispensed` | "Dispensed: Amoxicillin 500 mg." | "A prescription was dispensed for a patient whose access has ended. Ask the patient for access to see it." |
+| `dispensing_reversed` | "Dispensing reversed: Amoxicillin 500 mg." / "2 dispensings reversed: Amoxicillin 500 mg." | "A dispensing was reversed for a patient whose access has ended. Ask the patient for access to see it." |
+
+List answer: `{ "items": [notice], "nextCursor": "opaque string or null" }`.
+- Critical notices not yet Seen are always on top, read or not. Then newest first.
+- `state=unread` lists unread notices and critical notices not yet Seen. `state=all` lists every notice. `state` is required.
+- `cursor` is `nextCursor` from the page before, sent back as it came, with the same `state`. It is opaque: it records where that page was cut (whether its last notice was a critical one not Seen, that notice's `lastEventAt` to the microsecond, and its id), as it was then. So a notice marked Seen, or merged with a new event, between pages does not make the next page skip or repeat the rest. A notice that changed may show again higher up on a fresh list; load the list from the start to see the order now.
+- A cursor is good only for the member, facility and `state` it was issued with, exactly as issued. Any other is 400 `INVALID_CURSOR`; load the list from the start.
+- `limit` defaults to 20.
+
+Summary answer:
+
+```json
+{ "unread": 4, "criticalNotSeen": 1,
+  "byKind": { "lab_result_critical": { "unread": 1, "criticalNotSeen": 1 },
+              "lab_result_ready": { "unread": 3, "criticalNotSeen": 0 }, "...": "every kind, 0 when none" } }
+```
+
+- `unread` counts notices not yet read. `criticalNotSeen` counts critical notices not yet Seen, read or not.
+- The counts have no cap. The summary names no patient and reads no order.
+- Like the patient bell count (`patient-self.controller.ts:32`), it is not audited when it succeeds, because it is polled.
 
 Mark read:
-- Body `{ "noticeIds": ["uuid"] }`, 1-100 ids. Answer `{ "updated": n }`.
-- Ids that are not the caller's are ignored and not counted.
-- Reading does not clear `needsSeen`.
+- Body `{ "notices": [{ "noticeId": "uuid", "version": 3 }] }`: 1-100 pairs, each notice once, `version` as the list showed it. Answer `{ "updated": n }`.
+- Only a notice still at that version, and unread, is marked. One that changed since it was shown (a new event merged in, or read elsewhere) stays as it is and is not counted. That is not an error: show the list again.
+- Pairs that are not the caller's are ignored and not counted.
+- Mark read never needs access to the patient. It works while `accessEnded` is true.
+- Reading does not clear `needsSeen`. A critical notice read but not Seen stays counted in `criticalNotSeen` and stays on top.
 
 Mark Seen:
-- Body `{}`. Answer: the notice with `seenAt` set.
-- The recipient must be able to read the patient's records now, because Seen means they saw the result.
+- Body `{}`; it is not read. Answer: the notice with `seenAt` set.
+- A critical notice that was unread is marked read too (critical notices never merge). An ordinary notice stays as it was: an event may have merged into it since the list showed it, so only mark read, with the version, reads it.
+- Only Seen needs access: the recipient must be able to read the patient's records now, because Seen means they saw the result. Otherwise 403 `CONSENT_REQUIRED`.
 - Allowed on any notice. Required only for critical ones (owner decision Q128 A, 19 Nov 2026).
-- Seen is final and is recorded with who and when.
+- Seen is final. It records the time, the account and the membership. Seen again changes nothing.
 
-Keeping: a notice is kept 90 days after it is read, and a critical notice 90 days after it is Seen. A critical notice that is not Seen is never removed (proposed).
+Keeping (proposed, owner item 3 with the DPO): a notice is kept 90 days after it is read, and a critical notice 90 days after it is Seen. An unread ordinary notice goes 90 days after its last event. A critical notice that is not Seen is never removed. A notice under an unreleased legal hold on the patient, the recipient or the Seen account is kept. Gap rows are kept 90 days. ehr-api sweeps every 10 minutes while `ORDER_NOTICES_ENABLED` is on.
 
 Audit:
 - Each list read: one `ehr.order-notice.list` row (count, patient ids shown) plus one `ehr.order-notice.list.shown` row per patient shown, as EHR-C7 does.
-- Each read or Seen: `ehr.order-notice.read` or `ehr.order-notice.seen`, naming the patient.
+- Each mark read: one `ehr.order-notice.read` row per patient of the notices it marked. Each Seen: `ehr.order-notice.seen`, naming the patient.
+- The list, mark read and Seen also keep ehr-api's request row; the summary has one only when it fails.
+- The sweep writes one `ehr.order-notice.expire` row per notice it removes.
 - No test name, medicine or value goes in an audit row.
 
 ### Errors
 
 | HTTP | Code | Message |
 |---|---|---|
-| 400 | `VALIDATION_FAILED` | Names the field (for example, more than 100 ids). |
+| 400 | `VALIDATION_FAILED` | Names the field (for example, more than 100 pairs). |
+| 400 | `INVALID_CURSOR` | Pagination cursor is invalid. Load the list from the start. |
+| 400 | `BAD_REQUEST` | `:noticeId` in the Seen path is not a UUID (the house-wide UUID check on path ids). |
+| 400 | `PURPOSE_OF_USE_REQUIRED` | As today (direct care only). |
 | 403 | `PERMISSION_DENIED` | As today. |
 | 403 | `CONSENT_REQUIRED` | Ask the patient for access to see this result first. (Seen only.) |
 | 404 | `ORDER_NOTICE_NOT_FOUND` | This notice is not available. (Also for someone else's notice.) |
-| 503 | `ORDER_NOTICES_UNAVAILABLE` | Notices about your orders are not available yet. |
+| 503 | `ORDER_NOTICES_UNAVAILABLE` | sent as "The service could not complete the request." (`ORDER_NOTICES_ENABLED` off, a database without 0159, or any other database failure, such as a statement timeout or a deadlock, as MY-1. Every 5xx detail is replaced by that text, so a screen reads the status and the code, never the words, and uses its own. The request may be tried again.) |
 
 ### Screen notes
 
@@ -3721,24 +3775,27 @@ Audit:
   - Keep the bell for access requests only.
   - On the doctor's Home, show "Notices about your orders are not available yet. Check each order's progress." Link to each visit's order rows, which already show `ownProgress` (ORD-3): "Results ready 11:05", "Dispensed 11:05".
   - When MY-1 (0143, Release B) ships, use "Ordered by me" for this.
+- **How the website tells whether notices are served:** a 200 from `summary` or the list, or a 404 `ORDER_NOTICE_NOT_FOUND`, means served. A 404 with another code (an unknown route answers `NOT_FOUND`) means not served. 503 `ORDER_NOTICES_UNAVAILABLE` means not available right now: the setting is off, the database lacks 0159, or a passing database failure. Keep asking (see the polling note below), and never remember "not served" from a 503: once notices have been shown, a 503 keeps the last list and the critical ones on screen and says they could not be refreshed.
+- **While `summary` answers 503:** ask again slowly, once when the doctor signs in and then at most every 15 minutes, not once a minute. The summary writes an audit row only when it fails, so each 503 writes one failure row (`api.get./api/v1/ehr/me/order-notices/summary`); at once a minute that would be one row per signed-in doctor per minute until switch-on, which comes only after the count check. Go back to once a minute after the first 200.
 - **After:**
-  - Poll `summary` and put it on the bell: "4 new, 1 critical".
+  - Poll `summary` at most once a minute and put it on the bell: "4 new, 1 critical".
   - The results list puts critical notices first, in red, with "Open result" and then "Mark as Seen". Seen stays disabled until the result has been opened on the page.
+  - Mark read sends the version the list showed.
   - Unread and read: bold and plain.
   - When `accessEnded` is true, show the message and "Ask for access". Show no name.
 - **Not in this package (each would be a later package):** sending to phone or email (the in-app list comes first, owner decision Q128 A, 19 Nov 2026), handing a notice to a colleague, and raising an alarm when a critical result is not Seen. Until then, the laboratory's phone call stays the safety net for critical results.
 
 ### Depends on
 
-- ORD-3, ORD-2 (0133), order routes (sections 21-24), EHR-C7 (card shape), 0131 (own-facility access), MY-1 (0143) and ORD-12 (no refill notices).
-- ID-8b (merge, owner decision Q127 A, 19 Nov 2026) must carry the notices table in its foreign-key coverage, so notices follow the kept record.
+- ORD-3, ORD-2 (0133), order routes (sections 21-24), EHR-C7 (card shape), 0131 (own-facility access), MY-1 (0143) and ORD-12 (0154: no refill notices).
+- ID-8b (merge, owner decision Q127 A, 19 Nov 2026) must carry the notices table in its foreign-key coverage, so notices follow the kept record. `ehr.order_notices` has one foreign key, to `identity.patients`, so ID-8b's check finds it, and it is on the "moved" list.
 - Q128 A (owner decision, 19 Nov 2026).
 
 ### Target
 
-Release C (lane D). Size **L**:
-- writes from two services inside their own transactions (lab release and correction; pharmacy dispensing and reversal), including a new dispensing hook;
-- one ehr table with a per-read consent filter;
+Release C (lane D); Phase 1 (Q162). Size **L**:
+- four triggers in the database (0159) on Lab's releases and invalidations and Pharmacy's dispensings and reversals, inside the event's own transaction;
+- one ehr table with a per-read consent filter, a gaps table and a switch row;
 - four routes;
 - audit;
 - a runtime check across Lab, Pharmacy and EHR.

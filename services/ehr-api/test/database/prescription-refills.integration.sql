@@ -29,8 +29,10 @@
 --      and CHECKs (validated); the new key exactly and 0023's gone; the two
 --      replaced functions (md5, owner, attributes, ACL), the claim function
 --      naming no ehr.prescriptions and 0148's recorder unchanged; 0133's S7
---      list with the reader added and nothing else; the five triggers on
---      pharmacy.dispensings and their modes; what the runtimes may do with
+--      list with the reader added and nothing else (and, once 0159 is
+--      applied, its two notice readers); the five triggers on
+--      pharmacy.dispensings and their modes (six with 0159's
+--      zz_order_notice); what the runtimes may do with
 --      the new columns; the two readers exactly (md5, owner, attributes,
 --      result) and who may execute them (the Pharmacy and schema test
 --      runtimes only); R7's index on ehr.prescriptions exactly; the
@@ -238,7 +240,9 @@ begin
   -- pharmacy.dispensings, zz_billing_stock_and_gate, is there; Rahman's
   -- release-order review of 25 November 2026), its acceptance hook,
   -- commercial.hook_pharmacy_acceptance(), which reads a prescription's
-  -- price, is on the list as well, and nothing else is.
+  -- price, is on the list as well. 0159 (ORD-11) adds its list and Seen,
+  -- which read an order only for the session's own notices (the
+  -- order-notices suite, and that case 8). Nothing else is on the list.
   perform pg_temp.expect('1d the claim function names no ehr.prescriptions; 0133''s S7 list gains the two readers alone',
     (select count(*) from pg_proc proc
       where proc.oid = 'pharmacy.claim_prescription_dispensing()'::regprocedure and proc.prosrc ~* 'ehr\.prescriptions')
@@ -249,17 +253,22 @@ begin
                                    and trigger_row.tgname = 'zz_billing_stock_and_gate')
                    then 'commercial.hook_pharmacy_acceptance() ' else '' end
     || 'ehr.list_my_orders(text[],boolean,date,timestamp with time zone,text,uuid,integer) '
+    || 'ehr.list_order_notices(text,integer,timestamp with time zone,uuid,integer) '
+    || 'ehr.mark_order_notice_seen(uuid) '
     || 'ehr.patient_list_order_routes() ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,'
     || 'character) ehr.send_prescription_to_own_pharmacy(uuid,bigint) ehr.withdraw_own_pharmacy_send(uuid) '
     || 'identity.decide_unknown_patient(uuid,text,bigint,text,text,text) '
     || 'identity.demo_story_install(text) pharmacy.open_refill_work_items() pharmacy.validate_dispensing() '
     || 'pharmacy.validate_work_item() pharmacy.validate_work_item_acceptance() pharmacy.work_item_refills(uuid[])');
-  -- 1e. The five triggers on pharmacy.dispensings: the validator, the
+  -- 1e. The six triggers on pharmacy.dispensings: the validator, the
   -- immutability guard and 0086's route return in origin mode; 0133's claim
-  -- and key guard always; and, only where Billing's 0167 is applied,
-  -- exactly its zz_billing_stock_and_gate as a sixth (BEFORE INSERT FOR
-  -- EACH ROW, origin mode; it sorts last, so it fires after the validator),
-  -- which 0154's precondition g and post-check accept, and nothing else.
+  -- and key guard always; 0159's notice to the ordering doctor (AFTER
+  -- INSERT, origin), named to fire after the route return; and, only where
+  -- Billing's 0167 is applied, exactly its zz_billing_stock_and_gate as a
+  -- seventh (BEFORE INSERT FOR EACH ROW, origin mode; it sorts last of the
+  -- BEFORE triggers, so it fires after the validator), which 0154's
+  -- precondition g and post-check and 0159's precondition accept, and
+  -- nothing else.
   perform pg_temp.expect('1e the triggers on pharmacy.dispensings and their modes',
     (select string_agg(trigger_row.tgname || ':' || trigger_row.tgfoid::regprocedure::text || ':' || trigger_row.tgtype
               || ':' || trigger_row.tgenabled::text, ' ' order by trigger_row.tgname::text collate "C")
@@ -275,7 +284,8 @@ begin
     || 'dispensings_order_route_return:pharmacy.return_order_route_dispensing():5:O '
     || 'pharmacy_dispensing_validate:pharmacy.validate_dispensing():7:O '
     || 'pharmacy_dispensings_immutable:pharmacy.reject_immutable_evidence():27:O '
-    || 'prescription_claim_key_immutable:pharmacy.refuse_claim_key_change():19:A'
+    || 'prescription_claim_key_immutable:pharmacy.refuse_claim_key_change():19:A '
+    || 'zz_order_notice:ehr.order_notice_from_dispensing():5:O'
     || case when exists (select 1 from pg_trigger trigger_row
                           where trigger_row.tgrelid = 'pharmacy.dispensings'::regclass
                             and trigger_row.tgname = 'zz_billing_stock_and_gate')

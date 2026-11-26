@@ -40,7 +40,12 @@
 --      prescriptions_scan_refills: while the marker is held, the owner reads
 --      every row, so their own conditions decide what they answer); its
 --      marker test, pharmacy.refill_scan_open, is an owner-run definer that
---      names no ehr.prescriptions, so S7 is otherwise unchanged;
+--      names no ehr.prescriptions, so S7 is otherwise unchanged. 0159
+--      (ORD-11, notices to the ordering doctor) adds two more, the EHR
+--      runtime's ehr.list_order_notices and ehr.mark_order_notice_seen
+--      (S7's thirteenth and fourteenth; case 8): each reads an order by id
+--      only for a notice of the session's own account at its facility, and
+--      its trigger functions name no EHR order table;
 --   2. the send: the prescriber's activated prescription becomes a work item
 --      accepted by the prescriber with the fixed reason, one event, one
 --      outbox event with pharmacy-api's own four payload keys (what the event
@@ -158,7 +163,9 @@
 --      trigger answers the step of an item the session may not read (a held
 --      one: changed) before the policies refuse the row, as 0101's dispensing
 --      validator does (its own suite, pharmacy-work-item-acceptance, shows
---      each refusal, and both kinds of owner);
+--      each refusal, and both kinds of owner); 0159's notice list and Seen
+--      answer only for the session's own notices: PH lists none, and Seen
+--      and mark read do not find a notice of DR's;
 --  10. D15, the own-work list (owner's Q122 A): the patients with own work
 --      listed per kind and facility, one row per own item, replica inserts
 --      included, route-backed items never, nothing undone;
@@ -499,7 +506,11 @@ begin
   -- ehr.prescriptions under 0154's refill scan marker, so in their one
   -- statement that reads it the owner sees every row and their own
   -- conditions decide, as under a superuser owner, which that suite's case
-  -- 16 shows changes no answer and no other read);
+  -- 16 shows changes no answer and no other read; 0159 added
+  -- ehr.list_order_notices and ehr.mark_order_notice_seen, the EHR
+  -- runtime's notices to the ordering doctor, which read an order by id
+  -- only for a notice whose stored recipient is the session's account at
+  -- its facility, as the order-notices suite shows);
   -- case 8 shows each gives the pharmacist nothing more (the two
   -- validators in cases 3 and 5, and 0144's in its own suite,
   -- pharmacy-work-item-acceptance, too). A new one must be
@@ -513,6 +524,8 @@ begin
        where proc.prosecdef and proc.prosrc ~* 'ehr\.prescriptions'
          and proc.proowner = (select proowner from pg_proc where oid = 'pharmacy.validate_dispensing()'::regprocedure))
      is distinct from 'ehr.list_my_orders(text[],boolean,date,timestamp with time zone,text,uuid,integer) '
+       || 'ehr.list_order_notices(text,integer,timestamp with time zone,uuid,integer) '
+       || 'ehr.mark_order_notice_seen(uuid) '
        || 'ehr.patient_list_order_routes() ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,'
        || 'character) ehr.send_prescription_to_own_pharmacy(uuid,bigint) ehr.withdraw_own_pharmacy_send(uuid) '
        || 'identity.decide_unknown_patient(uuid,text,bigint,text,text,text) '
@@ -2260,6 +2273,25 @@ select pg_temp.expect('PH: the EHR runtime may not run the refills readers', pg_
   'select * from pharmacy.work_item_refills(array[%L]::uuid[])', pg_temp.work_item_of(pg_temp.rx(7)))) || ' | '
   || pg_temp.try('select * from pharmacy.open_refill_work_items()'),
   '42501 permission denied for schema pharmacy | 42501 permission denied for schema pharmacy');
+reset role;
+-- 0159's list and Seen (the thirteenth and fourteenth) answer only for the
+-- session's own notices: PH (who may read prescriptions) lists none of the
+-- notices DR's orders wrote, and DR's notice is not found for PH.
+select set_config('own_work.dr_notice', (select notice.id::text from ehr.order_notices notice
+  where notice.recipient_account_id = 'e1330002-0000-4000-8000-000000000001'
+    and notice.ordering_facility_id = 'e1330001-0000-4000-8000-000000000001'
+  order by notice.created_at, notice.id limit 1), true);
+select pg_temp.expect('DR has notices by now (the dispensings of his own orders)',
+  (current_setting('own_work.dr_notice') <> '')::text, 'true');
+set local role hid_ehr_api_runtime;
+select pg_temp.as_member(2);
+select pg_temp.expect('PH: the notice list and summary answer nothing of DR''s; Seen and mark read do not find DR''s notice',
+  pg_temp.rows_of('select * from ehr.list_order_notices(''all'', null, null, null, 50)') || ' | '
+  || pg_temp.rows_of('select * from ehr.order_notice_summary()') || ' | '
+  || pg_temp.try(format('select * from ehr.mark_order_notice_seen(%L)', current_setting('own_work.dr_notice')))
+  || ' | ' || pg_temp.rows_of(format('select 1 where ehr.mark_order_notices_read(array[%L]::uuid[], '
+       || 'array[1]::bigint[]) > 0', current_setting('own_work.dr_notice'))),
+  'rows=0 | rows=0 | P0002 ORDER_NOTICE_NOT_FOUND | rows=0');
 reset role;
 -- Through the Pharmacy runtime it answers only for a work item the session
 -- may read: prescription ids instead of work items give nothing.
