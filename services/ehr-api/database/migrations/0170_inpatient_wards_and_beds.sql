@@ -82,8 +82,7 @@
 -- suite), taken first, NOWAIT: SHARE ROW EXCLUSIVE on identity.facilities and
 -- identity.staff_facility_memberships (the foreign keys of the new, empty
 -- tables); ROW EXCLUSIVE on audit.events (the audit helper's body names it);
--- ACCESS SHARE on identity.patients, identity.unknown_patients,
--- identity.consent_directives, identity.consent_directive_versions,
+-- ACCESS SHARE on identity.patients, identity.consent_directives, identity.consent_directive_versions,
 -- auth.permissions, auth.role_permissions and auth.account_roles (read by the
 -- preconditions or named by the bodies). A busy table fails the attempt at
 -- once, and its subtransaction releases what it took. The attempt is made 50
@@ -105,7 +104,9 @@
 -- The whole file is one statement (do $adt0170$), so whatever raises in it,
 -- however the file is run, applies nothing:
 -- 0. The locks (one attempt, made up to 50 times while a table is busy).
--- 1. Preconditions (55000, nothing applied): markers of 0114, 0135 and 0145;
+-- 1. Preconditions (55000, nothing applied): the earlier functions this file
+--    calls (it uses no object of 0114, 0135 or 0145, so it needs no marker of
+--    them; the bodies it calls are md5-pinned below);
 --    "0170: already applied" when every object of this file is there,
 --    "0170: the schema is not in the reviewed state" for any half state; the
 --    bodies this file calls md5-pinned; the columns it reads by name and
@@ -148,22 +149,22 @@ begin
   begin
   lock table identity.facilities, identity.staff_facility_memberships in share row exclusive mode nowait;
   lock table audit.events in row exclusive mode nowait;
-  lock table identity.patients, identity.unknown_patients, identity.consent_directives,
-    identity.consent_directive_versions, auth.permissions, auth.role_permissions, auth.account_roles
+  lock table identity.patients, identity.consent_directives, identity.consent_directive_versions, auth.permissions,
+    auth.role_permissions, auth.account_roles
     in access share mode nowait;
   exit;
   exception when lock_not_available then
     if v_holding then
       raise exception using errcode = '55P03',
         message = '0170: identity.facilities, identity.staff_facility_memberships, audit.events or a table 0170 '
-          || 'reads (patients, unknown patient records, consent directives, permissions, role permissions and role '
+          || 'reads (patients, consent directives, permissions, role permissions and role '
           || 'assignments) is busy, and this transaction already holds an earlier migration''s locks, so it does not '
           || 'wait; nothing applied; run the release again at a quieter time';
     end if;
     if v_attempt >= 50 then
       raise exception using errcode = '55P03',
         message = '0170: identity.facilities, identity.staff_facility_memberships, audit.events or a table 0170 '
-          || 'reads (patients, unknown patient records, consent directives, permissions, role permissions and role '
+          || 'reads (patients, consent directives, permissions, role permissions and role '
           || 'assignments) stayed busy for 5 seconds; nothing applied; run the release again at a quieter time';
     end if;
     perform pg_sleep(0.1);
@@ -171,10 +172,11 @@ begin
   end loop;
 
   -- 1. Preconditions.
-  -- Markers of 0114 (department codes), 0135 (the waiting list) and 0145 (unknown records).
-  if to_regprocedure('identity.facility_departments_valid(text[])') is null
-     or to_regclass('ehr.visit_queue') is null
-     or to_regclass('identity.unknown_patients') is null
+  -- No earlier file's marker: this file uses no object of 0114 (department codes), 0135 (the waiting list) or 0145
+  -- (unknown records). The functions it calls must be there (their bodies are md5-pinned below).
+  if to_regprocedure('identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamp with time zone)') is null
+     or to_regprocedure('ehr.context_allows(uuid,uuid,text)') is null
+     or to_regprocedure('auth.membership_has_permission(text,uuid,uuid,text)') is null
      or to_regclass('migration.schema_migrations') is null then
     raise exception using errcode = '55000', message = '0170: 0001-0151 must be applied first';
   end if;

@@ -243,7 +243,7 @@ create temporary table declared_locks (file text, table_name text, mode text);
 insert into declared_locks values
   ('0170', 'identity.facilities', 'ShareRowExclusiveLock'), ('0170', 'identity.staff_facility_memberships', 'ShareRowExclusiveLock'),
   ('0170', 'audit.events', 'RowExclusiveLock'), ('0170', 'identity.patients', 'AccessShareLock'),
-  ('0170', 'identity.unknown_patients', 'AccessShareLock'), ('0170', 'identity.consent_directives', 'AccessShareLock'),
+  ('0170', 'identity.consent_directives', 'AccessShareLock'),
   ('0170', 'identity.consent_directive_versions', 'AccessShareLock'), ('0170', 'auth.permissions', 'AccessShareLock'),
   ('0170', 'auth.role_permissions', 'AccessShareLock'), ('0170', 'auth.account_roles', 'AccessShareLock'),
   ('0171', 'ehr.encounters', 'AccessExclusiveLock'), ('0171', 'ehr.record_versions', 'AccessExclusiveLock'),

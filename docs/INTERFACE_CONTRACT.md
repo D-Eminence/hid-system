@@ -12556,7 +12556,8 @@ patient's record first, then try again.").
 13. `POST /ehr/admissions/:admissionId/admit` (`ehr.bed.allocate`; no chart access needed, Q-ADT-11 A)
     `{ "expectedRowVersion", "bedId", "confirmSexMismatch"? }` → `{ "admission", "replayed" }`. Only from `requested`.
     The bed occupied, the visit `in_progress`; an ED record closes by itself (`closed_via = 'admission'`, ED-1 shows it
-    closed) and its waiting-list row finishes; a waiting-list row finishes. 409 `BED_NOT_AVAILABLE` ("This bed is not
+    closed) and its waiting-list row finishes; a waiting-list row finishes, and when its patient was put on the
+    emergency board while waiting for a bed, the ED record closes the same way. 409 `BED_NOT_AVAILABLE` ("This bed is not
     free. Choose another bed or overflow space."; also when two members give one bed at the same moment: exactly one
     wins), 409 `WARD_SEX_MISMATCH` (confirm with `confirmSexMismatch: true`; audited), 409 `ADMISSION_STATE_INVALID`.
 14. `POST /ehr/admissions/:admissionId/transfer` (`ehr.bed.allocate`) `{ "expectedRowVersion", "bedId",
@@ -12617,6 +12618,8 @@ patient's record first, then try again.").
   counts one day.
 - BILL-1's `POST /commercial/bills/:billId/payments` takes `"kind": "deposit"` on an admission bill while the stay is
   open (409 `DEPOSIT_NOT_ALLOWED` otherwise); a deposit may be more than what is due: the bill shows `creditKobo`.
+  On an admission bill BILL-1's `refundDueKobo` and `coverOverKobo` stay 0 (what was collected beyond the total is the
+  credit), so an inpatient's deposit is never listed as money over while the stay is open.
 - `GET /commercial/bills/:billId/interim-statement` (`billing.bill.read`) → BILL-1's bill answer plus
   `"statementNumber": "I-2026-000045"`, `"depositsKobo"` and `"printedAt"`; each print is audited.
 - **Discharge is never held for an unpaid bill**; the bill stays open after discharge. A facility without payment
