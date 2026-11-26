@@ -86,11 +86,11 @@
 --    audit.events              one row per role row added, as the system actor
 --                              (auth.role-permission.add).
 -- A6 ehr.visit_queue           the check_in_basis CHECK becomes ('search',
---                              'own_facility', 'appointment'), followed by any
---                              value another lane added before this file (after
---                              0168: 'emergency', the same CHECK 0168 leaves
---                              when it runs after this file). Nothing else in
---                              0135 changes; its functions read the basis as text.
+--                              'own_facility', 'appointment'), followed by
+--                              'emergency' when Emergency's 0168 added it before
+--                              this file (the same CHECK 0168 leaves when it
+--                              runs after this file). Nothing else in 0135
+--                              changes; its functions read the basis as text.
 -- A7 SECURITY DEFINER functions (search_path pg_catalog, pg_temp), owned like
 --    0135's (the owner of identity.has_active_consent_grant), EXECUTE for
 --    hid_ehr_runtime only: ehr.appointment_book, _list, _read, _patient_list,
@@ -158,14 +158,18 @@
 -- 0. The locks (one attempt, made up to 50 times while a table is busy).
 -- 1. Preconditions (55000, nothing applied): markers of 0145 and 0150 (the
 --    earlier files whose objects this file uses);
---    "0160: already applied" when every object of this file is there with the
---    role rows it adds, "0160: the schema is not in the reviewed state" for
---    any half state; the bodies this file calls or reads md5-pinned; every
---    code 0001-0151 give receptionist, doctor, clinician and nurse still held
---    (the four lists are written out; each one's md5 is the one this file
---    pinned before; codes another lane added are accepted) and no appointment
---    code yet; the waiting-list basis CHECK as 0135 left it, or with plain
---    values another lane added after 'search' and 'own_facility'.
+--    "0160: already applied" when every object of this file is there (the
+--    four tables and the 18 functions by signature, the two codes and no
+--    other appointment code, the CHECK with 'appointment') with exactly the
+--    seven role rows it adds (the roles and the codes), "0160: the schema is
+--    not in the reviewed state" for any half state (any of them, or any other
+--    appointment code or role row); the bodies this file calls or reads
+--    md5-pinned; every code 0001-0151 give receptionist, doctor, clinician and
+--    nurse still held (the four lists are written out; each one's md5 is the
+--    one this file pinned before; codes another lane added are accepted) and
+--    no appointment code yet; the waiting-list basis CHECK as 0135 left it, or with
+--    'emergency' (Emergency's 0168) after 'search' and 'own_facility', and no
+--    other value.
 -- 2. A1-A8.
 -- 3. Post-checks (0148's and 0152's form): the seven appointment role rows
 --    exactly, and every other role row as it was before this file (so the
@@ -177,7 +181,9 @@
 --    granted to no other role; the history's two triggers by tgtype, tgqual,
 --    tgattr, tgnargs, tgfoid and tgenabled, and its trigger function's body;
 --    the 18 functions are the owner's, the 13 entry points SECURITY DEFINER
---    with the fixed search_path and EXECUTE only for hid_ehr_runtime; exactly
+--    with the fixed search_path, and EXECUTE in 0148's form: hid_ehr_runtime
+--    (when it exists) holds it on each entry point, never with grant option,
+--    and no other role holds any, nor anybody on the five helpers; exactly
 --    seven audit rows of this file.
 
 do $appt0160$
@@ -247,27 +253,52 @@ begin
     raise exception using errcode = '55000', message = '0160: 0001-0151 must be applied first';
   end if;
 
+  -- Every object of this file, by name and signature: the four tables, the 18 functions and the two codes. "Already
+  -- applied" is all of them, with the CHECK admitting 'appointment', exactly the two codes and exactly the seven role
+  -- rows of A5 (which roles hold which code); any part of them, any other appointment code or role row, is a half
+  -- state.
   select count(*) into v_present
     from (values (to_regclass('ehr.appointment_settings')::oid), (to_regclass('ehr.appointment_clinics')::oid),
                  (to_regclass('ehr.appointments')::oid), (to_regclass('ehr.appointment_events')::oid),
-                 (to_regprocedure('ehr.appointment_cards(uuid[], uuid, uuid, uuid)')::oid),
                  (to_regprocedure('ehr.appointment_book(text, uuid, text, uuid, uuid, timestamptz, integer, text, text, text, text)')::oid),
+                 (to_regprocedure('ehr.appointment_list(date, uuid, uuid, text[], integer, timestamptz, timestamptz, uuid)')::oid),
+                 (to_regprocedure('ehr.appointment_read(uuid)')::oid),
+                 (to_regprocedure('ehr.appointment_patient_list(uuid)')::oid),
+                 (to_regprocedure('ehr.appointment_reschedule(uuid, bigint, timestamptz, integer, uuid, boolean, text, text, text)')::oid),
+                 (to_regprocedure('ehr.appointment_cancel(uuid, bigint, text, text, text)')::oid),
+                 (to_regprocedure('ehr.appointment_mark_no_show(uuid, bigint, text, text)')::oid),
                  (to_regprocedure('ehr.appointment_check_in(uuid, bigint, boolean, text, text, text)')::oid),
+                 (to_regprocedure('ehr.appointment_bookable_staff()')::oid),
+                 (to_regprocedure('ehr.appointment_clinic_list(boolean)')::oid),
+                 (to_regprocedure('ehr.appointment_clinic_save(uuid, bigint, text, text, integer, boolean, boolean, text, text)')::oid),
+                 (to_regprocedure('ehr.appointment_settings_read()')::oid),
+                 (to_regprocedure('ehr.appointment_settings_save(bigint, integer, text, text)')::oid),
+                 (to_regprocedure('ehr.appointment_cards(uuid[], uuid, uuid, uuid)')::oid),
+                 (to_regprocedure('ehr.appointment_caller(text[], text[])')::oid),
+                 (to_regprocedure('ehr.appointment_audit(text, uuid, uuid, uuid, uuid, text, text, uuid, text, text, text, text, jsonb)')::oid),
+                 (to_regprocedure('ehr.appointment_idempotency(uuid, text, text)')::oid),
+                 (to_regprocedure('ehr.appointment_events_immutable()')::oid),
                  ((select 1::oid where exists (select 1 from auth.permissions where code = 'ehr.appointment.read'))),
                  ((select 1::oid where exists (select 1 from auth.permissions where code = 'ehr.appointment.write'))))
          present(object_id)
    where present.object_id is not null;
-  if v_present = 9
+  if v_present = 24
      and exists (select 1 from pg_constraint where conrelid = 'ehr.visit_queue'::regclass
                   and conname = 'visit_queue_check_in_basis_check'
-                  and pg_get_constraintdef(oid) like '%appointment%')
-     and (select count(*) from auth.role_permissions
-           where permission_code in ('ehr.appointment.read', 'ehr.appointment.write')) = 7 then
+                  and pg_get_constraintdef(oid) like '%''appointment''%')
+     and (select count(*) from auth.permissions where code like 'ehr.appointment.%') = 2
+     and (select string_agg(grant_row.role_code || ' ' || grant_row.permission_code, ','
+                            order by grant_row.role_code collate "C", grant_row.permission_code collate "C")
+            from auth.role_permissions grant_row where grant_row.permission_code like 'ehr.appointment.%')
+         is not distinct from 'clinician ehr.appointment.read,clinician ehr.appointment.write,doctor ehr.appointment.read,'
+           || 'doctor ehr.appointment.write,nurse ehr.appointment.read,receptionist ehr.appointment.read,'
+           || 'receptionist ehr.appointment.write' then
     raise exception using errcode = '55000', message = '0160: already applied';
   end if;
   if v_present <> 0
      or exists (select 1 from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
                  where namespace.nspname = 'ehr' and proc.proname like 'appointment%')
+     or exists (select 1 from auth.permissions where code like 'ehr.appointment.%')
      or exists (select 1 from auth.role_permissions where permission_code like 'ehr.appointment.%') then
     raise exception using errcode = '55000', message = '0160: the schema is not in the reviewed state (part of 0160 is there); nothing applied';
   end if;
@@ -366,9 +397,9 @@ begin
       message = '0160: the role table is not in the reviewed state (' || v_mismatch || ' lacks a code 0001-0151 give '
         || 'it); nothing applied';
   end if;
-  -- The waiting-list basis CHECK: 0135's two values first, then only plain values another Release D lane added
-  -- (Emergency's 0168 adds 'emergency'), never 'appointment' (as 0168 accepts this file's CHECK). The definition
-  -- must be exactly the IN list of those values, so no other condition and no NOT VALID.
+  -- The waiting-list basis CHECK: 0135's two values first, then at most 'emergency', the one value another Release D
+  -- lane adds (Emergency's 0168, which in turn accepts only 0135's CHECK or this file's), never 'appointment' or any
+  -- other value. The definition must be exactly the IN list of those values, so no other condition and no NOT VALID.
   select pg_get_constraintdef(constraint_row.oid) into v_check_found from pg_constraint constraint_row
    where constraint_row.conrelid = 'ehr.visit_queue'::regclass
      and constraint_row.conname = 'visit_queue_check_in_basis_check' and constraint_row.contype = 'c';
@@ -380,11 +411,12 @@ begin
           (select string_agg(quote_literal(basis.value) || '::text', ', ' order by basis.position)
              from unnest(v_basis_found) with ordinality as basis(value, position)))
      or v_basis_found[1:2] is distinct from array['search', 'own_facility']
+     or not (v_basis_found[3:] <@ array['emergency'])
      or 'appointment' = any (v_basis_found)
      or cardinality(v_basis_found) <> (select count(distinct basis.value) from unnest(v_basis_found) basis(value)) then
     raise exception using errcode = '55000',
       message = '0160: the waiting-list basis CHECK is not as 0135 left it (search and own_facility, then only '
-        || 'values another lane added); nothing applied';
+        || 'emergency, the value Emergency''s 0168 adds); nothing applied';
   end if;
 
   select string_agg(grant_row.role_code || ' ' || grant_row.permission_code || ' ' || grant_row.granted_at::text, ','
@@ -1982,14 +2014,24 @@ begin
                        and proc.proconfig = array['search_path=pg_catalog, pg_temp']) then
     raise exception using errcode = '55000', message = '0160: post-check failed (the history''s triggers)';
   end if;
+  -- EXECUTE in 0148's form: only hid_ehr_runtime, on the 13 entry points only, never with grant option (so no default
+  -- privilege of the schema adds one), and held by it on each of them when the role exists.
   if exists (select 1 from pg_proc proc
                join pg_namespace namespace on namespace.oid = proc.pronamespace,
                lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
               where namespace.nspname = 'ehr' and proc.proname like 'appointment%'
                 and acl.grantee <> proc.proowner
                 and (acl.grantee = 0 or pg_get_userbyid(acl.grantee) <> 'hid_ehr_runtime'
+                     or acl.privilege_type <> 'EXECUTE' or acl.is_grantable
                      or proc.proname in ('appointment_cards', 'appointment_caller', 'appointment_audit',
                                          'appointment_idempotency', 'appointment_events_immutable')))
+     or (exists (select 1 from pg_roles role_row where role_row.rolname = 'hid_ehr_runtime')
+         and (select count(*) from pg_proc proc
+               join pg_namespace namespace on namespace.oid = proc.pronamespace,
+               lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
+              where namespace.nspname = 'ehr' and proc.proname like 'appointment%' and proc.prosecdef
+                and acl.grantee = (select role_row.oid from pg_roles role_row where role_row.rolname = 'hid_ehr_runtime')
+                and acl.privilege_type = 'EXECUTE') <> 13)
      or (select count(*) from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
           where namespace.nspname = 'ehr' and proc.proname like 'appointment%' and proc.prosecdef
             and proc.proconfig = array['search_path=pg_catalog, pg_temp']) <> 13

@@ -190,6 +190,35 @@ select pg_temp.expect('2b 0160 again: already applied, nothing changed', '55000 
 :run0161
 select pg_temp.expect('2c 0161 again: already applied, nothing changed', '55000 0161: already applied | ' || :'made0161_applied',
   pg_temp.answer('0161', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0161());
+-- "Already applied" only for the whole of a file (each rolled back after): seven appointment role rows held by other
+-- roles than A5's, a helper of 0160 missing, an appointment code 0160 does not add, and one of 0161's sender calls
+-- missing are each a half state.
+savepoint s2;
+delete from auth.role_permissions where role_code = 'doctor' and permission_code = 'ehr.appointment.write';
+insert into auth.role_permissions (role_code, permission_code) values ('nurse', 'ehr.appointment.write');
+:run0160
+rollback to savepoint s2;
+select pg_temp.expect('2d seven appointment role rows, but not A5''s: not "already applied"',
+  '55000 0160: the schema is not in the reviewed state (part of 0160 is there); nothing applied',
+  pg_temp.answer('0160', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE'));
+drop function ehr.appointment_caller(text[], text[]);
+:run0160
+rollback to savepoint s2;
+select pg_temp.expect('2e one of 0160''s helpers missing: not "already applied"',
+  '55000 0160: the schema is not in the reviewed state (part of 0160 is there); nothing applied',
+  pg_temp.answer('0160', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE'));
+insert into auth.permissions (code, description) values ('ehr.appointment.admin', 'Synthetic extra appointment code');
+:run0160
+rollback to savepoint s2;
+select pg_temp.expect('2f an appointment code 0160 does not add: not "already applied"',
+  '55000 0160: the schema is not in the reviewed state (part of 0160 is there); nothing applied',
+  pg_temp.answer('0160', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE'));
+drop function identity.appointment_email_record(uuid, text, text, text);
+:run0161
+rollback to savepoint s2;
+select pg_temp.expect('2g one of 0161''s sender calls missing: not "already applied"',
+  '55000 0161: the schema is not in the reviewed state (part of 0161 is there); nothing applied',
+  pg_temp.answer('0161', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE'));
 
 -- The locks a file adds, on tables that were there before it ran: (table, mode) pairs held by this backend after
 -- the run and not before; catalogs, temporary objects and the runner's own schema left out.
@@ -423,8 +452,8 @@ alter table ehr.visit_queue add constraint visit_queue_check_in_basis_check
 rollback to savepoint s160;
 -- (NOT VALID, so the waiting-list rows of a copy of production need not fit it.)
 select pg_temp.expect('4e a waiting-list basis CHECK without own_facility: refused, nothing applied',
-  '55000 0160: the waiting-list basis CHECK is not as 0135 left it (search and own_facility, then only values another '
-  || 'lane added); nothing applied | 0 tables, 0 functions, 0 role rows, 0 audit rows',
+  '55000 0160: the waiting-list basis CHECK is not as 0135 left it (search and own_facility, then only emergency, the '
+  || 'value Emergency''s 0168 adds); nothing applied | 0 tables, 0 functions, 0 role rows, 0 audit rows',
   pg_temp.answer('0160', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0160());
 alter table ehr.visit_queue drop constraint visit_queue_check_in_basis_check;
 alter table ehr.visit_queue add constraint visit_queue_check_in_basis_check
@@ -432,8 +461,17 @@ alter table ehr.visit_queue add constraint visit_queue_check_in_basis_check
 :run0160
 rollback to savepoint s160;
 select pg_temp.expect('4e2 a waiting-list basis CHECK with another condition: refused, nothing applied',
-  '55000 0160: the waiting-list basis CHECK is not as 0135 left it (search and own_facility, then only values another '
-  || 'lane added); nothing applied | 0 tables, 0 functions, 0 role rows, 0 audit rows',
+  '55000 0160: the waiting-list basis CHECK is not as 0135 left it (search and own_facility, then only emergency, the '
+  || 'value Emergency''s 0168 adds); nothing applied | 0 tables, 0 functions, 0 role rows, 0 audit rows',
+  pg_temp.answer('0160', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0160());
+alter table ehr.visit_queue drop constraint visit_queue_check_in_basis_check;
+alter table ehr.visit_queue add constraint visit_queue_check_in_basis_check
+  check (check_in_basis in ('search', 'own_facility', 'walk_in'));
+:run0160
+rollback to savepoint s160;
+select pg_temp.expect('4e5 a basis value no lane adds (walk_in) after 0135''s two: refused, nothing applied',
+  '55000 0160: the waiting-list basis CHECK is not as 0135 left it (search and own_facility, then only emergency, the '
+  || 'value Emergency''s 0168 adds); nothing applied | 0 tables, 0 functions, 0 role rows, 0 audit rows',
   pg_temp.answer('0160', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0160());
 -- Another lane's additions: a code added to the front desk (as Billing's 0162 adds its own) and a basis value added
 -- after 0135's two (as Emergency's 0168 adds emergency).
