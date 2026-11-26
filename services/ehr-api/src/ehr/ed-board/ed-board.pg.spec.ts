@@ -213,6 +213,19 @@ describeRehearsal('ED-1 the emergency department board on PostgreSQL (0168, 0169
       expect(audited.rows[0].count).toBe(1);
     });
 
+  it('shows a cancel\'s reason in the history to nurses, clinicians and doctors only, never to the front desk', async () => {
+    const arrived = await board.arrive(contextFor(nurse), { patientId: ownPatient, arrivalMode: 'walk_in', triageLevel: 1 },
+      key('arrive-to-cancel'));
+    await board.cancel(contextFor(nurse), arrived.attendance.attendanceId,
+      { expectedRowVersion: arrived.attendance.rowVersion, reason: 'Put on the board by mistake' }, key('cancel'));
+    const reasons = async (member: { n: number; role: string }) =>
+      (await board.read(contextFor(member), arrived.attendance.attendanceId)).history
+        .map((entry) => [entry.kind, entry.reason]);
+    expect(await reasons(nurse)).toEqual([['arrived', null], ['cancelled', 'Put on the board by mistake']]);
+    expect(await reasons(doctor)).toEqual([['arrived', null], ['cancelled', 'Put on the board by mistake']]);
+    expect(await reasons(desk)).toEqual([['arrived', null], ['cancelled', null]]);
+  });
+
   it('writes no name, Health ID or complaint into any audit row', async () => {
     const leaked = await client.query(`select count(*)::integer as count from audit.events
       where facility_id = $1 and action like 'ehr.ed.%' and details::text ~* 'boardown|HID-EP|motorcycle'`, [facilityId]);

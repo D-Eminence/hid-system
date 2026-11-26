@@ -21,7 +21,8 @@
 -- emergency search and holds an active break-glass grant for them here may put
 -- them on the board, basis emergency; the board gives no chart access),
 -- Q-ED-4 A (a short presenting complaint, 1-120 characters, shown only to
--- members who hold ehr.ed.triage), Q-ED-5 A (disposition in two steps: home,
+-- members who hold ehr.ed.triage; so are the history's free-text reasons),
+-- Q-ED-5 A (disposition in two steps: home,
 -- admission requested and referred out wait in Disposition until "Left the
 -- department"; left before being seen, left against advice, died and sent to
 -- outpatients close at once), Q-ED-6 A (the admission request is stored on the
@@ -127,7 +128,10 @@
 --    ehr.visit_queue_ed_attendances (beside 0145's
 --    ehr.visit_queue_record_kinds) and the waiting list's update while the
 --    board is off, ehr.visit_queue_ed_board_off_update (0135's
---    ehr.visit_queue_update, md5-pinned, under the marker). Helpers no role may execute:
+--    ehr.visit_queue_update, md5-pinned, under the marker). ehr.ed_read's
+--    history gives the free-text reasons (a cancel's, a changed
+--    disposition's) only to a caller holding ehr.ed.triage, as the
+--    complaint: the front desk gets reason null. Helpers no role may execute:
 --    ehr.ed_cards (0135's card fields, 0145's record kind and label, the ED
 --    fields; the complaint only for a caller holding ehr.ed.triage),
 --    ehr.ed_caller, ehr.ed_audit, ehr.ed_idempotency, the history's
@@ -167,6 +171,12 @@
 --      (identity.consent_grants, scope break_glass), basis emergency. The
 --      record stays on the board after the grant ends; the chart still needs a
 --      grant. With Q-ED-3 B the one change is that this route is refused.
+--      Its waiting-list row (basis emergency) is on the facility's outpatient
+--      waiting list for the stay, and stays there open after a
+--      sent_to_outpatients disposition or a cancel of the arrival, until the
+--      desk closes it on the waiting list: Rahman's second condition for
+--      Q-ED-3 A, the DPO's acceptance of that facility-wide visibility, is
+--      still open.
 -- Anything else answers needs_search, the same for every reason. Under 0135's
 -- advisory lock (visit-queue:<facility>:<patient>) and its one-open-row index:
 -- a new waiting-list row and ED record (arrived), an ED record on the open
@@ -245,7 +255,12 @@
 -- board is switched off, list its decided admit_requested records and hand
 -- those patients over outside the board: with the board off, any waiting-list
 -- change of their rows closes the record, and a later arrival does not carry
--- the request.
+-- the request. ED_BOARD_ENABLED is one switch for the whole ehr-api process:
+-- it does not look at the facility. Production is the one deployment and
+-- serves the sealed demo and QA facilities beside the real ones (0098), so
+-- switching it on there switches the board on at every facility whose staff
+-- hold 0169's codes: the demo and QA facilities get the board at the go-live,
+-- not before.
 --
 -- Undo (not in the ledger; a migration only if the owner signs it): drop the
 -- triggers, the functions and the two tables, and put back the CHECK found
@@ -1136,7 +1151,9 @@ begin
     '0168 (ED-1): this facility''s open and decided ED records (and, when asked, the closed ones that left the department today, Lagos day, whenever they arrived), by column (waiting, being seen, disposition, closed), then triage level (1 first, no level last), then arrival, at most 200, has_more when there are more, with the counts of the three columns. Needs ehr.ed.read and 0135''s pair, for direct care. The complaint only for members holding ehr.ed.triage. Audited: one ehr.ed.board row and one ehr.ed.board.shown row per patient shown.';
   revoke all on function ehr.ed_board(boolean) from public;
 
-  -- Route 3: one record with its history.
+  -- Route 3: one record with its history. The free-text reasons (a cancel's and a changed disposition's, 8-500
+  -- characters) are shown only to a caller holding ehr.ed.triage, as the complaint is: the front desk gets reason
+  -- null (Rahman, #337 7175564791, nits, "The front desk").
   create function ehr.ed_read(requested_attendance_id uuid)
   returns table (outcome text, ord bigint, attendance_id uuid, entry_id uuid, patient_id uuid, full_name text,
     record_kind text, unknown_label text, sex text, date_of_birth date, dob_estimated boolean, health_id_last4 text,
@@ -1178,7 +1195,8 @@ begin
              coalesce((select jsonb_agg(jsonb_build_object('kind', event.kind, 'at', event.at,
                          'byMembershipId', event.by_membership_id, 'fromStage', event.from_stage,
                          'toStage', event.to_stage, 'triageLevel', event.triage_level, 'outcome', event.outcome,
-                         'reason', event.reason, 'complaintChanged', event.complaint_changed)
+                         'reason', case when caller.can_triage then event.reason end,
+                         'complaintChanged', event.complaint_changed)
                          order by event.sequence_no)
                          from ehr.ed_attendance_events event
                         where event.attendance_id = requested_attendance_id and event.kind <> 'already_on_board'),
@@ -1188,7 +1206,7 @@ begin
   end
   $fn$;
   comment on function ehr.ed_read(uuid) is
-    '0168 (ED-1): one ED record of this facility with its history (arrived, moved_from_waiting_list, triaged, moved, visit_linked, disposition, disposition_changed, left, cancelled, closed_on_waiting_list; never the complaint text). Needs ehr.ed.read and 0135''s pair, for direct care. Another facility''s record answers not_found. Audited (ehr.ed.record-read).';
+    '0168 (ED-1): one ED record of this facility with its history (arrived, moved_from_waiting_list, triaged, moved, visit_linked, disposition, disposition_changed, left, cancelled, closed_on_waiting_list; never the complaint text; the reasons of a cancel and a changed disposition only for members holding ehr.ed.triage, null for the front desk). Needs ehr.ed.read and 0135''s pair, for direct care. Another facility''s record answers not_found. Audited (ehr.ed.record-read).';
   revoke all on function ehr.ed_read(uuid) from public;
 
   -- Route 4: triage (the level on the waiting-list row; the complaint on the ED record).
@@ -2331,7 +2349,7 @@ begin
       ('ehr.ed_leave(uuid,bigint,text,text)', true, 'v', '31fe957131f3b2e054e1f14a5abd6826'),
       ('ehr.ed_link_visit(uuid,bigint,uuid,text,text)', true, 'v', '1f9a5f2a3e15a909b83f1f89887f4d4c'),
       ('ehr.ed_move(uuid,bigint,text,uuid,boolean,text,text)', true, 'v', '6132460280b2469721128f511eb75d42'),
-      ('ehr.ed_read(uuid)', true, 'v', '7247568925375fafa3b09de0d4dd35ad'),
+      ('ehr.ed_read(uuid)', true, 'v', 'bbd308c6f4668f182d9fe92876ddd379'),
       ('ehr.ed_record_disposition(uuid,bigint,text,text,uuid,text,text,text,text)', true, 'v', 'fea81eebc9aaefe10f1b0b2c2c80be5a'),
       ('ehr.ed_triage(uuid,bigint,smallint,text,boolean,text,text)', true, 'v', '723ad0963a855fc976ea1deae2393c40'),
       ('ehr.visit_queue_ed_attendances(uuid[])', true, 's', '8f7a33d87ffaccca9686c43925d13b38'),

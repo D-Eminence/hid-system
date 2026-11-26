@@ -53,7 +53,10 @@
 --      not run it; "left today" is the Lagos day the record left, whenever
 --      it arrived;
 --   9. version conflicts, idempotent replays and a reused key;
---  10. the history, the waiting-list helper, the runtime cannot read the
+--  10. the history (its free-text reasons, a cancel's and a changed
+--      disposition's, only for members holding ehr.ed.triage: the front desk
+--      reads reason null, as it reads no complaint), the waiting-list helper,
+--      the runtime cannot read the
 --      tables or call the helpers, nor read or advance the history's
 --      sequence (no runtime role holds any privilege on it after
 --      runtime-grants.sql); the history cannot be updated, deleted or
@@ -78,7 +81,12 @@
 --      the close goes through and the mirror stays out, so the ED record is
 --      still open until the caller closes it; once the marker is cleared the
 --      guard is back for the row; a marker naming the ED record's id instead
---      opens nothing.
+--      opens nothing;
+--  14. what the clinical lead's checklist and the DPO's Q-ED-3 item ask about
+--      (Rahman, #337 7175564791): the front desk may cancel an arrival a nurse
+--      triaged at level 1, and the level then leaves the outpatient row; a
+--      cancelled emergency-basis arrival's row stays open on the facility's
+--      outpatient waiting list, where the desk sees the patient by name.
 --
 -- Each case records its outcome; the suite fails at the end listing every
 -- case whose outcome differs.
@@ -489,6 +497,22 @@ begin
     return answer.outcome;
   end if;
   return (select string_agg(entry.value ->> 'kind', ',' order by entry.ordinality)
+            from jsonb_array_elements(answer.history) with ordinality entry);
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end
+$f$;
+-- The history's reasons as member n reads them: one per entry, - when null.
+create function pg_temp.history_reasons(n integer, patient integer) returns text language plpgsql as $f$
+declare
+  answer record;
+begin
+  perform pg_temp.as_member(n);
+  select * into answer from ehr.ed_read(pg_temp.att(patient));
+  if answer.outcome <> 'found' then
+    return answer.outcome;
+  end if;
+  return (select string_agg(coalesce(entry.value ->> 'reason', '-'), ',' order by entry.ordinality)
             from jsonb_array_elements(answer.history) with ordinality entry);
 exception when others then
   return sqlstate || ' ' || sqlerrm;
@@ -943,6 +967,21 @@ select pg_temp.check_case('10 p1''s history (the complaint''s text never in it)'
   pg_temp.history(1, 1));
 select pg_temp.check_case('10 p5''s second record: moved from the waiting list, then cancelled',
   'moved_from_waiting_list,cancelled', pg_temp.history(1, 5));
+-- The free-text reasons, as the complaint, only for members holding ehr.ed.triage (Rahman, #337 7175564791, nits,
+-- "The front desk"): the desk read a clinician's reason for a changed disposition before.
+select pg_temp.check_case('10 the desk reads p1''s history with no reason (the changed disposition''s is hidden)',
+  '-,-,-,-,-,-,-,-', pg_temp.history_reasons(1, 1));
+select pg_temp.check_case('10 the nurse reads the changed disposition''s reason',
+  '-,-,-,-,-,-,No inpatient bed tonight; transferred,-', pg_temp.history_reasons(2, 1));
+select pg_temp.check_case('10 the doctor too', '-,-,-,-,-,-,No inpatient bed tonight; transferred,-',
+  pg_temp.history_reasons(3, 1));
+select pg_temp.check_case('10 the desk reads no cancel reason either, not even its own (p5)', '-,-',
+  pg_temp.history_reasons(1, 5));
+select pg_temp.check_case('10 the nurse reads p5''s cancel reason', '-,Sent to the board by mistake',
+  pg_temp.history_reasons(2, 5));
+select pg_temp.as_member(1);
+select pg_temp.check_case('10 the desk''s read of p1: the complaint and the reasons hidden alike', 'true/-',
+  (select complaint_hidden::text || '/' || coalesce(presenting_complaint, '-') from ehr.ed_read(pg_temp.att(1))));
 reset role;
 select pg_temp.check_case('10 no complaint text and no name in any history row', '0',
   (select count(*)::text from ehr.ed_attendance_events event
@@ -1154,6 +1193,38 @@ update ehr.ed_attendances attendance
  where attendance.id = pg_temp.att(19);
 select pg_temp.check_case('13 then closed by the caller, the row is the waiting list''s again', 'allowed',
   pg_temp.try($s$update ehr.visit_queue entry set triage_level = 1 where entry.id = pg_temp.queue_entry(19)$s$));
+
+-- 14. What the clinical lead's checklist and the DPO's Q-ED-3 item ask about (Rahman, #337 7175564791: the nit "The
+-- front desk", and his second condition for Q-ED-3 A). These cases hold the behaviour the two lists describe, so a
+-- change of either shows here. After 11, so its counts are unchanged.
+select pg_temp.make_ref('p3-emergency-again', 3, 3, 'emergency') is not null as made \gset
+set local role hid_ehr_api_runtime;
+select pg_temp.check_case('14 p25 put on the board at the desk', 'arrived/own_facility/waiting/waiting/-/HIDDEN/Ola Edperson25/standard/-/open',
+  pg_temp.arrive(1, null, 25, 'walk_in', 'arrive-p25'));
+select pg_temp.check_case('14 a nurse triages p25 at level 1', 'updated/own_facility/waiting/ready/1/-/Ola Edperson25/standard/-/open',
+  pg_temp.triage(2, 25, 'triage-p25', 1::smallint));
+select pg_temp.check_case('14 p25''s outpatient row: ready, level 1', 'ready/false/1/own_facility', pg_temp.queue_of(25));
+select pg_temp.check_case('14 the desk may cancel that triaged level-1 arrival (it holds ehr.ed.arrive; clinical lead item)',
+  'updated/own_facility/closed/waiting/-/HIDDEN/Ola Edperson25/standard/-/closed',
+  pg_temp.cancel(1, 25, 'cancel-p25', 'Put on the emergency board by mistake'));
+select pg_temp.check_case('14 the level leaves p25''s outpatient row: open, waiting, no level, nobody down',
+  'waiting/false/-/own_facility/-', pg_temp.queue_of(25) || '/' || pg_temp.queue_assignee(25));
+select pg_temp.check_case('14 p3 back by the doctor''s emergency search, with the doctor''s break-glass grant (level 1)',
+  'arrived/emergency/waiting/ready/1/-/Chika Edthree/standard/-/open',
+  pg_temp.arrive(3, pg_temp.ref('p3-emergency-again'), null, 'ambulance', 'arrive-p3-again', 1::smallint,
+    purpose => 'emergency'));
+select pg_temp.check_case('14 the doctor cancels p3''s arrival as made in error',
+  'updated/emergency/closed/waiting/-/-/Chika Edthree/standard/-/closed',
+  pg_temp.cancel(3, 3, 'cancel-p3-again', 'Wrong patient picked from the emergency search'));
+select pg_temp.check_case('14 p3''s ED record is closed by the cancel', 'closed/cancel/-/true', pg_temp.ed_state(3));
+select pg_temp.check_case('14 p3''s emergency-basis row stays open on the outpatient waiting list (DPO, Q-ED-3)',
+  'waiting/false/-/emergency', pg_temp.queue_of(3));
+select pg_temp.as_member(1);
+select pg_temp.check_case('14 the desk sees p3 there by name, though p3 is not this facility''s own patient',
+  'Chika Edthree/emergency',
+  (select string_agg(listed.full_name || '/' || listed.check_in_basis, ',') from ehr.visit_queue_list(false) listed
+    where listed.patient_id = pg_temp.patient(3)));
+reset role;
 
 do $$
 declare
