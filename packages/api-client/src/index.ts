@@ -131,10 +131,11 @@ export type {
   PharmacyRefillsClosedReason,
   ReversePharmacyDispensingInput,
 } from './pharmacy';
-export { EhrApiClient, EhrApiProblem } from './ehr';
+export { EHR_ORDER_NOTICES_PAGE_MAX, EhrApiClient, EhrApiProblem } from './ehr';
 export type {
   EhrClientOptions, EhrInternalCaller, EhrOcrClinicalNoteImport, EhrOcrDocumentSource,
-  EhrRequestContext, EhrResourceReference,
+  EhrOrderNotice, EhrOrderNoticeCounts, EhrOrderNoticeKind, EhrOrderNoticeListQuery, EhrOrderNoticePage,
+  EhrOrderNoticeSummary, EhrOrderNoticeVersion, EhrRequestContext, EhrResourceReference,
 } from './ehr';
 export { OcrApiClient, OcrContractError } from './ocr';
 export type {
