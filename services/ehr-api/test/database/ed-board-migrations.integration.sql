@@ -14,19 +14,26 @@
 --      once ("... so it does not wait; ..."). Both messages are the ones the
 --      runner's dry run retries (its own number first, its wording last;
 --      hid-system#306), and nothing is applied;
---   2. a second run of each answers "already applied" (55000) and changes
---      nothing;
+--   2. on the waiting-list basis CHECK found (0135's, or APPT-1's when its
+--      0160 is applied, before or after 0168: every expected basis below is
+--      derived from it), 0168 and 0169 are applied; 0168's four triggers as
+--      made (events, UPDATE OF columns, WHEN condition, function), the bodies
+--      of the guard, the mirror (at the md5 ADT-1's 0171 pins) and the
+--      waiting list's update while the board is off, and the history's
+--      sequence the owner's alone (after runtime-grants.sql too); a second run
+--      of each answers "already applied" (55000) and changes nothing;
 --   3. 0169 taken away for this transaction: a half state, a changed
 --      permission check and a role without 0135's pair refuse with 55000 and
 --      apply nothing; 0169 without 0168 refuses; then 0169 applies: four
 --      codes, thirteen role rows, thirteen audit rows; it takes no lock beyond
 --      its header's and every lock its header declares;
---   4. 0168 taken away too: a half state, a changed pinned body and an
---      unknown third waiting-list basis CHECK refuse; then 0168 applies on
---      0135's CHECK (search, own_facility, emergency) and, in its own
---      savepoint, on APPT-1's (search, own_facility, appointment, emergency),
---      each time keeping every waiting-list row; it takes no lock beyond its
---      header's and every lock its header declares; then 0169 applies on top.
+--   4. 0168 taken away too (the CHECK found put back without 'emergency'): a
+--      half state, a changed pinned body and an unknown extra waiting-list
+--      basis refuse; then 0168 applies, in its own savepoint, on APPT-1's
+--      CHECK (search, own_facility, appointment, emergency) and on the CHECK
+--      found (0135's: search, own_facility, emergency; or APPT-1's), each time
+--      keeping every waiting-list row; it takes no lock beyond its header's
+--      and every lock its header declares; then 0169 applies on top.
 -- Synthetic values only.
 set plpgsql.variable_conflict = error;
 
@@ -79,7 +86,8 @@ create function pg_temp.made0168() returns text language sql as $$
                           where namespace.nspname = 'ehr'
                             and (proc.proname like 'ed\_%' or proc.proname like 'visit\_queue\_ed\_%'))
       || ' functions, ' || (select count(*) from pg_trigger
-                             where tgname in ('visit_queue_ed_close_mirror', 'visit_queue_ed_guard', 'ed_attendance_events_immutable'))
+                             where tgname in ('visit_queue_ed_close_mirror', 'visit_queue_ed_guard', 'ed_attendance_events_immutable',
+                                              'ed_attendance_events_no_truncate'))
       || ' triggers, basis ' || (select replace(replace(substring(pg_get_constraintdef(oid) from 'ARRAY\[(.*)\]'),
                                    '::text', ''), '''', '')
                                    from pg_constraint where conrelid = 'ehr.visit_queue'::regclass
@@ -143,16 +151,73 @@ select setval('pg_temp.m168_passed', coalesce(nullif(current_setting('m168.passe
   as counted \gset
 
 -- 2. A second run.
+-- The waiting-list basis values found before 0168: the live CHECK's values without 'emergency'. 0135's (search,
+-- own_facility), or APPT-1's (search, own_facility, appointment) when its 0160 is applied, before or after 0168
+-- (0160 puts appointment third and keeps every value after it). Every expected basis below is derived from it.
+select coalesce(string_agg(basis.value[1], ', ' order by basis.position), '-') as basis_before
+  from regexp_matches((select pg_get_constraintdef(constraint_row.oid) from pg_constraint constraint_row
+                        where constraint_row.conrelid = 'ehr.visit_queue'::regclass
+                          and constraint_row.conname = 'visit_queue_check_in_basis_check'),
+                      '''([a-z][a-z0-9_]*)''::text', 'g') with ordinality as basis(value, position)
+ where basis.value[1] <> 'emergency' \gset
+select pg_temp.expect('2 the basis found before 0168 is 0135''s or APPT-1''s', 'true',
+  (:'basis_before' in ('search, own_facility', 'search, own_facility, appointment'))::text);
+-- Puts the waiting-list basis CHECK back with the given values (comma-separated), as a step of this suite.
+create function pg_temp.set_basis(basis_list text) returns void language plpgsql as $$
+begin
+  alter table ehr.visit_queue drop constraint visit_queue_check_in_basis_check;
+  execute format('alter table ehr.visit_queue add constraint visit_queue_check_in_basis_check check (check_in_basis in (%s))',
+    (select string_agg(quote_literal(btrim(listed.value)), ', ' order by listed.position)
+       from unnest(string_to_array(basis_list, ',')) with ordinality as listed(value, position)));
+end
+$$;
 select pg_temp.made0168() as made0168_applied \gset
 select pg_temp.made0169() as made0169_applied \gset
 select pg_temp.expect('2a 0168 and 0169 are applied here',
-  '2 tables, 18 functions, 3 triggers, basis search, own_facility, emergency | 4 codes, 13 role rows, 13 audit rows',
+  '2 tables, 18 functions, 4 triggers, basis ' || :'basis_before' || ', emergency | 4 codes, 13 role rows, 13 audit rows',
   :'made0168_applied' || ' | ' || :'made0169_applied');
+-- 0168's four triggers as made: a guard that lost a column of its UPDATE OF list or a mirror whose WHEN condition
+-- changed fails here (and in 0168's own post-check).
+select pg_temp.expect('2b 0168''s triggers as made',
+  'ed_attendance_events_immutable: CREATE TRIGGER ed_attendance_events_immutable BEFORE DELETE OR UPDATE ON '
+    || 'ehr.ed_attendance_events FOR EACH ROW EXECUTE FUNCTION ehr.ed_attendance_events_immutable() | '
+  || 'ed_attendance_events_no_truncate: CREATE TRIGGER ed_attendance_events_no_truncate BEFORE TRUNCATE ON '
+    || 'ehr.ed_attendance_events FOR EACH STATEMENT EXECUTE FUNCTION ehr.ed_attendance_events_immutable() | '
+  || 'visit_queue_ed_close_mirror: CREATE TRIGGER visit_queue_ed_close_mirror AFTER UPDATE OF closed_at ON '
+    || 'ehr.visit_queue FOR EACH ROW WHEN (((old.closed_at IS NULL) AND (new.closed_at IS NOT NULL))) EXECUTE FUNCTION '
+    || 'ehr.visit_queue_ed_close_mirror() | '
+  || 'visit_queue_ed_guard: CREATE TRIGGER visit_queue_ed_guard BEFORE UPDATE OF stage, triage_level, '
+    || 'assigned_membership_id, closed_at ON ehr.visit_queue FOR EACH ROW EXECUTE FUNCTION ehr.visit_queue_ed_guard()',
+  (select string_agg(trigger_row.tgname || ': ' || pg_get_triggerdef(trigger_row.oid), ' | ' order by trigger_row.tgname)
+     from pg_trigger trigger_row
+    where not trigger_row.tgisinternal and trigger_row.tgenabled = 'O'
+      and (trigger_row.tgrelid in ('ehr.ed_attendances'::regclass, 'ehr.ed_attendance_events'::regclass)
+           or trigger_row.tgname like 'visit\_queue\_ed\_%')));
+-- The guard's and the mirror's bodies (the board's marker, hid.ed_board_closing, is read there; ADT-1's 0171 pins the
+-- mirror at this md5) and the waiting list's update while the board is off.
+select pg_temp.expect('2c the guard, the mirror and the board-off update as made',
+  'ehr.visit_queue_ed_board_off_update(uuid,bigint,text,smallint,boolean,uuid,boolean) 59a569a1fdf0cd41521d106439e62103 | '
+  || 'ehr.visit_queue_ed_close_mirror() 6aaaeb33d1318136fb7fba5ad405fc8e | '
+  || 'ehr.visit_queue_ed_guard() 350b9590c1ef10d0e658de6e4283f62b',
+  (select string_agg(proc.oid::regprocedure::text || ' ' || md5(proc.prosrc), ' | ' order by proc.proname)
+     from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
+    where namespace.nspname = 'ehr'
+      and proc.proname in ('visit_queue_ed_guard', 'visit_queue_ed_close_mirror', 'visit_queue_ed_board_off_update')));
+-- The history's identity sequence: the owner's and granted to no other role, after 0168 and after runtime-grants.sql
+-- (whose schema-wide sequence grants would give the EHR and schema test runtimes USAGE and SELECT on it).
+select pg_temp.expect('2d the history''s sequence is the owner''s alone', 'ehr.ed_attendance_events_sequence_no_seq: no grantee',
+  (select sequence_row.oid::regclass::text || ': '
+          || coalesce((select string_agg(pg_get_userbyid(acl.grantee) || ' ' || acl.privilege_type, ', '
+                                         order by pg_get_userbyid(acl.grantee), acl.privilege_type)
+                         from aclexplode(coalesce(sequence_row.relacl, acldefault('s', sequence_row.relowner))) acl
+                        where acl.grantee <> sequence_row.relowner), 'no grantee')
+     from pg_class sequence_row
+    where sequence_row.oid = pg_get_serial_sequence('ehr.ed_attendance_events', 'sequence_no')::regclass));
 :run0168
-select pg_temp.expect('2b 0168 again: already applied, nothing changed', '55000 0168: already applied | ' || :'made0168_applied',
+select pg_temp.expect('2e 0168 again: already applied, nothing changed', '55000 0168: already applied | ' || :'made0168_applied',
   pg_temp.answer('0168', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0168());
 :run0169
-select pg_temp.expect('2c 0169 again: already applied, nothing changed', '55000 0169: already applied | ' || :'made0169_applied',
+select pg_temp.expect('2f 0169 again: already applied, nothing changed', '55000 0169: already applied | ' || :'made0169_applied',
   pg_temp.answer('0169', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0169());
 
 -- The locks a file adds, on tables that were there before it ran: (table, mode) pairs held by this backend after
@@ -313,10 +378,8 @@ drop function ehr.ed_arrive(text, uuid, text, timestamptz, smallint, text, text,
   ehr.visit_queue_ed_board_off_update(uuid, bigint, text, smallint, boolean, uuid, boolean);
 drop table ehr.ed_attendance_events, ehr.ed_attendances;
 drop function ehr.ed_attendance_events_immutable();
-alter table ehr.visit_queue drop constraint visit_queue_check_in_basis_check;
-alter table ehr.visit_queue add constraint visit_queue_check_in_basis_check
-  check (check_in_basis in ('search', 'own_facility'));
-select pg_temp.expect('4a the state before 0168, for this transaction', '0 tables, 0 functions, 0 triggers, basis search, own_facility',
+select pg_temp.set_basis(:'basis_before');
+select pg_temp.expect('4a the state before 0168, for this transaction', '0 tables, 0 functions, 0 triggers, basis ' || :'basis_before',
   pg_temp.made0168());
 :run0169
 select pg_temp.expect('4b 0169 without 0168: refused', '55000 0169: 0168 must be applied first',
@@ -328,16 +391,14 @@ create table ehr.ed_attendances (id integer);
 rollback to savepoint s168;
 select pg_temp.expect('4c a half state (one of its tables there) is refused, nothing applied',
   '55000 0168: the schema is not in the reviewed state (part of 0168 is there); nothing applied | '
-  || '0 tables, 0 functions, 0 triggers, basis search, own_facility',
+  || '0 tables, 0 functions, 0 triggers, basis ' || :'basis_before',
   pg_temp.answer('0168', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0168());
-alter table ehr.visit_queue drop constraint visit_queue_check_in_basis_check;
-alter table ehr.visit_queue add constraint visit_queue_check_in_basis_check
-  check (check_in_basis in ('search', 'own_facility', 'emergency'));
+select pg_temp.set_basis(:'basis_before' || ', emergency');
 :run0168
 rollback to savepoint s168;
 select pg_temp.expect('4d the basis CHECK already with emergency (a half state) is refused, nothing applied',
   '55000 0168: the schema is not in the reviewed state (part of 0168 is there); nothing applied | '
-  || '0 tables, 0 functions, 0 triggers, basis search, own_facility',
+  || '0 tables, 0 functions, 0 triggers, basis ' || :'basis_before',
   pg_temp.answer('0168', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0168());
 do $$
 begin
@@ -348,7 +409,7 @@ end $$;
 rollback to savepoint s168;
 select pg_temp.expect('4e a body it calls changed (0132''s matchRef check) is refused, nothing applied',
   '55000 0168: these bodies are not as 0001-0151 left them: identity.resolve_patient_search_ref(text,text) | '
-  || '0 tables, 0 functions, 0 triggers, basis search, own_facility',
+  || '0 tables, 0 functions, 0 triggers, basis ' || :'basis_before',
   pg_temp.answer('0168', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0168());
 do $$
 begin
@@ -359,26 +420,22 @@ end $$;
 rollback to savepoint s168;
 select pg_temp.expect('4e2 0135''s update changed (the board-off update calls it) is refused, nothing applied',
   '55000 0168: these bodies are not as 0001-0151 left them: ehr.visit_queue_update(uuid,bigint,text,smallint,boolean,uuid,boolean) | '
-  || '0 tables, 0 functions, 0 triggers, basis search, own_facility',
+  || '0 tables, 0 functions, 0 triggers, basis ' || :'basis_before',
   pg_temp.answer('0168', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0168());
-alter table ehr.visit_queue drop constraint visit_queue_check_in_basis_check;
-alter table ehr.visit_queue add constraint visit_queue_check_in_basis_check
-  check (check_in_basis in ('search', 'own_facility', 'walk_in'));
+select pg_temp.set_basis(:'basis_before' || ', walk_in');
 :run0168
 rollback to savepoint s168;
-select pg_temp.expect('4f an unknown third waiting-list basis CHECK: refused, nothing applied',
+select pg_temp.expect('4f an unknown extra waiting-list basis: refused, nothing applied',
   '55000 0168: the waiting-list basis CHECK is neither 0135''s nor APPT-1''s; nothing applied | '
-  || '0 tables, 0 functions, 0 triggers, basis search, own_facility',
+  || '0 tables, 0 functions, 0 triggers, basis ' || :'basis_before',
   pg_temp.answer('0168', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0168());
 rollback to savepoint s168;
 
 -- On APPT-1's CHECK (0160 applied first), in its own savepoint.
-alter table ehr.visit_queue drop constraint visit_queue_check_in_basis_check;
-alter table ehr.visit_queue add constraint visit_queue_check_in_basis_check
-  check (check_in_basis in ('search', 'own_facility', 'appointment'));
+select pg_temp.set_basis('search, own_facility, appointment');
 :run0168
 select pg_temp.expect('4g on APPT-1''s CHECK: applies and keeps appointment',
-  'applied | 2 tables, 18 functions, 3 triggers, basis search, own_facility, appointment, emergency',
+  'applied | 2 tables, 18 functions, 4 triggers, basis search, own_facility, appointment, emergency',
   pg_temp.answer('0168', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0168());
 select pg_temp.expect('4h every waiting-list row kept', 'true',
   ((select md5(string_agg(to_jsonb(entry)::text, ',' order by entry.id)) from ehr.visit_queue entry)
@@ -388,12 +445,13 @@ select pg_temp.expect('4i and answers already applied again', '55000 0168: alrea
   pg_temp.answer('0168', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE'));
 rollback to savepoint s168;
 
--- On 0135's CHECK, measuring the locks.
+-- On the CHECK found (0135's, or APPT-1's when 0160 is applied), measuring the locks.
 delete from locks_seen;
 select pg_temp.record_locks('before');
 :run0168
 select pg_temp.record_locks('after');
-select pg_temp.expect('4j on 0135''s CHECK: applies', 'applied | 2 tables, 18 functions, 3 triggers, basis search, own_facility, emergency',
+select pg_temp.expect('4j on the CHECK found: applies',
+  'applied | 2 tables, 18 functions, 4 triggers, basis ' || :'basis_before' || ', emergency',
   pg_temp.answer('0168', :'LAST_ERROR_SQLSTATE', :'LAST_ERROR_MESSAGE') || ' | ' || pg_temp.made0168());
 select pg_temp.expect('4k every waiting-list row kept', 'true',
   ((select md5(string_agg(to_jsonb(entry)::text, ',' order by entry.id)) from ehr.visit_queue entry)

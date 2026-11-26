@@ -12598,6 +12598,17 @@ history), and the board's roles, reasons and cancel rule cannot be gone around o
 is 0145's cancel of an unknown record, which makes the patient inactive and cancels the row: the ED record then closes
 too (history `closed_on_waiting_list`).
 
+**The board's marker (database interface, stable).** Inside the database, the ED functions get past the guard by
+naming the row in the setting `hid.ed_board_closing`. A later file that finishes a board patient's row itself does the
+same; ADT-1's 0171 does this to admit a patient from the board. The caller:
+- sets `set_config('hid.ed_board_closing', <visit_queue row id>::text, true)`, which lasts only for the transaction,
+  immediately before its `UPDATE` of `ehr.visit_queue`, and sets it back to `''` straight after;
+- then closes the ED record itself (`status`, `left_at`, `closed_via`, a history event), because the mirror stays out
+  under the marker;
+- locks the ED record and then the row, `FOR UPDATE`, in that order.
+
+The name and value of this setting change only together with 0171 (docs/EHR_PLANNED_CONTRACT.md, 0168).
+
 **The board switched off after use (the kill switch).** All of the above holds only while `ED_BOARD_ENABLED` is on.
 While it is off, the board's routes answer 503 and the waiting list treats every row as its own: `edAttendanceId` is
 always `null` on its cards, and `PATCH /api/v1/ehr/visit-queue/:entryId` goes through 0168's

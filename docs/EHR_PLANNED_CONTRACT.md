@@ -3936,9 +3936,15 @@ Two migrations, **0168 and 0169, provisional** (numbers are given at merge, afte
 Both files follow 0147, 0150 and 0151:
 - the whole file is one `do` block, so nothing applies if any part raises;
 - locks are taken first, NOWAIT, tried 50 times 100 ms apart. If this transaction already holds an earlier file's blocking locks, there is one try and no sleep. A busy refusal raises 55P03 beginning "0168: " (or "0169: ") and ending "run the release again at a quieter time";
-- preconditions are catalog reads that raise 55000 and apply nothing: markers of every earlier file, and the md5 of each function body the file calls or replaces;
+- preconditions are catalog reads that raise 55000 and apply nothing: markers only of the earlier files whose objects the file uses (#258, 7168672285 item 3; for 0168, 0145's), and the md5 of each function body the file calls or replaces;
 - running the file again on a database where it is applied raises "0168: already applied" and changes nothing; any half state raises "0168: the schema is not in the reviewed state";
-- post-checks compare the tables, the role table and the pinned bodies afterwards;
+- post-checks in 0148's and 0152's form compare the tables, the role table and the pinned bodies afterwards. For 0168 they cover:
+  - the owners of the tables, the history's sequence and the 18 functions, and that no other role holds a grant on any of them except the entry points' EXECUTE;
+  - row-level security enabled and not forced, with no policy;
+  - each trigger's events, `UPDATE OF` columns, `WHEN` condition, arguments, function and enabled state;
+  - each function's SECURITY DEFINER setting, volatility and body (md5);
+  - the validated basis CHECK;
+  - no waiting-list row written;
 - audit rows are written as the system actor;
 - the file updates `runtime-grants.sql` and the declaration in `config/production-schema-compatibility.json` (which stays unsigned until the owner signs).
 
@@ -3955,12 +3961,19 @@ Both files follow 0147, 0150 and 0151:
 - `ehr.ed_attendance_events`: one row per arrival, move, triage, link, disposition, leave, cancel or mirrored close.
   - It holds the kind, the from and to stage, the triage level, whether the complaint changed (never its text), the outcome, the reason (8-500 for a change of disposition and cancel), the actor, and when.
   - It also holds the `Idempotency-Key` with the request's SHA-256 (unique per membership and key).
-  - A trigger refuses any update or delete.
-- Both tables have row-level security enabled and no policy or privilege for any runtime role. Only the functions read or write them, as their owner (0135's rule).
+  - Triggers refuse any update, delete or truncate, even by the owner.
+- Both tables have row-level security enabled (not forced, the same exception as 0135's `ehr.visit_queue`) and no policy or privilege for any runtime role. Only the functions read or write them, as their owner (0135's rule).
+- The history's identity sequence (`ehr.ed_attendance_events_sequence_no_seq`) is the owner's, with no grant. `runtime-grants.sql` revokes it from `hid_ehr_runtime` and `hid_schema_test_runtime` after its schema-wide sequence grants, which would otherwise give both its `last_value` (a platform-wide count of ED history events) and `nextval`.
 - `ehr.visit_queue`:
   - The `check_in_basis` CHECK gains `'emergency'`. The precondition accepts exactly one of two reviewed definitions, 0135's `('search', 'own_facility')` or APPT-1's `('search', 'own_facility', 'appointment')`, and keeps every value it finds. So 0168 applies whether or not APPT-1's 0160 is in the same cut.
-  - A trigger, `visit_queue_ed_guard` (BEFORE UPDATE OF `stage`, `triage_level`, `assigned_membership_id`, `closed_at`), refuses (55000 `VISIT_QUEUE_ON_ED_BOARD`) a change to a row that has an open or decided ED record, unless the change comes from an ED function (which names the row in a transaction-local marker first) or the patient's record is no longer active (0145's cancel of an unknown record).
+  - A trigger, `visit_queue_ed_guard` (BEFORE UPDATE OF `stage`, `triage_level`, `assigned_membership_id`, `closed_at`), refuses (55000 `VISIT_QUEUE_ON_ED_BOARD`) a change to a row that has an open or decided ED record, unless the change comes from an ED function (which names the row in the board's marker first, below) or the patient's record is no longer active (0145's cancel of an unknown record).
   - A trigger, `visit_queue_ed_close_mirror` (AFTER UPDATE OF `closed_at`, only when a row closes), closes the open or decided ED record of that row. It writes the `closed_on_waiting_list` event and one audit row. It does nothing when the change came from an ED function (the same marker).
+  - **The board's marker (a stable interface).** ADT-1's 0171 depends on it to admit a patient from the board, and pins the mirror's body by md5 (`6aaaeb33d1318136fb7fba5ad405fc8e`).
+    - The marker is the setting `hid.ed_board_closing`. Its value is the id of the one `ehr.visit_queue` row being changed, as text (`<row id>::text`).
+    - A caller (an ED function, or a later file that closes an ED record itself) sets it with `set_config('hid.ed_board_closing', <row id>::text, true)`, which lasts only for the transaction, immediately before its `UPDATE` of `ehr.visit_queue`. It sets it back to `''` straight after.
+    - While the marker names the row, the guard lets the change through (it compares the setting with `old.id::text`) and the mirror does nothing (it compares with `new.id::text`). A marker naming any other value, the ED record's id included, opens nothing.
+    - So the caller closes the ED record itself: `status`, `left_at`, `closed_via`, `updated_by_membership_id`, `updated_at`, `row_version` and one history event. It locks the ED record and then the row, `FOR UPDATE`, in that order, as the ED functions do.
+    - The setting's name, its value and this behaviour change only together with 0171. The ED suite's section 13 pins this behaviour, and its migrations suite pins the bodies of the guard and the mirror.
   - Nothing else in 0135 changes: its three functions and its card are not replaced.
   - The kill switch: while `ED_BOARD_ENABLED` is off, ehr-api sends the waiting list's changes through `ehr.visit_queue_ed_board_off_update` (below) and shows no ED record on the waiting list's cards, so a board patient's row is never stuck while the board is off. While the flag is on, ehr-api never calls it and the guard applies.
 - SECURITY DEFINER functions with `search_path = pg_catalog, pg_temp`, owned like 0135's, EXECUTE for `hid_ehr_runtime` only:
@@ -3978,7 +3991,7 @@ Both files follow 0147, 0150 and 0151:
 - Without 0169, no role holds an ED code, so every function refuses. This is the database half of "built but switched off".
 - Locks (expected; measured with `pg_locks` before commit and pinned when the file is written):
   - SHARE ROW EXCLUSIVE on `identity.patients`, `identity.facilities`, `identity.staff_facility_memberships` and `ehr.encounters` (foreign keys of new, empty tables);
-  - ACCESS EXCLUSIVE on `ehr.visit_queue` (the CHECK swap and the new trigger; the table is small, so this takes milliseconds);
+  - ACCESS EXCLUSIVE on `ehr.visit_queue` (the CHECK swap and the new triggers). The only read of the table is the new CHECK's validation, one pass. The file builds no copy of the rows: its "no row changed" post-check reads the transaction's own row counters. Measured on a throwaway database with 200,005 fictional waiting-list rows (39 MB), the whole file held its locks for 0.3-0.7 s (0.2-0.4 s with an empty list) on a shared, loaded machine;
   - ACCESS SHARE on `identity.unknown_patients`, `identity.consent_grants`, the consent directive tables and `auth.permissions` (the card's body checks);
   - ROW EXCLUSIVE on `audit.events`.
 - Old images on this schema:

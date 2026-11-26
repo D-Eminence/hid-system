@@ -59,11 +59,19 @@
 --                              the outcome, the reason (8-500, for a changed
 --                              disposition and a cancel), and the
 --                              Idempotency-Key with the request's SHA-256
---                              (unique per membership and key). A trigger
---                              refuses any update or delete.
+--                              (unique per membership and key). Triggers
+--                              refuse any update, delete or truncate, even by
+--                              the owner.
 --    Both tables have row-level security enabled and no policy or privilege for
 --    any runtime role: only the functions below read or write them, as their
---    owner (0135's rule).
+--    owner (0135's rule). Row-level security is enabled but not forced, an
+--    explicit exception as on 0135's ehr.visit_queue: no role but the owner
+--    holds any privilege on them, and the owner is the role the definers run
+--    as, so forcing it would only make every definer need an owner policy. The
+--    history's identity sequence (sequence_no) is the owner's with no grant;
+--    runtime-grants.sql takes back what its schema-wide sequence grants would
+--    give the EHR and schema test runtimes on it. The post-checks hold all of
+--    this.
 -- E3 ehr.visit_queue           the check_in_basis CHECK gains 'emergency'. The
 --                              CHECK found must be exactly 0135's ('search',
 --                              'own_facility') or APPT-1's ('search',
@@ -78,7 +86,8 @@
 --                              next-step button and Change form) is refused
 --                              for it (55000 VISIT_QUEUE_ON_ED_BOARD), whoever
 --                              calls it; the ED functions name the row in a
---                              transaction-local marker first. So the ED
+--                              transaction-local marker first (below, "The
+--                              board's marker"). So the ED
 --                              record's row version covers every field the
 --                              board writes, and the board's roles, reasons
 --                              and cancel rule cannot be gone around on the
@@ -170,12 +179,31 @@
 -- takes the mirror's order too (the row, then the record); ehr-api serves no
 -- board write then.
 --
+-- The board's marker, a stable interface (ADT-1's 0171 sets it to admit a
+-- patient from the board, and pins the mirror's body by md5): the setting
+-- hid.ed_board_closing names the one waiting-list row, by its id as text,
+-- whose stage, triage level, assignee or close an ED write is changing. A
+-- caller sets it with set_config('hid.ed_board_closing', <row id>::text, true)
+-- (transaction-local) immediately before its UPDATE of ehr.visit_queue and
+-- sets it back to '' straight after. While it names the row the guard lets the
+-- change through (it compares the setting with old.id::text) and the mirror
+-- does nothing (with new.id::text), so the caller closes the ED record itself:
+-- status, left_at, closed_via, updated_by_membership_id, updated_at, row_version
+-- and one history event, having locked the ED record and then the row FOR
+-- UPDATE, as the ED functions do. The name, the value and this behaviour change
+-- only together with 0171 (docs/EHR_PLANNED_CONTRACT.md, ED-1, "The board's
+-- marker").
+--
 -- Locks (measured with pg_locks before commit and compared by the suite),
 -- taken first, NOWAIT: SHARE ROW EXCLUSIVE on identity.patients,
 -- identity.facilities, identity.staff_facility_memberships and ehr.encounters
 -- (the foreign keys of the new, empty tables); ACCESS EXCLUSIVE on
--- ehr.visit_queue (the CHECK swap, the new trigger and the new tables' foreign
--- key; the table is small, so the hold is milliseconds); ROW EXCLUSIVE on
+-- ehr.visit_queue (the CHECK swap, the new triggers and the new tables'
+-- foreign key; the new CHECK's validation is the one read of its rows, and the
+-- "no row changed" post-check reads this transaction's own row counters, not
+-- the rows: on a throwaway database with 200,005 fictional waiting-list rows,
+-- 39 MB, the whole file held its locks for 0.3-0.7 s, against 0.2-0.4 s with
+-- an empty list, on a shared, loaded machine); ROW EXCLUSIVE on
 -- audit.events (the audit helper's body names it; this file writes no audit
 -- row); ACCESS SHARE on identity.unknown_patients, identity.consent_grants,
 -- identity.consent_directives, identity.consent_directive_versions,
@@ -209,7 +237,11 @@
 -- The whole file is one statement (do $ed0168$), so whatever raises in it,
 -- however the file is run, applies nothing:
 -- 0. The locks (one attempt, made up to 50 times while a table is busy).
--- 1. Preconditions (55000, nothing applied): markers of 0145, 0149 and 0150;
+-- 1. Preconditions (55000, nothing applied): the marker of 0145 (the unknown
+--    patient records and ehr.visit_queue_record_kinds; the earlier files'
+--    objects this file uses are held by the md5 pins and the columns below,
+--    and it uses nothing of 0149's or 0150's, so it needs no marker of either:
+--    #258, 7168672285 item 3);
 --    "0168: already applied" when every object of this file is there with the
 --    CHECK it leaves, "0168: the schema is not in the reviewed state" for any
 --    half state; the bodies this file calls md5-pinned; the waiting-list basis
@@ -217,11 +249,20 @@
 --    0145's and 0003's tables; the functions' owner may read ehr.encounters
 --    under its forced row-level security (the visit link).
 -- 2. E1-E4.
--- 3. Post-checks: the CHECK is the found one plus 'emergency'; the tables have
---    row-level security and no privilege; the functions are SECURITY DEFINER
---    with the fixed search_path and EXECUTE only for hid_ehr_runtime; the
---    helpers have no EXECUTE for any role; the three triggers are there; no
---    row of any existing table changed (this file writes none).
+-- 3. Post-checks (0148's and 0152's form): the CHECK is the found one plus
+--    'emergency', validated; the two tables are plain tables of the owner (the
+--    owner of 0135's functions), with row-level security enabled and not
+--    forced, no policy and no privilege for another role; the one sequence
+--    they own (the history's sequence_no) is the owner's and granted to no
+--    other role; the four triggers by tgtype, tgattr (the UPDATE OF columns),
+--    tgqual (the mirror's WHEN condition, compared as written), tgnargs,
+--    tgfoid, tgenabled and not internal, and no other trigger on the two
+--    tables; the 18 functions are the owner's, each with its SECURITY DEFINER
+--    setting, volatility and body (md5) as made here, all with the fixed
+--    search_path, EXECUTE only for hid_ehr_runtime on the 11 entry points and
+--    for no role on the 7 helpers; no row of ehr.visit_queue inserted, updated
+--    or deleted by this file (the transaction's own row counters for the
+--    table, which cost nothing; this file writes no row).
 
 do $ed0168$
 declare
@@ -240,7 +281,9 @@ declare
   v_check_found text;
   v_check_after text;
   v_owner name;
-  v_queue_rows text;
+  v_owner_oid oid;
+  v_queue_writes bigint[];
+  v_mismatch_after text;
   -- The two reviewed definitions of 0135's basis CHECK, and what this file leaves for each.
   v_check_0135 constant text := 'CHECK ((check_in_basis = ANY (ARRAY[''search''::text, ''own_facility''::text])))';
   v_check_appt constant text :=
@@ -283,10 +326,11 @@ begin
   end loop;
 
   -- 1. Preconditions.
-  -- A marker of each of 0145, 0149 and 0150.
+  -- The marker of 0145 (the unknown patient records and ehr.visit_queue_record_kinds), the one earlier file whose
+  -- objects this file uses beyond the md5-pinned bodies and the columns checked below. Nothing of 0149's or 0150's is
+  -- used, so neither is required (#258, 7168672285 item 3).
   if to_regprocedure('ehr.visit_queue_record_kinds(uuid[])') is null
-     or to_regclass('ehr.catalog_versions') is null
-     or not exists (select 1 from auth.role_permissions where role_code = 'doctor' and permission_code = 'ocr.job.start')
+     or to_regclass('identity.unknown_patients') is null
      or to_regclass('migration.schema_migrations') is null then
     raise exception using errcode = '55000', message = '0168: 0001-0151 must be applied first';
   end if;
@@ -398,15 +442,20 @@ begin
   if v_mismatch is not null then
     raise exception using errcode = '55000', message = '0168: these columns are not as 0001-0151 left them: ' || v_mismatch;
   end if;
-  v_owner := (select pg_get_userbyid(proowner) from pg_proc
-               where oid = 'identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamp with time zone)'::regprocedure);
+  v_owner_oid := (select proowner from pg_proc
+                   where oid = 'identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamp with time zone)'::regprocedure);
+  v_owner := pg_get_userbyid(v_owner_oid);
   if not pg_has_role(v_owner, (select relation.relowner from pg_class relation
                                 where relation.oid = 'ehr.encounters'::regclass), 'USAGE') then
     raise exception using errcode = '55000',
       message = '0168: the owner of 0135''s functions cannot read ehr.encounters under its forced row-level security';
   end if;
-  select md5(coalesce(string_agg(to_jsonb(entry)::text, ',' order by entry.id), '')) into v_queue_rows
-    from ehr.visit_queue entry;
+  -- This transaction's own row counters for the waiting list (rows inserted, updated, deleted, subtransactions
+  -- included), for the post-check that this file writes none. Read from this backend's pending statistics, so no
+  -- scan of the table: under the ACCESS EXCLUSIVE lock above only the CHECK's validation reads it.
+  v_queue_writes := array[pg_stat_get_xact_tuples_inserted('ehr.visit_queue'::regclass),
+                          pg_stat_get_xact_tuples_updated('ehr.visit_queue'::regclass),
+                          pg_stat_get_xact_tuples_deleted('ehr.visit_queue'::regclass)];
 
   -- E1. The ED records.
   create table ehr.ed_attendances (
@@ -540,7 +589,7 @@ begin
   alter table ehr.ed_attendance_events enable row level security;
   revoke all on ehr.ed_attendance_events from public;
   comment on table ehr.ed_attendance_events is
-    '0168 (ED-1): one row per arrival, triage, move, visit link, disposition, leave, cancel or mirrored close of an ED record, with the Idempotency-Key and the request''s SHA-256. Never the complaint text. Append only (a trigger refuses update and delete). Only the ED functions read and write it, as its owner.';
+    '0168 (ED-1): one row per arrival, triage, move, visit link, disposition, leave, cancel or mirrored close of an ED record, with the Idempotency-Key and the request''s SHA-256. Never the complaint text. Append only (triggers refuse update, delete and truncate). Only the ED functions read and write it, as its owner.';
 
   create function ehr.ed_attendance_events_immutable()
   returns trigger
@@ -555,6 +604,11 @@ begin
   create trigger ed_attendance_events_immutable
     before update or delete on ehr.ed_attendance_events
     for each row execute function ehr.ed_attendance_events_immutable();
+  -- Nor emptied: TRUNCATE fires no row trigger, so a statement trigger refuses it too, even for the owner (as 0098's
+  -- and 0152's append-only tables).
+  create trigger ed_attendance_events_no_truncate
+    before truncate on ehr.ed_attendance_events
+    for each statement execute function ehr.ed_attendance_events_immutable();
 
   -- E3. The waiting-list basis: every value found, plus emergency.
   alter table ehr.visit_queue drop constraint visit_queue_check_in_basis_check;
@@ -2122,26 +2176,141 @@ begin
       to hid_ehr_runtime;
   end if;
 
-  -- 3. Post-checks.
+  -- 3. Post-checks (0148's and 0152's form).
+  -- The CHECK: the found one plus 'emergency', a CHECK constraint, validated.
   select pg_get_constraintdef(constraint_row.oid) into v_check_after from pg_constraint constraint_row
    where constraint_row.conrelid = 'ehr.visit_queue'::regclass
-     and constraint_row.conname = 'visit_queue_check_in_basis_check';
+     and constraint_row.conname = 'visit_queue_check_in_basis_check' and constraint_row.contype = 'c'
+     and constraint_row.convalidated;
   if v_check_after is distinct from (array[v_check_0135_ed, v_check_appt_ed])[1 + (v_check_found = v_check_appt)::integer] then
     raise exception using errcode = '55000', message = '0168: post-check failed (the waiting-list basis CHECK)';
   end if;
-  if (select md5(coalesce(string_agg(to_jsonb(entry)::text, ',' order by entry.id), '')) from ehr.visit_queue entry)
-     is distinct from v_queue_rows then
+  -- No waiting-list row inserted, updated or deleted by this file: this transaction's own counters for the table are
+  -- as they were before step 2.
+  if array[pg_stat_get_xact_tuples_inserted('ehr.visit_queue'::regclass),
+           pg_stat_get_xact_tuples_updated('ehr.visit_queue'::regclass),
+           pg_stat_get_xact_tuples_deleted('ehr.visit_queue'::regclass)] is distinct from v_queue_writes then
     raise exception using errcode = '55000', message = '0168: post-check failed (a waiting-list row changed)';
   end if;
+  -- The two tables: plain tables of the owner (v_owner, the owner of 0135's functions; the migrator on production),
+  -- row-level security enabled and not forced (the exception the header states), no policy, no privilege for any role
+  -- but the owner.
   if exists (select 1 from pg_class class_row, lateral aclexplode(coalesce(class_row.relacl, acldefault('r', class_row.relowner))) acl
               where class_row.oid in ('ehr.ed_attendances'::regclass, 'ehr.ed_attendance_events'::regclass)
                 and acl.grantee <> class_row.relowner)
      or (select count(*) from pg_class
           where oid in ('ehr.ed_attendances'::regclass, 'ehr.ed_attendance_events'::regclass)
-            and relrowsecurity) <> 2 then
+            and relkind = 'r' and relrowsecurity and not relforcerowsecurity and relowner = v_owner_oid) <> 2
+     or exists (select 1 from pg_policy policy_row
+                 where policy_row.polrelid in ('ehr.ed_attendances'::regclass, 'ehr.ed_attendance_events'::regclass)) then
     raise exception using errcode = '55000',
-      message = '0168: post-check failed (a table is granted to a role or lacks row-level security)';
+      message = '0168: post-check failed (a table is granted to a role, is not the owner''s, or its row-level security is not enabled and unforced without a policy)';
   end if;
+  -- The sequences the two tables own: exactly the history's identity sequence (sequence_no), the owner's and granted
+  -- to no other role. (runtime-grants.sql takes it back from hid_ehr_runtime and hid_schema_test_runtime after its
+  -- schema-wide sequence grants.)
+  if (select count(*) from pg_depend dependency join pg_class sequence_row on sequence_row.oid = dependency.objid
+       where dependency.classid = 'pg_class'::regclass and dependency.refclassid = 'pg_class'::regclass
+         and dependency.refobjid in ('ehr.ed_attendances'::regclass, 'ehr.ed_attendance_events'::regclass)
+         and dependency.deptype in ('a', 'i') and sequence_row.relkind = 'S') <> 1
+     or to_regclass('ehr.ed_attendance_events_sequence_no_seq')
+        is distinct from to_regclass(pg_get_serial_sequence('ehr.ed_attendance_events', 'sequence_no'))
+     or (select sequence_row.relowner from pg_class sequence_row
+          where sequence_row.oid = to_regclass('ehr.ed_attendance_events_sequence_no_seq')) is distinct from v_owner_oid
+     or exists (select 1 from pg_class sequence_row,
+                       lateral aclexplode(coalesce(sequence_row.relacl, acldefault('s', sequence_row.relowner))) acl
+                 where sequence_row.oid = to_regclass('ehr.ed_attendance_events_sequence_no_seq')
+                   and acl.grantee <> sequence_row.relowner) then
+    raise exception using errcode = '55000',
+      message = '0168: post-check failed (a sequence of the new tables is granted to a role or is not the owner''s)';
+  end if;
+  -- The four triggers, 0152's form (pg_trigger.tgtype: 1 for each row, 2 before, 4 insert, 8 delete, 16 update,
+  -- 32 truncate; a WHEN condition or an UPDATE OF list leaves tgtype as it is, so each is held apart):
+  --   ed_attendance_events_immutable  27, before update or delete for each row, no column list, no condition;
+  --   ed_attendance_events_no_truncate 34, before truncate (for each statement), no column list, no condition;
+  --   visit_queue_ed_guard            19, before update for each row, of exactly stage, triage_level,
+  --                                   assigned_membership_id and closed_at, no condition;
+  --   visit_queue_ed_close_mirror     17, after update for each row, of exactly closed_at, with exactly the WHEN
+  --                                   condition written above (its text as PostgreSQL gives it back);
+  -- each with no arguments, enabled in origin mode, not internal, not a constraint trigger, with no transition table,
+  -- and its function. No other trigger on the two new tables.
+  if (select count(*) from pg_trigger trigger_row
+       where not trigger_row.tgisinternal
+         and trigger_row.tgrelid in ('ehr.ed_attendances'::regclass, 'ehr.ed_attendance_events'::regclass)) <> 2
+     or (select count(*) from pg_trigger trigger_row
+          where not trigger_row.tgisinternal and trigger_row.tgenabled = 'O' and trigger_row.tgnargs = 0
+            and trigger_row.tgconstraint = 0 and trigger_row.tgoldtable is null and trigger_row.tgnewtable is null
+            and ((trigger_row.tgrelid = 'ehr.ed_attendance_events'::regclass
+                  and trigger_row.tgfoid = 'ehr.ed_attendance_events_immutable()'::regprocedure
+                  and trigger_row.tgqual is null and trigger_row.tgattr = ''::int2vector
+                  and ((trigger_row.tgname = 'ed_attendance_events_immutable' and trigger_row.tgtype = 27)
+                       or (trigger_row.tgname = 'ed_attendance_events_no_truncate' and trigger_row.tgtype = 34)))
+                 or (trigger_row.tgrelid = 'ehr.visit_queue'::regclass
+                     and trigger_row.tgname = 'visit_queue_ed_guard' and trigger_row.tgtype = 19
+                     and trigger_row.tgfoid = 'ehr.visit_queue_ed_guard()'::regprocedure
+                     and trigger_row.tgqual is null
+                     and (select array_agg(column_number order by column_number)
+                            from unnest(trigger_row.tgattr::int2[]) column_number)
+                         = (select array_agg(attribute_row.attnum order by attribute_row.attnum)
+                              from pg_attribute attribute_row
+                             where attribute_row.attrelid = 'ehr.visit_queue'::regclass
+                               and attribute_row.attname in ('stage', 'triage_level', 'assigned_membership_id', 'closed_at')
+                               and not attribute_row.attisdropped)
+                     and cardinality(trigger_row.tgattr::int2[]) = 4)
+                 or (trigger_row.tgrelid = 'ehr.visit_queue'::regclass
+                     and trigger_row.tgname = 'visit_queue_ed_close_mirror' and trigger_row.tgtype = 17
+                     and trigger_row.tgfoid = 'ehr.visit_queue_ed_close_mirror()'::regprocedure
+                     and (select array_agg(column_number) from unnest(trigger_row.tgattr::int2[]) column_number)
+                         = (select array_agg(attribute_row.attnum) from pg_attribute attribute_row
+                             where attribute_row.attrelid = 'ehr.visit_queue'::regclass
+                               and attribute_row.attname = 'closed_at' and not attribute_row.attisdropped)
+                     and trigger_row.tgqual is not null
+                     and substring(pg_get_triggerdef(trigger_row.oid) from ' WHEN (.*) EXECUTE FUNCTION ')
+                         = '(((old.closed_at IS NULL) AND (new.closed_at IS NOT NULL)))'))) <> 4 then
+    raise exception using errcode = '55000', message = '0168: post-check failed (the triggers)';
+  end if;
+  -- The 18 functions: each the owner's, with its SECURITY DEFINER setting, volatility and body (the md5 of prosrc) as
+  -- made above, all with the fixed search_path. (0171, ADT-1, pins the mirror's body at the same md5.)
+  select string_agg(coalesce(expected.signature, made.signature), ', ' order by coalesce(expected.signature, made.signature))
+    into v_mismatch_after
+    from (values
+      ('ehr.ed_arrive(text,uuid,text,timestamp with time zone,smallint,text,text,text)', true, 'v', '2ab8eb0318e0f442472115c59f868e49'),
+      ('ehr.ed_attendance_events_immutable()', false, 'v', '26d7f4d6be70feacd37dc3b11dce4cce'),
+      ('ehr.ed_audit(text,uuid,uuid,uuid,uuid,text,text,uuid,text,text,text,text,jsonb)', false, 'v', '2aa7b8bf69f9d3352457af2a7d13ef13'),
+      ('ehr.ed_board(boolean)', true, 'v', '5f5f6f61c6efe7a298e24d350728e119'),
+      ('ehr.ed_caller(text,text[])', false, 's', '338d8b237da6d511a55c365c78987621'),
+      ('ehr.ed_cancel(uuid,bigint,text,text,text)', true, 'v', 'd29b9982ce45c778cde791d116856178'),
+      ('ehr.ed_cards(uuid[],uuid,uuid,uuid,boolean)', false, 's', '3ad96b9bc5905b044520a048f4dfea27'),
+      ('ehr.ed_idempotency(uuid,text,text)', false, 'v', '7713a08a26b7a26acd4f7e16e6b728f4'),
+      ('ehr.ed_leave(uuid,bigint,text,text)', true, 'v', '31fe957131f3b2e054e1f14a5abd6826'),
+      ('ehr.ed_link_visit(uuid,bigint,uuid,text,text)', true, 'v', '1f9a5f2a3e15a909b83f1f89887f4d4c'),
+      ('ehr.ed_move(uuid,bigint,text,uuid,boolean,text,text)', true, 'v', '6132460280b2469721128f511eb75d42'),
+      ('ehr.ed_read(uuid)', true, 'v', '7247568925375fafa3b09de0d4dd35ad'),
+      ('ehr.ed_record_disposition(uuid,bigint,text,text,uuid,text,text,text,text)', true, 'v', 'fea81eebc9aaefe10f1b0b2c2c80be5a'),
+      ('ehr.ed_triage(uuid,bigint,smallint,text,boolean,text,text)', true, 'v', '723ad0963a855fc976ea1deae2393c40'),
+      ('ehr.visit_queue_ed_attendances(uuid[])', true, 's', '8f7a33d87ffaccca9686c43925d13b38'),
+      ('ehr.visit_queue_ed_board_off_update(uuid,bigint,text,smallint,boolean,uuid,boolean)', true, 'v', '59a569a1fdf0cd41521d106439e62103'),
+      ('ehr.visit_queue_ed_close_mirror()', true, 'v', '6aaaeb33d1318136fb7fba5ad405fc8e'),
+      ('ehr.visit_queue_ed_guard()', true, 'v', '350b9590c1ef10d0e658de6e4283f62b')
+    ) expected(signature, security_definer, volatility, body_md5)
+    full join (select proc.oid::regprocedure::text as signature, proc.prosecdef, proc.provolatile::text as provolatile,
+                      md5(proc.prosrc) as body_md5, proc.proowner, proc.proconfig, proc.prokind
+                 from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
+                where namespace.nspname = 'ehr'
+                  and (proc.proname like 'ed\_%' or proc.proname like 'visit\_queue\_ed\_%')) made
+      on made.signature = expected.signature
+   where made.signature is null or expected.signature is null
+      or made.prosecdef is distinct from expected.security_definer
+      or made.provolatile is distinct from expected.volatility
+      or made.body_md5 is distinct from expected.body_md5
+      or made.proowner is distinct from v_owner_oid
+      or made.prokind is distinct from 'f'
+      or made.proconfig is distinct from array['search_path=pg_catalog, pg_temp'];
+  if v_mismatch_after is not null then
+    raise exception using errcode = '55000', message = '0168: post-check failed (these functions are not as made: '
+      || v_mismatch_after || ')';
+  end if;
+  -- EXECUTE: hid_ehr_runtime only on the 11 entry points (when the role exists), no role on the 7 helpers.
   if exists (select 1 from pg_proc proc
                join pg_namespace namespace on namespace.oid = proc.pronamespace,
                lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
@@ -2152,25 +2321,14 @@ begin
                      or proc.proname in ('ed_cards', 'ed_caller', 'ed_audit', 'ed_idempotency',
                                          'ed_attendance_events_immutable', 'visit_queue_ed_close_mirror',
                                          'visit_queue_ed_guard')))
-     or (select count(*) from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
-          where namespace.nspname = 'ehr'
-            and (proc.proname like 'ed\_%' or proc.proname like 'visit\_queue\_ed\_%') and proc.prosecdef
-            and proc.proconfig = array['search_path=pg_catalog, pg_temp']) <> 13
-     or (select count(*) from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
-          where namespace.nspname = 'ehr'
-            and (proc.proname like 'ed\_%' or proc.proname like 'visit\_queue\_ed\_%')) <> 18
-     or exists (select 1 from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
-                 where namespace.nspname = 'ehr'
-                   and (proc.proname like 'ed\_%' or proc.proname like 'visit\_queue\_ed\_%')
-                   and proc.proconfig is distinct from array['search_path=pg_catalog, pg_temp']) then
-    raise exception using errcode = '55000', message = '0168: post-check failed (the functions'' security or grants)';
-  end if;
-  if (select count(*) from pg_trigger trigger_row
-       where (trigger_row.tgrelid, trigger_row.tgname) in (('ehr.visit_queue'::regclass, 'visit_queue_ed_close_mirror'),
-               ('ehr.visit_queue'::regclass, 'visit_queue_ed_guard'),
-               ('ehr.ed_attendance_events'::regclass, 'ed_attendance_events_immutable'))
-         and trigger_row.tgenabled = 'O') <> 3 then
-    raise exception using errcode = '55000', message = '0168: post-check failed (the triggers)';
+     or (exists (select 1 from pg_roles where rolname = 'hid_ehr_runtime')
+         and (select count(*) from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace,
+                     lateral aclexplode(proc.proacl) acl
+               where namespace.nspname = 'ehr'
+                 and (proc.proname like 'ed\_%' or proc.proname like 'visit\_queue\_ed\_%')
+                 and acl.grantee = (select oid from pg_roles where rolname = 'hid_ehr_runtime')
+                 and acl.privilege_type = 'EXECUTE') <> 11) then
+    raise exception using errcode = '55000', message = '0168: post-check failed (the functions'' grants)';
   end if;
 
   raise notice '0168: the emergency department board is installed (2 tables, 18 functions, the waiting-list guard and close mirror, the waiting list''s update while the board is off; basis emergency on the waiting list). Nobody can use it until 0169 gives the codes.';

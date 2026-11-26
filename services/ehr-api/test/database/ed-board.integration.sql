@@ -50,7 +50,10 @@
 --      it arrived;
 --   9. version conflicts, idempotent replays and a reused key;
 --  10. the history, the waiting-list helper, the runtime cannot read the
---      tables or call the helpers;
+--      tables or call the helpers, nor read or advance the history's
+--      sequence (no runtime role holds any privilege on it after
+--      runtime-grants.sql); the history cannot be updated, deleted or
+--      emptied (TRUNCATE), even by its owner;
 --  11. audit: every row's outcome, and no name, date of birth, Health ID,
 --      complaint, referral facility name or reason text in any ED audit row;
 --  12. the board switched off after use (ED_BOARD_ENABLED off: ehr-api sends
@@ -63,7 +66,15 @@
 --      facility's member change nothing; a row with no ED record is 0135's
 --      update; the marker is cleared afterwards, so 0135's own update is
 --      still refused for another board patient's row (the guard stays in
---      force while the flag is on).
+--      force while the flag is on);
+--  13. the board's marker as a later file uses it (ADT-1's 0171 admits a
+--      patient from the board this way): the owner's own close of a board
+--      patient's waiting-list row is refused without it; with
+--      hid.ed_board_closing naming the row (its id as text, transaction-local)
+--      the close goes through and the mirror stays out, so the ED record is
+--      still open until the caller closes it; once the marker is cleared the
+--      guard is back for the row; a marker naming the ED record's id instead
+--      opens nothing.
 --
 -- Each case records its outcome; the suite fails at the end listing every
 -- case whose outcome differs.
@@ -928,6 +939,21 @@ select pg_temp.check_case('10 no caller helper', '42501', pg_temp.try($s$select 
 reset role;
 select pg_temp.check_case('10 the history is append only', '55000',
   pg_temp.try('update ehr.ed_attendance_events set reason = null'));
+select pg_temp.check_case('10 the history cannot be emptied either (TRUNCATE), even by its owner', '55000',
+  pg_temp.try('truncate ehr.ed_attendance_events'));
+select pg_temp.check_case('10 the history''s sequence: no privilege for any runtime role (after runtime-grants.sql)', '0',
+  (select count(*)::text from pg_roles runtime_role
+    cross join unnest(array['USAGE', 'SELECT', 'UPDATE']) privilege_type
+    where runtime_role.rolname ~ '^hid_' and not runtime_role.rolsuper
+      and not pg_has_role(runtime_role.oid, (select relowner from pg_class
+                                             where oid = 'ehr.ed_attendance_events_sequence_no_seq'::regclass), 'MEMBER')
+      and has_sequence_privilege(runtime_role.oid, 'ehr.ed_attendance_events_sequence_no_seq', privilege_type)));
+set local role hid_ehr_api_runtime;
+select pg_temp.check_case('10 ehr-api cannot read the history''s sequence (a count of every facility''s ED events)', '42501',
+  pg_temp.try('select last_value from ehr.ed_attendance_events_sequence_no_seq'));
+select pg_temp.check_case('10 nor advance it', '42501',
+  pg_temp.try($s$select nextval('ehr.ed_attendance_events_sequence_no_seq')$s$));
+reset role;
 select pg_temp.check_case('10 EXECUTE on the commands', 'hid_ehr_runtime',
   (select string_agg(distinct grantee.rolname, ',')
      from pg_proc proc
@@ -1050,6 +1076,44 @@ select pg_temp.check_case('12 EXECUTE on the board-off update: the EHR runtime o
       'ehr.visit_queue_ed_board_off_update(uuid, bigint, text, smallint, boolean, uuid, boolean)', 'execute'),
     has_function_privilege('public',
       'ehr.visit_queue_ed_board_off_update(uuid, bigint, text, smallint, boolean, uuid, boolean)', 'execute')));
+
+-- 13. The board's marker as a later file uses it (ADT-1's 0171 admits a patient from the board this way). p19 is
+-- back on the outpatient waiting list (8) and arrives on the board again.
+set local role hid_ehr_api_runtime;
+select pg_temp.check_case('13 p19 moved to the board again', 'moved_from_waiting_list',
+  split_part(pg_temp.arrive(2, null, 19, 'walk_in', 'arrive-p19-again'), '/', 1));
+reset role;
+select pg_temp.check_case('13 the owner''s own close of p19''s row without the marker: refused', '55000',
+  pg_temp.try($s$update ehr.visit_queue entry
+     set stage = 'finished', stage_changed_at = clock_timestamp(), closed_at = clock_timestamp(),
+         updated_by_membership_id = pg_temp.member(3), updated_at = clock_timestamp(), row_version = entry.row_version + 1
+   where entry.id = pg_temp.queue_entry(19)$s$));
+select pg_temp.check_case('13 a marker naming the ED record''s id instead of the row''s opens nothing', '55000',
+  pg_temp.try($s$select set_config('hid.ed_board_closing', pg_temp.att(19)::text, true);
+    update ehr.visit_queue entry set triage_level = 1 where entry.id = pg_temp.queue_entry(19)$s$));
+select set_config('hid.ed_board_closing', pg_temp.queue_entry(19)::text, true) is not null as marked \gset
+select pg_temp.check_case('13 with hid.ed_board_closing naming the row (its id as text): the close goes through', 'allowed',
+  pg_temp.try($s$update ehr.visit_queue entry
+     set stage = 'finished', stage_changed_at = clock_timestamp(), closed_at = clock_timestamp(),
+         updated_by_membership_id = pg_temp.member(3), updated_at = clock_timestamp(), row_version = entry.row_version + 1
+   where entry.id = pg_temp.queue_entry(19)$s$));
+select set_config('hid.ed_board_closing', '', true) is not null as cleared \gset
+select pg_temp.check_case('13 the mirror stayed out: the ED record is still open, no closed_on_waiting_list event',
+  'finished/true|open|0',
+  (select split_part(pg_temp.queue_of(19), '/', 1) || '/' || split_part(pg_temp.queue_of(19), '/', 2) || '|'
+          || (select status from ehr.ed_attendances where id = pg_temp.att(19)) || '|'
+          || (select count(*) from ehr.ed_attendance_events
+               where attendance_id = pg_temp.att(19) and kind = 'closed_on_waiting_list')));
+select pg_temp.check_case('13 the marker cleared: the guard is back for the row', '55000',
+  pg_temp.try($s$update ehr.visit_queue entry set triage_level = 1 where entry.id = pg_temp.queue_entry(19)$s$));
+-- The caller closes the ED record itself (0171 with closed_via 'admission' and an 'admitted' event, which its own
+-- CHECKs add; here the closed_via 0168 knows).
+update ehr.ed_attendances attendance
+   set status = 'closed', left_at = clock_timestamp(), closed_via = 'waiting_list',
+       updated_by_membership_id = pg_temp.member(3), updated_at = clock_timestamp(), row_version = attendance.row_version + 1
+ where attendance.id = pg_temp.att(19);
+select pg_temp.check_case('13 then closed by the caller, the row is the waiting list''s again', 'allowed',
+  pg_temp.try($s$update ehr.visit_queue entry set triage_level = 1 where entry.id = pg_temp.queue_entry(19)$s$));
 
 do $$
 declare
