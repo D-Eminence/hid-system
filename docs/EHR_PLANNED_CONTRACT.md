@@ -1943,6 +1943,10 @@ file released alone.
     `rowVersion`, `addedAt` and `changedAt`. A facility item has
     `codeSystem: "HID-FACILITY"`, `code` equal to `itemId`, `scope:
     "facility"`, and for a medicine `source: "facility"`.
+  - A `POST` replayed with the same `Idempotency-Key` and body gives the
+    same answer: the item as it was added (`active: true`, `rowVersion: 1`,
+    `changedAt: null`), even if it has been withdrawn since. It adds
+    nothing, and its audit row is `.created` with `idempotentReplay: true`.
   - `PATCH` asked for the state the item is already in answers it
     unchanged and changes no row; it is still audited.
   - Audit rows, one for every answer: `ehr.catalog.facility-item.created`

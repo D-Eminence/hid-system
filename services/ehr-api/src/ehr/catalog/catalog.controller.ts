@@ -71,7 +71,7 @@ export class CatalogController {
     return this.facilityItems.list(staffCaller(request), query.kind);
   }
 
-  /** 0155: adds one of this facility's items. Idempotency-Key required; a replay answers the same item. */
+  /** 0155: adds one of this facility's items. Idempotency-Key required; a replay gives the same answer. */
   @Post('facility-items')
   @HttpCode(201)
   @RequirePermissions('ehr.catalog.facility-item.write')

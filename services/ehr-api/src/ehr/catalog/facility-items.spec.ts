@@ -306,10 +306,10 @@ describe('ORD-7 facility items (0155): adding an item', () => {
       'parasitology']);
   });
 
-  it('the same key with the same body answers the item it made, as it is now, and inserts nothing', async () => {
+  it('the same key with the same body gives the same answer, even after a withdrawal, and inserts nothing', async () => {
     const { service, calls, audits } = fakeStaff({ [FACILITY_ITEM_BY_KEY_SQL]: [{ ...medicineRow({ active: false,
       row_version: '2', changed_at: addedAt }), request_sha256: digest() }] });
-    await expect(service.create(caller, input(), key)).resolves.toMatchObject({ itemId, active: false, rowVersion: 2 });
+    await expect(service.create(caller, input(), key)).resolves.toEqual(medicineAnswer);
     expect(calls.map((call) => call.sql)).toEqual([FACILITY_ITEM_BY_KEY_SQL]);
     expect(audits.map((entry) => entry.event.details)).toEqual([{ kind: 'medicine', idempotentReplay: true }]);
   });
@@ -324,8 +324,8 @@ describe('ORD-7 facility items (0155): adding an item', () => {
   });
 
   it('a request with the same key that committed while this one waited is answered as a replay', async () => {
-    const { service, calls, audits } = fakeStaff({ [FACILITY_ITEM_BY_KEY_SQL]: inTurn([], [{ ...medicineRow(),
-      request_sha256: digest() }]), [FACILITY_ITEM_INSERT_SQL]: [] });
+    const { service, calls, audits } = fakeStaff({ [FACILITY_ITEM_BY_KEY_SQL]: inTurn([], [{ ...medicineRow({ active: false,
+      row_version: '2', changed_at: addedAt }), request_sha256: digest() }]), [FACILITY_ITEM_INSERT_SQL]: [] });
     await expect(service.create(caller, input(), key)).resolves.toEqual(medicineAnswer);
     expect(calls.map((call) => call.sql)).toEqual([FACILITY_ITEM_BY_KEY_SQL, FACILITY_ITEM_INSERT_SQL, FACILITY_ITEM_BY_KEY_SQL]);
     expect(audits.map((entry) => entry.event.details)).toEqual([{ kind: 'medicine', idempotentReplay: true }]);

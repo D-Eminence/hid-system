@@ -211,6 +211,14 @@ export function facilityItemProblem(error: unknown, logger: Logger): DomainProbl
   return catalogUnavailable();
 }
 
+/**
+ * The answer an add gave, from its row: every field the add wrote never changes (0155's guard), and an add is active
+ * at row version 1 with no change yet, so a replay answers as the add did, even after the item was withdrawn.
+ */
+function asAdded(row: FacilityItemRow): FacilityItemRow {
+  return { ...row, active: true, row_version: 1, changed_at: null };
+}
+
 /** The fields kept on the row, from the validated body, absent ones as null (the digest covers the body as sent). */
 function insertValues(caller: CatalogCaller, input: CreateFacilityItemDto, idempotencyKey: string, digest: string): unknown[] {
   return [caller.facilityId, input.kind, input.display, input.genericName ?? null, input.strength ?? null,
@@ -240,23 +248,24 @@ export class FacilityItemsService {
 
   /**
    * POST: adds an item, active, at row version 1. The Idempotency-Key and the
-   * request's sha256 stay on the row: the same key with the same body answers
-   * the item that key made (as it is now), and with another body 409
-   * IDEMPOTENCY_KEY_REUSED. The name and the 500-item limit are 0155's checks.
+   * request's sha256 stay on the row: the same key with the same body gives
+   * the same answer (the item as that key added it, even if it has changed
+   * since), and with another body 409 IDEMPOTENCY_KEY_REUSED. The name and
+   * the 500-item limit are 0155's checks.
    */
   async create(caller: CatalogCaller, input: CreateFacilityItemDto, idempotencyKey: string): Promise<FacilityItem> {
     const digest = requestDigest(FACILITY_ITEM_CREATE_OPERATION, input);
     try {
       return await this.database.withStaffTransaction(caller, async (client) => {
         const replay = await this.byKey(client, caller, idempotencyKey, digest);
-        if (replay) return this.created(client, caller, replay, true);
+        if (replay) return this.created(client, caller, asAdded(replay), true);
         const inserted = (await client.query<FacilityItemRow>(FACILITY_ITEM_INSERT_SQL,
           insertValues(caller, input, idempotencyKey, digest))).rows[0];
         if (inserted) return this.created(client, caller, inserted, false);
         // Another request with this key committed while this one waited.
         const raced = await this.byKey(client, caller, idempotencyKey, digest);
         if (!raced) throw new Error('The Idempotency-Key row was not found after its conflict');
-        return this.created(client, caller, raced, true);
+        return this.created(client, caller, asAdded(raced), true);
       });
     } catch (error) {
       throw facilityItemProblem(error, this.logger);

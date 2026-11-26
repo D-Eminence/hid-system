@@ -209,7 +209,8 @@ export interface EhrFacilityItemList {
  * Refusals: 409 FACILITY_ITEM_EXISTS (an active item of that name), 409
  * FACILITY_ITEM_LIMIT (500 active items of the kind), 409
  * IDEMPOTENCY_KEY_REUSED (the key with another body). A replay with the same
- * key and body answers the same item.
+ * key and body gives the same answer: the item as it was added (active, row
+ * version 1), even if it has changed since.
  */
 export type CreateEhrFacilityItemInput =
   | { kind: 'medicine'; display: string; genericName: string; strength?: string; doseForm?: EhrCatalogDoseForm;
