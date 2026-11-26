@@ -140,8 +140,8 @@ declare
        and namespace.nspname <> 'migration');
   made constant jsonb := '{
     "commercial.hook_check_in()": "0132c9412cbb3b0f3b73d2ebbbe60e90",
-    "commercial.hook_dispensing()": "8edafc5d502ed188fa3d730de1605c1d",
-    "commercial.hook_dispensing_reversal()": "26f47e77c559cac01724f6731c57bd03",
+    "commercial.hook_dispensing()": "3e4c62e6b71149558db7c3ea8d0aa09f",
+    "commercial.hook_dispensing_reversal()": "fc3acba6652996b384832915e31bd7c0",
     "commercial.hook_facility(uuid)": "4efd0ae0c3c4ad8ce694a74b223cafa5",
     "commercial.hook_lab_work_item()": "903edbb2d3a10fc4a91610cec007349a",
     "commercial.hook_pharmacy_acceptance()": "2f5cabce9719e94cfc88d1e9bd7ca665",
@@ -461,9 +461,10 @@ begin
   if not commercial.hook_facility(new.facility_id) then
     return new;
   end if;
-  -- A refill (ORD-12's fill_number above 1, read so this file works with or without 0154) of a work item billing
-  -- knows (a live line, or one that billed a dispensing) is refused until refills are billed (ORD-12's follow-up):
-  -- it would otherwise be given with no charge on the bill, even after the first fill's charge was refunded.
+  -- A refill (ORD-12's fill_number above 1, read from the row, so this works with or without ORD-12's refills) of a
+  -- work item billing knows (a live line, or one that billed a dispensing) is refused until refills are billed
+  -- (ORD-12's follow-up): it would otherwise be given with no charge on the bill, even after the first fill's charge
+  -- was refunded.
   if coalesce((to_jsonb(new)->>'fill_number')::integer, 1) > 1
      and exists (select 1 from commercial.bill_lines bill_line
                   where bill_line.facility_id = new.facility_id and bill_line.work_item_kind = 'pharmacy'
@@ -530,7 +531,7 @@ begin
     return new;
   end if;
   -- Always off the bill: never-paid, part-paid and paid alike; what was collected beyond the new total stays as
-  -- the bill's refund due and cover over the bill (0164's bill_recompute).
+  -- the bill's refund due and cover over the bill (commercial.bill_recompute).
   update commercial.bill_lines bill_line
      set dispensing_reversed_at = clock_timestamp(), cancelled = true, cancel_reason = 'Dispensing reversed',
          cancelled_by_membership_id = new.reversed_by_membership_id, cancelled_at = clock_timestamp()
@@ -610,8 +611,8 @@ do $post$
 declare
   made constant jsonb := '{
     "commercial.hook_check_in()": "0132c9412cbb3b0f3b73d2ebbbe60e90",
-    "commercial.hook_dispensing()": "8edafc5d502ed188fa3d730de1605c1d",
-    "commercial.hook_dispensing_reversal()": "26f47e77c559cac01724f6731c57bd03",
+    "commercial.hook_dispensing()": "3e4c62e6b71149558db7c3ea8d0aa09f",
+    "commercial.hook_dispensing_reversal()": "fc3acba6652996b384832915e31bd7c0",
     "commercial.hook_facility(uuid)": "4efd0ae0c3c4ad8ce694a74b223cafa5",
     "commercial.hook_lab_work_item()": "903edbb2d3a10fc4a91610cec007349a",
     "commercial.hook_pharmacy_acceptance()": "2f5cabce9719e94cfc88d1e9bd7ca665",

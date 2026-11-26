@@ -129,7 +129,7 @@ declare
     "commercial.catalogue_write_prices(uuid,uuid,jsonb)": "8fa7f007675931a209e32a9c9b632afc",
     "commercial.command_record(text,text,text,uuid)": "84e04cc81ba491a39773741ce8e26274",
     "commercial.command_replay(text,text,text)": "e7c1ff69e15ec0ca75b1c624355d163a",
-    "commercial.facility_item_ok(text,text)": "598be200cf5cbfa3b236dc3017959474",
+    "commercial.facility_item_ok(text,text)": "4b3c3925a90ae04317bf8bb6a534140f",
     "commercial.holds(text)": "4ee831ae9d72455e1cdeb1d4661aac69",
     "commercial.lagos_day(timestampwithtimezone)": "08620d6c3114df8123f496d76238763f",
     "commercial.member_name(uuid)": "50f7c6db29a6b99ee94973b373ed57cd",
@@ -641,8 +641,8 @@ begin
      or platform.current_facility_id() is null then
     return false;
   end if;
-  -- Only 0155's own table: an ordinary table owned by the schema owner (who made this schema too), so nothing another
-  -- role made (a view, its policies or functions) is ever read here as the owner.
+  -- Only ORD-7's ehr.catalog_facility_items as an ordinary table owned by the schema owner (who made this schema too),
+  -- so nothing another role made (a view, its policies or functions) is ever read here as the owner.
   if not exists (select 1 from pg_catalog.pg_class relation
                   where relation.oid = to_regclass('ehr.catalog_facility_items') and relation.relkind = 'r'
                     and relation.relowner = (select namespace.nspowner from pg_catalog.pg_namespace namespace
@@ -1339,7 +1339,7 @@ declare
     "commercial.catalogue_write_prices(uuid,uuid,jsonb)": "8fa7f007675931a209e32a9c9b632afc",
     "commercial.command_record(text,text,text,uuid)": "84e04cc81ba491a39773741ce8e26274",
     "commercial.command_replay(text,text,text)": "e7c1ff69e15ec0ca75b1c624355d163a",
-    "commercial.facility_item_ok(text,text)": "598be200cf5cbfa3b236dc3017959474",
+    "commercial.facility_item_ok(text,text)": "4b3c3925a90ae04317bf8bb6a534140f",
     "commercial.holds(text)": "4ee831ae9d72455e1cdeb1d4661aac69",
     "commercial.lagos_day(timestampwithtimezone)": "08620d6c3114df8123f496d76238763f",
     "commercial.member_name(uuid)": "50f7c6db29a6b99ee94973b373ed57cd",

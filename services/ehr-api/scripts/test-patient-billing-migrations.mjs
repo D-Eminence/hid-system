@@ -37,9 +37,18 @@
 //   6. a payment taken while its day is being closed waits for the close and
 //      is refused TILL_DAY_NOT_OPEN, so the closed day's expected cash counts
 //      every payment recorded in it.
+// And the numbers closed up, as the coordinator does at integration:
+//   0. no function body of the six files names a migration number (their
+//      headers say so), so renumbering changes no pinned md5;
+//   7. the six renamed 0154-0159, with every number from 0154 on rewritten in
+//      their text (their own to 0154-0159, the other lanes' to others), apply
+//      on the live schema with every post-check, and each re-run answers
+//      "already applied" under its new number.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const service = resolve(import.meta.dirname, '..');
@@ -77,10 +86,29 @@ const copy = (name) => withAdmin(async (admin) => {
 });
 const drop = (name) => withAdmin((admin) => admin.query(`drop database if exists ${name}`));
 
+// 0. No migration number inside a function body: the md5 each post-check pins is of the body (pg_proc.prosrc,
+// comments included), so a number there changes when the numbers are closed up at integration.
+{
+  const numbered = [];
+  for (const file of files) {
+    const text = readFileSync(join(migrations, file), 'utf8');
+    for (const made of text.matchAll(/create\s+(?:or\s+replace\s+)?function\s+([\w.]+)\s*\(/gi)) {
+      const open = /\$(\w*)\$/.exec(text.slice(made.index + made[0].length));
+      const start = made.index + made[0].length + open.index + open[0].length;
+      const body = text.slice(start, text.indexOf(open[0], start));
+      for (const number of body.matchAll(/(?<![0-9])0[0-9]{3}(?![0-9])/g)) {
+        numbered.push(`${file.slice(0, 4)} ${made[1]}: ${number[0]}`);
+      }
+    }
+  }
+  assert.deepEqual(numbered, [], 'a function body names a migration number, so closing the numbers up changes its md5');
+  results.function_bodies_without_numbers = files.length;
+}
+
 /** Applies one file as the owner with psql; answers [status, sqlstate, message of the last error]. */
-function apply(database, file) {
+function apply(database, file, directory = migrations) {
   const run = spawnSync('psql', ['-X', '-q', '-U', owner, '-d', database, '-v', 'ON_ERROR_STOP=1',
-    '-v', 'VERBOSITY=verbose', '-f', join(migrations, file)], { encoding: 'utf8', env: process.env, timeout: 120_000 });
+    '-v', 'VERBOSITY=verbose', '-f', join(directory, file)], { encoding: 'utf8', env: process.env, timeout: 120_000 });
   const error = [...(run.stderr ?? '').matchAll(/ERROR:\s+([0-9A-Z]{5}):\s+(.*)/g)].at(-1);
   return [run.status, error?.[1] ?? null, error?.[2] ?? null];
 }
@@ -393,5 +421,40 @@ assert.deepEqual([Number(years.y2027), Number(years.y2027b)], [1, 2], 'a new yea
 results.bill_numbers = `${numbers[0]}..${numbers.at(-1)} (${numbers.length}, no gaps)`;
 for (const connection of [...sessions, check]) await connection.end();
 await drop('hid_bill_steps');
+
+// 7. Closed up (coordinator, #258: numbers closed up at integration in release order). Billing's six become
+// 0154-0159 by name and in their text; every other number from 0154 on (the other lanes' files) is moved out of the
+// way. Nothing pinned may change: each applies with its post-checks on the live schema, and runs again as
+// "already applied" under its new number.
+{
+  const closedUp = mkdtempSync(join(tmpdir(), 'hid-bill-closed-'));
+  const renumber = (text) => text.replace(/(?<![0-9a-fA-F])01[5-9][0-9](?![0-9a-fA-F])/g, (number) => {
+    const value = Number(number);
+    if (value < 154) return number;
+    const moved = value >= 162 && value <= 167 ? value - 8 : value + 100;
+    return String(moved).padStart(4, '0');
+  });
+  const renamed = files.map((file) => {
+    const name = renumber(file.slice(0, 4)) + file.slice(4);
+    writeFileSync(join(closedUp, name), renumber(readFileSync(join(migrations, file), 'utf8')));
+    return name;
+  });
+  try {
+    await copy('hid_bill_closed');
+    for (const name of renamed) {
+      const [status, , failure] = apply('hid_bill_closed', name, closedUp);
+      assert.equal(status, 0, `${name} (closed up) did not apply: ${failure}`);
+    }
+    for (const name of renamed) {
+      const [status, sqlstate, message] = apply('hid_bill_closed', name, closedUp);
+      assert.notEqual(status, 0);
+      assert.deepEqual([sqlstate, message], ['55000', `${name.slice(0, 4)}: already applied`], `${name} re-run`);
+    }
+    await drop('hid_bill_closed');
+  } finally {
+    rmSync(closedUp, { recursive: true, force: true });
+  }
+  results.closed_up = `${renamed[0].slice(0, 4)}-${renamed.at(-1).slice(0, 4)} applied and re-ran as already applied`;
+}
 
 process.stdout.write(`${JSON.stringify({ status: 'passed', ...results })}\n`);
