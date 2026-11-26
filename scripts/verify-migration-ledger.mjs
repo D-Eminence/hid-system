@@ -167,14 +167,14 @@ const acceptedMigrations = new Map([
   ['0152_catalog_diagnoses.sql', 'abfecc3571808e4ad29fdf8c1e202f65b3cdf890e9f3106b74bd6ef1bd19f9c9'],
   ['0153_clinician_recent_diagnoses.sql', '45faa6a739056cc07426fdb5363b58c7dda1dbcbc096fb6d1769ae746798500b'],
   // ADT-1 (Release D), numbers provisional (given at merge, after 0154-0169 and the files cut before them), unsigned.
-  ['0170_inpatient_wards_and_beds.sql', 'b5fa2ffe1f63400c95db5906b6e4b8c31cfe31fec517f4f761dd02f725a4c520'],
-  ['0171_inpatient_admissions_and_discharge.sql', '2ebfa6cfe8283764c6812d7ea6fa00001611d54bef8a8ed8c2fabd50235f4e9d'],
-  ['0172_inpatient_admission_charges.sql', 'cfcc828ad32296c42dbfdaa83eca07c23ce8911f74d3dd2fc24a33e2851758e1'],
-  ['0173_inpatient_access_and_ward_team.sql', 'b0c9c43a53de4218c33b2ae93206dec2692b9b6888dee28f4d131e276215b0c3'],
+  ['0170_inpatient_wards_and_beds.sql', '1fba4e74e2ee67b211e2952b2215ee87f391c2d0d224af8a4e9cd63dfa133ce0'],
+  ['0171_inpatient_admissions_and_discharge.sql', 'e305323d403731c85b6bbd1d712dbe4df09126038e5d4ef11ead71e72a4fe27a'],
+  ['0172_inpatient_admission_charges.sql', 'a4c5c20eb359fe97031282bf931d23b3af371dd635b2b6dedaf99b70ca6b2b2e'],
+  ['0173_inpatient_access_and_ward_team.sql', 'e21e7b96189373c18a7842a09c127648c543c9e5d6a1485f5adbbbe223923a1f'],
   // NUR-1 (Release D), numbers provisional (given at merge, after ADT-1's 0170-0173), unsigned.
-  ['0174_nursing_observation_chart.sql', '9d4e54122c280a51b92d716664e38ed96fccec459ad04e0095fdd255bbb0cb40'],
-  ['0175_nursing_medicine_round.sql', '93aade726fb84df494677b2041b861eb2e8326901f0caf5ed2efa0f20fa94cdc'],
-  ['0176_nursing_tasks_fluid_shifts_handover.sql', 'bea2663d33b7775b03e95a0ee64bcc421e60f4ee5bd9c3bd39afa1d0974acece'],
+  ['0174_nursing_observation_chart.sql', '0a33d41cbcac7c50cae1095263ab81ac2ed1ef2398eb4654778e8307f27af6b0'],
+  ['0175_nursing_medicine_round.sql', '58480cc46e591f4ab7ee8af0ed521570df927fcb03791013fc04fbef4b6af8b1'],
+  ['0176_nursing_tasks_fluid_shifts_handover.sql', 'b801798572a076c309d736da16a918041a51c99405c80e0ec0cf288cd4b73d3c'],
   ['0177_nursing_access_codes.sql', '80e579d064b118a811f69849dd4d4b0690e155af942a89b08d197a2c2ab69147'],
 ])
 

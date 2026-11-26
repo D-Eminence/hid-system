@@ -716,31 +716,31 @@
       },
       {
         "name": "0170_inpatient_wards_and_beds.sql",
-        "sha256": "b5fa2ffe1f63400c95db5906b6e4b8c31cfe31fec517f4f761dd02f725a4c520"
+        "sha256": "1fba4e74e2ee67b211e2952b2215ee87f391c2d0d224af8a4e9cd63dfa133ce0"
       },
       {
         "name": "0171_inpatient_admissions_and_discharge.sql",
-        "sha256": "2ebfa6cfe8283764c6812d7ea6fa00001611d54bef8a8ed8c2fabd50235f4e9d"
+        "sha256": "e305323d403731c85b6bbd1d712dbe4df09126038e5d4ef11ead71e72a4fe27a"
       },
       {
         "name": "0172_inpatient_admission_charges.sql",
-        "sha256": "cfcc828ad32296c42dbfdaa83eca07c23ce8911f74d3dd2fc24a33e2851758e1"
+        "sha256": "a4c5c20eb359fe97031282bf931d23b3af371dd635b2b6dedaf99b70ca6b2b2e"
       },
       {
         "name": "0173_inpatient_access_and_ward_team.sql",
-        "sha256": "b0c9c43a53de4218c33b2ae93206dec2692b9b6888dee28f4d131e276215b0c3"
+        "sha256": "e21e7b96189373c18a7842a09c127648c543c9e5d6a1485f5adbbbe223923a1f"
       },
       {
         "name": "0174_nursing_observation_chart.sql",
-        "sha256": "9d4e54122c280a51b92d716664e38ed96fccec459ad04e0095fdd255bbb0cb40"
+        "sha256": "0a33d41cbcac7c50cae1095263ab81ac2ed1ef2398eb4654778e8307f27af6b0"
       },
       {
         "name": "0175_nursing_medicine_round.sql",
-        "sha256": "93aade726fb84df494677b2041b861eb2e8326901f0caf5ed2efa0f20fa94cdc"
+        "sha256": "58480cc46e591f4ab7ee8af0ed521570df927fcb03791013fc04fbef4b6af8b1"
       },
       {
         "name": "0176_nursing_tasks_fluid_shifts_handover.sql",
-        "sha256": "bea2663d33b7775b03e95a0ee64bcc421e60f4ee5bd9c3bd39afa1d0974acece"
+        "sha256": "b801798572a076c309d736da16a918041a51c99405c80e0ec0cf288cd4b73d3c"
       },
       {
         "name": "0177_nursing_access_codes.sql",
