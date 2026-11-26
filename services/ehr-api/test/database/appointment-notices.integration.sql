@@ -14,10 +14,16 @@
 --      no account gets nothing;
 --   2. the control: appointment_sms_reminders_enabled exists, is off, and
 --      platform.control_enabled answers it; 12 controls;
---   3. the reminder sweep: system:auth only; only between 07:00 and 21:00
---      Lagos (otherwise 0, and the rest of 3 is skipped); exactly the booked
---      appointments within 24 hours, without a reminder, booked at least 12
---      hours before their start; inbox, email and audit; a second run sends
+--   3. the reminder sweep: system:auth only; 0161's own sweep, run at the
+--      hour the suite runs and undone, sends the due reminders between 07:00
+--      and 21:00 Lagos and none outside; then, in this transaction only, a
+--      copy of it whose one change is that the suite can set its Lagos hour
+--      (create or replace: owner, grants, SECURITY DEFINER and search_path
+--      kept): 0161's guard at its edges (none at 06 and 21, the due ones at
+--      07 and 20), and the rest of 3 at noon Lagos, so every case of 3 runs
+--      at any hour: exactly the booked appointments within 24 hours, without
+--      a reminder, booked at least 12 hours before their start; inbox, email
+--      and audit; a second run sends
 --      nothing; no SMS row while the control is off; with it on, an SMS row
 --      only for a patient with a phone this facility recorded; a reschedule
 --      with it on keeps one unsent SMS row and the sweep goes on for every
@@ -423,13 +429,72 @@ select pg_temp.place('r2', pg_temp.slot(6 * 60), clock_timestamp() - interval '2
 select pg_temp.place('r3', pg_temp.slot(5 * 60), clock_timestamp() - interval '1 hour');
 select pg_temp.place('r4', pg_temp.slot(30 * 60), clock_timestamp() - interval '40 hours');
 select pg_temp.place('r5', pg_temp.slot(7 * 60), clock_timestamp() - interval '40 hours');
-select extract(hour from (clock_timestamp() at time zone 'Africa/Lagos'))::integer between 7 and 20 as n161_in_window \gset
 set local role hid_ehr_api_runtime;
 select pg_temp.as_member(1);
 select pg_temp.check_case('3 a staff session cannot run the sweep', '42501',
   pg_temp.try('select ehr.appointment_send_reminders(10)'));
 select pg_temp.check_case('3 a batch outside 1-500 is refused', '22023 APPOINTMENT_INVALID', pg_temp.sweep(0));
-\if :n161_in_window
+reset role;
+-- The sweep's hour. 0161's own sweep runs first, at the hour the suite runs, and is undone: between 07:00 and 21:00
+-- Lagos it sends the two due reminders, outside none. Then, for this transaction only, the function is replaced by a
+-- copy of itself (create or replace, so its owner, grants, SECURITY DEFINER and search_path stay) whose one change is
+-- its clock line: its Lagos hour is n161.lagos_hour when that is set, the clock's otherwise. 0161's guard is checked
+-- in the copy at its edges, and the rest of 3 runs at noon Lagos, so every case of 3 runs whatever the hour.
+-- A sweep of up to 50, at the Lagos hour given (or the clock's, when null), undone after: how many it sent.
+create function pg_temp.sweep_undone(hour_in_lagos integer) returns text language plpgsql as $f$
+declare
+  answer text;
+begin
+  begin
+    if hour_in_lagos is not null then
+      perform set_config('n161.lagos_hour', hour_in_lagos::text, true);
+    end if;
+    answer := pg_temp.sweep(50);
+    raise exception using errcode = 'P0001', message = 'appointment notices suite: undo the sweep';
+  exception when sqlstate 'P0001' then
+    return answer;
+  end;
+end
+$f$;
+create function pg_temp.sweep_attributes() returns text language sql as $f$
+  select proowner::regrole::text || '/' || coalesce(proacl::text, '-') || '/' || prosecdef::text || '/'
+         || coalesce(array_to_string(proconfig, ','), '-')
+    from pg_proc where oid = 'ehr.appointment_send_reminders(integer)'::regprocedure
+$f$;
+-- Replaces the sweep by its copy when 0161's clock line is in it exactly once; answers how many times it is.
+create function pg_temp.sweep_copy() returns text language plpgsql as $f$
+declare
+  clock_line constant text :=
+    'lagos_hour integer := extract(hour from (clock_timestamp() at time zone ''Africa/Lagos''))::integer;';
+  copy_line constant text :=
+    'lagos_hour integer := coalesce(nullif(current_setting(''n161.lagos_hour'', true), '''')::integer, '
+    || 'extract(hour from (clock_timestamp() at time zone ''Africa/Lagos''))::integer);';
+  definition text := pg_get_functiondef('ehr.appointment_send_reminders(integer)'::regprocedure);
+  found integer;
+begin
+  found := (length(definition) - length(replace(definition, clock_line, ''))) / length(clock_line);
+  if found = 1 then
+    execute replace(definition, clock_line, copy_line);
+  end if;
+  return found::text;
+end
+$f$;
+set local role hid_ehr_api_runtime;
+select extract(hour from (clock_timestamp() at time zone 'Africa/Lagos'))::integer between 7 and 20 as n161_in_window,
+       pg_temp.sweep_undone(null) as n161_sweep_now \gset
+select pg_temp.check_case('3 0161''s sweep, run now and undone: the two due between 07:00 and 21:00 Lagos, none outside',
+  case when :'n161_in_window'::boolean then '2' else '0' end, :'n161_sweep_now');
+reset role;
+select pg_temp.sweep_attributes() as n161_sweep_attributes \gset
+select pg_temp.check_case('3 the copy: 0161''s clock line found once, and replaced', '1', pg_temp.sweep_copy());
+select pg_temp.check_case('3 the copy keeps the owner, the grants, SECURITY DEFINER and the search_path',
+  :'n161_sweep_attributes', pg_temp.sweep_attributes());
+set local role hid_ehr_api_runtime;
+select pg_temp.check_case('3 0161''s guard, in the copy: none at 06 and 21 Lagos, the two due at 07 and 20', '0/2/2/0',
+  pg_temp.sweep_undone(6) || '/' || pg_temp.sweep_undone(7) || '/' || pg_temp.sweep_undone(20) || '/'
+  || pg_temp.sweep_undone(21));
+-- From here on, noon in Lagos for the copy (the rest of 3).
+select set_config('n161.lagos_hour', '12', true) as n161_lagos_hour \gset
 select pg_temp.check_case('3 the sweep sends the two due reminders', '2', pg_temp.sweep(50));
 reset role;
 select pg_temp.check_case('3 which: r1 and r2, each with its time set', 'r1,r2',
@@ -549,15 +614,6 @@ select pg_temp.check_case('3 SMS on, p1 deceased: the reminder is set, with no c
   :'n161_sweep_deceased' || '/' || :'n161_r9_deceased');
 select pg_temp.check_case('3 SMS on, p1''s notices off: inbox and email, no SMS row', '1/0/["inbox", "email"]',
   :'n161_sweep_notices_off' || '/' || :'n161_r9_notices_off');
-\else
-select pg_temp.check_case('3 outside 07:00-21:00 Lagos the sweep sends nothing', '0', pg_temp.sweep(50));
-reset role;
-\echo 'appointment notices suite: outside 07:00-21:00 Lagos, so the reminder cases of 3 are skipped (the sweep answered 0)'
--- For 4: one SMS row as the sweep writes it while the control is on.
-update platform.control_settings set enabled = true where control_key = 'appointment_sms_reminders_enabled';
-insert into ehr.appointment_sms_outbox (appointment_id, facility_id, patient_id, contact_id)
-values (pg_temp.id('r1'), 'e1610000-0000-4000-8000-000000000002', pg_temp.patient(1), 'e1610700-0000-4000-8000-000000000002');
-\endif
 
 -- 4. The SMS sender.
 update platform.control_settings set enabled = false where control_key = 'appointment_sms_reminders_enabled';
