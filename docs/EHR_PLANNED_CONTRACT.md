@@ -1939,6 +1939,10 @@ file released alone.
   - `GET .../catalog/facility-items` takes `kind` or none (both kinds),
     and answers `{ "items": [...], "more": false }`: active and withdrawn,
     by kind, the active first, then A to Z.
+  - The three facility-item routes are never kept: they answer
+    `Cache-Control: private, no-store`, not the `private, max-age=60` of
+    the status and the searches, since the list changes with each add and
+    withdrawal.
   - Each item is in its search's shape, plus `itemId`, `kind`, `active`,
     `rowVersion`, `addedAt` and `changedAt`. A facility item has
     `codeSystem: "HID-FACILITY"`, `code` equal to `itemId`, `scope:
