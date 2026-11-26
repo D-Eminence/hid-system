@@ -46,6 +46,12 @@ This file is for a coordinator session that takes over: a new cloud session, or 
 - **Interim release gate (owner, 25 Nov ~23:10 UTC, "Agent check stands in"):** Rahman's `check:db` (from `a8d99ac1`) in a Docker harness, plus an independent agent review of the final renumbered files. **The harness was never built** (its agent failed), and pgvector isn't on the host. Build it first: image `hid-pg16-vector:local` (postgres:16 plus pgvector) exists, and needs Node 24 added.
 - **Owner, 26 Nov ~12:20 UTC (gate details):**
   - **The harness is trusted only after its calibration matches Rahman.** On live `0cfddcc9` it must reproduce his Release E result: the same suites failing (schema and records-processing-draft, known to fail on production) and all 12 live verifiers passing. Report that match before relying on any harness PASS.
+  - **Calibration target (Release E's recorded checks, #338 body and Rahman's 7165136553):**
+    - Database suites on a NOSUPERUSER NOBYPASSRLS build of 0001–0153: 127 suites, 125 pass.
+    - Exactly `schema` and `records-processing-draft` fail, with errors identical to a live `95fa1e52` build.
+    - `my-orders` can exceed its "page 1 under 10 s" case on a loaded machine, but passes alone.
+    - `check:db` PASSED, with all 12 live runtime verifiers passing after each migration.
+    - If `check:db` doesn't run the suites itself, the calibration runs them separately.
   - **Appointments:** signing text only after it is renumbered (0155–0156) on a staging that holds the released 0154. The harness check and the independent review run on those renumbered files.
   - **#335 round 2:** check that both confirmed findings are tests-only. Any change they need in 0160/0161 is made before renumbering.
   - **0154's signing text** names 0154 at its final sha256, `runtime-grants.sql` if it changes, and the declaration, and says that `PRESCRIPTION_REFILLS_ENABLED` stays off until the clinical lead countersigns the refill calls (Q158).
