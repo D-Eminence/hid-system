@@ -111,6 +111,16 @@ const environmentSchema = z
     OFFLINE_ESCROW_KEYS: optionalString,
     // Prescription strength, form, duration, quantity and priority (0125): off by default, off is exactly as before.
     PRESCRIPTION_DISPENSING_DETAILS_ENABLED: booleanString,
+    // ADT-1 (0170-0173): inpatient admission, wards and beds. Off by default; every inpatient route answers 503
+    // INPATIENT_NOT_AVAILABLE. On in staging and at the sealed demo and QA facilities; in production only after the
+    // clinical lead's checklist and the owner's go-live (owner decision Q160 A, 25 November 2026).
+    INPATIENT_ENABLED: booleanString,
+    // NUR-1 (0174-0177): nursing on the ward (observation chart fields, inpatient medicine orders, the medicine round,
+    // nursing tasks, fluid balance, clinical shifts and handover). Off by default; every nursing route answers 503
+    // NURSING_NOT_AVAILABLE and the new vitals and prescription fields are refused with 400
+    // NURSING_FIELDS_NOT_AVAILABLE. Needs INPATIENT_ENABLED too. On in staging and at the sealed demo and QA
+    // facilities; in production only after the clinical lead's checklist and the owner's go-live (Q160 A).
+    NURSING_ENABLED: booleanString,
   })
   .superRefine((environment, context) => {
     if (environment.AI_ENABLED) {

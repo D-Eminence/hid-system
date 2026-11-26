@@ -14,7 +14,9 @@ import { calendarDate } from '../shared/calendar-date';
 import { checkPrescriptionAllergies, readAllergyAcknowledgements,
   recordAllergyAcknowledgement } from '../allergies/prescription-allergy-gate';
 import { type CreatePrescriptionInput, PRESCRIPTION_DISPENSING_DETAILS_OFF,
-  PrescriptionDispensingDetails } from './prescription-dispensing-details';
+  PrescriptionDispensingDetails, type PrescriptionDispensingDetailsAnswer } from './prescription-dispensing-details';
+import { PRESCRIPTION_INPATIENT_SCHEDULE_OFF, PrescriptionInpatientSchedule, scheduleProblem,
+  type InpatientScheduleAnswer } from './inpatient-schedule';
 import { OWN_PHARMACY_SEND_OFF, OwnPharmacySend, type PharmacyHandoff, pharmacyHandoff } from './own-pharmacy-send';
 import type { SendPrescriptionToOwnPharmacyDto } from './own-pharmacy-send.dto';
 
@@ -69,11 +71,18 @@ export class PrescriptionsService {
     private readonly orderRoutes: OrderRouteReader,
     private readonly details: PrescriptionDispensingDetails = PRESCRIPTION_DISPENSING_DETAILS_OFF,
     private readonly ownPharmacy: OwnPharmacySend = OWN_PHARMACY_SEND_OFF,
+    private readonly schedule: PrescriptionInpatientSchedule = PRESCRIPTION_INPATIENT_SCHEDULE_OFF,
   ) {}
 
   /** The answer's columns: today's, plus the dispensing details while they are on (0125). */
   private columns(): string {
-    return COLUMNS + this.details.selectList();
+    return COLUMNS + this.details.selectList() + this.schedule.selectList();
+  }
+
+  /** A row as answered: the dispensing details (0125) and the inpatient schedule (NUR-1, 0175) while each is on. */
+  private project<Row extends object>(row: Row): Row & PrescriptionDispensingDetailsAnswer
+    & { inpatientSchedule?: InpatientScheduleAnswer | null } {
+    return this.schedule.project(this.details.project(row));
   }
 
   /**
@@ -110,7 +119,7 @@ export class PrescriptionsService {
         const acknowledgements = await readAllergyAcknowledgements(client, context, patientId, ids);
         // 0133: whether a send to this hospital's own pharmacy can reach somebody here (no field without 0133).
         const staffed = withStaffed(await this.ownPharmacy.staffed(client, context.correlationId));
-        const items = page.items.map((item) => ({ ...withOrderRoute(this.details.project(item), routes),
+        const items = page.items.map((item) => ({ ...withOrderRoute(this.project(item), routes),
           allergyAcknowledgements: acknowledgements.get(item.id) ?? [], ...staffed }));
         return { value: { ...page, items },
           details: { resultCount: page.items.length, allergyAcknowledgementCount: countValues(acknowledgements) } };
@@ -133,7 +142,7 @@ export class PrescriptionsService {
         const acknowledgements = (await readAllergyAcknowledgements(client, context, patientId, [row.id])).get(row.id) ?? [];
         // 0133: whether a send to this hospital's own pharmacy can reach somebody here (no field without 0133).
         const staffed = withStaffed(await this.ownPharmacy.staffed(client, context.correlationId));
-        return { value: { ...withOrderRoute(this.details.project(row), routes), allergyAcknowledgements: acknowledgements,
+        return { value: { ...withOrderRoute(this.project(row), routes), allergyAcknowledgements: acknowledgements,
           ...staffed },
           details: { allergyAcknowledgementCount: acknowledgements.length } };
       },
@@ -161,8 +170,11 @@ export class PrescriptionsService {
       throw new DomainProblem(400, 'DOSE_INCOMPLETE', 'Dose quantity and unit must be supplied together');
     }
     this.details.requirePairs(input);
+    // NUR-1 (0175): an inpatient schedule's shape (the visit is checked by 0175's guard).
+    this.schedule.check(input);
     const operation = 'prescription.create';
-    const digest = requestDigest(operation, { patientId, encounterId, input: this.details.digestInput(input) });
+    const digest = requestDigest(operation, { patientId, encounterId,
+      input: this.schedule.digestInput(this.details.digestInput(input)) });
     return this.repository.run(
       context, patientId, 'write_records',
       { action: 'ehr.prescription.create', resourceType: 'prescription' },
@@ -185,26 +197,29 @@ export class PrescriptionsService {
         // transaction, idempotency key included, rolls back).
         const matches = await checkPrescriptionAllergies(client, context, patientId,
           { display: input.medicationDisplay, code: input.medicationCode ?? null }, input.allergyAcknowledgement);
+        const detailValues = this.details.insertValues(input);
         const result = await client.query<PrescriptionRow>(
           `insert into ehr.prescriptions (
              encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
              medication_code_system, medication_code, medication_display, dose_quantity, dose_unit,
-             route_code, frequency, instructions, starts_on, ends_on, status${this.details.insertColumns()}
-           ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16${this.details.insertPlaceholders()})
+             route_code, frequency, instructions, starts_on, ends_on, status${this.details.insertColumns()}${
+             this.schedule.insertColumns(input)}
+           ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16${this.details.insertPlaceholders()}${
+             this.schedule.insertPlaceholders(input, 17 + detailValues.length)})
            returning ${this.columns()}`,
           [
             encounterId, patientId, context.facilityId, context.actor.accountId, context.membershipId,
             input.medicationCodeSystem ?? null, input.medicationCode ?? null, input.medicationDisplay,
             input.doseQuantity ?? null, input.doseUnit ?? null, input.routeCode ?? null,
             input.frequency, input.instructions, input.startsOn ?? null, input.endsOn ?? null, input.status,
-            ...this.details.insertValues(input),
+            ...detailValues, ...this.schedule.insertValues(input),
           ],
-        );
+        ).catch((error: unknown) => { throw scheduleProblem(error); });
         const row = this.single(result.rows[0]);
         // 0133: a prescription written as active goes to this hospital's own pharmacy at once.
         const handoff = row.status === OrderStatus.Active
           ? await this.ownPharmacy.send(client, row.id, Number(row.rowVersion), context.correlationId) : undefined;
-        const value = withHandoff(this.details.project(row), handoff);
+        const value = withHandoff(this.project(row), handoff);
         if (matches.length > 0 && input.allergyAcknowledgement) {
           // The audit says the prescriber went ahead after a warning: flags and counts only,
           // never the substance or the reason text.
@@ -220,7 +235,7 @@ export class PrescriptionsService {
         // 0133: a request written as active answers its hand-off on a replay too.
         replayHandoff = input.status === OrderStatus.Active
           ? await this.ownPharmacy.send(client, row.id, Number(row.rowVersion), context.correlationId) : undefined;
-        return withHandoff(this.details.project(row), replayHandoff);
+        return withHandoff(this.project(row), replayHandoff);
       },
     );
     return replayHandoff ? { ...created, details: { ...created.details, ...handoffDetails(replayHandoff) } } : created;
@@ -306,10 +321,10 @@ export class PrescriptionsService {
         if (matches.length > 0 && input.allergyAcknowledgement) {
           const override = await recordAllergyAcknowledgement(client, context, patientId, row.id,
             current.status === OrderStatus.Draft ? 'activate' : 'resume', matches, input.allergyAcknowledgement);
-          return { value: withHandoff(this.details.project(row), handoff), resourceId: prescriptionId,
+          return { value: withHandoff(this.project(row), handoff), resourceId: prescriptionId,
             details: { rowVersion: row.rowVersion, ...reasonDetails, ...override, ...sendDetails } };
         }
-        return { value: withHandoff(this.details.project(row), handoff), resourceId: prescriptionId,
+        return { value: withHandoff(this.project(row), handoff), resourceId: prescriptionId,
           details: { rowVersion: row.rowVersion, ...reasonDetails, ...sendDetails } };
       },
       (client) => this.repository.exists(client, 'prescriptions', prescriptionId, patientId, context.facilityId, encounterId),

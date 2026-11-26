@@ -15,6 +15,10 @@ import { ClinicalRepository, type OperationResult } from '../shared/clinical.rep
 import type { MarkVitalEnteredInErrorDto, VitalsListQueryDto } from './vitals.dto';
 import { measureWarning, moreSerious, USUAL_RANGES_VERSION, vitalWarnings, type VitalWarning,
   type WarnedMeasure } from './usual-ranges';
+import {
+  checkObservationRules, OBSERVATION_FIELD_KEYS, OBSERVATION_INSERT_COLUMNS, observationColumnsSql,
+  observationFieldsEnabled, observationInsertValues, requireObservationFieldsAllowed, type ObservationValues,
+} from './observation-fields';
 
 /** EHR-C8b (0142): a reading is recorded, or withdrawn for good. */
 export type VitalStatus = 'recorded' | 'entered_in_error';
@@ -42,6 +46,17 @@ export interface VitalRow extends QueryResultRow {
   updatedAt: Date;
   status: VitalStatus;
   statusChangedAt: Date | null;
+  // NUR-1 (0174): present only while NURSING_ENABLED is on.
+  painScore?: number | null;
+  avpu?: string | null;
+  bloodGlucoseMmolL?: string | null;
+  oxygenDevice?: string | null;
+  oxygenFlowLPerMin?: string | null;
+  fio2Percent?: number | null;
+  gcsEye?: number | null;
+  gcsVerbal?: number | null;
+  gcsVerbalNotTestable?: boolean | null;
+  gcsMotor?: number | null;
 }
 
 export interface VitalCorrectionRow extends QueryResultRow {
@@ -93,6 +108,11 @@ const VITAL_COLUMNS = `
   created_at as "createdAt", updated_at as "updatedAt",
   ${vitalStatusSql('vitals')} as status,
   (to_jsonb(vitals)->>'status_changed_at')::timestamptz as "statusChangedAt"`;
+
+/** Today's columns, and (NUR-1, 0174) the observation chart's fields while NURSING_ENABLED is on. */
+function vitalColumns(): string {
+  return VITAL_COLUMNS + (observationFieldsEnabled() ? observationColumnsSql('vitals') : '');
+}
 
 const CORRECTION_COLUMNS = `
   id, vital_id as "vitalId", patient_id as "patientId", facility_id as "facilityId",
@@ -224,7 +244,7 @@ export class VitalsService {
       { action: 'ehr.vital.list', resourceType: 'vital', resourceId: encounterId },
       async (client) => {
         const result = await client.query<VitalRow & { cursorAt: string }>(
-          `select ${VITAL_COLUMNS}, ${timelineCursorSql('recorded_at')} as "cursorAt" from ehr.vitals
+          `select ${vitalColumns()}, ${timelineCursorSql('recorded_at')} as "cursorAt" from ehr.vitals
            where encounter_id = $1 and patient_id = $2 and facility_id = $3
              and ($4::timestamptz is null or (recorded_at, id) < ($4::timestamptz, $5::uuid))
              and ($7 or ${recordedVitalSql('vitals')})
@@ -322,18 +342,23 @@ export class VitalsService {
       client, context, patientId, key, operation, digest, 'vital',
       async () => {
         this.checkBloodPressureOrder(input);
+        // NUR-1 (0174): the observation chart's fields go in only while NURSING_ENABLED is on (off, the INSERT is
+        // today's, and a reading carrying them was refused before the key lookup).
+        const observations = observationFieldsEnabled();
         const result = await client.query<VitalRow>(
           `insert into ehr.vitals (
              encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
              recorded_at, height_cm, weight_kg, temperature_c, pulse_bpm, respiratory_rate,
-             systolic_mmhg, diastolic_mmhg, oxygen_saturation_percent, source
-           ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-           returning ${VITAL_COLUMNS}`,
+             systolic_mmhg, diastolic_mmhg, oxygen_saturation_percent, source${observations ? `, ${OBSERVATION_INSERT_COLUMNS}` : ''}
+           ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15${observations
+             ? ',$16,$17,$18,$19,$20,$21,$22,$23,$24,$25' : ''})
+           returning ${vitalColumns()}`,
           [
             encounterId, patientId, context.facilityId, context.actor.accountId, context.membershipId,
             input.recordedAt, input.heightCm ?? null, input.weightKg ?? null, input.temperatureC ?? null,
             input.pulseBpm ?? null, input.respiratoryRate ?? null, input.systolicMmhg ?? null,
             input.diastolicMmhg ?? null, input.oxygenSaturationPercent ?? null, input.source,
+            ...(observations ? observationInsertValues(input) : []),
           ],
         );
         const row = this.single(result.rows[0]);
@@ -351,7 +376,7 @@ export class VitalsService {
     input: CreateVitalCorrectionDto,
     key: string,
   ) {
-    this.assertMeasurementsGiven(input.replacementValues);
+    this.assertMeasurementsGiven(input.replacementValues, false);
     const operation = 'vital-correction.create';
     const digest = requestDigest(operation, { patientId, encounterId, vitalId, input });
     return this.repository.run(
@@ -368,6 +393,8 @@ export class VitalsService {
           if (Number(vital.rowVersion) !== input.expectedRowVersion) {
             throw new DomainProblem(412, 'VERSION_CONFLICT', VITAL_MESSAGES.versionConflict);
           }
+          // NUR-1 (0174): a correction of the new fields keeps the oxygen and GCS rules for the values after it.
+          if (observationFieldsEnabled()) checkObservationRules(observationsAfter(vital, input.replacementValues));
           const nextCorrection = vital.currentCorrectionNo + 1;
           const result = await client.query<VitalCorrectionRow>(
             `insert into ehr.vital_corrections (
@@ -432,7 +459,7 @@ export class VitalsService {
           updated = (await client.query<VitalRow>(
             `update ehr.vitals set status = 'entered_in_error'
              where id = $1 and encounter_id = $2 and patient_id = $3 and facility_id = $4 and row_version = $5
-             returning ${VITAL_COLUMNS}`,
+             returning ${vitalColumns()}`,
             [vitalId, encounterId, patientId, context.facilityId, input.expectedRowVersion],
           )).rows[0];
         } catch (error) {
@@ -452,7 +479,7 @@ export class VitalsService {
 
   private async findVital(client: PoolClient, context: DataAccessContext, patientId: string, encounterId: string, id: string) {
     const result = await client.query<VitalRow>(
-      `select ${VITAL_COLUMNS} from ehr.vitals
+      `select ${vitalColumns()} from ehr.vitals
        where id = $1 and encounter_id = $2 and patient_id = $3 and facility_id = $4`,
       [id, encounterId, patientId, context.facilityId],
     );
@@ -461,7 +488,7 @@ export class VitalsService {
 
   private async findVitalById(client: PoolClient, context: DataAccessContext, patientId: string, id: string) {
     const result = await client.query<VitalRow>(
-      `select ${VITAL_COLUMNS} from ehr.vitals where id = $1 and patient_id = $2 and facility_id = $3`,
+      `select ${vitalColumns()} from ehr.vitals where id = $1 and patient_id = $2 and facility_id = $3`,
       [id, patientId, context.facilityId],
     );
     return result.rows[0];
@@ -469,7 +496,7 @@ export class VitalsService {
 
   private async lockVital(client: PoolClient, context: DataAccessContext, patientId: string, encounterId: string, id: string) {
     const result = await client.query<VitalRow>(
-      `select ${VITAL_COLUMNS} from ehr.vitals
+      `select ${vitalColumns()} from ehr.vitals
        where id = $1 and encounter_id = $2 and patient_id = $3 and facility_id = $4 for update`,
       [id, encounterId, patientId, context.facilityId],
     );
@@ -491,7 +518,11 @@ export class VitalsService {
     return row;
   }
 
-  private assertMeasurementsGiven(value: VitalMeasurementsDto): void {
+  private assertMeasurementsGiven(value: VitalMeasurementsDto, whole = true): void {
+    // NUR-1 (0174): the observation chart's fields only while NURSING_ENABLED is on; on a new reading, the oxygen and
+    // GCS rules (a correction's are checked on the values after it, once the reading is locked).
+    requireObservationFieldsAllowed(value, observationFieldsEnabled());
+    if (whole) checkObservationRules(value as ObservationValues);
     if (!hasMeasurements(value)) throw new DomainProblem(400, 'VITAL_MEASUREMENT_REQUIRED', 'At least one vital measurement is required');
     if ((value.systolicMmhg === undefined) !== (value.diastolicMmhg === undefined)) {
       throw new DomainProblem(400, 'BLOOD_PRESSURE_INCOMPLETE', 'Systolic and diastolic pressure must be supplied together');
@@ -578,7 +609,19 @@ const VITAL_STORAGE_KEYS = {
   systolicMmhg: 'systolic_mmhg',
   diastolicMmhg: 'diastolic_mmhg',
   oxygenSaturationPercent: 'oxygen_saturation_percent',
+  // NUR-1 (0174): the observation chart's fields (0174's corrections CHECK lists their keys).
+  ...OBSERVATION_FIELD_KEYS,
 } as const;
+
+/** NUR-1 (0174): a reading's new fields after a correction: its values, then the correction's over them. */
+function observationsAfter(vital: VitalRow, replacement: VitalMeasurementsDto): ObservationValues {
+  const after: ObservationValues = {};
+  for (const field of Object.keys(OBSERVATION_FIELD_KEYS) as (keyof typeof OBSERVATION_FIELD_KEYS)[]) {
+    const corrected = (replacement as ObservationValues)[field];
+    after[field] = corrected !== undefined ? corrected : (vital[field] ?? null);
+  }
+  return after;
+}
 
 function latestValue(value: unknown): LatestVitalValue['value'] {
   if (value && typeof value === 'object') {
@@ -590,8 +633,8 @@ function latestValue(value: unknown): LatestVitalValue['value'] {
 
 export function vitalMeasurementsToStorage(
   measurements: VitalMeasurementsDto,
-): Readonly<Record<string, number>> {
-  const stored: Record<string, number> = {};
+): Readonly<Record<string, number | string | boolean>> {
+  const stored: Record<string, number | string | boolean> = {};
   for (const [applicationKey, storageKey] of Object.entries(VITAL_STORAGE_KEYS)) {
     const value = measurements[applicationKey as keyof VitalMeasurementsDto];
     if (value !== undefined) stored[storageKey] = value;

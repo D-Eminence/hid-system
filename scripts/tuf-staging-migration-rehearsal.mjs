@@ -35,6 +35,12 @@ const baseEnvironment = {
   PGHOST: temporary, PGPORT: '5432', PGUSER: admin, PGSSLMODE: 'disable',
 };
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
+// The audit rows the release's migrations write at apply time on any data: 0150 one, 0173 sixteen (one per
+// inpatient role row; 0170-0172 write none, and 0173's sealed test wards are written only where a sealed tenant is
+// installed, which no rehearsal baseline has), 0177 nineteen (one per nursing role row; 0174-0176 write none, and
+// 0177's sealed test shifts are written only where a sealed tenant is installed). Each dry run and each apply takes
+// that many numbers from audit.events' identity sequence.
+const AUDITED_MIGRATION_ROWS = 1 + 16 + 19;
 const evidence = {
   schema_version: 1, scope: 'local-synthetic-only', status: 'failed', staging_accepted: false,
   started_at: new Date().toISOString(), checks: {}, artifacts: [],
@@ -110,6 +116,15 @@ const addedColumns = {
   'ocr.publications': ['publication_basis'], // 0113, default NULL (read as direct care)
   // 0130, default 'nin_verified' and NULL: every historical case was registered with a checked NIN.
   'identity.registration_cases': ['identity_evidence', 'no_nin_reason'],
+  // 0173 (ADT-1), default NULL: only a ward-stay grant (switched off, so none) names its admission.
+  'identity.consent_grants': ['admission_id'],
+  // 0174 (NUR-1), no default: the observation chart's fields; a historical reading has none of them.
+  'ehr.vitals': ['pain_score', 'avpu', 'blood_glucose_mmol_l', 'oxygen_device', 'oxygen_flow_l_per_min', 'fio2_percent',
+    'gcs_eye', 'gcs_verbal', 'gcs_verbal_not_testable', 'gcs_motor'],
+  // 0175 (NUR-1), no default: an inpatient order's schedule; a historical prescription has none.
+  'ehr.prescriptions': ['schedule_kind', 'scheduled_times', 'first_due_at', 'as_needed_reason',
+    'as_needed_min_interval_minutes', 'as_needed_max_doses_per_24h', 'infusion_rate_ml_per_hour', 'infusion_volume_ml',
+    'infusion_fluid'],
 };
 
 async function snapshot(db) {
@@ -295,8 +310,10 @@ try {
   await artifact('pre-schema-upgrade.dump');
   migration('existing baseline schema upgrade dry run', 'apply-migrations.mjs', 'hid_upgrade', {}, 0, ['--dry-run']);
   // Migration 0150 (owner decision Q141 B) writes one audit row at any data,
-  // so the dry run takes one number from audit.events' identity sequence:
-  // sequences are not transactional, so the rollback leaves that one number
+  // 0173 (ADT-1) sixteen (one per inpatient role row) and 0177 (NUR-1)
+  // nineteen (one per nursing role row), so the dry run takes
+  // AUDITED_MIGRATION_ROWS numbers from audit.events' identity sequence:
+  // sequences are not transactional, so the rollback leaves those numbers
   // unused (a gap, as any rolled-back audited request leaves; nothing reads
   // the numbers as gap-free). Every row, and every other sequence, is as
   // before.
@@ -304,7 +321,7 @@ try {
   const advanced = (sequence, by) => ({ last_value: String(Number(sequence.last_value) + by - (sequence.is_called ? 0 : 1)),
     is_called: true });
   assert.deepEqual(await snapshot('hid_upgrade'),
-    { ...upgradeBefore, [auditSequence]: advanced(upgradeBefore[auditSequence], 1) },
+    { ...upgradeBefore, [auditSequence]: advanced(upgradeBefore[auditSequence], AUDITED_MIGRATION_ROWS) },
     'Upgrade dry run must preserve all historical rows');
   migration('existing baseline schema upgrade', 'apply-migrations.mjs', 'hid_upgrade');
   migration('upgraded baseline role bootstrap', 'bootstrap-database-roles.mjs', 'hid_upgrade');
@@ -411,12 +428,14 @@ try {
       granted_by: null, revoked_at: null }], 'Migration 0106 must add exactly its declared OCR worker role');
   });
   // Migration 0150 (owner decision Q141 B) writes exactly one audit row, the
-  // system actor's auth.role-permission.add for doctor/ocr.job.start; every
+  // system actor's auth.role-permission.add for doctor/ocr.job.start; 0173
+  // (ADT-1) one auth.role-permission.add per inpatient role row. Every
   // historical audit row is unchanged.
   await withClient('hid_upgrade', async client => {
     await client.query("set timezone = 'UTC'");
     const kept = (await client.query(`select to_jsonb(t)::text as value from audit.events t
-      where correlation_id <> '0150-doctors-start-readings-q141b' order by to_jsonb(t)::text collate "C"`)).rows;
+      where correlation_id not in ('0150-doctors-start-readings-q141b', '0173-inpatient-adt1', '0177-nursing-nur1')
+      order by to_jsonb(t)::text collate "C"`)).rows;
     assert.deepEqual({ rows: kept.length, sha256: sha256(kept.map(row => row.value).join('\n')) },
       upgradeBefore['audit.events'], 'Upgrade changed a historical audit.events row');
     assert.deepEqual((await client.query(`select actor_type, action, outcome, resource_type, resource_id, provenance,
@@ -425,9 +444,33 @@ try {
     [{ actor_type: 'system', action: 'auth.role-permission.add', outcome: 'success', resource_type: 'role-permission',
       resource_id: 'doctor/ocr.job.start', provenance: 'migration', source_system: 'hid-0150', actor_account_id: null,
       facility_id: null, patient_id: null }], 'Migration 0150 must write exactly its one audit row');
-    // The dry run's number and the apply's.
-    assert.deepEqual(upgradeAfter[auditSequence], advanced(upgradeBefore[auditSequence], 2),
-      'Only 0150 takes numbers from audit.events\' identity sequence (one in the dry run, one in the apply)');
+    assert.deepEqual((await client.query(`select actor_type, action, outcome, resource_type, resource_id, provenance,
+        source_system, actor_account_id, facility_id, patient_id
+      from audit.events where correlation_id = '0173-inpatient-adt1' order by resource_id collate "C"`)).rows,
+    ['admin/ehr.ward.manage', 'clinician/ehr.admission.decide', 'clinician/ehr.admission.read',
+      'clinician/ehr.bed.allocate', 'clinician/ehr.ward.read', 'clinician/ehr.wristband.print',
+      'doctor/ehr.admission.decide', 'doctor/ehr.admission.read', 'doctor/ehr.bed.allocate', 'doctor/ehr.ward.read',
+      'doctor/ehr.wristband.print', 'nurse/ehr.admission.read', 'nurse/ehr.bed.allocate', 'nurse/ehr.ward.read',
+      'nurse/ehr.wristband.print', 'org_admin/ehr.ward.manage'].map((resource) => ({ actor_type: 'system',
+      action: 'auth.role-permission.add', outcome: 'success', resource_type: 'role-permission', resource_id: resource,
+      provenance: 'migration', source_system: 'hid-0173', actor_account_id: null, facility_id: null, patient_id: null })),
+    'Migration 0173 must write exactly its sixteen audit rows');
+    assert.deepEqual((await client.query(`select actor_type, action, outcome, resource_type, resource_id, provenance,
+        source_system, actor_account_id, facility_id, patient_id
+      from audit.events where correlation_id = '0177-nursing-nur1' order by resource_id collate "C"`)).rows,
+    ['admin/ehr.clinical-shift.manage', 'admin/ehr.shift-assignment.manage', 'clinician/ehr.handover.write',
+      'clinician/ehr.mar.read', 'clinician/ehr.mar.record', 'clinician/ehr.nursing-task.read',
+      'clinician/ehr.nursing-task.write', 'doctor/ehr.mar.read', 'doctor/ehr.mar.record', 'doctor/ehr.nursing-task.read',
+      'doctor/ehr.nursing-task.write', 'nurse/ehr.handover.write', 'nurse/ehr.mar.read', 'nurse/ehr.mar.record',
+      'nurse/ehr.nursing-task.read', 'nurse/ehr.nursing-task.write', 'nurse/ehr.shift-assignment.manage',
+      'org_admin/ehr.clinical-shift.manage', 'org_admin/ehr.shift-assignment.manage'].map((resource) => ({
+      actor_type: 'system', action: 'auth.role-permission.add', outcome: 'success', resource_type: 'role-permission',
+      resource_id: resource, provenance: 'migration', source_system: 'hid-0177', actor_account_id: null, facility_id: null,
+      patient_id: null })),
+    'Migration 0177 must write exactly its nineteen audit rows');
+    // The dry run's numbers and the apply's.
+    assert.deepEqual(upgradeAfter[auditSequence], advanced(upgradeBefore[auditSequence], 2 * AUDITED_MIGRATION_ROWS),
+      'Only 0150, 0173 and 0177 take numbers from audit.events\' identity sequence (in the dry run and in the apply)');
   });
   const expectedChanged = new Set([
     'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
@@ -443,6 +486,10 @@ try {
       ['ehr.encounters', 'imported_paper_records is distinct from false'],
       ['ocr.publications', 'publication_basis is not null'],
       ['identity.registration_cases', "identity_evidence is distinct from 'nin_verified' or no_nin_reason is not null"],
+      ['identity.consent_grants', 'admission_id is not null'],
+      ['ehr.vitals', 'num_nonnulls(pain_score, avpu, blood_glucose_mmol_l, oxygen_device, oxygen_flow_l_per_min, '
+        + 'fio2_percent, gcs_eye, gcs_verbal, gcs_verbal_not_testable, gcs_motor) > 0'],
+      ['ehr.prescriptions', 'schedule_kind is not null or first_due_at is not null or scheduled_times is not null'],
     ];
     for (const [table, offending] of historicalDefaults) {
       const { rows } = await client.query(`select count(*)::int as n from ${table} where ${offending}`);
@@ -521,6 +568,16 @@ try {
   // consent whatever 0133's check does, so only this proves the check answers).
   evidence.checks.own_facility_work_runtime = JSON.parse(command('exact-role own facility pharmacy and lab work',
     process.execPath, [join(repository, 'services/ehr-api/scripts/verify-own-facility-work-runtime.mjs')], workflowEnvironment));
+  // 0170-0173 (ADT-1): inpatient admission, wards and beds through ehr-api's InpatientService as its exact runtime
+  // role: ward setup, request, admit, transfer, discharge by each outcome, the prints, the census, and the charges
+  // when BILL-1 (0172) is applied.
+  evidence.checks.inpatient_adt_runtime = JSON.parse(command('exact-role inpatient admission, wards and beds',
+    process.execPath, [join(repository, 'services/ehr-api/scripts/verify-inpatient-adt-runtime.mjs')], workflowEnvironment));
+  // 0174-0177 (NUR-1): nursing on the ward through ehr-api's NursingService as its exact runtime role: a reading with
+  // the new fields and the chart (no score), a scheduled order, a dose of each outcome, a task, fluid balance, a
+  // shift, the ward's assignments and a handover given.
+  evidence.checks.nursing_runtime = JSON.parse(command('exact-role nursing on the ward',
+    process.execPath, [join(repository, 'services/ehr-api/scripts/verify-nursing-runtime.mjs')], workflowEnvironment));
   await withClient(database, (client) => client.query(baselineSql));
   evidence.checks.schema = { dry_run_rolled_back: true, applied: files.length, rerun_pending: 0, schema_rls_suite: 'passed' };
   // Release A (coordinator, 19 November 2026, on #280): the runner applies the pending files one by one, each in
@@ -564,14 +621,22 @@ try {
       'services/ehr-api/scripts/verify-records-processing-runtime.mjs': [
         "assert.deepEqual([code?.active, listColumns], [true, 12], 'a database with 0104');",
         "assert.deepEqual([code?.active, listColumns], [true, 14], 'a database with 0104 and 0128');"],
+      // ADT-1 (0173, Q191 A): the governed administrator (org_admin) gains ehr.ward.manage: nine codes become ten
+      // once 0173 is applied; NUR-1 (0177, Q200 A) adds ehr.shift-assignment.manage and ehr.clinical-shift.manage:
+      // twelve once 0177 is applied (see liveGuardFrom).
+      'services/identity-api/scripts/verify-provider-enrollment-runtime.mjs': (last) => [
+        'assert.equal(governedView.permissions.length, 9);',
+        `assert.equal(governedView.permissions.length, ${last >= '0177' ? 12 : 10});`],
       'services/identity-api/scripts/verify-desk-registration-own-facility-runtime.mjs': [
         'assert.equal(registrationAudits, 3);',
         "const replays = (await pool.query(`select count(*)::integer as n from audit.events where action in ('identity.registration.without-nin', 'identity.registration.without-nin.review') and facility_id = $1 and outcome = 'success' and details ? 'replayed'`, [ids.facA])).rows[0].n; assert(replays <= 1, 'At most the one replay is audited as a replay'); assert.equal(registrationAudits - replays, 3);"],
     };
+    // A guard that holds only once a given file is applied: before that point the live verifier runs as it is.
+    const liveGuardFrom = { 'services/identity-api/scripts/verify-provider-enrollment-runtime.mjs': '0173' };
     const guardsChanged = [];
-    const liveScript = async (verifier) => {
-      const guard = liveGuards[verifier];
-      if (!guard) return join(live, verifier);
+    const liveScript = async (verifier, last) => {
+      const guard = typeof liveGuards[verifier] === 'function' ? liveGuards[verifier](last) : liveGuards[verifier];
+      if (!guard || (liveGuardFrom[verifier] !== undefined && last < liveGuardFrom[verifier])) return join(live, verifier);
       const original = await readFile(join(live, verifier), 'utf8');
       // A live tree with 0128 (Release A and later) reads the shape itself (`has0128 ? 14 : 12`): no old line, so
       // its verifier runs as it is. The old line, where present, must be there exactly once.
@@ -585,8 +650,9 @@ try {
       assert.equal(occurrences, 1, `the live ${basename(verifier)} guard is not as expected`);
       const copy = join(live, verifier.replace(/[^/]+$/, (name) => `rehearsal-copy-${name}`));
       await writeFile(copy, original.replace(guard[0], guard[1]));
-      if (!guardsChanged.some((entry) => entry.verifier === verifier)) {
-        guardsChanged.push({ verifier, live_sha256: sha256(original), line_before: guard[0], line_after: guard[1] });
+      if (!guardsChanged.some((entry) => entry.verifier === verifier && entry.line_after === guard[1])) {
+        guardsChanged.push({ verifier, live_sha256: sha256(original), line_before: guard[0], line_after: guard[1],
+          ...(liveGuardFrom[verifier] === undefined ? {} : { from_point: liveGuardFrom[verifier] }) });
       }
       return copy;
     };
@@ -644,7 +710,7 @@ try {
             const name = basename(verifier, '.mjs');
             try {
               verified[name] = JSON.parse(command(`live ${basename(verifier)} after ${last}`,
-                process.execPath, [await liveScript(verifier)], liveEnvironment)).status ?? 'passed';
+                process.execPath, [await liveScript(verifier, last)], liveEnvironment)).status ?? 'passed';
             } catch (error) {
               const message = String(error?.message ?? error).split('\n').find((line) => /Assertion|Error/.test(line))
                 ?? String(error?.message ?? error).slice(0, 300);

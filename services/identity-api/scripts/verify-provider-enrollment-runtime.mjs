@@ -2639,7 +2639,9 @@ try {
   const governedAdmin = await signedIn(governedFixture.email, invitationPassword, 'ehr', governedFixture.facilityId);
   const governedView = await facilityPermissions(governedAdmin, governedFixture.facilityId);
   assert.deepEqual(governedView.permissions, await permissionsOf('org_admin'));
-  assert.equal(governedView.permissions.length, 9);
+  // ADT-1 (0173, Q191 A): org_admin's nine and ehr.ward.manage; NUR-1 (0177, Q200 A): and ehr.shift-assignment.manage
+  // and ehr.clinical-shift.manage.
+  assert.equal(governedView.permissions.length, 12);
   assert.equal(governedView.selfService, undefined, 'A governed facility carries selfService');
   expectProblem(await staffCall(governedAdmin, 'get', '/identity/facility-staff'), 403, 'STAFF_MANAGEMENT_NOT_AVAILABLE');
   expectProblem(await invite(governedAdmin, { name: 'Gov Desk', email: email('gov-desk'), role: 'receptionist' }), 403,

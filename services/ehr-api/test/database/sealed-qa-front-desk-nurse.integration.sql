@@ -185,6 +185,11 @@ create function pg_temp.added_locks() returns table (table_name text, mode text)
    group by namespace.nspname, class.relname;
 $$;
 
+-- A later file's role rows (0173, ADT-1: the sixteen inpatient rows; 0177,
+-- NUR-1: the nineteen nursing rows) are taken away for this transaction, so the
+-- role table is as 0151 found it.
+delete from auth.role_permissions where permission_code in ('ehr.ward.read', 'ehr.admission.read', 'ehr.bed.allocate', 'ehr.wristband.print', 'ehr.admission.decide', 'ehr.ward.manage', 'ehr.death-record.write', 'ehr.mar.read', 'ehr.mar.record', 'ehr.nursing-task.read', 'ehr.nursing-task.write', 'ehr.handover.write', 'ehr.shift-assignment.manage', 'ehr.clinical-shift.manage');
+
 -- 2. Without the QA tenant.
 select pg_temp.expect('2a no QA tenant here', 'false',
   identity.sealed_qa_facility('c0a00002-0000-4000-8000-000000000001')::text);

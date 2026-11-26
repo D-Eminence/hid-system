@@ -488,9 +488,21 @@ begin
   -- reads as the owner too (today ehr.order_belongs_to, called by
   -- ehr.list_order_routes_for_order and ehr.order_route_summaries after
   -- ehr.order_route_reader's read consent test; 0133 D5), so whoever adds
-  -- one adds it to D5's analysis by hand.
+  -- one adds it to D5's analysis by hand. ADT-1's 0171 adds
+  -- ehr.admission_prepare_discharge and ehr.admission_discharge (the medicines
+  -- on discharge): each reads the stay's prescriptions only after
+  -- ehr.context_allows(patient, facility, 'write_records') for the caller, under
+  -- ehr.prescriptions' forced row-level security, and is checked in its own
+  -- suite (inpatient-adt); they are left out of this list. NUR-1's 0175 medicine
+  -- round functions (ehr.mar_read, ehr.mar_ward_round, ehr.mar_record) read the
+  -- stay's orders under the same forced row-level security after the caller's
+  -- chart access check, or count due doses through the owner-only policy
+  -- prescriptions_mar_owner_read without showing any order; they are checked in
+  -- their own suite (nursing) and left out too.
   if (select string_agg(proc.oid::regprocedure::text, ' ' order by proc.oid::regprocedure::text) from pg_proc proc
        where proc.prosecdef and proc.prosrc ~* 'ehr\.prescriptions'
+         and proc.oid::regprocedure::text not like 'ehr.admission\_%'
+         and proc.oid::regprocedure::text not like 'ehr.mar\_%'
          and proc.proowner = (select proowner from pg_proc where oid = 'pharmacy.validate_dispensing()'::regprocedure))
      is distinct from 'ehr.list_my_orders(text[],boolean,date,timestamp with time zone,text,uuid,integer) '
        || 'ehr.patient_list_order_routes() ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,'

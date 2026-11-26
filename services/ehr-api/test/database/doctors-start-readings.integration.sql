@@ -133,6 +133,9 @@ set local session_replication_role = replica;
 delete from audit.events where correlation_id = '0150-doctors-start-readings-q141b';
 set local session_replication_role = origin;
 delete from auth.role_permissions where role_code = 'doctor' and permission_code = 'ocr.job.start';
+-- A later file's role rows go too (0173, ADT-1: the sixteen inpatient rows; 0177, NUR-1: the nineteen nursing
+-- rows), so the role table is as 0150 found it.
+delete from auth.role_permissions where permission_code in ('ehr.ward.read', 'ehr.admission.read', 'ehr.bed.allocate', 'ehr.wristband.print', 'ehr.admission.decide', 'ehr.ward.manage', 'ehr.death-record.write', 'ehr.mar.read', 'ehr.mar.record', 'ehr.nursing-task.read', 'ehr.nursing-task.write', 'ehr.handover.write', 'ehr.shift-assignment.manage', 'ehr.clinical-shift.manage');
 select pg_temp.expect('2a the state before 0150, for this transaction', '0 rows, 0 audit rows', pg_temp.made());
 select pg_temp.expect('2b the doctor''s codes as Release C leaves them (0150''s pin)', '35 186a1ece641bffd2be5ebb05b80479b2',
   (select count(*) || ' ' || md5(string_agg(permission_code, ',' order by permission_code collate "C"))

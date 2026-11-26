@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0153",
-    "count": 154,
+    "last": "0177",
+    "count": 162,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -713,6 +713,38 @@
       {
         "name": "0153_clinician_recent_diagnoses.sql",
         "sha256": "45faa6a739056cc07426fdb5363b58c7dda1dbcbc096fb6d1769ae746798500b"
+      },
+      {
+        "name": "0170_inpatient_wards_and_beds.sql",
+        "sha256": "1fba4e74e2ee67b211e2952b2215ee87f391c2d0d224af8a4e9cd63dfa133ce0"
+      },
+      {
+        "name": "0171_inpatient_admissions_and_discharge.sql",
+        "sha256": "e305323d403731c85b6bbd1d712dbe4df09126038e5d4ef11ead71e72a4fe27a"
+      },
+      {
+        "name": "0172_inpatient_admission_charges.sql",
+        "sha256": "a4c5c20eb359fe97031282bf931d23b3af371dd635b2b6dedaf99b70ca6b2b2e"
+      },
+      {
+        "name": "0173_inpatient_access_and_ward_team.sql",
+        "sha256": "e21e7b96189373c18a7842a09c127648c543c9e5d6a1485f5adbbbe223923a1f"
+      },
+      {
+        "name": "0174_nursing_observation_chart.sql",
+        "sha256": "0a33d41cbcac7c50cae1095263ab81ac2ed1ef2398eb4654778e8307f27af6b0"
+      },
+      {
+        "name": "0175_nursing_medicine_round.sql",
+        "sha256": "58480cc46e591f4ab7ee8af0ed521570df927fcb03791013fc04fbef4b6af8b1"
+      },
+      {
+        "name": "0176_nursing_tasks_fluid_shifts_handover.sql",
+        "sha256": "b801798572a076c309d736da16a918041a51c99405c80e0ec0cf288cd4b73d3c"
+      },
+      {
+        "name": "0177_nursing_access_codes.sql",
+        "sha256": "80e579d064b118a811f69849dd4d4b0690e155af942a89b08d197a2c2ab69147"
       }
     ]
   },

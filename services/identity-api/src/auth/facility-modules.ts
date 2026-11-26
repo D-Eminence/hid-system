@@ -32,7 +32,11 @@ export type FacilityModuleKey =
   | 'migrate'
   | 'outreach'
   | 'admin'
-  | 'audit';
+  | 'audit'
+  | 'inpatient'
+  | 'wardSetup'
+  | 'nursingCare'
+  | 'clinicalShifts';
 
 export interface FacilityModuleRule {
   key: FacilityModuleKey;
@@ -81,6 +85,20 @@ export const FACILITY_MODULE_RULES: readonly FacilityModuleRule[] = Object.freez
   rule('admin', 'Facility profile and staff', ['workforce.manage'], ['organization.manage']),
   // The facility's audit trail (Akos's "View (audit)" cells).
   rule('audit', 'Audit trail', ['audit.read']),
+  // ADT-1 (0170-0173; owner decisions Q185 A and Q191 A): inpatient admission, wards and beds (ehr-api's inpatient
+  // routes). Shown with the bed board; used in full by those who also see the admission reason and give beds (nurses,
+  // clinicians and doctors). Admitting and discharging (ehr.admission.decide) is checked by its own routes.
+  rule('inpatient', 'Inpatient and wards', ['ehr.ward.read'], ['ehr.admission.read', 'ehr.bed.allocate']),
+  // Ward configuration (Settings): facility admins and owners.
+  rule('wardSetup', 'Ward configuration', ['ehr.ward.manage']),
+  // NUR-1 (0174-0177; owner decision Q200 A): the medicine round and nursing tasks (ehr-api's nursing routes). Shown
+  // with the round and the task list; used in full by those who also record doses and change tasks (nurses,
+  // clinicians and doctors). Handover notes (ehr.handover.write) are checked by their own routes.
+  rule('nursingCare', 'Medicine round and nursing tasks', ['ehr.mar.read', 'ehr.nursing-task.read'],
+    ['ehr.mar.record', 'ehr.nursing-task.write']),
+  // Clinical shifts (Settings, Q193 A): shown to those who assign shifts (nurses in charge and admins); used in full
+  // by those who also set them up (facility admins and owners).
+  rule('clinicalShifts', 'Clinical shifts', ['ehr.shift-assignment.manage'], ['ehr.clinical-shift.manage']),
 ]);
 
 /** How far a set of permission codes can use one area. */

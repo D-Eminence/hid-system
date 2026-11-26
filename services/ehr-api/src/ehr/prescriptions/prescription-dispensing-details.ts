@@ -1,10 +1,15 @@
-import { Injectable, type PipeTransform } from '@nestjs/common';
+import { Injectable, Optional, type PipeTransform } from '@nestjs/common';
 import { DomainProblem } from '../../common/problem';
 import { createValidationPipe } from '../../common/validation-pipe';
 import { CreatePrescriptionDto, CreatePrescriptionWithDetailsDto } from '../shared/clinical.dto';
+import {
+  CreatePrescriptionWithDetailsAndScheduleDto, CreatePrescriptionWithScheduleDto, PRESCRIPTION_INPATIENT_SCHEDULE_OFF,
+  PrescriptionInpatientSchedule, SCHEDULE_MESSAGES, type InpatientScheduleDto,
+} from './inpatient-schedule';
 
 /** The body a prescription create carries: today's, or with the details while they are on. */
-export type CreatePrescriptionInput = CreatePrescriptionDto | CreatePrescriptionWithDetailsDto;
+export type CreatePrescriptionInput = (CreatePrescriptionDto | CreatePrescriptionWithDetailsDto)
+  & { inpatientSchedule?: InpatientScheduleDto };
 
 /** The seven optional, create-only fields (0125), by their request and answer names. */
 export const DISPENSING_DETAIL_FIELDS = ['priority', 'strength', 'doseForm', 'durationValue', 'durationUnit',
@@ -145,10 +150,22 @@ export const PRESCRIPTION_DISPENSING_DETAILS_OFF = new PrescriptionDispensingDet
 export class CreatePrescriptionBodyPipe implements PipeTransform<unknown, Promise<CreatePrescriptionInput>> {
   private readonly validation = createValidationPipe();
 
-  constructor(private readonly details: PrescriptionDispensingDetails) {}
+  constructor(private readonly details: PrescriptionDispensingDetails,
+    @Optional() private readonly schedule: PrescriptionInpatientSchedule = PRESCRIPTION_INPATIENT_SCHEDULE_OFF) {}
 
+  /**
+   * NUR-1 (0175): while NURSING_ENABLED is on the body may also carry
+   * `inpatientSchedule`; off, a body carrying it is refused with 400
+   * NURSING_FIELDS_NOT_AVAILABLE before any other check, and every other body
+   * is checked exactly as before.
+   */
   transform(value: unknown): Promise<CreatePrescriptionInput> {
-    return this.validation.transform(value, { type: 'body', data: undefined,
-      metatype: this.details.enabled ? CreatePrescriptionWithDetailsDto : CreatePrescriptionDto });
+    if (!this.schedule.enabled && typeof value === 'object' && value !== null && 'inpatientSchedule' in value) {
+      throw new DomainProblem(400, 'NURSING_FIELDS_NOT_AVAILABLE', SCHEDULE_MESSAGES.notAvailable);
+    }
+    const metatype = this.schedule.enabled
+      ? (this.details.enabled ? CreatePrescriptionWithDetailsAndScheduleDto : CreatePrescriptionWithScheduleDto)
+      : (this.details.enabled ? CreatePrescriptionWithDetailsDto : CreatePrescriptionDto);
+    return this.validation.transform(value, { type: 'body', data: undefined, metatype });
   }
 }

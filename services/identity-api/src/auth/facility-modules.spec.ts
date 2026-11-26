@@ -12,7 +12,8 @@ import { seededRolePermissions } from '../../test/role-matrix.fixtures';
 import { AuthController } from './auth.controller';
 import type { AuthService } from './auth.service';
 import type { AuthSessionAuditService } from './auth-session-audit.service';
-import { FACILITY_MODULE_RULES, facilityModules, withFacilityModules, type FacilityModuleKey } from './facility-modules';
+import { FACILITY_MODULE_RULES, facilityModuleAccess, facilityModules, withFacilityModules, type FacilityModuleKey }
+  from './facility-modules';
 import type { GoogleAuthenticationService } from './google-authentication.service';
 import type { TokenService } from './token.service';
 import type { TurnstileService } from './turnstile.service';
@@ -24,7 +25,11 @@ import type { WorkloadAuthService } from './workload-auth.service';
 const SEEDS = seededRolePermissions();
 const permissionsOf = (role: string): readonly string[] => SEEDS.get(role) ?? [];
 const KEYS: FacilityModuleKey[] = ['patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage', 'consultation',
-  'orders', 'lab', 'labResults', 'pharmacy', 'prescriptions', 'migrate', 'outreach', 'admin', 'audit'];
+  'orders', 'lab', 'labResults', 'pharmacy', 'prescriptions', 'migrate', 'outreach', 'admin', 'audit',
+  // ADT-1 (0173, Q185 A, Q191 A): inpatient admission, wards and beds; ward configuration.
+  'inpatient', 'wardSetup',
+  // NUR-1 (0177, Q200 A, Q193 A): the medicine round and nursing tasks; clinical shifts.
+  'nursingCare', 'clinicalShifts'];
 const only = (...shown: FacilityModuleKey[]) => Object.fromEntries(KEYS.map((key) => [key, shown.includes(key)]));
 
 describe('facility areas for each seeded role (SX-1)', () => {
@@ -37,17 +42,19 @@ describe('facility areas for each seeded role (SX-1)', () => {
   it.each<[string, FacilityModuleKey[]]>([
     // 0136 (Q103 A, Q112 A): the front desk sees vitals (triage) and scans paper records into the file.
     ['receptionist', ['patients', 'registration', 'accessRequests', 'triage', 'outreach']],
+    // ADT-1 (0173, Q185 A): nurses, clinicians and doctors see the wards; admins and owners set them up (Q191 A).
+    // NUR-1 (0177, Q200 A): the medicine round and nursing tasks; nurses (in charge) see clinical shifts to assign them.
     ['nurse', ['patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage', 'consultation', 'labResults',
-      'prescriptions', 'migrate', 'outreach']],
+      'prescriptions', 'migrate', 'outreach', 'inpatient', 'nursingCare', 'clinicalShifts']],
     // 0136 (Q103 A): doctors lose the leftover Outreach permissions.
     ['doctor', ['patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage', 'consultation', 'orders',
-      'labResults', 'prescriptions', 'migrate']],
+      'labResults', 'prescriptions', 'migrate', 'inpatient', 'nursingCare']],
     ['clinician', ['patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage', 'consultation', 'orders',
-      'labResults', 'prescriptions', 'migrate', 'outreach']],
+      'labResults', 'prescriptions', 'migrate', 'outreach', 'inpatient', 'nursingCare']],
     ['lab', ['patients', 'accessRequests', 'lab', 'labResults']],
     ['pharmacist', ['patients', 'accessRequests', 'pharmacy', 'prescriptions']],
-    ['admin', ['registration', 'labResults', 'outreach', 'admin', 'audit']],
-    ['org_admin', ['registration', 'outreach', 'admin', 'audit']],
+    ['admin', ['registration', 'labResults', 'outreach', 'admin', 'audit', 'wardSetup', 'clinicalShifts']],
+    ['org_admin', ['registration', 'outreach', 'admin', 'audit', 'wardSetup', 'clinicalShifts']],
     ['org_admin_awaiting_review', ['outreach', 'admin', 'audit']],
     ['outreach_organiser', ['outreach']],
     ['outreach_volunteer', ['outreach']],
@@ -81,7 +88,34 @@ describe('facility areas for each seeded role (SX-1)', () => {
   it('a membership holding two roles shows what either role shows', () => {
     const both = [...new Set([...permissionsOf('nurse'), ...permissionsOf('lab')])];
     expect(facilityModules(both)).toEqual(only('patients', 'registration', 'accessRequests', 'emergencyAccess', 'triage',
-      'consultation', 'lab', 'labResults', 'prescriptions', 'migrate', 'outreach'));
+      'consultation', 'lab', 'labResults', 'prescriptions', 'migrate', 'outreach', 'inpatient', 'nursingCare',
+      'clinicalShifts'));
+  });
+
+  it('NUR-1 (0177, Q200 A, Q193 A): the round and tasks for nurses, clinicians and doctors; shifts for admins', () => {
+    const care = FACILITY_MODULE_RULES.find((area) => area.key === 'nursingCare')!;
+    const shifts = FACILITY_MODULE_RULES.find((area) => area.key === 'clinicalShifts')!;
+    expect([care.label, care.show, care.act]).toEqual(['Medicine round and nursing tasks',
+      ['ehr.mar.read', 'ehr.nursing-task.read'],
+      ['ehr.mar.read', 'ehr.nursing-task.read', 'ehr.mar.record', 'ehr.nursing-task.write']]);
+    expect([shifts.label, shifts.show, shifts.act]).toEqual(['Clinical shifts', ['ehr.shift-assignment.manage'],
+      ['ehr.shift-assignment.manage', 'ehr.clinical-shift.manage']]);
+    expect(['receptionist', 'nurse', 'clinician', 'doctor', 'lab', 'pharmacist', 'admin', 'org_admin']
+      .map((role) => [facilityModuleAccess(permissionsOf(role), care), facilityModuleAccess(permissionsOf(role), shifts)]))
+      .toEqual([['hidden', 'hidden'], ['full', 'view'], ['full', 'hidden'], ['full', 'hidden'], ['hidden', 'hidden'],
+        ['hidden', 'hidden'], ['hidden', 'full'], ['hidden', 'full']]);
+  });
+
+  it('ADT-1 (0173, Q185 A, Q191 A): the wards in full for nurses, clinicians and doctors; ward setup for admins', () => {
+    const wards = FACILITY_MODULE_RULES.find((area) => area.key === 'inpatient')!;
+    const setup = FACILITY_MODULE_RULES.find((area) => area.key === 'wardSetup')!;
+    expect([wards.label, wards.show, wards.act]).toEqual(['Inpatient and wards', ['ehr.ward.read'],
+      ['ehr.ward.read', 'ehr.admission.read', 'ehr.bed.allocate']]);
+    expect([setup.label, setup.show, setup.act]).toEqual(['Ward configuration', ['ehr.ward.manage'], ['ehr.ward.manage']]);
+    expect(['receptionist', 'nurse', 'clinician', 'doctor', 'lab', 'pharmacist', 'admin', 'org_admin']
+      .map((role) => [facilityModuleAccess(permissionsOf(role), wards), facilityModuleAccess(permissionsOf(role), setup)]))
+      .toEqual([['hidden', 'hidden'], ['full', 'hidden'], ['full', 'hidden'], ['full', 'hidden'], ['hidden', 'hidden'],
+        ['hidden', 'hidden'], ['hidden', 'full'], ['hidden', 'full']]);
   });
 });
 
