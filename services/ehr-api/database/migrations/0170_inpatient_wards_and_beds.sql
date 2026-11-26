@@ -111,14 +111,22 @@
 --    bodies this file calls md5-pinned; the columns it reads by name and
 --    type; the functions' owner is the owner of the tables it reads.
 -- 2. W1-W7.
--- 3. Post-checks: the tables have row-level security and no privilege for any
---    role but their owner; the switches are the three rows, all false; the
---    functions are SECURITY DEFINER where they must be, with the fixed
---    search_path, EXECUTE only for hid_ehr_runtime and none for the helpers;
---    the trigger is there; no row of any existing table changed.
+-- 3. Post-checks (0148's, 0152's and 0168's form): the tables have row-level
+--    security and no privilege for any role but their owner; the two
+--    histories' identity sequences (sequence_no) are the owner's and granted
+--    to no other role (runtime-grants.sql takes back what its schema-wide
+--    sequence grants would give); the switches are the three rows, all false;
+--    the two triggers by events, columns and function, with no WHEN condition
+--    or arguments, and no other trigger on the new tables; the 20 functions
+--    by body (md5), SECURITY DEFINER setting, volatility, search_path, owner
+--    and EXECUTE (hid_ehr_runtime on the nine entry points, no role on the
+--    helpers); no audit row written (this transaction's own row counters for
+--    audit.events, which cost nothing; no count of the table).
 
 do $adt0170$
 declare
+  v_writes_before text;
+  v_post_mismatch text;
   v_attempt integer := 0;
   v_holding boolean := exists (
     select 1 from pg_locks held
@@ -132,7 +140,6 @@ declare
   v_mismatch text;
   v_present integer;
   v_owner name;
-  v_audit_rows bigint;
 begin
   -- 0. The locks, NOWAIT. (The attempt's block is not indented, so step 0
   -- reads as its own step.)
@@ -251,7 +258,14 @@ begin
   end if;
   v_owner := (select pg_get_userbyid(proowner) from pg_proc
                where oid = 'identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamp with time zone)'::regprocedure);
-  select count(*) into v_audit_rows from audit.events;
+  -- The rows of audit.events this file must not write: this transaction's own row counters for each
+  -- (inserted/updated/deleted), taken here and compared in the post-checks. They cost nothing; a count or a snapshot
+  -- of the rows would read whole tables under this file's locks.
+  select string_agg(format('%s %s/%s/%s', watched.relation, pg_stat_get_xact_tuples_inserted(watched.relation),
+           pg_stat_get_xact_tuples_updated(watched.relation), pg_stat_get_xact_tuples_deleted(watched.relation)),
+           ', ' order by watched.ord)
+    into v_writes_before
+    from unnest(array['audit.events']::regclass[]) with ordinality watched(relation, ord);
 
   -- W1. Wards.
   create table ehr.wards (
@@ -1368,10 +1382,137 @@ begin
          and trigger_row.tgenabled = 'O') <> 2 then
     raise exception using errcode = '55000', message = '0170: post-check failed (the triggers)';
   end if;
-  if (select count(*) from audit.events) <> v_audit_rows then
-    raise exception using errcode = '55000', message = '0170: post-check failed (an audit row was written)';
-  end if;
 
+  -- Post-check, sequences (0168's form). The sequences the 6 new tables own: exactly the identity
+  -- sequences of ehr.bed_status_events.sequence_no, ehr.ward_events.sequence_no, each the owner's (v_owner, as its table) and
+  -- granted to no other role. (runtime-grants.sql takes them back from hid_ehr_runtime and hid_schema_test_runtime
+  -- after its schema-wide sequence grants; a file never grants a runtime a new identity sequence.)
+  if (select count(*) from pg_depend dependency join pg_class sequence_row on sequence_row.oid = dependency.objid
+       where dependency.classid = 'pg_class'::regclass and dependency.refclassid = 'pg_class'::regclass
+         and dependency.deptype in ('a', 'i') and sequence_row.relkind = 'S'
+         and dependency.refobjid in ('ehr.wards'::regclass, 'ehr.beds'::regclass, 'ehr.bed_status_events'::regclass,
+           'ehr.ward_staff'::regclass, 'ehr.ward_events'::regclass, 'ehr.inpatient_switches'::regclass)) <> 2
+     or exists (select 1
+                  from (values ('ehr.bed_status_events', 'ehr.bed_status_events_sequence_no_seq'),
+                          ('ehr.ward_events', 'ehr.ward_events_sequence_no_seq')) expected(relation, sequence_name)
+                 where to_regclass(expected.sequence_name)
+                       is distinct from to_regclass(pg_get_serial_sequence(expected.relation, 'sequence_no'))
+                    or (select sequence_row.relowner from pg_class sequence_row
+                         where sequence_row.oid = to_regclass(expected.sequence_name))
+                       is distinct from (select role_row.oid from pg_roles role_row where role_row.rolname = v_owner)
+                    or exists (select 1 from pg_class sequence_row,
+                                      lateral aclexplode(coalesce(sequence_row.relacl, acldefault('s', sequence_row.relowner))) acl
+                                where sequence_row.oid = to_regclass(expected.sequence_name)
+                                  and acl.grantee <> sequence_row.relowner)) then
+    raise exception using errcode = '55000',
+      message = '0170: post-check failed (a sequence of the new tables is granted to a role or is not the owner''s)';
+  end if;
+  -- End of the sequences' post-check.
+  -- Post-check, rows: no row of audit.events written.
+  if (select string_agg(format('%s %s/%s/%s', watched.relation, pg_stat_get_xact_tuples_inserted(watched.relation),
+               pg_stat_get_xact_tuples_updated(watched.relation), pg_stat_get_xact_tuples_deleted(watched.relation)),
+               ', ' order by watched.ord)
+        from unnest(array['audit.events']::regclass[]) with ordinality watched(relation, ord))
+     is distinct from v_writes_before then
+    raise exception using errcode = '55000', message = '0170: post-check failed (it wrote a row of a table '
+      || 'it must not write; counters before: ' || v_writes_before || ')';
+  end if;
+  -- Post-check, triggers (0152's form). The 2 triggers this file makes, each by its table, name, events
+  -- (pg_trigger.tgtype: 1 for each row, 2 before, 4 insert, 8 delete, 16 update, 32 truncate), UPDATE OF columns
+  -- (tgattr, '' for none) and function; with no WHEN condition, no arguments, enabled in origin mode, not internal,
+  -- not a constraint trigger and with no transition table (a WHEN condition or an UPDATE OF list leaves tgtype as it
+  -- is, so each is held apart).
+  -- No other trigger on the 6 tables this file makes (they hold 2).
+  if (select count(*)
+        from (values
+      ('ehr.bed_status_events', 'bed_status_events_immutable', 27, 'ehr.bed_status_events_immutable()', ''),
+      ('ehr.ward_events', 'ward_events_immutable', 27, 'ehr.bed_status_events_immutable()', '')
+        ) expected(relation, name, events, function_signature, columns)
+        join pg_trigger trigger_row on trigger_row.tgrelid = expected.relation::regclass
+         and trigger_row.tgname = expected.name and trigger_row.tgtype = expected.events
+         and trigger_row.tgfoid = to_regprocedure(expected.function_signature)
+       where not trigger_row.tgisinternal and trigger_row.tgenabled = 'O' and trigger_row.tgnargs = 0
+         and trigger_row.tgqual is null and trigger_row.tgconstraint = 0 and trigger_row.tgoldtable is null
+         and trigger_row.tgnewtable is null
+         and coalesce((select string_agg(attribute_row.attname, ',' order by attribute_row.attnum)
+                         from pg_attribute attribute_row
+                        where attribute_row.attrelid = trigger_row.tgrelid
+                          and attribute_row.attnum = any (trigger_row.tgattr::int2[])), '') = expected.columns
+         and cardinality(trigger_row.tgattr::int2[]) = coalesce(cardinality(string_to_array(nullif(expected.columns, ''), ',')), 0)
+     ) <> 2
+     or (select count(*) from pg_trigger trigger_row where not trigger_row.tgisinternal
+          and trigger_row.tgrelid in ('ehr.wards'::regclass, 'ehr.beds'::regclass, 'ehr.bed_status_events'::regclass,
+            'ehr.ward_staff'::regclass, 'ehr.ward_events'::regclass, 'ehr.inpatient_switches'::regclass)) <> 2 then
+    raise exception using errcode = '55000', message = '0170: post-check failed (the triggers, in 0152''s form)';
+  end if;
+  -- End of the triggers' post-check.
+  -- Post-check, functions (0168's form). The 20 functions this file makes (20) or replaces (0):
+  -- each a plain function with its SECURITY DEFINER setting, volatility, body (the md5 of prosrc) and fixed
+  -- search_path as written here. Those it makes are the owner's (v_owner), with EXECUTE for exactly the runtimes
+  -- listed (the entry points, when the role exists) and for no other role (none on the helpers); CREATE OR REPLACE
+  -- keeps a replaced function's owner and grants.
+  select string_agg(expected.signature, ', ' order by expected.signature) into v_post_mismatch
+    from (values
+      ('ehr.bed_status_events_immutable()', false, false, 'v', '1c388f655b535bf07b736a995ca8a588',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.inpatient_member_has_role(uuid,uuid,text[])', false, false, 's', '6fe87cf420a6ee48fa20f397191aa866',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.inpatient_caller(text,text[])', false, false, 's', '605009e6aa061d48680c7a01463095f8',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.inpatient_audit(uuid,text,text,text,text,jsonb)', false, false, 'v', '81c360af02e3cd2ddb8f3a4fb3041dd2',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.ward_key(uuid,text,text)', false, false, 'v', '18d86f876044fec21ac0467a58bde55b',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.ward_json(uuid,boolean)', false, false, 's', 'd8ec8be15d8d52d32d1c1f40c37b4ce9',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.inpatient_chart_blocked(uuid,uuid,uuid,uuid)', false, false, 's', '77c70b509fd1914d601dd9391cc921bc',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.ward_patient_name_visible(uuid,uuid)', false, false, 's', '32db17d5e8974a112c2cdf1f21d7bcec',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.inpatient_bed_occupants(uuid,uuid[])', false, false, 's', 'ef7fdc71d0e22a5f7ea179a432da1125',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.inpatient_waiting(uuid,uuid[])', false, false, 's', '4fe910433909cce113d9bbdeff3902d9',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.inpatient_day_counts(uuid,date)', false, false, 's', '6664ebd5a34ce8e017aa8ab9f05507eb',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.ward_list(boolean,boolean)', false, true, 'v', 'a803e00dd05077235fb60de35dbc30ab',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.ward_create(text,text,text,text,text)', false, true, 'v', '10313e45398457d77e2416c53db9ab7c',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.ward_update(uuid,bigint,text,text,text,boolean,text,text)', false, true, 'v', 'c0cf4e711058ae6701390530ef8b90c8',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.bed_create(uuid,text,text,text,text)', false, true, 'v', '30817a545ba77fed50d3b89046c2cf2d',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.bed_update(uuid,bigint,text,boolean,text,text)', false, true, 'v', '4a54101acc4f75bb59bdc992b1f1744b',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.ward_staff_set(uuid,bigint,uuid[],text,text)', false, true, 'v', 'f6205e9a66c21ee84212c50c4960c686',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.bed_board(uuid,text)', false, true, 'v', '51856be695d7940f83bedb2e5964f547',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.inpatient_census(date)', false, true, 'v', '6dc6b7ea183c0479dc89018d2178712b',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.bed_set_status(uuid,bigint,text,text,text,text)', false, true, 'v', '74b1db50a7c43998ee72a24a093ecf6e',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime'])
+    ) expected(signature, replaced, security_definer, volatility, body_md5, config, runtimes)
+    left join pg_proc proc on proc.oid = to_regprocedure(expected.signature)
+   where proc.oid is null or proc.prokind <> 'f' or proc.prosecdef <> expected.security_definer
+      or proc.provolatile::text <> expected.volatility or md5(proc.prosrc) <> expected.body_md5
+      or proc.proconfig is distinct from array[expected.config]
+      or (not expected.replaced
+          and (proc.proowner <> (select role_row.oid from pg_roles role_row where role_row.rolname = v_owner)
+               or exists (select 1 from aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
+                           where acl.grantee <> proc.proowner
+                             and (acl.grantee = 0 or acl.privilege_type <> 'EXECUTE'
+                                  or not pg_get_userbyid(acl.grantee) = any (expected.runtimes)))
+               or exists (select 1 from unnest(expected.runtimes) runtime_name
+                            join pg_roles role_row on role_row.rolname = runtime_name
+                           where not exists (select 1 from aclexplode(proc.proacl) acl
+                                              where acl.grantee = role_row.oid and acl.privilege_type = 'EXECUTE'))));
+  if v_post_mismatch is not null then
+    raise exception using errcode = '55000',
+      message = '0170: post-check failed (these functions are not as made: ' || v_post_mismatch || ')';
+  end if;
+  -- End of the functions' post-check.
   raise notice '0170: wards and beds are installed (6 tables, 20 functions; the three switches off). Nobody can use them until 0173 gives the codes.';
 end
 $adt0170$;

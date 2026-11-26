@@ -117,12 +117,20 @@
 --    "0176: the schema is not in the reviewed state" for any half state; the
 --    bodies it calls or replaces md5-pinned.
 -- 2. T1-T8.
--- 3. Post-checks: the tables' row-level security and privileges, the trigger,
---    the replaced bodies (md5), the functions' security and grants, no audit
---    row written.
+-- 3. Post-checks: the tables' row-level security and privileges; the shift
+--    history's identity sequence (sequence_no) the owner's and granted to no
+--    other role (runtime-grants.sql takes back what its schema-wide sequence
+--    grants would give); the four triggers in 0152's form (events, columns,
+--    function, no WHEN condition or arguments) and no other trigger on the new
+--    tables; the replaced bodies (md5); the 31 functions in 0168's form (body
+--    md5, SECURITY DEFINER setting, volatility, search_path, owner, EXECUTE);
+--    no audit row written (this transaction's own row counters for
+--    audit.events; no count of the table).
 
 do $nur0176$
 declare
+  v_writes_before text;
+  v_post_mismatch text;
   v_attempt integer := 0;
   v_holding boolean := exists (
     select 1 from pg_locks held
@@ -136,7 +144,6 @@ declare
   v_mismatch text;
   v_present integer;
   v_owner name;
-  v_audit_rows bigint;
   v_definition text;
   v_old_team constant text := E'    elsif not (admission_row.responsible_membership_id = actor_membership\n'
     || E'               or exists (select 1 from ehr.ward_staff staff where staff.ward_id = admission_row.ward_id\n'
@@ -243,7 +250,14 @@ begin
   end if;
   v_owner := (select pg_get_userbyid(proowner) from pg_proc
                where oid = 'identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamp with time zone)'::regprocedure);
-  select count(*) into v_audit_rows from audit.events;
+  -- The rows of audit.events this file must not write: this transaction's own row counters for each
+  -- (inserted/updated/deleted), taken here and compared in the post-checks. They cost nothing; a count or a snapshot
+  -- of the rows would read whole tables under this file's locks.
+  select string_agg(format('%s %s/%s/%s', watched.relation, pg_stat_get_xact_tuples_inserted(watched.relation),
+           pg_stat_get_xact_tuples_updated(watched.relation), pg_stat_get_xact_tuples_deleted(watched.relation)),
+           ', ' order by watched.ord)
+    into v_writes_before
+    from unnest(array['audit.events']::regclass[]) with ordinality watched(relation, ord);
 
   -- T3. Facility nursing settings.
   create table ehr.facility_nursing_settings (
@@ -2098,10 +2112,166 @@ begin
                    where switch_row.key = 'ward_stay_access'), true) then
     raise exception using errcode = '55000', message = '0176: post-check failed (the functions'' security or grants)';
   end if;
-  if (select count(*) from audit.events) <> v_audit_rows then
-    raise exception using errcode = '55000', message = '0176: post-check failed (an audit row was written)';
-  end if;
 
+  -- Post-check, sequences (0168's form). The sequences the 9 new tables own: exactly the identity
+  -- sequence of ehr.shift_assignment_events.sequence_no, each the owner's (v_owner, as its table) and
+  -- granted to no other role. (runtime-grants.sql takes them back from hid_ehr_runtime and hid_schema_test_runtime
+  -- after its schema-wide sequence grants; a file never grants a runtime a new identity sequence.)
+  if (select count(*) from pg_depend dependency join pg_class sequence_row on sequence_row.oid = dependency.objid
+       where dependency.classid = 'pg_class'::regclass and dependency.refclassid = 'pg_class'::regclass
+         and dependency.deptype in ('a', 'i') and sequence_row.relkind = 'S'
+         and dependency.refobjid in ('ehr.facility_nursing_settings'::regclass, 'ehr.clinical_shifts'::regclass,
+           'ehr.shift_assignments'::regclass, 'ehr.shift_patient_allocations'::regclass,
+           'ehr.shift_assignment_events'::regclass, 'ehr.nursing_tasks'::regclass,
+           'ehr.fluid_balance_entries'::regclass, 'ehr.shift_handovers'::regclass,
+           'ehr.shift_handover_items'::regclass)) <> 1
+     or exists (select 1
+                  from (values ('ehr.shift_assignment_events', 'ehr.shift_assignment_events_sequence_no_seq')) expected(relation, sequence_name)
+                 where to_regclass(expected.sequence_name)
+                       is distinct from to_regclass(pg_get_serial_sequence(expected.relation, 'sequence_no'))
+                    or (select sequence_row.relowner from pg_class sequence_row
+                         where sequence_row.oid = to_regclass(expected.sequence_name))
+                       is distinct from (select role_row.oid from pg_roles role_row where role_row.rolname = v_owner)
+                    or exists (select 1 from pg_class sequence_row,
+                                      lateral aclexplode(coalesce(sequence_row.relacl, acldefault('s', sequence_row.relowner))) acl
+                                where sequence_row.oid = to_regclass(expected.sequence_name)
+                                  and acl.grantee <> sequence_row.relowner)) then
+    raise exception using errcode = '55000',
+      message = '0176: post-check failed (a sequence of the new tables is granted to a role or is not the owner''s)';
+  end if;
+  -- End of the sequences' post-check.
+  -- Post-check, rows: no row of audit.events written.
+  if (select string_agg(format('%s %s/%s/%s', watched.relation, pg_stat_get_xact_tuples_inserted(watched.relation),
+               pg_stat_get_xact_tuples_updated(watched.relation), pg_stat_get_xact_tuples_deleted(watched.relation)),
+               ', ' order by watched.ord)
+        from unnest(array['audit.events']::regclass[]) with ordinality watched(relation, ord))
+     is distinct from v_writes_before then
+    raise exception using errcode = '55000', message = '0176: post-check failed (it wrote a row of a table '
+      || 'it must not write; counters before: ' || v_writes_before || ')';
+  end if;
+  -- Post-check, triggers (0152's form). The 4 triggers this file makes, each by its table, name, events
+  -- (pg_trigger.tgtype: 1 for each row, 2 before, 4 insert, 8 delete, 16 update, 32 truncate), UPDATE OF columns
+  -- (tgattr, '' for none) and function; with no WHEN condition, no arguments, enabled in origin mode, not internal,
+  -- not a constraint trigger and with no transition table (a WHEN condition or an UPDATE OF list leaves tgtype as it
+  -- is, so each is held apart).
+  -- No other trigger on the 9 tables this file makes (they hold 3).
+  if (select count(*)
+        from (values
+      ('ehr.admissions', 'admissions_nursing_tasks_close', 17, 'ehr.nursing_tasks_close_for_discharge()', 'status'),
+      ('ehr.fluid_balance_entries', 'fluid_balance_guard', 27, 'ehr.fluid_balance_guard()', ''),
+      ('ehr.nursing_tasks', 'nursing_tasks_no_delete', 11, 'ehr.nursing_tasks_no_delete()', ''),
+      ('ehr.shift_assignment_events', 'shift_assignment_events_immutable', 27, 'ehr.nursing_requests_immutable()', '')
+        ) expected(relation, name, events, function_signature, columns)
+        join pg_trigger trigger_row on trigger_row.tgrelid = expected.relation::regclass
+         and trigger_row.tgname = expected.name and trigger_row.tgtype = expected.events
+         and trigger_row.tgfoid = to_regprocedure(expected.function_signature)
+       where not trigger_row.tgisinternal and trigger_row.tgenabled = 'O' and trigger_row.tgnargs = 0
+         and trigger_row.tgqual is null and trigger_row.tgconstraint = 0 and trigger_row.tgoldtable is null
+         and trigger_row.tgnewtable is null
+         and coalesce((select string_agg(attribute_row.attname, ',' order by attribute_row.attnum)
+                         from pg_attribute attribute_row
+                        where attribute_row.attrelid = trigger_row.tgrelid
+                          and attribute_row.attnum = any (trigger_row.tgattr::int2[])), '') = expected.columns
+         and cardinality(trigger_row.tgattr::int2[]) = coalesce(cardinality(string_to_array(nullif(expected.columns, ''), ',')), 0)
+     ) <> 4
+     or (select count(*) from pg_trigger trigger_row where not trigger_row.tgisinternal
+          and trigger_row.tgrelid in ('ehr.facility_nursing_settings'::regclass, 'ehr.clinical_shifts'::regclass,
+            'ehr.shift_assignments'::regclass, 'ehr.shift_patient_allocations'::regclass,
+            'ehr.shift_assignment_events'::regclass, 'ehr.nursing_tasks'::regclass,
+            'ehr.fluid_balance_entries'::regclass, 'ehr.shift_handovers'::regclass,
+            'ehr.shift_handover_items'::regclass)) <> 3 then
+    raise exception using errcode = '55000', message = '0176: post-check failed (the triggers, in 0152''s form)';
+  end if;
+  -- End of the triggers' post-check.
+  -- Post-check, functions (0168's form). The 31 functions this file makes (29) or replaces (2):
+  -- each a plain function with its SECURITY DEFINER setting, volatility, body (the md5 of prosrc) and fixed
+  -- search_path as written here. Those it makes are the owner's (v_owner), with EXECUTE for exactly the runtimes
+  -- listed (the entry points, when the role exists) and for no other role (none on the helpers); CREATE OR REPLACE
+  -- keeps a replaced function's owner and grants.
+  select string_agg(expected.signature, ', ' order by expected.signature) into v_post_mismatch
+    from (values
+      ('ehr.nursing_tasks_no_delete()', false, false, 'v', '5365827a57fb402d500122b700a804c5',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.fluid_balance_guard()', false, false, 'v', '596765895841bc1f1aa98618b2bb873a',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.clinical_shift_window(uuid,date)', false, false, 's', '3328f443f30dcb3d434108f2d40172c8',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.clinical_shifts_at(uuid,timestamp with time zone)', false, false, 's', 'ae1ea284f310f680e50cade2232fed22',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.clinical_shift_next(uuid,date)', false, false, 's', 'fc49493dccf409e9f34a3894374282cf',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.nursing_fluid_day_start_hour(uuid)', false, false, 's', 'dafa3d64da54e1489abf8b82d8c5304c',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.nursing_task_json(uuid,boolean,jsonb)', false, false, 's', '1656634ec402915d0a36efc36117ce0f',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.nursing_tasks_close_for_discharge()', false, true, 'v', 'eb367356f96e99e28ebce0efad47d3ec',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.observation_fluid_hours(uuid,timestamp with time zone,timestamp with time zone)', true, false, 's', '877e4805842ad94be6632d5fa4f12796',
+       'search_path=pg_catalog, pg_temp', null),
+      ('ehr.admission_notice_recipients(uuid)', true, false, 's', 'ef7cd7cb428e7e2e13f4c3f9efe5ed52',
+       'search_path=pg_catalog, pg_temp', null),
+      ('ehr.nursing_task_list(uuid,uuid,text,boolean)', false, true, 'v', '69ec2045e3a67df01c2c5c865ce11e7b',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.nursing_task_create(uuid,text,timestamp with time zone,uuid,integer,text,text)', false, true, 'v', '46936352264479e6e4f3dfe6d52d3aee',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.nursing_task_step(uuid,bigint,text,text,uuid,timestamp with time zone,text,text)', false, false, 'v', '526528fbaeeef69193b2fd83319bc5ee',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.nursing_task_start(uuid,bigint,text,text)', false, true, 'v', '65cfebd48ca7864d8ef49391fea1e980',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.nursing_task_complete(uuid,bigint,text,text,text)', false, true, 'v', '262768bed02e26d858977fab3ded7e5f',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.nursing_task_cancel(uuid,bigint,text,text,text)', false, true, 'v', '5174e3ec1d982ebb59174c339c1d390e',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.nursing_task_update(uuid,bigint,uuid,timestamp with time zone,text,text)', false, true, 'v', 'fa2b80465ab638a679b8e29e2f09c6f2',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.fluid_balance_read(uuid,date)', false, true, 'v', 'c5ae7ad88e3a8d25e02c64ecde9420fa',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.fluid_balance_record(uuid,text,text,integer,boolean,timestamp with time zone,text,text,text)', false, true, 'v', '83e9a94b49ea743ccd3d0554517b1be1',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.fluid_balance_entered_in_error(uuid,bigint,text,text,text)', false, true, 'v', 'e80a7e72e68e0e1efa51ea3c14c8b3f9',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.clinical_shift_list()', false, true, 'v', 'b2f07b5a96ac5ccec623d0f7a5c0b009',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.clinical_shift_write(uuid,bigint,text,text,text,boolean,text,text)', false, false, 'v', '5611d1e410280bd4e1971dc96fe85c70',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.clinical_shift_create(text,text,text,text,text)', false, true, 'v', 'f364b978d82201cce1c2da00987f1cd0',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.clinical_shift_update(uuid,bigint,text,boolean,text,text)', false, true, 'v', 'e46ef6153f18c409299d3691d0f1ec7c',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.shift_assignments_read(date,uuid,uuid)', false, true, 'v', '1008fa31d0eae3da2a3f95db38c892b9',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.shift_assignments_set(date,uuid,uuid,integer,jsonb,text,text)', false, true, 'v', 'ee516e55e005a74d513e955fe06525d9',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.handover_read(uuid,date,uuid)', false, true, 'v', 'c1fb4bf814fff5eee2cfd24a753dc5f3',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.handover_note_put(uuid,uuid,uuid,date,uuid,bigint,text,boolean,text,text)', false, true, 'v', '0cb9df2ce525a5ebfb1e6e645981e42e',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.handover_step(uuid,bigint,text,text,text)', false, false, 'v', '0c325cbb9b5f307add82164caf5c7bad',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.handover_give(uuid,bigint,text,text)', false, true, 'v', '656011c60079cdd664d95b3d4aadde23',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.handover_accept(uuid,bigint,text,text)', false, true, 'v', 'c2eb312f08898ee756af20d73ba43766',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime'])
+    ) expected(signature, replaced, security_definer, volatility, body_md5, config, runtimes)
+    left join pg_proc proc on proc.oid = to_regprocedure(expected.signature)
+   where proc.oid is null or proc.prokind <> 'f' or proc.prosecdef <> expected.security_definer
+      or proc.provolatile::text <> expected.volatility or md5(proc.prosrc) <> expected.body_md5
+      or proc.proconfig is distinct from array[expected.config]
+      or (not expected.replaced
+          and (proc.proowner <> (select role_row.oid from pg_roles role_row where role_row.rolname = v_owner)
+               or exists (select 1 from aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
+                           where acl.grantee <> proc.proowner
+                             and (acl.grantee = 0 or acl.privilege_type <> 'EXECUTE'
+                                  or not pg_get_userbyid(acl.grantee) = any (expected.runtimes)))
+               or exists (select 1 from unnest(expected.runtimes) runtime_name
+                            join pg_roles role_row on role_row.rolname = runtime_name
+                           where not exists (select 1 from aclexplode(proc.proacl) acl
+                                              where acl.grantee = role_row.oid and acl.privilege_type = 'EXECUTE'))));
+  if v_post_mismatch is not null then
+    raise exception using errcode = '55000',
+      message = '0176: post-check failed (these functions are not as made: ' || v_post_mismatch || ')';
+  end if;
+  -- End of the functions' post-check.
   raise notice '0176: nursing tasks, fluid balance, clinical shifts and assignments, and shift handover are installed (9 tables, 29 functions; 3 bodies replaced: the ICU grid''s fluid, who is told of a critical result on a ward, and ward-team access, still off). Nobody can use them until 0177 gives the codes.';
 end
 $nur0176$;

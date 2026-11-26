@@ -128,15 +128,22 @@
 --    column, the CHECKs and the new functions are there; "0173: the schema is
 --    not in the reviewed state" for any half state; the five roles active;
 --    auth.membership_has_permission and the three replaced identity bodies as
---    0001-0151 leave them (md5); the two CHECKs exactly 0131's.
+--    0001-0151 leave them (md5); the two CHECKs 0131's (with any value another
+--    lane added, which is kept).
 -- 2. C1-C5.
 -- 3. Post-checks: the inpatient rows are exactly the sixteen; every other row
 --    of the role table is unchanged; exactly sixteen role audit rows; the
---    CHECKs, the column and the three replaced bodies (md5) as written; the new
---    functions' security and grants; the switch still off.
+--    CHECKs (the values found plus ward_stay), the column and the three
+--    replaced bodies (md5) as written; the five functions in 0168's form (body
+--    md5, SECURITY DEFINER setting, volatility, search_path; owner and EXECUTE
+--    for the two it makes); no grant or notice row written (this
+--    transaction's own row counters; no scan of identity.consent_grants); the
+--    switch still off.
 
 do $adt0173$
 declare
+  v_writes_before text;
+  v_post_mismatch text;
   v_attempt integer := 0;
   v_holding boolean := exists (
     select 1 from pg_locks held
@@ -159,14 +166,12 @@ declare
   v_codes constant text[] := array['ehr.ward.read', 'ehr.admission.read', 'ehr.bed.allocate', 'ehr.wristband.print',
     'ehr.admission.decide', 'ehr.ward.manage', 'ehr.death-record.write'];
   v_permission_check_md5 constant text := '65e3eaff93fe729fd5c5b986b80c9dd6';
-  v_method_check_0131 constant text :=
-    'CHECK (((authorization_method IS NULL) OR (authorization_method = ANY (ARRAY[''patient_access_pin''::text, ''own_facility''::text]))))';
-  v_method_check_0173 constant text :=
-    'CHECK (((authorization_method IS NULL) OR (authorization_method = ANY (ARRAY[''patient_access_pin''::text, ''own_facility''::text, ''ward_stay''::text]))))';
-  v_kind_check_0131 constant text :=
-    'CHECK ((access_kind = ANY (ARRAY[''standard''::text, ''share''::text, ''pin''::text, ''own_facility''::text])))';
-  v_kind_check_0173 constant text :=
-    'CHECK ((access_kind = ANY (ARRAY[''standard''::text, ''share''::text, ''pin''::text, ''own_facility''::text, ''ward_stay''::text])))';
+  -- 0131's two value-list CHECKs: 0131's values (all must be there; another lane's extra values are kept), and this
+  -- file adds 'ward_stay' to each.
+  v_method_0131 constant text[] := array['patient_access_pin', 'own_facility'];
+  v_kind_0131 constant text[] := array['standard', 'share', 'pin', 'own_facility'];
+  v_method_values text[];
+  v_kind_values text[];
   v_rows_before text;
   v_audited integer;
   v_owner name;
@@ -266,14 +271,37 @@ begin
   if v_missing is not null then
     raise exception using errcode = '55000', message = '0173: these bodies are not as 0001-0151 left them: ' || v_missing;
   end if;
+  -- Each a plain list of text values written as 0131 writes it, holding 0131's values and not 'ward_stay' (a value
+  -- another lane added is kept).
+  select coalesce(array_agg(found.value[1] order by found.ord), array[]::text[]) into v_method_values
+    from pg_constraint constraint_row,
+         regexp_matches(pg_get_constraintdef(constraint_row.oid), '''([a-z_]+)''::text', 'g') with ordinality found(value, ord)
+   where constraint_row.conrelid = 'identity.consent_grants'::regclass
+     and constraint_row.conname = 'consent_grants_authorization_method_ck';
+  select coalesce(array_agg(found.value[1] order by found.ord), array[]::text[]) into v_kind_values
+    from pg_constraint constraint_row,
+         regexp_matches(pg_get_constraintdef(constraint_row.oid), '''([a-z_]+)''::text', 'g') with ordinality found(value, ord)
+   where constraint_row.conrelid = 'identity.record_access_notices'::regclass
+     and constraint_row.conname = 'record_access_notices_access_kind_check';
   if (select pg_get_constraintdef(constraint_row.oid) from pg_constraint constraint_row
-       where constraint_row.conrelid = 'identity.consent_grants'::regclass
-         and constraint_row.conname = 'consent_grants_authorization_method_ck') is distinct from v_method_check_0131
+       where constraint_row.conrelid = 'identity.consent_grants'::regclass and constraint_row.contype = 'c'
+         and constraint_row.conname = 'consent_grants_authorization_method_ck' and constraint_row.convalidated)
+       is distinct from format('CHECK (((authorization_method IS NULL) OR (authorization_method = ANY (ARRAY[%s]))))',
+         (select string_agg(quote_literal(value) || '::text', ', ' order by ord)
+            from unnest(v_method_values) with ordinality listed(value, ord)))
      or (select pg_get_constraintdef(constraint_row.oid) from pg_constraint constraint_row
-          where constraint_row.conrelid = 'identity.record_access_notices'::regclass
-            and constraint_row.conname = 'record_access_notices_access_kind_check') is distinct from v_kind_check_0131 then
+          where constraint_row.conrelid = 'identity.record_access_notices'::regclass and constraint_row.contype = 'c'
+            and constraint_row.conname = 'record_access_notices_access_kind_check' and constraint_row.convalidated)
+       is distinct from format('CHECK ((access_kind = ANY (ARRAY[%s])))',
+         (select string_agg(quote_literal(value) || '::text', ', ' order by ord)
+            from unnest(v_kind_values) with ordinality listed(value, ord)))
+     or not (v_method_values @> v_method_0131) or not (v_kind_values @> v_kind_0131)
+     or 'ward_stay' = any (v_method_values) or 'ward_stay' = any (v_kind_values)
+     or cardinality(v_method_values) <> (select count(distinct value) from unnest(v_method_values) value)
+     or cardinality(v_kind_values) <> (select count(distinct value) from unnest(v_kind_values) value) then
     raise exception using errcode = '55000',
-      message = '0173: the grant method or notice kind CHECK is not as 0131 left it; nothing applied';
+      message = '0173: the grant method or notice kind CHECK is not as 0131 left it (with any value another lane '
+        || 'added); nothing applied';
   end if;
   v_owner := (select pg_get_userbyid(proowner) from pg_proc
                where oid = 'identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamp with time zone)'::regprocedure);
@@ -281,6 +309,15 @@ begin
   select string_agg(grant_row.role_code || ' ' || grant_row.permission_code || ' ' || grant_row.granted_at::text, ','
                     order by grant_row.role_code collate "C", grant_row.permission_code collate "C")
     into v_rows_before from auth.role_permissions grant_row;
+  -- The rows of identity.consent_grants, identity.record_access_notices this file must not write: this transaction's
+  -- own row counters for each (inserted/updated/deleted), taken here and compared in the post-checks. They cost
+  -- nothing; a count or a snapshot of the rows would read whole tables under this file's locks.
+  select string_agg(format('%s %s/%s/%s', watched.relation, pg_stat_get_xact_tuples_inserted(watched.relation),
+           pg_stat_get_xact_tuples_updated(watched.relation), pg_stat_get_xact_tuples_deleted(watched.relation)),
+           ', ' order by watched.ord)
+    into v_writes_before
+    from unnest(array['identity.consent_grants', 'identity.record_access_notices']::regclass[])
+         with ordinality watched(relation, ord);
 
   -- 2. C1. The seven codes.
   insert into auth.permissions (code, description) values
@@ -319,10 +356,13 @@ begin
 
   -- C4. Ward-team access (Q156 A), built and off.
   alter table identity.consent_grants add column admission_id uuid references ehr.admissions(id) on delete restrict;
+  -- The two value lists: the values found (0131's, and any another lane added) plus 'ward_stay'.
+  alter table identity.consent_grants drop constraint consent_grants_authorization_method_ck;
+  execute format('alter table identity.consent_grants add constraint consent_grants_authorization_method_ck '
+    || 'check (authorization_method is null or authorization_method in (%s))',
+    (select string_agg(quote_literal(value), ', ' order by ord)
+       from unnest(v_method_values || array['ward_stay']) with ordinality listed(value, ord)));
   alter table identity.consent_grants
-    drop constraint consent_grants_authorization_method_ck,
-    add constraint consent_grants_authorization_method_ck
-      check (authorization_method is null or authorization_method in ('patient_access_pin', 'own_facility', 'ward_stay')),
     add constraint consent_grants_ward_stay_shape_ck
       check ((authorization_method is not distinct from 'ward_stay') = (admission_id is not null)
         and (authorization_method is distinct from 'ward_stay'
@@ -330,10 +370,11 @@ begin
                  and request_id is null and granted_by_patient_id is null)));
   create index consent_grants_ward_stay_idx on identity.consent_grants (admission_id, status, expires_at desc)
     where authorization_method = 'ward_stay';
-  alter table identity.record_access_notices
-    drop constraint record_access_notices_access_kind_check,
-    add constraint record_access_notices_access_kind_check
-      check (access_kind in ('standard', 'share', 'pin', 'own_facility', 'ward_stay'));
+  alter table identity.record_access_notices drop constraint record_access_notices_access_kind_check;
+  execute format('alter table identity.record_access_notices add constraint record_access_notices_access_kind_check '
+    || 'check (access_kind in (%s))',
+    (select string_agg(quote_literal(value), ', ' order by ord)
+       from unnest(v_kind_values || array['ward_stay']) with ordinality listed(value, ord)));
 
   create function identity.open_ward_stay(requested_admission uuid)
   returns table (outcome text, consent_grant_id uuid, subject_patient_id uuid, grant_status text,
@@ -774,14 +815,19 @@ begin
     raise exception using errcode = '55000', message = '0173: post-check failed (the role table or its audit rows)';
   end if;
   if (select pg_get_constraintdef(constraint_row.oid) from pg_constraint constraint_row
-       where constraint_row.conrelid = 'identity.consent_grants'::regclass
-         and constraint_row.conname = 'consent_grants_authorization_method_ck') is distinct from v_method_check_0173
+       where constraint_row.conrelid = 'identity.consent_grants'::regclass and constraint_row.contype = 'c'
+         and constraint_row.conname = 'consent_grants_authorization_method_ck' and constraint_row.convalidated)
+       is distinct from format('CHECK (((authorization_method IS NULL) OR (authorization_method = ANY (ARRAY[%s]))))',
+         (select string_agg(quote_literal(value) || '::text', ', ' order by ord)
+            from unnest(v_method_values || array['ward_stay']) with ordinality listed(value, ord)))
      or (select pg_get_constraintdef(constraint_row.oid) from pg_constraint constraint_row
-          where constraint_row.conrelid = 'identity.record_access_notices'::regclass
-            and constraint_row.conname = 'record_access_notices_access_kind_check') is distinct from v_kind_check_0173
+          where constraint_row.conrelid = 'identity.record_access_notices'::regclass and constraint_row.contype = 'c'
+            and constraint_row.conname = 'record_access_notices_access_kind_check' and constraint_row.convalidated)
+       is distinct from format('CHECK ((access_kind = ANY (ARRAY[%s])))',
+         (select string_agg(quote_literal(value) || '::text', ', ' order by ord)
+            from unnest(v_kind_values || array['ward_stay']) with ordinality listed(value, ord)))
      or not exists (select 1 from pg_constraint where conrelid = 'identity.consent_grants'::regclass
-                     and conname = 'consent_grants_ward_stay_shape_ck' and convalidated)
-     or exists (select 1 from identity.consent_grants where authorization_method = 'ward_stay') then
+                     and conname = 'consent_grants_ward_stay_shape_ck' and convalidated) then
     raise exception using errcode = '55000', message = '0173: post-check failed (the grant CHECKs)';
   end if;
   select string_agg(expected.signature, ', ') into v_missing
@@ -807,6 +853,53 @@ begin
     raise exception using errcode = '55000', message = '0173: post-check failed (the ward-team functions or switch)';
   end if;
 
+  -- Post-check, rows: no row of identity.consent_grants, identity.record_access_notices written.
+  if (select string_agg(format('%s %s/%s/%s', watched.relation, pg_stat_get_xact_tuples_inserted(watched.relation),
+               pg_stat_get_xact_tuples_updated(watched.relation), pg_stat_get_xact_tuples_deleted(watched.relation)),
+               ', ' order by watched.ord)
+        from unnest(array['identity.consent_grants', 'identity.record_access_notices']::regclass[])
+             with ordinality watched(relation, ord))
+     is distinct from v_writes_before then
+    raise exception using errcode = '55000', message = '0173: post-check failed (it wrote a row of a table '
+      || 'it must not write; counters before: ' || v_writes_before || ')';
+  end if;
+  -- Post-check, functions (0168's form). The 5 functions this file makes (2) or replaces (3):
+  -- each a plain function with its SECURITY DEFINER setting, volatility, body (the md5 of prosrc) and fixed
+  -- search_path as written here. Those it makes are the owner's (v_owner), with EXECUTE for exactly the runtimes
+  -- listed (the entry points, when the role exists) and for no other role (none on the helpers); CREATE OR REPLACE
+  -- keeps a replaced function's owner and grants.
+  select string_agg(expected.signature, ', ' order by expected.signature) into v_post_mismatch
+    from (values
+      ('identity.open_ward_stay(uuid)', false, true, 'v', '8c5a8d1c2440c505753f07f42bc5a81a',
+       'search_path=pg_catalog, pg_temp', array['hid_identity_runtime']),
+      ('identity.end_ward_stay_grants(uuid,text)', false, false, 'v', 'be121b8907ab9aa92c60da77ccc87a39',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('identity.patient_self_access_history(text,uuid)', true, true, 's', 'b86778d5f12e4a8ca605cd870df1ccb9',
+       'search_path=pg_catalog, pg_temp', null),
+      ('identity.revoke_my_consent_grant(text,uuid,uuid,text)', true, true, 'v', '0d9ec8a681b67d8ca3574f25a97f0e18',
+       'search_path=pg_catalog, identity, auth, audit, platform, pg_temp', null),
+      ('identity.note_record_access(uuid)', true, true, 'v', '6c44604b17709e6aa29e1d8d496329c5',
+       'search_path=pg_catalog, pg_temp', null)
+    ) expected(signature, replaced, security_definer, volatility, body_md5, config, runtimes)
+    left join pg_proc proc on proc.oid = to_regprocedure(expected.signature)
+   where proc.oid is null or proc.prokind <> 'f' or proc.prosecdef <> expected.security_definer
+      or proc.provolatile::text <> expected.volatility or md5(proc.prosrc) <> expected.body_md5
+      or proc.proconfig is distinct from array[expected.config]
+      or (not expected.replaced
+          and (proc.proowner <> (select role_row.oid from pg_roles role_row where role_row.rolname = v_owner)
+               or exists (select 1 from aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
+                           where acl.grantee <> proc.proowner
+                             and (acl.grantee = 0 or acl.privilege_type <> 'EXECUTE'
+                                  or not pg_get_userbyid(acl.grantee) = any (expected.runtimes)))
+               or exists (select 1 from unnest(expected.runtimes) runtime_name
+                            join pg_roles role_row on role_row.rolname = runtime_name
+                           where not exists (select 1 from aclexplode(proc.proacl) acl
+                                              where acl.grantee = role_row.oid and acl.privilege_type = 'EXECUTE'))));
+  if v_post_mismatch is not null then
+    raise exception using errcode = '55000',
+      message = '0173: post-check failed (these functions are not as made: ' || v_post_mismatch || ')';
+  end if;
+  -- End of the functions' post-check.
   -- What the rows give, at real (not sealed) facilities: the active memberships that gain each code.
   select count(distinct membership.id) filter (where grant_row.permission_code = 'ehr.ward.read') as ward_read,
          count(distinct membership.id) filter (where grant_row.permission_code = 'ehr.admission.read') as admission_read,

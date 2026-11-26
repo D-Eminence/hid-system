@@ -114,11 +114,17 @@
 -- 2. M1-M6.
 -- 3. Post-checks: the columns and CHECK (validated), the trigger, 0148's
 --    trigger last, the policies (the old ones unchanged, one new), the tables'
---    row-level security and privileges, the functions' security and grants, no
---    audit row written.
+--    row-level security and privileges; the three triggers in 0152's form
+--    (events, columns, function, no WHEN condition or arguments) and no other
+--    trigger on the new tables; the 13 functions in 0168's form (body md5,
+--    SECURITY DEFINER setting, volatility, search_path, owner, EXECUTE); no
+--    row of audit.events or ehr.prescriptions written (this transaction's own
+--    row counters; no count or scan of a table).
 
 do $nur0175$
 declare
+  v_writes_before text;
+  v_post_mismatch text;
   v_attempt integer := 0;
   v_holding boolean := exists (
     select 1 from pg_locks held
@@ -132,7 +138,6 @@ declare
   v_mismatch text;
   v_present integer;
   v_owner name;
-  v_audit_rows bigint;
   v_policies text;
   v_after_triggers text;
 begin
@@ -245,7 +250,14 @@ begin
     from pg_policy policy_row where policy_row.polrelid = 'ehr.prescriptions'::regclass;
   v_owner := (select pg_get_userbyid(proowner) from pg_proc
                where oid = 'identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamp with time zone)'::regprocedure);
-  select count(*) into v_audit_rows from audit.events;
+  -- The rows of audit.events, ehr.prescriptions this file must not write: this transaction's own row counters for each
+  -- (inserted/updated/deleted), taken here and compared in the post-checks. They cost nothing; a count or a snapshot
+  -- of the rows would read whole tables under this file's locks.
+  select string_agg(format('%s %s/%s/%s', watched.relation, pg_stat_get_xact_tuples_inserted(watched.relation),
+           pg_stat_get_xact_tuples_updated(watched.relation), pg_stat_get_xact_tuples_deleted(watched.relation)),
+           ', ' order by watched.ord)
+    into v_writes_before
+    from unnest(array['audit.events', 'ehr.prescriptions']::regclass[]) with ordinality watched(relation, ord);
 
   -- M1. The schedule columns (nullable, no default: no row is touched) and their shape.
   alter table ehr.prescriptions
@@ -1154,8 +1166,7 @@ begin
            'infusion_volume_ml', 'infusion_fluid')
          and not attribute_row.attnotnull and not attribute_row.atthasdef) <> 9
      or not exists (select 1 from pg_constraint where conrelid = 'ehr.prescriptions'::regclass
-                     and conname = 'prescriptions_inpatient_schedule_ck' and convalidated)
-     or exists (select 1 from ehr.prescriptions where schedule_kind is not null) then
+                     and conname = 'prescriptions_inpatient_schedule_ck' and convalidated) then
     raise exception using errcode = '55000', message = '0175: post-check failed (the schedule columns or CHECK)';
   end if;
   if (select count(*) from pg_trigger trigger_row
@@ -1229,10 +1240,98 @@ begin
                    and proc.proconfig is distinct from array['search_path=pg_catalog, pg_temp']) then
     raise exception using errcode = '55000', message = '0175: post-check failed (the functions'' security or grants)';
   end if;
-  if (select count(*) from audit.events) <> v_audit_rows then
-    raise exception using errcode = '55000', message = '0175: post-check failed (an audit row was written)';
-  end if;
 
+  -- Post-check, rows: no row of audit.events, ehr.prescriptions written.
+  if (select string_agg(format('%s %s/%s/%s', watched.relation, pg_stat_get_xact_tuples_inserted(watched.relation),
+               pg_stat_get_xact_tuples_updated(watched.relation), pg_stat_get_xact_tuples_deleted(watched.relation)),
+               ', ' order by watched.ord)
+        from unnest(array['audit.events', 'ehr.prescriptions']::regclass[]) with ordinality watched(relation, ord))
+     is distinct from v_writes_before then
+    raise exception using errcode = '55000', message = '0175: post-check failed (it wrote a row of a table '
+      || 'it must not write; counters before: ' || v_writes_before || ')';
+  end if;
+  -- Post-check, triggers (0152's form). The 3 triggers this file makes, each by its table, name, events
+  -- (pg_trigger.tgtype: 1 for each row, 2 before, 4 insert, 8 delete, 16 update, 32 truncate), UPDATE OF columns
+  -- (tgattr, '' for none) and function; with no WHEN condition, no arguments, enabled in origin mode, not internal,
+  -- not a constraint trigger and with no transition table (a WHEN condition or an UPDATE OF list leaves tgtype as it
+  -- is, so each is held apart).
+  -- No other trigger on the 2 tables this file makes (they hold 2).
+  if (select count(*)
+        from (values
+      ('ehr.medication_administrations', 'medication_administrations_guard', 27, 'ehr.medication_administrations_guard()', ''),
+      ('ehr.nursing_requests', 'nursing_requests_immutable', 27, 'ehr.nursing_requests_immutable()', ''),
+      ('ehr.prescriptions', 'prescriptions_inpatient_schedule_guard', 23, 'ehr.prescriptions_inpatient_schedule_guard()', '')
+        ) expected(relation, name, events, function_signature, columns)
+        join pg_trigger trigger_row on trigger_row.tgrelid = expected.relation::regclass
+         and trigger_row.tgname = expected.name and trigger_row.tgtype = expected.events
+         and trigger_row.tgfoid = to_regprocedure(expected.function_signature)
+       where not trigger_row.tgisinternal and trigger_row.tgenabled = 'O' and trigger_row.tgnargs = 0
+         and trigger_row.tgqual is null and trigger_row.tgconstraint = 0 and trigger_row.tgoldtable is null
+         and trigger_row.tgnewtable is null
+         and coalesce((select string_agg(attribute_row.attname, ',' order by attribute_row.attnum)
+                         from pg_attribute attribute_row
+                        where attribute_row.attrelid = trigger_row.tgrelid
+                          and attribute_row.attnum = any (trigger_row.tgattr::int2[])), '') = expected.columns
+         and cardinality(trigger_row.tgattr::int2[]) = coalesce(cardinality(string_to_array(nullif(expected.columns, ''), ',')), 0)
+     ) <> 3
+     or (select count(*) from pg_trigger trigger_row where not trigger_row.tgisinternal
+          and trigger_row.tgrelid in ('ehr.nursing_requests'::regclass, 'ehr.medication_administrations'::regclass)) <> 2 then
+    raise exception using errcode = '55000', message = '0175: post-check failed (the triggers, in 0152''s form)';
+  end if;
+  -- End of the triggers' post-check.
+  -- Post-check, functions (0168's form). The 13 functions this file makes (13) or replaces (0):
+  -- each a plain function with its SECURITY DEFINER setting, volatility, body (the md5 of prosrc) and fixed
+  -- search_path as written here. Those it makes are the owner's (v_owner), with EXECUTE for exactly the runtimes
+  -- listed (the entry points, when the role exists) and for no other role (none on the helpers); CREATE OR REPLACE
+  -- keeps a replaced function's owner and grants.
+  select string_agg(expected.signature, ', ' order by expected.signature) into v_post_mismatch
+    from (values
+      ('ehr.prescriptions_inpatient_schedule_guard()', false, true, 'v', '2090d7c653d13586158c84cb8d16b8e3',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.nursing_requests_immutable()', false, false, 'v', '5365827a57fb402d500122b700a804c5',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.medication_administrations_guard()', false, false, 'v', 'd22a75a33bd1907698960a39f143393e',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.nursing_key(uuid,text,text)', false, false, 'v', '01194c48e7de5b5922a422fa594dddcd',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.nursing_key_record(uuid,uuid,text,text,text,uuid)', false, false, 'v', '63f7abd5a68277a4471ec23fa5b5c196',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.mar_pharmacy_state(uuid)', false, false, 's', 'c770eb08f18072c1364bc4b9ea86522f',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.mar_due_doses(uuid,timestamp with time zone,timestamp with time zone)', false, false, 'v', '12607c96a3bd2d06b7f873ed5a553590',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.mar_administration_json(uuid)', false, false, 's', 'eddec64af941f9bcecf0dfe2495732f2',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.mar_order_json(uuid,uuid,timestamp with time zone,timestamp with time zone)', false, false, 'v', 'f9949a7f403a7a80fe8540a64238e5d7',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.mar_read(uuid,timestamp with time zone,timestamp with time zone)', false, true, 'v', 'cbc92cfe528b00fda69a32d21fb1b168',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.mar_ward_round(uuid,text)', false, true, 'v', 'ae26d8c26f975f9b82bc20f5ded1bd77',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.mar_record(uuid,uuid,timestamp with time zone,text,timestamp with time zone,numeric,text,text,text,text,text,text,text,text,text,text)', false, true, 'v', '233cffa9579351176e3d0699c9ec0312',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.mar_entered_in_error(uuid,bigint,text,text,text)', false, true, 'v', 'c2b6defc88529f70896471c37f2bc5da',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime'])
+    ) expected(signature, replaced, security_definer, volatility, body_md5, config, runtimes)
+    left join pg_proc proc on proc.oid = to_regprocedure(expected.signature)
+   where proc.oid is null or proc.prokind <> 'f' or proc.prosecdef <> expected.security_definer
+      or proc.provolatile::text <> expected.volatility or md5(proc.prosrc) <> expected.body_md5
+      or proc.proconfig is distinct from array[expected.config]
+      or (not expected.replaced
+          and (proc.proowner <> (select role_row.oid from pg_roles role_row where role_row.rolname = v_owner)
+               or exists (select 1 from aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
+                           where acl.grantee <> proc.proowner
+                             and (acl.grantee = 0 or acl.privilege_type <> 'EXECUTE'
+                                  or not pg_get_userbyid(acl.grantee) = any (expected.runtimes)))
+               or exists (select 1 from unnest(expected.runtimes) runtime_name
+                            join pg_roles role_row on role_row.rolname = runtime_name
+                           where not exists (select 1 from aclexplode(proc.proacl) acl
+                                              where acl.grantee = role_row.oid and acl.privilege_type = 'EXECUTE'))));
+  if v_post_mismatch is not null then
+    raise exception using errcode = '55000',
+      message = '0175: post-check failed (these functions are not as made: ' || v_post_mismatch || ')';
+  end if;
+  -- End of the functions' post-check.
   raise notice '0175: inpatient medicine orders and the medicine round are installed (9 prescription columns set at creation only, 2 tables, 13 functions, one owner-only policy). Nobody can use the round until 0177 gives the codes.';
 end
 $nur0175$;

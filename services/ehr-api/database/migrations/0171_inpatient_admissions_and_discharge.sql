@@ -79,7 +79,9 @@
 --    them, as their owner.
 -- A7 ED-1 link (Q-ADT-18 A): ehr.ed_attendances' closed_via CHECK gains
 --    'admission' and ehr.ed_attendance_events' kind CHECK gains 'admitted'.
---    The CHECKs found must be exactly 0168's; every value found is kept.
+--    Each CHECK found must be a plain list of values written as 0168 writes
+--    it, holding every one of 0168's values and not this file's; a value
+--    another lane added is accepted and kept, with every value found.
 -- A8 Three owner-only policies, as 0131's encounters_owner_read: no runtime
 --    role is a member of the tables' owner, so they open nothing to a runtime
 --    role.
@@ -200,16 +202,25 @@
 --    the mirror, whose marker this file uses) applied;
 --    "0171: already applied" when every object of this file is there,
 --    "0171: the schema is not in the reviewed state" for any half state; the
---    two ED CHECKs exactly 0168's; the bodies this file calls md5-pinned; the
---    columns it reads by name and type; the owner may read ehr.encounters.
+--    two ED CHECKs 0168's (with any value another lane added); the bodies
+--    this file calls md5-pinned; the columns it reads by name and type; the
+--    owner may read ehr.encounters.
 -- 2. A1-A9.
--- 3. Post-checks: the tables have row-level security and no privilege; the
---    functions' security, search_path and EXECUTE; the two CHECKs are the
---    found ones plus the new value; the three policies are there; no row of
---    any existing table changed; no audit row written.
+-- 3. Post-checks (0148's, 0152's and 0168's form): the tables have row-level
+--    security and no privilege; the one sequence they own (the movements'
+--    sequence_no) is the owner's and granted to no other role; the three
+--    triggers by events, columns and function, no WHEN condition, no
+--    arguments, and no other trigger on the new tables; the 33 functions by
+--    body (md5), SECURITY DEFINER setting, volatility, search_path, owner and
+--    EXECUTE; the two CHECKs are the found ones plus the new value; the three
+--    policies are there; no row of audit.events, ehr.encounters,
+--    ehr.visit_queue or the ED tables written (this transaction's own row
+--    counters, which cost nothing; no count or snapshot of a table).
 
 do $adt0171$
 declare
+  v_writes_before text;
+  v_post_mismatch text;
   v_attempt integer := 0;
   v_holding boolean := exists (
     select 1 from pg_locks held
@@ -223,23 +234,17 @@ declare
   v_mismatch text;
   v_present integer;
   v_owner name;
-  v_audit_rows bigint;
   v_closed_via_found text;
   v_kind_found text;
-  v_ed_rows text;
-  -- 0168's two CHECKs, and what this file leaves.
-  v_closed_via_0168 constant text := 'CHECK (((closed_via IS NULL) OR (closed_via = ANY (ARRAY[''board''::text, '
-    || '''disposition''::text, ''cancel''::text, ''waiting_list''::text]))))';
-  v_closed_via_0171 constant text := 'CHECK (((closed_via IS NULL) OR (closed_via = ANY (ARRAY[''board''::text, '
-    || '''disposition''::text, ''cancel''::text, ''waiting_list''::text, ''admission''::text]))))';
-  v_kind_0168 constant text := 'CHECK ((kind = ANY (ARRAY[''arrived''::text, ''moved_from_waiting_list''::text, '
-    || '''already_on_board''::text, ''triaged''::text, ''moved''::text, ''visit_linked''::text, '
-    || '''disposition''::text, ''disposition_changed''::text, ''left''::text, ''cancelled''::text, '
-    || '''closed_on_waiting_list''::text])))';
-  v_kind_0171 constant text := 'CHECK ((kind = ANY (ARRAY[''arrived''::text, ''moved_from_waiting_list''::text, '
-    || '''already_on_board''::text, ''triaged''::text, ''moved''::text, ''visit_linked''::text, '
-    || '''disposition''::text, ''disposition_changed''::text, ''left''::text, ''cancelled''::text, '
-    || '''closed_on_waiting_list''::text, ''admitted''::text])))';
+  -- 0168's two value-list CHECKs: 0168's values (all must be there; another lane's extra values are kept) and the
+  -- value this file adds to each.
+  v_closed_via_0168 constant text[] := array['board', 'disposition', 'cancel', 'waiting_list'];
+  v_kind_0168 constant text[] := array['arrived', 'moved_from_waiting_list', 'already_on_board', 'triaged', 'moved',
+    'visit_linked', 'disposition', 'disposition_changed', 'left', 'cancelled', 'closed_on_waiting_list'];
+  v_closed_via_values text[];
+  v_kind_values text[];
+  v_closed_via_shape boolean;
+  v_kind_shape boolean;
 begin
   -- Before the locks (catalog reads only): the files whose tables step 0 locks.
   if to_regclass('ehr.wards') is null or to_regclass('ehr.beds') is null
@@ -317,11 +322,27 @@ begin
                       and policy_row.polname = 'encounters_inpatient_owner_update')))
          present(object_id)
    where present.object_id is not null;
-  if v_present = 10 and v_closed_via_found = v_closed_via_0171 and v_kind_found = v_kind_0171 then
+  -- Each a plain list of text values (written as 0168 writes it; any value another lane added is kept).
+  select coalesce(array_agg(found.value[1] order by found.ord), array[]::text[]) into v_closed_via_values
+    from regexp_matches(coalesce(v_closed_via_found, ''), '''([a-z_]+)''::text', 'g') with ordinality found(value, ord);
+  select coalesce(array_agg(found.value[1] order by found.ord), array[]::text[]) into v_kind_values
+    from regexp_matches(coalesce(v_kind_found, ''), '''([a-z_]+)''::text', 'g') with ordinality found(value, ord);
+  v_closed_via_shape := v_closed_via_found = format('CHECK (((closed_via IS NULL) OR (closed_via = ANY (ARRAY[%s]))))',
+      (select string_agg(quote_literal(value) || '::text', ', ' order by ord)
+         from unnest(v_closed_via_values) with ordinality listed(value, ord)))
+    and cardinality(v_closed_via_values) = (select count(distinct value) from unnest(v_closed_via_values) value)
+    and v_closed_via_values @> v_closed_via_0168;
+  v_kind_shape := v_kind_found = format('CHECK ((kind = ANY (ARRAY[%s])))',
+      (select string_agg(quote_literal(value) || '::text', ', ' order by ord)
+         from unnest(v_kind_values) with ordinality listed(value, ord)))
+    and cardinality(v_kind_values) = (select count(distinct value) from unnest(v_kind_values) value)
+    and v_kind_values @> v_kind_0168;
+  if v_present = 10 and coalesce(v_closed_via_shape and v_kind_shape, false)
+     and 'admission' = any (v_closed_via_values) and 'admitted' = any (v_kind_values) then
     raise exception using errcode = '55000', message = '0171: already applied';
   end if;
   if v_present <> 0
-     or v_closed_via_found like '%admission%' or v_kind_found like '%''admitted''%'
+     or 'admission' = any (v_closed_via_values) or 'admitted' = any (v_kind_values)
      or exists (select 1 from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
                  where namespace.nspname = 'ehr'
                    and (proc.proname like 'admission\_%' or proc.proname like 'admissions\_%'
@@ -330,9 +351,10 @@ begin
     raise exception using errcode = '55000',
       message = '0171: the schema is not in the reviewed state (part of 0171 is there); nothing applied';
   end if;
-  if v_closed_via_found is distinct from v_closed_via_0168 or v_kind_found is distinct from v_kind_0168 then
+  if not coalesce(v_closed_via_shape and v_kind_shape, false) then
     raise exception using errcode = '55000',
-      message = '0171: the ED record''s closed_via or history kind CHECK is not as 0168 left it; nothing applied';
+      message = '0171: the ED record''s closed_via or history kind CHECK is not as 0168 left it (with any value '
+        || 'another lane added); nothing applied';
   end if;
 
   select string_agg(expected.signature, ', ') into v_mismatch
@@ -410,9 +432,16 @@ begin
     raise exception using errcode = '55000',
       message = '0171: the owner of 0170''s functions cannot read ehr.encounters under its forced row-level security';
   end if;
-  select count(*) into v_audit_rows from audit.events;
-  select md5(coalesce(string_agg(to_jsonb(attendance)::text, ',' order by attendance.id), '')) into v_ed_rows
-    from ehr.ed_attendances attendance;
+  -- The rows of audit.events, ehr.encounters, ehr.visit_queue, ehr.ed_attendances, ehr.ed_attendance_events this file
+  -- must not write: this transaction's own row counters for each (inserted/updated/deleted), taken here and compared
+  -- in the post-checks. They cost nothing; a count or a snapshot of the rows would read whole tables under this file's
+  -- locks.
+  select string_agg(format('%s %s/%s/%s', watched.relation, pg_stat_get_xact_tuples_inserted(watched.relation),
+           pg_stat_get_xact_tuples_updated(watched.relation), pg_stat_get_xact_tuples_deleted(watched.relation)),
+           ', ' order by watched.ord)
+    into v_writes_before
+    from unnest(array['audit.events', 'ehr.encounters', 'ehr.visit_queue', 'ehr.ed_attendances',
+                        'ehr.ed_attendance_events']::regclass[]) with ordinality watched(relation, ord);
 
   -- A1. The admission number counter.
   create table ehr.admission_counters (
@@ -643,13 +672,16 @@ begin
     '0171 (ADT-1, Q188 A): the medical certificate of cause of death of an admission discharged as died, built and switched off (no role holds ehr.death-record.write; the death_record switch is off). Never changes the Health ID record and sends no notice.';
 
   -- A7. The ED record (Q-ADT-18 A): closed by an admission, and its history.
+  -- The values found (0168's, and any another lane added) plus 'admission' and 'admitted'.
   alter table ehr.ed_attendances drop constraint ed_attendances_closed_via_check;
-  alter table ehr.ed_attendances add constraint ed_attendances_closed_via_check
-    check (closed_via is null or closed_via in ('board', 'disposition', 'cancel', 'waiting_list', 'admission'));
+  execute format('alter table ehr.ed_attendances add constraint ed_attendances_closed_via_check '
+    || 'check (closed_via is null or closed_via in (%s))',
+    (select string_agg(quote_literal(value), ', ' order by ord)
+       from unnest(v_closed_via_values || array['admission']) with ordinality listed(value, ord)));
   alter table ehr.ed_attendance_events drop constraint ed_attendance_events_kind_check;
-  alter table ehr.ed_attendance_events add constraint ed_attendance_events_kind_check
-    check (kind in ('arrived', 'moved_from_waiting_list', 'already_on_board', 'triaged', 'moved', 'visit_linked',
-      'disposition', 'disposition_changed', 'left', 'cancelled', 'closed_on_waiting_list', 'admitted'));
+  execute format('alter table ehr.ed_attendance_events add constraint ed_attendance_events_kind_check check (kind in (%s))',
+    (select string_agg(quote_literal(value), ', ' order by ord)
+       from unnest(v_kind_values || array['admitted']) with ordinality listed(value, ord)));
 
   -- A8. The owner-only policies (see the header).
   create policy encounters_inpatient_owner_update on ehr.encounters
@@ -2615,11 +2647,17 @@ begin
     raise exception using errcode = '55000', message = '0171: post-check failed (the functions'' security or grants)';
   end if;
   if (select pg_get_constraintdef(constraint_row.oid) from pg_constraint constraint_row
-       where constraint_row.conrelid = 'ehr.ed_attendances'::regclass
-         and constraint_row.conname = 'ed_attendances_closed_via_check') is distinct from v_closed_via_0171
+       where constraint_row.conrelid = 'ehr.ed_attendances'::regclass and constraint_row.contype = 'c'
+         and constraint_row.conname = 'ed_attendances_closed_via_check' and constraint_row.convalidated)
+       is distinct from format('CHECK (((closed_via IS NULL) OR (closed_via = ANY (ARRAY[%s]))))',
+         (select string_agg(quote_literal(value) || '::text', ', ' order by ord)
+            from unnest(v_closed_via_values || array['admission']) with ordinality listed(value, ord)))
      or (select pg_get_constraintdef(constraint_row.oid) from pg_constraint constraint_row
-          where constraint_row.conrelid = 'ehr.ed_attendance_events'::regclass
-            and constraint_row.conname = 'ed_attendance_events_kind_check') is distinct from v_kind_0171 then
+          where constraint_row.conrelid = 'ehr.ed_attendance_events'::regclass and constraint_row.contype = 'c'
+            and constraint_row.conname = 'ed_attendance_events_kind_check' and constraint_row.convalidated)
+       is distinct from format('CHECK ((kind = ANY (ARRAY[%s])))',
+         (select string_agg(quote_literal(value) || '::text', ', ' order by ord)
+            from unnest(v_kind_values || array['admitted']) with ordinality listed(value, ord))) then
     raise exception using errcode = '55000', message = '0171: post-check failed (the ED record''s CHECKs)';
   end if;
   if (select count(*) from pg_policy policy_row
@@ -2635,12 +2673,167 @@ begin
             and trigger_row.tgenabled = 'O') <> 3 then
     raise exception using errcode = '55000', message = '0171: post-check failed (the policies or the triggers)';
   end if;
-  if (select md5(coalesce(string_agg(to_jsonb(attendance)::text, ',' order by attendance.id), ''))
-        from ehr.ed_attendances attendance) is distinct from v_ed_rows
-     or (select count(*) from audit.events) <> v_audit_rows then
-    raise exception using errcode = '55000', message = '0171: post-check failed (an existing row changed)';
-  end if;
 
+  -- Post-check, sequences (0168's form). The sequences the 7 new tables own: exactly the identity
+  -- sequence of ehr.admission_movements.sequence_no, each the owner's (v_owner, as its table) and
+  -- granted to no other role. (runtime-grants.sql takes them back from hid_ehr_runtime and hid_schema_test_runtime
+  -- after its schema-wide sequence grants; a file never grants a runtime a new identity sequence.)
+  if (select count(*) from pg_depend dependency join pg_class sequence_row on sequence_row.oid = dependency.objid
+       where dependency.classid = 'pg_class'::regclass and dependency.refclassid = 'pg_class'::regclass
+         and dependency.deptype in ('a', 'i') and sequence_row.relkind = 'S'
+         and dependency.refobjid in ('ehr.admission_counters'::regclass, 'ehr.admissions'::regclass,
+           'ehr.admission_movements'::regclass, 'ehr.admission_discharge_medicines'::regclass,
+           'ehr.wristband_prints'::regclass, 'ehr.death_records'::regclass, 'ehr.death_record_versions'::regclass)) <> 1
+     or exists (select 1
+                  from (values ('ehr.admission_movements', 'ehr.admission_movements_sequence_no_seq')) expected(relation, sequence_name)
+                 where to_regclass(expected.sequence_name)
+                       is distinct from to_regclass(pg_get_serial_sequence(expected.relation, 'sequence_no'))
+                    or (select sequence_row.relowner from pg_class sequence_row
+                         where sequence_row.oid = to_regclass(expected.sequence_name))
+                       is distinct from (select role_row.oid from pg_roles role_row where role_row.rolname = v_owner)
+                    or exists (select 1 from pg_class sequence_row,
+                                      lateral aclexplode(coalesce(sequence_row.relacl, acldefault('s', sequence_row.relowner))) acl
+                                where sequence_row.oid = to_regclass(expected.sequence_name)
+                                  and acl.grantee <> sequence_row.relowner)) then
+    raise exception using errcode = '55000',
+      message = '0171: post-check failed (a sequence of the new tables is granted to a role or is not the owner''s)';
+  end if;
+  -- End of the sequences' post-check.
+  -- Post-check, rows: no row of audit.events, ehr.encounters, ehr.visit_queue, ehr.ed_attendances,
+  -- ehr.ed_attendance_events written.
+  if (select string_agg(format('%s %s/%s/%s', watched.relation, pg_stat_get_xact_tuples_inserted(watched.relation),
+               pg_stat_get_xact_tuples_updated(watched.relation), pg_stat_get_xact_tuples_deleted(watched.relation)),
+               ', ' order by watched.ord)
+        from unnest(array['audit.events', 'ehr.encounters', 'ehr.visit_queue', 'ehr.ed_attendances',
+                            'ehr.ed_attendance_events']::regclass[]) with ordinality watched(relation, ord))
+     is distinct from v_writes_before then
+    raise exception using errcode = '55000', message = '0171: post-check failed (it wrote a row of a table '
+      || 'it must not write; counters before: ' || v_writes_before || ')';
+  end if;
+  -- Post-check, triggers (0152's form). The 3 triggers this file makes, each by its table, name, events
+  -- (pg_trigger.tgtype: 1 for each row, 2 before, 4 insert, 8 delete, 16 update, 32 truncate), UPDATE OF columns
+  -- (tgattr, '' for none) and function; with no WHEN condition, no arguments, enabled in origin mode, not internal,
+  -- not a constraint trigger and with no transition table (a WHEN condition or an UPDATE OF list leaves tgtype as it
+  -- is, so each is held apart).
+  -- No other trigger on the 7 tables this file makes (they hold 3).
+  if (select count(*)
+        from (values
+      ('ehr.admission_movements', 'admission_movements_immutable', 27, 'ehr.admission_history_immutable()', ''),
+      ('ehr.death_record_versions', 'death_record_versions_immutable', 27, 'ehr.admission_history_immutable()', ''),
+      ('ehr.wristband_prints', 'wristband_prints_immutable', 27, 'ehr.admission_history_immutable()', '')
+        ) expected(relation, name, events, function_signature, columns)
+        join pg_trigger trigger_row on trigger_row.tgrelid = expected.relation::regclass
+         and trigger_row.tgname = expected.name and trigger_row.tgtype = expected.events
+         and trigger_row.tgfoid = to_regprocedure(expected.function_signature)
+       where not trigger_row.tgisinternal and trigger_row.tgenabled = 'O' and trigger_row.tgnargs = 0
+         and trigger_row.tgqual is null and trigger_row.tgconstraint = 0 and trigger_row.tgoldtable is null
+         and trigger_row.tgnewtable is null
+         and coalesce((select string_agg(attribute_row.attname, ',' order by attribute_row.attnum)
+                         from pg_attribute attribute_row
+                        where attribute_row.attrelid = trigger_row.tgrelid
+                          and attribute_row.attnum = any (trigger_row.tgattr::int2[])), '') = expected.columns
+         and cardinality(trigger_row.tgattr::int2[]) = coalesce(cardinality(string_to_array(nullif(expected.columns, ''), ',')), 0)
+     ) <> 3
+     or (select count(*) from pg_trigger trigger_row where not trigger_row.tgisinternal
+          and trigger_row.tgrelid in ('ehr.admission_counters'::regclass, 'ehr.admissions'::regclass,
+            'ehr.admission_movements'::regclass, 'ehr.admission_discharge_medicines'::regclass,
+            'ehr.wristband_prints'::regclass, 'ehr.death_records'::regclass, 'ehr.death_record_versions'::regclass)) <> 3 then
+    raise exception using errcode = '55000', message = '0171: post-check failed (the triggers, in 0152''s form)';
+  end if;
+  -- End of the triggers' post-check.
+  -- Post-check, functions (0168's form). The 33 functions this file makes (30) or replaces (3):
+  -- each a plain function with its SECURITY DEFINER setting, volatility, body (the md5 of prosrc) and fixed
+  -- search_path as written here. Those it makes are the owner's (v_owner), with EXECUTE for exactly the runtimes
+  -- listed (the entry points, when the role exists) and for no other role (none on the helpers); CREATE OR REPLACE
+  -- keeps a replaced function's owner and grants.
+  select string_agg(expected.signature, ', ' order by expected.signature) into v_post_mismatch
+    from (values
+      ('ehr.admission_history_immutable()', false, false, 'v', '1c388f655b535bf07b736a995ca8a588',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.admission_key(uuid,text,text)', false, false, 'v', 'afa3a494ca5055473c25f8f5c735340c',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.admission_cards(uuid[],boolean)', false, false, 's', '15a3e73ce20f39c5c941237c468aeb68',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.admission_encounter_move(uuid,text,timestamp with time zone,text)', false, false, 'v', '34d996fd07ababb69fde077f198cde09',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.admission_bed_move(uuid,text,text)', false, false, 'v', 'c0789ddf6f7e345141f98901d7bd2a54',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.admission_stay_ended(uuid,text)', false, false, 'v', 'd299993cf7da542721bfa4c582d5f74c',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.admission_sex_mismatch(uuid,uuid)', false, false, 's', 'aca65b041f5aae266fe47e8a41e1494f',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.admission_notice_recipients(uuid)', false, false, 's', '38097e2f83954868d0fb2f971e49e9c9',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.inpatient_bed_occupants(uuid,uuid[])', true, false, 's', '84a72015bd5acddce6a1c9eb6098c75b',
+       'search_path=pg_catalog, pg_temp', null),
+      ('ehr.inpatient_waiting(uuid,uuid[])', true, false, 's', '5fff61891ff9468ba55cbe0b54c0bd70',
+       'search_path=pg_catalog, pg_temp', null),
+      ('ehr.inpatient_day_counts(uuid,date)', true, false, 's', '7a309b39ca88b5000ba3ae4b4b421d78',
+       'search_path=pg_catalog, pg_temp', null),
+      ('ehr.admission_request(uuid,text,uuid,uuid,uuid,text,text,uuid,uuid,uuid,text,text)', false, true, 'v', '71345fab1c926c8f73fa6dddec0a5dce',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.admission_list(text,uuid,text)', false, true, 'v', '74e8f012708559517533abfb2b0397c1',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.admission_read(uuid)', false, true, 'v', '4ce67edf1482caf0cacf30fd45ba009d',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.admission_admit(uuid,bigint,uuid,boolean,text,text)', false, true, 'v', 'dcacacc740a64578bcbb87c34b25e183',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.admission_transfer(uuid,bigint,uuid,text,boolean,text,text)', false, true, 'v', '15520cb723672f1e9b3ae546d460e290',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.admission_handover_read(uuid,uuid)', false, true, 'v', '45d02089d2aefd43d8e730a1b6a6bf01',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.admission_prepare_discharge(uuid,bigint,text,date,uuid[],text,text)', false, true, 'v', '9b188a18f803d7e37d46c97216926799',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.admission_discharge(uuid,bigint,text,timestamp with time zone,jsonb,text,timestamp with time zone,text,text,text)', false, true, 'v', '21945aa0791c9c89af7c3944706c1df6',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.admission_cancel(uuid,bigint,text,text,text)', false, true, 'v', '0cb16fb082dd3ba21ea84563b8514413',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.admission_update(uuid,bigint,text,uuid,date,text,text,text)', false, true, 'v', '96d0cc1c41f745cd445345328444aa58',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.discharge_summary_print(uuid)', false, true, 'v', 'f523a1e8bea05f60c292feea9e9f441f',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.wristband_answer(uuid,text,integer,timestamp with time zone)', false, false, 'v', '55fbaeb52135d9fcd04b9a2cc5260448',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.wristband_print_for(uuid,text,text,text,text)', false, false, 'v', '32c527e3a3d341caf58c3a6c7c7128cd',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.wristband_print(uuid,text,text,text)', false, true, 'v', '09033c839191b895ac55716fac0afea1',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.newborn_band_print(uuid,text,text,text)', false, true, 'v', '47d2122ce5c2cee9122506d26e543dfb',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.death_record_gate(text)', false, false, 'v', '65ff26b23a41d968bf59887d87330656',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.death_record_content_valid(jsonb)', false, false, 'i', '31653493c0609d20f12ab57e3b473e59',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.death_record_json(uuid)', false, false, 's', '41d14c14f75aed5ef257fc17670087f8',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.death_record_write(uuid,jsonb)', false, true, 'v', '9c37667a8ce19c4445d43fb638f3cb77',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.death_record_read(uuid)', false, true, 'v', '0bba759610ee5d4aa0b4403c45ab45b9',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.death_record_amend(uuid,jsonb,text)', false, true, 'v', '31afda37fd6c90e4cf5ed9da38c8b4ef',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime']),
+      ('ehr.death_record_print(uuid,text)', false, true, 'v', 'cb7c9b0997bf305c729e417cf37e35e8',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime'])
+    ) expected(signature, replaced, security_definer, volatility, body_md5, config, runtimes)
+    left join pg_proc proc on proc.oid = to_regprocedure(expected.signature)
+   where proc.oid is null or proc.prokind <> 'f' or proc.prosecdef <> expected.security_definer
+      or proc.provolatile::text <> expected.volatility or md5(proc.prosrc) <> expected.body_md5
+      or proc.proconfig is distinct from array[expected.config]
+      or (not expected.replaced
+          and (proc.proowner <> (select role_row.oid from pg_roles role_row where role_row.rolname = v_owner)
+               or exists (select 1 from aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
+                           where acl.grantee <> proc.proowner
+                             and (acl.grantee = 0 or acl.privilege_type <> 'EXECUTE'
+                                  or not pg_get_userbyid(acl.grantee) = any (expected.runtimes)))
+               or exists (select 1 from unnest(expected.runtimes) runtime_name
+                            join pg_roles role_row on role_row.rolname = runtime_name
+                           where not exists (select 1 from aclexplode(proc.proacl) acl
+                                              where acl.grantee = role_row.oid and acl.privilege_type = 'EXECUTE'))));
+  if v_post_mismatch is not null then
+    raise exception using errcode = '55000',
+      message = '0171: post-check failed (these functions are not as made: ' || v_post_mismatch || ')';
+  end if;
+  -- End of the functions' post-check.
   raise notice '0171: admissions, transfers, discharge, bands and the death record are installed (7 tables, 30 functions, 3 owner-only policies; the ED record closes by an admission). Nobody can use them until 0173 gives the codes; the death record stays off.';
 end
 $adt0171$;

@@ -92,11 +92,15 @@
 --    policies on the two tables as they are.
 -- 2. O1-O4.
 -- 3. Post-checks: the columns, the CHECKs (validated), the old CHECKs gone,
---    the policies and kept bodies unchanged, the functions' security and
---    grants, no audit row written.
+--    the policies and kept bodies unchanged; the three functions in 0168's
+--    form (body md5, SECURITY DEFINER setting, volatility, search_path, owner,
+--    EXECUTE); no row of audit.events, ehr.vitals or ehr.vital_corrections
+--    written (this transaction's own row counters; no count of a table).
 
 do $nur0174$
 declare
+  v_writes_before text;
+  v_post_mismatch text;
   v_attempt integer := 0;
   v_holding boolean := exists (
     select 1 from pg_locks held
@@ -110,7 +114,6 @@ declare
   v_mismatch text;
   v_present integer;
   v_owner name;
-  v_audit_rows bigint;
   v_policies text;
   v_one_value_0004 constant text := 'CHECK ((num_nonnulls(height_cm, weight_kg, temperature_c, pulse_bpm, '
     || 'respiratory_rate, systolic_mmhg, diastolic_mmhg, oxygen_saturation_percent) > 0))';
@@ -223,7 +226,15 @@ begin
    where policy_row.polrelid in ('ehr.vitals'::regclass, 'ehr.vital_corrections'::regclass);
   v_owner := (select pg_get_userbyid(proowner) from pg_proc
                where oid = 'identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamp with time zone)'::regprocedure);
-  select count(*) into v_audit_rows from audit.events;
+  -- The rows of audit.events, ehr.vitals, ehr.vital_corrections this file must not write: this transaction's own row
+  -- counters for each (inserted/updated/deleted), taken here and compared in the post-checks. They cost nothing; a
+  -- count or a snapshot of the rows would read whole tables under this file's locks.
+  select string_agg(format('%s %s/%s/%s', watched.relation, pg_stat_get_xact_tuples_inserted(watched.relation),
+           pg_stat_get_xact_tuples_updated(watched.relation), pg_stat_get_xact_tuples_deleted(watched.relation)),
+           ', ' order by watched.ord)
+    into v_writes_before
+    from unnest(array['audit.events', 'ehr.vitals', 'ehr.vital_corrections']::regclass[])
+         with ordinality watched(relation, ord);
 
   -- O1. The new columns (nullable, no default: no row is touched).
   alter table ehr.vitals
@@ -526,10 +537,50 @@ begin
                    and proc.proconfig is distinct from array['search_path=pg_catalog, pg_temp']) then
     raise exception using errcode = '55000', message = '0174: post-check failed (the functions'' security or grants)';
   end if;
-  if (select count(*) from audit.events) <> v_audit_rows then
-    raise exception using errcode = '55000', message = '0174: post-check failed (an audit row was written)';
-  end if;
 
+  -- Post-check, rows: no row of audit.events, ehr.vitals, ehr.vital_corrections written.
+  if (select string_agg(format('%s %s/%s/%s', watched.relation, pg_stat_get_xact_tuples_inserted(watched.relation),
+               pg_stat_get_xact_tuples_updated(watched.relation), pg_stat_get_xact_tuples_deleted(watched.relation)),
+               ', ' order by watched.ord)
+        from unnest(array['audit.events', 'ehr.vitals', 'ehr.vital_corrections']::regclass[])
+             with ordinality watched(relation, ord))
+     is distinct from v_writes_before then
+    raise exception using errcode = '55000', message = '0174: post-check failed (it wrote a row of a table '
+      || 'it must not write; counters before: ' || v_writes_before || ')';
+  end if;
+  -- Post-check, functions (0168's form). The 3 functions this file makes (3) or replaces (0):
+  -- each a plain function with its SECURITY DEFINER setting, volatility, body (the md5 of prosrc) and fixed
+  -- search_path as written here. Those it makes are the owner's (v_owner), with EXECUTE for exactly the runtimes
+  -- listed (the entry points, when the role exists) and for no other role (none on the helpers); CREATE OR REPLACE
+  -- keeps a replaced function's owner and grants.
+  select string_agg(expected.signature, ', ' order by expected.signature) into v_post_mismatch
+    from (values
+      ('ehr.nursing_caller(text,text[])', false, false, 's', 'afe0851769a0403fff7f0df4adbfbf6e',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.observation_fluid_hours(uuid,timestamp with time zone,timestamp with time zone)', false, false, 's', 'c15ad3a0e447fafd48a7d4b8f1630f0c',
+       'search_path=pg_catalog, pg_temp', array[]::text[]),
+      ('ehr.observation_chart(uuid,timestamp with time zone,timestamp with time zone,boolean)', false, true, 'v', 'abf5df7fcb9a7798d70344e44a1697ca',
+       'search_path=pg_catalog, pg_temp', array['hid_ehr_runtime'])
+    ) expected(signature, replaced, security_definer, volatility, body_md5, config, runtimes)
+    left join pg_proc proc on proc.oid = to_regprocedure(expected.signature)
+   where proc.oid is null or proc.prokind <> 'f' or proc.prosecdef <> expected.security_definer
+      or proc.provolatile::text <> expected.volatility or md5(proc.prosrc) <> expected.body_md5
+      or proc.proconfig is distinct from array[expected.config]
+      or (not expected.replaced
+          and (proc.proowner <> (select role_row.oid from pg_roles role_row where role_row.rolname = v_owner)
+               or exists (select 1 from aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
+                           where acl.grantee <> proc.proowner
+                             and (acl.grantee = 0 or acl.privilege_type <> 'EXECUTE'
+                                  or not pg_get_userbyid(acl.grantee) = any (expected.runtimes)))
+               or exists (select 1 from unnest(expected.runtimes) runtime_name
+                            join pg_roles role_row on role_row.rolname = runtime_name
+                           where not exists (select 1 from aclexplode(proc.proacl) acl
+                                              where acl.grantee = role_row.oid and acl.privilege_type = 'EXECUTE'))));
+  if v_post_mismatch is not null then
+    raise exception using errcode = '55000',
+      message = '0174: post-check failed (these functions are not as made: ' || v_post_mismatch || ')';
+  end if;
+  -- End of the functions' post-check.
   raise notice '0174: the observation chart fields are on vitals (10 columns, 2 new CHECKs, 2 CHECKs replaced; no reading changed) and the chart is installed. No score is computed (Q199 A).';
 end
 $nur0174$;

@@ -2185,6 +2185,13 @@ revoke all on function
 revoke all on commercial.ward_charge_items, commercial.bed_day_charges from public;
 grant execute on function identity.open_ward_stay(uuid) to hid_identity_runtime;
 revoke all on function identity.open_ward_stay(uuid), identity.end_ward_stay_grants(uuid, text) from public;
+-- The three histories' identity sequences (sequence_no of ehr.bed_status_events and ehr.ward_events, 0170, and of
+-- ehr.admission_movements, 0171): the files grant nothing on them and only the tables' owner uses them, but the
+-- schema-wide grants above (USAGE and SELECT on all sequences in schema ehr, to hid_ehr_runtime and to
+-- hid_schema_test_runtime) would give both their last_value, a platform-wide count of bed, ward and admission
+-- events, and nextval. Taken back here, after them.
+revoke all on sequence ehr.bed_status_events_sequence_no_seq, ehr.ward_events_sequence_no_seq,
+  ehr.admission_movements_sequence_no_seq from public, hid_ehr_runtime, hid_schema_test_runtime;
 
 -- Nursing on the ward (NUR-1 of Release D, 0174-0177; the owner's sprint
 -- approval of 25 November 2026), exactly as those files grant and revoke
@@ -2278,3 +2285,6 @@ revoke all on function
 revoke all on ehr.medication_administrations, ehr.nursing_requests, ehr.nursing_tasks, ehr.fluid_balance_entries,
   ehr.facility_nursing_settings, ehr.clinical_shifts, ehr.shift_assignments, ehr.shift_patient_allocations,
   ehr.shift_assignment_events, ehr.shift_handovers, ehr.shift_handover_items from public;
+-- The shift assignments' history identity sequence (sequence_no of ehr.shift_assignment_events, 0176): taken back
+-- from both runtimes after the schema-wide sequence grants above, as 0170's and 0171's.
+revoke all on sequence ehr.shift_assignment_events_sequence_no_seq from public, hid_ehr_runtime, hid_schema_test_runtime;
