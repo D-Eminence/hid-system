@@ -383,3 +383,34 @@ Fixed, not configurable: 3 codes a day per registration and per email, a 60-seco
 codes for one registration, and 30 code confirmations a day per volunteer and email. Raising a
 variable takes effect on the next identity-api deployment; lowering one never affects Health IDs
 already created.
+
+## Before 0156: ANALYZE the six tables
+
+0156 (lab tests and diagnoses by name only) checks every row of six tables while it holds them, so it first reads
+each table's size from `pg_class.reltuples`. It reads no row. It refuses (55000, nothing applied) when a table is above
+5,000,000 rows, or has never been analysed (`reltuples` -1) and has a page on disk. Autovacuum analyses a table only
+after about 50 changes, so a small table (the routed result reports, say) may never have been analysed.
+
+The deploy tool runs only the plan, dry run and apply tasks of the migration runner, so this step is by hand:
+
+- **Where:** every environment whose six tables hold rows (production and staging).
+- **Who:** the release operator, connected as the role that owns the six tables (the migration role) or as the
+  database owner. On PostgreSQL 16 only they or a superuser may ANALYZE them.
+- **What:**
+
+  ```sql
+  analyze ehr.lab_requests, ehr.diagnoses, ehr.order_routes, lab.work_items, lab.work_item_requested_tests,
+    lab.order_route_result_reports;
+  select relation.oid::regclass, relation.reltuples::bigint, relation.relpages, pg_relation_size(relation.oid)
+    from pg_class relation
+   where relation.oid in ('ehr.lab_requests'::regclass, 'ehr.diagnoses'::regclass, 'ehr.order_routes'::regclass,
+                          'lab.work_items'::regclass, 'lab.work_item_requested_tests'::regclass,
+                          'lab.order_route_result_reports'::regclass);
+  ```
+
+- **When:** finished before the deploy is dispatched.
+- **Recorded:** the time and the figures above in the schema declaration's evidence.
+
+ANALYZE takes SHARE UPDATE EXCLUSIVE, which no read or write waits for. But an ANALYZE or autovacuum still running on
+one of the six when 0156 starts makes 0156 stop after 5 seconds with its busy refusal, nothing applied. The dry run
+tries again; the apply does not, so run the release again.

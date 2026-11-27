@@ -2564,10 +2564,18 @@ above is the lab request's part.
   The fallback is to turn the settings off; rows already saved by name only
   keep their nulls.
 - **Release (0156 alone):**
-  1. The release runbook runs ANALYZE on the six tables in production
-     before the dry run: autovacuum may never have analysed a small table,
-     which leaves `reltuples` at -1, and the file then refuses. ANALYZE takes
-     SHARE UPDATE EXCLUSIVE, which no read or write waits for.
+  1. ANALYZE of the six tables, by hand, before the deploy is dispatched,
+     in every environment whose six tables hold rows (production and
+     staging): autovacuum may never have analysed a small table, which
+     leaves `reltuples` at -1, and the file then refuses. The deploy tool
+     runs only the plan, dry run and apply tasks, so the release operator
+     runs it, connected as the role that owns the six tables (the migration
+     role) or as the database owner, and records the time and each table's
+     `reltuples`, `relpages` and size in the schema declaration's evidence
+     (`docs/MIGRATION_RUNBOOK.md`, "Before 0156"). ANALYZE takes SHARE
+     UPDATE EXCLUSIVE, which no read or write waits for; but one still
+     running when 0156 starts makes it stop after 5 seconds with the busy
+     refusal, nothing applied (the dry run tries again; the apply does not).
   2. 0156's dry run and apply, alone.
   3. ehr-api and lab-api at 0156's images, both settings off.
   4. The website.

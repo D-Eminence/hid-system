@@ -157,11 +157,33 @@
 -- VACUUM or write can change it before the scans, and pg_relation_size
 -- waits for nothing. Above the bound, or for a measured hold over 1 s, the
 -- change is NOT VALID here and a follow-up file validates it.
--- The release runbook runs ANALYZE on the six tables in production before
--- the dry run: autovacuum may never have analysed a small table (the routed
--- result reports, say), which leaves reltuples at -1. ANALYZE samples pages
+-- ANALYZE FIRST. Autovacuum may never have analysed a small table (the
+-- routed result reports, say: it analyses after about 50 changes), which
+-- leaves reltuples at -1, and section 2 then refuses. ANALYZE samples pages
 -- without the policies and takes SHARE UPDATE EXCLUSIVE, which no read or
--- write waits for. Production's figures are measured at build.
+-- write waits for. The deploy tool runs only the runner's plan, dry run and
+-- apply tasks (scripts/production_deployment.py, no shell in the task), so
+-- this is a step by hand, in the release runbook (docs/MIGRATION_RUNBOOK.md,
+-- "Before 0156"):
+-- - where: every environment whose six tables hold rows (production and
+--   staging);
+-- - who: the release operator, connected as the role that owns the six
+--   tables (the migration role) or as the database owner; on PostgreSQL 16
+--   only they or a superuser may ANALYZE them;
+-- - what: ANALYZE ehr.lab_requests, ehr.diagnoses, ehr.order_routes,
+--   lab.work_items, lab.work_item_requested_tests,
+--   lab.order_route_result_reports; then each table's reltuples, relpages
+--   and pg_relation_size from pg_class;
+-- - when: finished before the deploy is dispatched;
+-- - recorded: the time and those figures in the schema declaration's
+--   evidence. The builder cannot reach production, so production's sizes
+--   come from there, and the hold from the rehearsal copy at pre-sign.
+-- An ANALYZE or autovacuum still running on any of the six holds SHARE
+-- UPDATE EXCLUSIVE, which section 1's NOWAIT cannot pass, and a NOWAIT
+-- request never cancels an autovacuum: the file stops after 5 seconds with
+-- the busy refusal, nothing applied (measured: behind an open ANALYZE of
+-- lab.work_items, 5.0 s). The dry run tries again, up to 20 times in 5
+-- minutes; the apply does not, so the release stops and is run again.
 --
 -- NO ROWS READ AS THE MIGRATOR (Rahman's point 3). All six tables force row
 -- security; as a NOSUPERUSER NOBYPASSRLS owner, a count(*) runs the
@@ -466,7 +488,8 @@ begin
   if too_large is not null then
     raise exception using errcode = '55000',
       message = '0156: too large to validate here, or never analysed: ' || too_large || '; nothing applied',
-      hint = 'Run ANALYZE on the six tables first. Above 5,000,000 rows the pair checks go in NOT VALID with a follow-up file.';
+      hint = 'Run ANALYZE on the six tables first (docs/MIGRATION_RUNBOOK.md, "Before 0156"). Above 5,000,000 rows the '
+        || 'pair checks go in NOT VALID with a follow-up file.';
   end if;
 end
 $$;
