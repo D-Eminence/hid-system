@@ -104,6 +104,18 @@
 --    moves to that lane's md5 at integration. No trigger set is pinned, so
 --    Billing's trigger on lab.work_items (0167) does not make this file
 --    refuse; it skips a null pair.
+-- 0159 (ORD-11, order notices; #345) ships before this file, but is not
+-- on staging 0cfddcc9, so this branch cannot test with it. At #345's
+-- 5857690e (0159 unchanged since b99011fd) its triggers are on
+-- lab.result_releases, lab.result_invalidations, pharmacy.dispensings and
+-- pharmacy.dispensing_reversals, and its functions read ehr.lab_requests,
+-- ehr.order_routes, lab.work_items, lab.work_item_requested_tests and
+-- lab.order_route_result_reports by id, and the request's test_display,
+-- but no code column. So nothing of 0159 is pinned here. Owed at
+-- integration on 0159: a name-only-codes case that releases a name-only
+-- result and finds no row in ehr.order_notice_gaps (gaps = 0), and a
+-- fresh look at 0159's functions for a code column, pinning any that
+-- reads one.
 --
 -- SERVICE SETTINGS. Nothing changes for a service until it sends a null
 -- pair. ehr-api takes a lab request by name only while

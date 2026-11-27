@@ -2505,6 +2505,13 @@ above is the lab request's part.
   - The 24 functions that copy, compare or read the pairs, or run as
     triggers on the six, are pinned by md5; each already passes a null pair
     through.
+  - 0159 (order notices, #345) ships first but is not on staging
+    `0cfddcc9`. At `5857690e` no 0159 function reads a code column of the
+    six (they read by id, and the request's `test_display`), so none is
+    pinned. Owed at integration on 0159: a `name-only-codes` case that
+    releases a name-only result with no row in `ehr.order_notice_gaps`
+    (gaps = 0), and a fresh look for a 0159 function that reads a code
+    column.
 - **Settings (ehr-api), both off by default.** Off, the routes are exactly
   as today.
   - `DIAGNOSIS_NAME_ONLY_ENABLED`: diagnoses by name only and `codeStatus`
