@@ -104,9 +104,12 @@ export class LabApiClient {
     return page;
   }
 
-  /** `input` is a LabAcceptEhrOrderInput; typed `unknown` so a test may send any body. */
+  /**
+   * `input` should be a LabAcceptEhrOrderInput. It is typed `unknown`, as before 0156, so a contract test may send
+   * any body; the type checks nothing here. Callers type their own argument (ehr-api's LabApiService does).
+   */
   acceptEhrOrder(
-    input: LabAcceptEhrOrderInput | unknown,
+    input: unknown,
     context: LabRequestContext,
     idempotencyKey: string,
     signal?: AbortSignal,
