@@ -28,6 +28,8 @@
 --      existing member, a second facility non-primary, an ended membership
 --      reused, one staff audit row at the inviting facility, none on a
 --      refusal;
+--   5c. a community health worker's invitation (0209): no licence, refused
+--      at a laboratory, accepted with no attestation;
 --   6. the control closes every public and signed-in command (55000).
 -- See provider-self-enrollment.integration.sql for why FORCE is lifted on
 -- the control table when its owner cannot bypass row-level security.
@@ -847,6 +849,69 @@ do $$ begin
   end if;
 end $$;
 reset role;
+
+-- 5c. A community health worker's invitation (0209, CHW-1, Q130 A): invited at
+-- the hospital with no licence (with one it is refused, and the laboratory
+-- cannot invite the role), opened and accepted as a new account; the
+-- membership and its one role are the community health worker's and no
+-- licence attestation is written. Undone afterwards (savepoint).
+savepoint chw_invitation;
+set local role hid_identity_api_runtime;
+select pg_temp.as_admin(1, 'accept-chw-invite');
+do $$
+begin
+  begin
+    perform pg_temp.invite(1, 40, 'chw.licensed@accept-people.invalid', 'community_health_worker', 'MDCN', 'MDCN/40');
+    raise exception '5c-a: a community health worker was invited with a licence';
+  exception when others then
+    if sqlstate <> '22023' or sqlerrm <> 'STAFF_INVITATION_INVALID' then raise; end if;
+  end;
+  perform pg_temp.as_admin(2, 'accept-chw-invite-lab');
+  begin
+    perform pg_temp.invite(2, 141, 'chw.lab@accept-people.invalid', 'community_health_worker');
+    raise exception '5c-b: a laboratory invited a community health worker';
+  exception when others then
+    if sqlstate <> '22023' or sqlerrm <> 'STAFF_INVITATION_ROLE_NOT_ALLOWED' then raise; end if;
+  end;
+  perform pg_temp.as_admin(1, 'accept-chw-invite');
+  perform pg_temp.invite(1, 41, 'chw.new@accept-people.invalid', 'community_health_worker', null, null, 'Efe Fieldworker');
+end $$;
+select pg_temp.as_public('accept-chw-accept');
+do $$
+declare prepared record; accepted record;
+begin
+  if pg_temp.result_of(pg_temp.open_link(41, 'link-41', 'session-41')) <> 'ready' then
+    raise exception '5c-c: opening the community health worker''s invitation did not answer ready';
+  end if;
+  select * into prepared from identity.prepare_staff_invitation_acceptance(pg_temp.hmac('session-41'));
+  if prepared.result <> 'ready' or prepared.account_case <> 'new' then
+    raise exception '5c-d: prepare answered %', row_to_json(prepared);
+  end if;
+  select * into accepted from identity.accept_staff_invitation_with_password(pg_temp.hmac('session-41'),
+    '$argon2id$v=19$m=65536,t=3,p=1$' || repeat('c', 22) || '$' || repeat('w', 43));
+  if accepted.account_case <> 'new' or accepted.role_code <> 'community_health_worker'
+     or accepted.facility_id <> current_setting('hid.test.a_facility_1')::uuid then
+    raise exception '5c-e: accepting answered %', row_to_json(accepted);
+  end if;
+  perform set_config('hid.test.chw_membership', accepted.membership_id::text, true);
+end $$;
+reset role;
+do $$ begin
+  if (select string_agg(role_code || ':' || grant_reason, ',') from auth.account_roles
+       where membership_id = current_setting('hid.test.chw_membership')::uuid and revoked_at is null)
+     <> 'community_health_worker:Staff invitation accepted; licence vouched by the facility administrator'
+     or not exists (select 1 from identity.staff_facility_memberships
+                     where id = current_setting('hid.test.chw_membership')::uuid and active
+                       and membership_role = 'community_health_worker' and app_role = 'community_health_worker')
+     or exists (select 1 from identity.staff_licence_attestations
+                 where membership_id = current_setting('hid.test.chw_membership')::uuid)
+     or not exists (select 1 from identity.staff_invitations
+                     where id = 'd3970000-0000-4000-8000-000000000041' and status = 'accepted'
+                       and role_code = 'community_health_worker' and licence_body is null and licence_number is null) then
+    raise exception '5c-f: the community health worker''s membership, role, attestation or invitation is wrong';
+  end if;
+end $$;
+rollback to savepoint chw_invitation;
 
 -- 6. The control closes every public and signed-in command.
 set local role hid_identity_api_runtime;

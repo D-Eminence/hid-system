@@ -52,9 +52,16 @@
         "admin",
         "org_admin"
       ]
+    },
+    {
+      "id": "communityHealthWorker",
+      "label": "Community health worker",
+      "roles": [
+        "community_health_worker"
+      ]
     }
   ],
-  "columnNotes": "Akos's table has one Doctor column; clinician holds the same seeded permissions as doctor today, so it is compared with that column. Facility admin stands for both admin and org_admin. The administrator awaiting review (org_admin_awaiting_review) is a short-lived state and is not compared.",
+  "columnNotes": "Akos's table has one Doctor column; clinician holds the same seeded permissions as doctor today, so it is compared with that column. Facility admin stands for both admin and org_admin. The administrator awaiting review (org_admin_awaiting_review) is a short-lived state and is not compared. The Community health worker column is not in Akos's table: it is the role of CHW-1 (0209, owner decision Q130 A), compared with what the planned contract gives it (the Outreach area only, without creating or managing campaigns; nothing else).",
   "narrowRoles": {
     "about": "Owner decision Q137 B (migration 0147): two narrow roles, given only to the administrators and the doctor that 0136's count named, beside their own role, so they get back exactly what 0136 took from them. They are not columns of Akos's table and never a staff kind: nobody is invited to them, support never grants them at review, and SX-4 never adds or removes them by name (removing doctor through SX-4 revokes them too, work_list_reader staying while the membership holds admin). A staff profile names them by these labels. Their seeded permissions are pinned in todayRolePermissions like the columns' roles. Owner decision Q141 B (migration 0150) gives every doctor ocr.job.start again, so reading_starter now adds nothing beside doctor; it stays as 0147 made it.",
     "roles": [
@@ -83,7 +90,8 @@
     "doctor": "My patients waiting",
     "lab": "Lab work queue",
     "pharmacy": "Dispensing queue",
-    "facilityAdmin": "Staff and settings"
+    "facilityAdmin": "Staff and settings",
+    "communityHealthWorker": "Outreach"
   },
   "rows": [
     {
@@ -95,7 +103,8 @@
         "doctor": "full",
         "lab": "scoped",
         "pharmacy": "scoped",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "communityHealthWorker": "hidden"
       },
       "scopedText": {
         "lab": "with lab orders only",
@@ -111,7 +120,8 @@
         "doctor": "hidden",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "communityHealthWorker": "hidden"
       }
     },
     {
@@ -123,7 +133,8 @@
         "doctor": "full",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "audit"
+        "facilityAdmin": "audit",
+        "communityHealthWorker": "hidden"
       }
     },
     {
@@ -135,7 +146,8 @@
         "doctor": "full",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "audit"
+        "facilityAdmin": "audit",
+        "communityHealthWorker": "hidden"
       }
     },
     {
@@ -147,7 +159,8 @@
         "doctor": "full",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "communityHealthWorker": "hidden"
       }
     },
     {
@@ -159,7 +172,8 @@
         "doctor": "view",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "communityHealthWorker": "hidden"
       },
       "notCompared": "No permission tells nursing observations apart from triage and vitals today; the screens use the triage area for both."
     },
@@ -172,7 +186,8 @@
         "doctor": "full",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "communityHealthWorker": "hidden"
       }
     },
     {
@@ -184,7 +199,8 @@
         "doctor": "full",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "communityHealthWorker": "hidden"
       }
     },
     {
@@ -196,7 +212,8 @@
         "doctor": "hidden",
         "lab": "full",
         "pharmacy": "hidden",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "communityHealthWorker": "hidden"
       }
     },
     {
@@ -208,7 +225,8 @@
         "doctor": "view",
         "lab": "full",
         "pharmacy": "hidden",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "communityHealthWorker": "hidden"
       }
     },
     {
@@ -220,7 +238,8 @@
         "doctor": "hidden",
         "lab": "hidden",
         "pharmacy": "full",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "communityHealthWorker": "hidden"
       }
     },
     {
@@ -232,7 +251,8 @@
         "doctor": "full",
         "lab": "hidden",
         "pharmacy": "view",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "communityHealthWorker": "hidden"
       }
     },
     {
@@ -244,7 +264,8 @@
         "doctor": "view",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "hidden"
+        "facilityAdmin": "hidden",
+        "communityHealthWorker": "hidden"
       }
     },
     {
@@ -256,7 +277,8 @@
         "doctor": "hidden",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "full"
+        "facilityAdmin": "full",
+        "communityHealthWorker": "view"
       }
     },
     {
@@ -268,7 +290,8 @@
         "doctor": "hidden",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "full"
+        "facilityAdmin": "full",
+        "communityHealthWorker": "hidden"
       }
     },
     {
@@ -280,7 +303,8 @@
         "doctor": "hidden",
         "lab": "hidden",
         "pharmacy": "hidden",
-        "facilityAdmin": "full"
+        "facilityAdmin": "full",
+        "communityHealthWorker": "hidden"
       },
       "derived": "Not a row of Akos's table: taken from its \"View (audit)\" cells, which give the facility admin the audit trail. The audit trail is read only, so holding audit.read is its full use."
     }
@@ -498,6 +522,11 @@
       "outreach.registration.read",
       "outreach.registration.write",
       "workforce.manage"
+    ],
+    "community_health_worker": [
+      "outreach.campaign.read",
+      "outreach.registration.read",
+      "outreach.registration.write"
     ],
     "work_list_reader": [
       "lab.work-item.read",

@@ -55,8 +55,9 @@ export function isStaffProduct(value: unknown): value is StaffProduct {
  * - pharmacy roles: pharmacy.work-item.read or pharmacy.dispensing.read
  *   (pharmacist, 0023);
  * - outreach roles: outreach.registration.read or outreach.campaign.read
- *   (outreach_organiser and outreach_volunteer, 0115; hospital outreach staff,
- *   0024 and 0038).
+ *   (outreach_organiser and outreach_volunteer at outreach groups, 0115; the
+ *   community health worker at hospitals and clinics, 0209; hospital outreach
+ *   staff, 0024 and 0038).
  *
  * Each staff site is for its own job (owner decision Q97): lab., pharmacy.
  * and outreach. admit their own roles' codes and a hospital administrator
@@ -81,7 +82,13 @@ const HOSPITAL_CLINICAL_PERMISSION = 'ehr.encounter.write';
  * pharmacist, never to doctor, clinician, nurse or receptionist): a
  * membership that holds one is that site's staff too, for example a nurse
  * also given the lab role at a small clinic, so Q97 does not refuse it there.
- * Outreach has none: its own roles (0115) live only at outreach groups.
+ * Outreach has none: its own roles hold only outreach codes that the
+ * hospital clinical roles hold too (outreach_organiser and outreach_volunteer
+ * at outreach groups, 0115; community_health_worker at hospitals and clinics,
+ * 0209). A membership holding one of them beside a clinical role is still a
+ * hospital clinical membership and is refused on outreach. (the design note's
+ * default for CHW-1: no gate change); one holding only them is admitted there
+ * by OUTREACH_PERMISSIONS.
  */
 const OWN_JOB_PERMISSIONS: Readonly<Record<StaffProduct, readonly string[]>> = Object.freeze({
   ehr: [],

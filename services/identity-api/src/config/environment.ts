@@ -294,6 +294,14 @@ const environmentSchema = z.object({
   // time, only once 0140 is applied: with it on, Identity refuses to start
   // while the table or one of its grants is missing (OpenPatientStartupCheck).
   STAFF_OPEN_PATIENT_ENABLED: booleanString,
+  // CHW-1 (0209, owner decision Q130 A): the community health worker role.
+  // Off (the default): Identity leaves community_health_worker out of the
+  // Staff page's inviteOptions.roles and refuses an invitation or an SX-4
+  // add naming it (400 STAFF_INVITATION_ROLE_NOT_ALLOWED), so the role stays
+  // hidden even after 0209 applies. Exactly 'true' or 'false'. Set it in AWS
+  // with HID_COMMUNITY_HEALTH_WORKER_ENABLED at synth time, only once 0209 is
+  // applied and the website's screens for the role ship.
+  COMMUNITY_HEALTH_WORKER_ENABLED: booleanString,
 }).superRefine((environment, context) => {
   if (environment.AUTH_MODE === 'local') {
     if (!environment.AUTH_SIGNING_SECRET || environment.AUTH_SIGNING_SECRET.length < 32) {

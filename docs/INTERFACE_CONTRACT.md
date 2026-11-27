@@ -4161,6 +4161,13 @@ POST /api/v1/outreach/registration-cases/campaigns/:campaignId/members # outreac
   returned.
 
 **members** (`{ membershipId, role: enumerator | health_worker | admin }`)
+- Who can be a member: any active staff membership at the campaign's
+  facility (the admins' `staff` list). At a hospital or clinic that includes,
+  since CHW-1 (0209), a community health worker (`community_health_worker`,
+  the volunteer's three codes). The member roles are not tied to staff roles:
+  nothing stops an admin from adding a community health worker as `admin`
+  (who then sees the facility's staff list above); the screens offer it
+  `health_worker` or `enumerator`.
 - A caller who is not one of the campaign's admins gets 403
   `OUTREACH_CAMPAIGN_ADMIN_REQUIRED`.
 - Someone who is not an active staff member at the facility gets 422
@@ -5441,7 +5448,7 @@ memberships whose permissions fit the product of the site:
 | `lab.` | `lab.work-item.read`, `lab.work-item.accept` (lab roles), or `organization.manage` (an administrator) |
 | `pharmacy.` | `pharmacy.work-item.read`, `pharmacy.dispensing.read` (pharmacy roles), or `organization.manage` |
 | `migrate.` | `ehr.encounter.write`, `organization.manage` only (lab staff are not admitted, although they hold `ocr.job.*`) |
-| `outreach.` | `outreach.registration.read`, `outreach.campaign.read` (outreach roles), or `organization.manage` |
+| `outreach.` | `outreach.registration.read`, `outreach.campaign.read` (outreach roles: `outreach_organiser` and `outreach_volunteer` at outreach groups, and, since CHW-1 (0209), `community_health_worker` at hospitals and clinics), or `organization.manage` |
 
 Each staff site is for its own job (owner decision Q97, "Q97 A", 17 November
 2026): a membership that holds `ehr.encounter.write` without
@@ -5451,7 +5458,13 @@ pharmacy and outreach reading codes for their own hospital work (0018, 0023,
 0024, 0038). A hospital administrator (`admin`, `org_admin`, which hold
 `organization.manage`, and the review-pending administrator below) keeps every
 site of its own organisation. Lab staff, pharmacists, outreach organisers and
-volunteers, and the account-only outreach session are unchanged. A doctor who
+volunteers, and the account-only outreach session are unchanged. Outreach
+roles now include a hospital role: a hospital's or clinic's membership that
+holds only `community_health_worker` (CHW-1, 0209: the volunteer's three
+codes, no `ehr.encounter.write`) fits `outreach.` only; one that holds it
+beside a clinical role (doctor, clinician, nurse, receptionist) is a hospital
+clinical membership and fits `ehr.` and `migrate.` only, as before (no gate
+change; see "CHW-1" below). A doctor who
 also helps an outreach group signs in on `outreach.` with the group only. A
 membership that also holds a site's own job keeps that site: one that holds
 `lab.result.enter`, `lab.specimen.receive` or `lab.order-route.receive` (the
@@ -5609,7 +5622,8 @@ actor.products: ('ehr' | 'lab' | 'pharmacy' | 'migrate' | 'outreach')[]
 
 Examples (fictional): a doctor `["ehr", "migrate"]`; a doctor who also helps
 an outreach group `["ehr", "migrate", "outreach"]`; lab staff `["lab"]`; a
-hospital `org_admin` `["ehr", "lab", "pharmacy", "migrate", "outreach"]`.
+hospital `org_admin` `["ehr", "lab", "pharmacy", "migrate", "outreach"]`; a
+hospital's community health worker (CHW-1) `["outreach"]`.
 
 The product is bound to the session, not to the `Origin` of each refresh (the
 `Origin` is the client's to set). A staff session issued on a product site
@@ -9511,7 +9525,8 @@ amendment on #258, for the owner to confirm at signing.
   as 0136 left them.
 - **Not a staff role:** the codes are never offered for invitation, never
   granted at support's review and never added or removed through SX-4
-  (`STAFF_ROLES` and 0139's lists stay the five hospital roles; requests
+  (`STAFF_ROLES` and 0139's lists stay the five hospital roles, and since
+  CHW-1 (0209) the community health worker; requests
   naming them answer 400 `VALIDATION_FAILED`). A staff profile (the Staff
   page's `members[].roles`, support's staff view) lists them, and the
   website shows the labels above. Neither ever becomes the membership's own
@@ -11324,8 +11339,8 @@ exactly these fields:
 
 | Field | Rule |
 |---|---|
-| `role` | `doctor`, `nurse`, `lab`, `pharmacist` or `receptionist`, and one of the facility's invitable roles (`inviteOptions.roles` of `GET /identity/facility-staff`). |
-| `licenceBody`, `licenceNumber` | The role's own licence: MDCN (doctor), NMCN (nurse), MLSCN (lab), PCN (pharmacist), with a number of 3-100 characters. The front desk sends neither. Today's invitation rule. |
+| `role` | `doctor`, `nurse`, `lab`, `pharmacist`, `receptionist` or (CHW-1, 0209) `community_health_worker`, and one of the facility's invitable roles (`inviteOptions.roles` of `GET /identity/facility-staff`). While `COMMUNITY_HEALTH_WORKER_ENABLED` is off, `community_health_worker` is refused 400 `STAFF_INVITATION_ROLE_NOT_ALLOWED` before the password. |
+| `licenceBody`, `licenceNumber` | The role's own licence: MDCN (doctor), NMCN (nurse), MLSCN (lab), PCN (pharmacist), with a number of 3-100 characters. The front desk and the community health worker send neither. Today's invitation rule. |
 | `attested` | `true`: the administrator vouches for the licence. |
 | `reason` | 8-500 characters. |
 | `currentPassword` | 1-256 characters. |
@@ -11365,11 +11380,15 @@ platform administrator works).
 - Bodies as the administrator's, with no `currentPassword` and no
   `expectedVersion`. Add also needs `verificationMethod` for a licensed role:
   `regulator_register`, `in_person`, `officer_match`, `cac_registered_contact`
-  or `other`. The front desk sends none.
+  or `other`. The front desk and the community health worker send none.
 - Any facility. The roles allowed are those of the organisation's recorded
-  kinds (a hospital or clinic: all five; a laboratory: `lab` and
-  `receptionist`; a pharmacy: `pharmacist` and `receptionist`; none
-  recorded: a hospital). None at an outreach group's facility.
+  kinds (a hospital or clinic: all five, and since 0209 the community health
+  worker; a laboratory: `lab` and `receptionist`; a pharmacy: `pharmacist`
+  and `receptionist`; none recorded: a hospital). None at an outreach group's
+  facility (support's add answers 400 `STAFF_INVITATION_ROLE_NOT_ALLOWED`
+  there). The community health worker's add is refused (400
+  `STAFF_INVITATION_ROLE_NOT_ALLOWED`) while `COMMUNITY_HEALTH_WORKER_ENABLED`
+  is off; its remove never is.
 - Support may change a governed facility's administrator's membership (never
   the administrator roles themselves). At a self-signed-up facility the
   administrator's role is changed with
@@ -11520,6 +11539,172 @@ EXECUTE to the Identity runtime only. The idempotency keys are kept in
 `admin.facility-staff.role-remove`. `identity.staff_licence_attestations`
 accepts support's methods (with no attesting membership, review or
 invitation) and a new attestation text, `platform-staff-role-v1`.
+
+## CHW-1. The community health worker role (migration 0209, provisional; not live until signed)
+
+Akos N-2 (the role table's Outreach row). Owner decision Q130 A (19 November
+2026): a new Outreach-only role for field health workers at hospitals and
+clinics, who register and screen people but never open the clinical record.
+The planned contract's "CHW-1" is the spec; this section is what is built, at
+the design note's recommended answers (hid-system #258, comment 7192282694),
+which the owner has not answered yet: no registration number is recorded in
+this release; export, campaign scope and mixed memberships stay as today; 0086's
+single "Change role" does not offer the role. Nothing changes for anyone until
+0209 is applied and `COMMUNITY_HEALTH_WORKER_ENABLED` is turned on.
+
+### The role
+
+- Code `community_health_worker`, title "Community health worker" (the email's
+  word: "community health worker").
+- Permissions: exactly `outreach_volunteer`'s (0115): `outreach.campaign.read`,
+  `outreach.registration.read`, `outreach.registration.write`. No
+  `outreach.campaign.write`, no `identity.*`, `ehr.*`, `lab.*`, `pharmacy.*`,
+  `ocr.*`, `workforce.manage`, consent or break-glass code.
+- No licence, as the front desk: invitations, SX-4's add and support's add
+  carry no `licenceBody`, `licenceNumber` or `verificationMethod` (400
+  `VALIDATION_FAILED` when sent), and no licence attestation is written.
+- Granted only at a hospital's or clinic's facility. 0115's fence
+  (`identity.enforce_outreach_tenant_roles`, the trigger on
+  `auth.account_roles`) gains one rule: an active grant of the role at
+  platform scope, or at a facility whose organisation is recorded as neither
+  a hospital nor a clinic (`identity.organization_staff_kinds`, 0126: no kind
+  recorded counts as a hospital, Q91 A; `other` with `ehr` or `migrate` is a
+  hospital), is refused with P0001 `COMMUNITY_HEALTH_WORKER_ONLY_AT_HOSPITAL`.
+  At an outreach group's facility the fence's existing rule refuses it
+  (`OUTREACH_GROUP_ROLE_INVALID`); outreach groups keep `outreach_volunteer`.
+  A revocation always passes. Grants made earlier are not re-checked if the
+  organisation's recorded kinds change later.
+
+### How it is given
+
+- **Invitation** (`POST /api/v1/identity/staff-invitations`): `role:
+  "community_health_worker"`, no licence fields, at hospitals and clinics
+  only (`identity.staff_invitable_roles` lists it last for `hospital`,
+  `clinic` and `other` with `ehr` or `migrate`; never for `laboratory` or
+  `pharmacy`). The invitation email names "community health worker" and its
+  link opens on `outreach.` (notification-api's `staffSiteForRole`), where the
+  website serves the acceptance page (health, separate pull request).
+  Accepting creates the membership with the role in both role columns and no
+  licence attestation.
+- **SX-4's add and remove** (the administrator's and support's), with no
+  licence and no method. Support's list of a governed hospital's roles
+  (`identity.staff_role_change_roles`) includes it; a governed laboratory's or
+  pharmacy's does not. A member can be left holding it alone (remove the
+  other roles).
+- **Not** 0086's single "Change role" (`POST
+  /identity/facility-staff/:membershipId/role`): 400 `VALIDATION_FAILED`
+  (identity-api), and the database's change refuses it too (22023
+  `STAFF_INVITATION_INVALID`).
+- Support cannot create a new membership at a governed facility, so a new
+  CHW-only person there first needs another role (add CHW, then remove the
+  other role). Open point for the owner.
+
+### The setting `COMMUNITY_HEALTH_WORKER_ENABLED` (identity-api)
+
+`true` or `false` exactly (anything else refuses to start), default `false`.
+While it is off, even after 0209 applies:
+
+- `GET /identity/facility-staff` leaves `community_health_worker` out of
+  `inviteOptions.roles` (the database lists it; Identity filters it);
+- an invitation, SX-4's add or support's add naming it answers 400
+  `STAFF_INVITATION_ROLE_NOT_ALLOWED` ("This facility cannot invite that
+  role") before the password and the database; the administrator's add writes
+  its usual denied row;
+- removing the role is always allowed.
+
+Turn it on only once 0209 is applied and the website's screens for the role
+ship. In AWS it is `HID_COMMUNITY_HEALTH_WORKER_ENABLED` at synth time
+(`infra/aws`, `environmentSettingVariables`; passed to identity-api only,
+`false` unless `true` is given, anything else refuses to synthesize). With
+it on, `inviteOptions.roles` at a hospital ends with `{ "code":
+"community_health_worker", "licenceBody": null }`.
+
+### Sign-in and home
+
+- Section 53's gate, unchanged: a membership holding only the role is admitted
+  on `outreach.` and refused on `ehr.`, `lab.`, `pharmacy.` and `migrate.` with
+  403 `PRODUCT_NOT_AUTHORISED` ("This account isn't set up for this Health ID
+  product."); `actor.products` is `["outreach"]`. Held beside a clinical role
+  (doctor, clinician, nurse, receptionist), the membership is a hospital
+  clinical one and is refused on `outreach.` (design note default: no gate
+  change).
+- Session roles come from `membership_role` and `app_role`: a member invited
+  as, or left with only, the community health worker has it there; one who
+  was given it beside another role through SX-4 does not, until a remove moves
+  the columns (SX-4).
+- SX-1's `modules`: `outreach` only (shown; using it in full needs
+  `outreach.campaign.write`, which the role does not hold). Home opens on
+  Outreach. The role-matrix fixture has a "Community health worker" column.
+
+### What it can and cannot do on Outreach (as served; corrections to the planned contract)
+
+- It sees **every campaign at its facility** (`outreach_campaigns_read` needs
+  only `outreach.campaign.read`), not only the campaigns it belongs to.
+- It sees and registers into its campaigns, and it also sees the facility's
+  **registrations with no campaign** (0045 and 0121's row rule admits
+  `campaign_id` null; campaigns are optional at a hospital). A DPO follow-up
+  is noted, not built.
+- Registering into a campaign it is a member of works without
+  `outreach.campaign.write`, through 0115's `outreach_campaigns_member_lock`
+  policy, as for volunteers.
+- **Export:** `POST /outreach/registration-cases/exports` needs only
+  `outreach.registration.read`, so the role can record an export, as a
+  volunteer can (the planned contract's "Recording an export is not given to
+  this role" is not built; closing it would also close it to volunteers).
+- It cannot create, open, close or manage a campaign; link a registration to
+  an existing patient (Identity's patient authorization); create a Health ID
+  through Outreach at a hospital (0119 refuses groups that are not outreach
+  groups); search patients, register at the desk, check in, open a chart,
+  request access or use emergency access.
+- Campaign admins may add it with any member role, `admin` included (section
+  40).
+
+### Errors it meets
+
+| HTTP | Code | Detail | When |
+|---|---|---|---|
+| 400 | `STAFF_INVITATION_ROLE_NOT_ALLOWED` | This facility cannot invite that role | At a laboratory or pharmacy; support's add at an outreach group; anywhere while the setting is off |
+| 400 | `VALIDATION_FAILED` | One or more request fields are invalid. | Licence fields or a method sent; the single "Change role" |
+| 403 | `PRODUCT_NOT_AUTHORISED` | This account isn't set up for this Health ID product. | On `ehr.`, `lab.`, `pharmacy.` or `migrate.` |
+| 403 | `PERMISSION_DENIED` | Required permission is missing (route guard) / Staff management is not permitted | Any non-Outreach route, including an invitation or SX-4 add at an outreach group (organisers and volunteers hold no `workforce.manage`) |
+| 403 | `OUTREACH_CAMPAIGN_ADMIN_REQUIRED` | (today's, section 40) | Managing a campaign |
+| 404 | `OUTREACH_REGISTRATION_NOT_FOUND` | (today's, section 48) | Another campaign's registration |
+
+### Database (0209)
+
+- One `auth.roles` row, three `auth.role_permissions` rows, and 4 audit rows
+  as the system actor (`auth.role.add` and three `auth.role-permission.add`,
+  correlation `0209-community-health-worker-role`, source `hid-0209`).
+- The fence's one rule (above).
+- `identity.staff_invitable_roles` and six role functions
+  (`staff_invitation_fields_valid`, `attach_invited_member`,
+  `add_facility_staff_role`, `remove_facility_staff_role`,
+  `admin_add_facility_staff_role`, `admin_remove_facility_staff_role`):
+  CREATE OR REPLACE from their current definitions with the role added to the
+  invitable list and to the front desk's unlicensed group; owner, grants,
+  SECURITY DEFINER and `search_path` unchanged. Tolerant of Billing's 0162 and
+  Dental's 0194 (applies before or after them; 0162 as cut on its branch
+  refuses after 0209, as it does after 0194). The tolerance is bounded: each
+  role another lane appended must be named by the invitation role check
+  after the front desk, be an active role, and not be a role of 0001-0153 or
+  a platform, outreach or organisation administrator role; every role in a
+  no-licence list must have no licence body; grants are pinned with their
+  grant option and grantor. Anything else refuses (55000), nothing applied.
+- A table change (the planned contract said none):
+  `identity.staff_invitations`' `staff_invitations_role_code_check` and
+  `staff_invitations_licence_ck` are replaced (the role added; no licence),
+  NOT VALID then validated, under ACCESS EXCLUSIVE for milliseconds.
+- No new function or grant: `runtime-grants.sql` is unchanged.
+- No existing member is changed.
+
+### Release order
+
+Deploy identity-api with CHW-1 (setting off) and notification-api with CHW-1
+before applying 0209, so that the role is never offered by an identity-api
+that does not know it. Quality's 0198 gives `quality.incident.report` to every
+active role in `staff_invitable_roles('hospital', 'ehr')` not in its
+`v_never`; if 0198 applies after 0209, `community_health_worker` must be added
+to `v_never` or it gains a fourth code (open).
 
 ## SX-8. Keep the open patient across a reload (Release B, migration 0140; not live until signed)
 

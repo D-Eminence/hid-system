@@ -50,6 +50,11 @@ describe('Outreach group rules (open sign-up on outreach.)', () => {
     expect(isOutreachTenant(tenant)).toBe(true);
     expect(isOutreachTenant(contextWithRoles(['outreach_organiser']))).toBe(true);
     expect(isOutreachTenant(hospital)).toBe(false);
+    // CHW-1 (0209): the community health worker is a hospital role, so its
+    // registrations take the hospital path (no tenant governance, no refusal
+    // of a Health ID link), alone or beside another hospital role.
+    expect(isOutreachTenant(contextWithRoles(['community_health_worker']))).toBe(false);
+    expect(isOutreachTenant(contextWithRoles(['community_health_worker', 'nurse']))).toBe(false);
   });
 
   it.each([

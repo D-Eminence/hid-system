@@ -370,6 +370,66 @@ describe('SX-4 routes over HTTP', () => {
     });
   });
 
+  // CHW-1 (0209): the community health worker is added and removed like the front desk (no licence, no method). While
+  // COMMUNITY_HEALTH_WORKER_ENABLED is off (the default) an add naming it is refused 400
+  // STAFF_INVITATION_ROLE_NOT_ALLOWED before the database (the administrator's with its denied row, before the
+  // password), by support too; a remove always passes, so a role given while the setting was on can be taken away.
+  describe('the community health worker (CHW-1)', () => {
+    const chwAdd = { role: 'community_health_worker', attested: true, reason: 'Works in the community',
+      currentPassword: 'secret pass', expectedVersion: 4 };
+    const chwSupportAdd = { role: 'community_health_worker', attested: true, reason: 'Works in the community' };
+
+    it('refuses the add while COMMUNITY_HEALTH_WORKER_ENABLED is off, with a denied row, and lets the remove through', async () => {
+      handlers['identity.add_facility_staff_role'] = changed();
+      handlers['identity.remove_facility_staff_role'] = changed({ roles: ['nurse'], grants_revoked: 0 });
+      const added = await asStaff(`${staffPath}/add`).set('Idempotency-Key', 'add-role-chw-0001').send(chwAdd);
+      expect([added.status, added.body.code]).toEqual([400, 'STAFF_INVITATION_ROLE_NOT_ALLOWED']);
+      expect(sqlCalls('add_facility_staff_role')).toEqual([]);
+      expect(reauthentication.confirm).not.toHaveBeenCalled();
+      expect(domainRows('identity.facility-staff.role-add')).toEqual([expect.objectContaining({ outcome: 'denied',
+        details: { membershipId, roleCode: 'community_health_worker', code: 'STAFF_INVITATION_ROLE_NOT_ALLOWED' } })]);
+      const removed = await asStaff(`${staffPath}/remove`)
+        .send({ role: 'community_health_worker', reason: 'Back on the ward only', currentPassword: 'secret pass',
+          expectedVersion: 5 });
+      expect(removed.status).toBe(200);
+      expect(sqlCalls('identity.remove_facility_staff_role')[0]?.values.slice(2, 3)).toEqual(['community_health_worker']);
+      tokens.verify.mockResolvedValue({ actor: support, claims: {} });
+      handlers['identity.admin_add_facility_staff_role'] = changed();
+      const supportAdded = await asSupport(`${supportPath}/add`).set('If-Match', '"4"')
+        .set('Idempotency-Key', 'support-add-chw-0001').send(chwSupportAdd);
+      expect([supportAdded.status, supportAdded.body.code]).toEqual([400, 'STAFF_INVITATION_ROLE_NOT_ALLOWED']);
+      expect(sqlCalls('admin_add_facility_staff_role')).toEqual([]);
+      handlers['identity.admin_remove_facility_staff_role'] = changed({ roles: ['nurse'], replayed: false });
+      const supportRemoved = await asSupport(`${supportPath}/remove`).set('If-Match', '"5"')
+        .set('Idempotency-Key', 'support-remove-chw-0001').send({ role: 'community_health_worker',
+          reason: 'Back on the ward only' });
+      expect(supportRemoved.status).toBe(200);
+    });
+
+    it('adds it with no licence or method once COMMUNITY_HEALTH_WORKER_ENABLED is on', async () => {
+      process.env.COMMUNITY_HEALTH_WORKER_ENABLED = 'true';
+      resetEnvironmentForTests();
+      handlers['identity.add_facility_staff_role'] = changed({ roles: ['community_health_worker', 'doctor'] });
+      const added = await asStaff(`${staffPath}/add`).set('Idempotency-Key', 'add-role-chw-0002').send(chwAdd);
+      expect([added.status, added.body.roles]).toEqual([201, ['community_health_worker', 'doctor']]);
+      expect(sqlCalls('identity.add_facility_staff_role')[0]?.values.slice(2, 5))
+        .toEqual(['community_health_worker', null, null]);
+      const licensed = await asStaff(`${staffPath}/add`).set('Idempotency-Key', 'add-role-chw-0003')
+        .send({ ...chwAdd, licenceBody: 'MDCN', licenceNumber: 'MDCN/1' });
+      expect([licensed.status, licensed.body.code]).toEqual([400, 'VALIDATION_FAILED']);
+      tokens.verify.mockResolvedValue({ actor: support, claims: {} });
+      handlers['identity.admin_add_facility_staff_role'] = changed();
+      const supportAdded = await asSupport(`${supportPath}/add`).set('If-Match', '"4"')
+        .set('Idempotency-Key', 'support-add-chw-0002').send(chwSupportAdd);
+      expect(supportAdded.status).toBe(201);
+      expect(sqlCalls('identity.admin_add_facility_staff_role')[0]?.values.slice(3, 7))
+        .toEqual(['community_health_worker', null, null, null]);
+      const withMethod = await asSupport(`${supportPath}/add`).set('If-Match', '"4"')
+        .set('Idempotency-Key', 'support-add-chw-0003').send({ ...chwSupportAdd, verificationMethod: 'in_person' });
+      expect([withMethod.status, withMethod.body.code]).toEqual([400, 'VALIDATION_FAILED']);
+    });
+  });
+
   describe('support', () => {
     beforeEach(() => {
       tokens.verify.mockResolvedValue({ actor: support, claims: {} });

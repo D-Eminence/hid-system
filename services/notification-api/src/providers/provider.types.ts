@@ -163,7 +163,9 @@ export function emergencyContactAlertContent(input: {
 
 /**
  * The lower-case role label a staff invitation names (P4b, SPEC 4.2): the
- * five roles a self-signed-up facility may invite. No other role can be sent.
+ * roles a self-signed-up facility may invite, as identity-api's
+ * STAFF_ROLE_LABELS (CHW-1, 0209: the community health worker, at hospitals
+ * and clinics). No other role can be sent.
  */
 export const STAFF_ROLE_LABELS = {
   doctor: 'doctor',
@@ -171,6 +173,7 @@ export const STAFF_ROLE_LABELS = {
   lab: 'laboratory scientist',
   pharmacist: 'pharmacist',
   receptionist: 'receptionist',
+  community_health_worker: 'community health worker',
 } as const;
 export type FacilityStaffInvitationRole = keyof typeof STAFF_ROLE_LABELS;
 /**
@@ -196,11 +199,13 @@ const STAFF_SITE_ORIGINS: Readonly<Record<'staging' | 'production', Readonly<Rec
 /**
  * The staff site a facility role works on, as the website's staffSiteForRole
  * (D-Eminence/health productHostname.ts): laboratory scientists on lab,
- * pharmacists on pharmacy, everyone else on ehr. The invitation is opened and
- * accepted there, and the new member signs in there.
+ * pharmacists on pharmacy, outreach volunteers and community health workers
+ * (CHW-1, 0209: an Outreach-only role, refused on ehr. by the product gate)
+ * on outreach, everyone else on ehr. The invitation is opened and accepted
+ * there, and the new member signs in there.
  */
 export function staffSiteForRole(role: StaffInvitationRole): StaffSite {
-  if (role === OUTREACH_VOLUNTEER_ROLE) return 'outreach';
+  if (role === OUTREACH_VOLUNTEER_ROLE || role === 'community_health_worker') return 'outreach';
   return role === 'lab' ? 'lab' : role === 'pharmacist' ? 'pharmacy' : 'ehr';
 }
 

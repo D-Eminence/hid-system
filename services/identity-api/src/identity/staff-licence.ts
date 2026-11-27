@@ -8,8 +8,20 @@
  * choices to the browser.
  */
 
-export const STAFF_ROLES = ['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist'] as const;
+// CHW-1 (0209, owner decision Q130 A): community_health_worker is a staff role with no licence, like the front desk,
+// invitable at hospitals and clinics only (the database's list puts it last). While COMMUNITY_HEALTH_WORKER_ENABLED is
+// off it is neither offered nor accepted for invitations and SX-4's add (staffRoleOffered).
+export const STAFF_ROLES = ['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist', 'community_health_worker'] as const;
 export type StaffRole = typeof STAFF_ROLES[number];
+
+/** The community health worker (CHW-1, 0209): an Outreach-only role at hospitals and clinics. */
+export const COMMUNITY_HEALTH_WORKER_ROLE = 'community_health_worker' as const;
+
+/**
+ * The roles 0086's single "Change role" (identity.change_facility_staff_role) offers: every staff role but the
+ * community health worker, which 0209 leaves to SX-4's add and remove (the database refuses it there too).
+ */
+export const CHANGEABLE_STAFF_ROLES = STAFF_ROLES.filter((role) => role !== COMMUNITY_HEALTH_WORKER_ROLE);
 
 export const LICENCE_BODIES = ['MDCN', 'NMCN', 'MLSCN', 'PCN'] as const;
 export type LicenceBody = typeof LICENCE_BODIES[number];
@@ -33,6 +45,7 @@ const LICENCE_BODY_BY_ROLE: Readonly<Record<StaffRole, LicenceBody | null>> = Ob
   lab: 'MLSCN',
   pharmacist: 'PCN',
   receptionist: null,
+  community_health_worker: null,
 });
 
 /** The role's labels: the title the page shows and the lower-case word the email uses. */
@@ -42,6 +55,7 @@ export const STAFF_ROLE_LABELS: Readonly<Record<StaffRole, { title: string; lowe
   lab: { title: 'Laboratory scientist', lower: 'laboratory scientist' },
   pharmacist: { title: 'Pharmacist', lower: 'pharmacist' },
   receptionist: { title: 'Receptionist', lower: 'receptionist' },
+  community_health_worker: { title: 'Community health worker', lower: 'community health worker' },
 });
 
 /**
@@ -63,7 +77,7 @@ export const NARROW_ROLE_LABELS: Readonly<Record<NarrowRole, { title: string; lo
   reading_starter: { title: 'Start a paper reading', lower: 'start a paper reading' },
 });
 
-/** The licence body a role needs, or null (receptionist: no licence). */
+/** The licence body a role needs, or null (receptionist and community health worker: no licence). */
 export function staffRoleLicenceBody(role: string): LicenceBody | null {
   return (STAFF_ROLES as readonly string[]).includes(role) ? LICENCE_BODY_BY_ROLE[role as StaffRole] : null;
 }
@@ -85,7 +99,7 @@ function family(organizationType: string, productCode: string): Family | null {
 /** The roles a reviewed self-signed-up facility may invite (S9, Q5; SPEC 4.2). */
 export function staffInvitableRoles(organizationType: string, productCode: string): StaffRole[] {
   switch (family(organizationType, productCode)) {
-    case 'clinical': return ['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist'];
+    case 'clinical': return ['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist', 'community_health_worker'];
     case 'laboratory': return ['lab', 'receptionist'];
     case 'pharmacy': return ['pharmacist', 'receptionist'];
     default: return [];
@@ -118,4 +132,15 @@ export const LICENCE_NUMBER = /^[A-Z0-9][A-Z0-9/. -]{1,98}[A-Z0-9]$/;
 
 export function licenceNumberAcceptable(normalized: string): boolean {
   return LICENCE_NUMBER.test(normalized) && !normalized.includes('  ');
+}
+
+/**
+ * CHW-1 (0209): whether a role may be offered and given now. Every role is, but the community health worker only while
+ * COMMUNITY_HEALTH_WORKER_ENABLED is on: while it is off (the default) Identity leaves the role out of the Staff page's
+ * inviteOptions.roles and refuses an invitation or an SX-4 add naming it with 400 STAFF_INVITATION_ROLE_NOT_ALLOWED,
+ * so the role stays hidden even after 0209 applies (the planned contract: "Before this ships, do not show the role
+ * anywhere"). Removing the role is always allowed.
+ */
+export function staffRoleOffered(role: string, switches: { communityHealthWorkerEnabled: boolean }): boolean {
+  return role !== COMMUNITY_HEALTH_WORKER_ROLE || switches.communityHealthWorkerEnabled;
 }
