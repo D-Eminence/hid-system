@@ -66,8 +66,8 @@ test('0152\'s post-checks pin the sealed-release function\'s body: the md5 is of
 
 // 0157 (ORD-9, Rahman's two ranking fixes after his last look at #320): one CREATE OR REPLACE of the diagnosis
 // search. Its preconditions pin 0152's search by the md5 of its body, and its post-checks the md5 of its own; both
-// are read here from the files, as above. No migration number appears in either body, so a new number at
-// integration keeps both.
+// are read here from the files, as above. Neither body names 0152 or 0157 (both name only 0149, in comments), so a
+// new number at integration keeps both.
 const rankingFile = 'services/ehr-api/database/migrations/0157_diagnosis_search_ranking.sql'
 const ranking = readFileSync(resolve(repository, rankingFile), 'utf8')
 const searchHead = 'ehr.search_catalog_diagnoses(requested_q text, requested_limit integer)'

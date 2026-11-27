@@ -5,10 +5,11 @@
 -- November 2026) cleared 0152 to sign and left two ranking minors, to fix
 -- before any ICD-11 release is activated; the design note on hid-system#258
 -- (Ola, 26 November 2026, 13:20 UTC) is the plan. Written on 0152 (#320).
--- The number is a booking, given at integration in release order; no
--- migration number appears inside the function body, so renumbering leaves
--- both md5s. This file requires 0149 and 0152 applied (0153-0156 and 0159
--- are not required). The declaration is signed separately.
+-- The number is a booking, given at integration in release order; neither
+-- function body names 0152 or 0157 (both name only 0149, the helper's file,
+-- in comments), so renumbering leaves both md5s. This file requires 0149
+-- and 0152 applied (0153-0156 and 0159 are not required). The declaration
+-- is signed separately.
 --
 -- THE GAP. Rahman's two minors, both in ehr.search_catalog_diagnoses only:
 -- 1. The second attempt (when nothing matched) drops a final s from every
@@ -349,13 +350,14 @@ begin
                 and (acl.grantee = 0 or pg_get_userbyid(acl.grantee) not in ('hid_ehr_runtime', 'hid_schema_test_runtime'))) then
     raise exception using errcode = '55000', message = '0157: the diagnosis search is granted to a role other than the EHR and schema test runtimes';
   end if;
-  -- CREATE OR REPLACE keeps the grants: each runtime that exists still holds EXECUTE.
+  -- CREATE OR REPLACE keeps the grants: each runtime that exists holds EXECUTE (0152 granted it; the preconditions do
+  -- not check it, so a runtime that never held it is refused here too, and nothing is applied).
   if exists (select 1 from pg_roles runtime_role
               where runtime_role.rolname in ('hid_ehr_runtime', 'hid_schema_test_runtime')
                 and not exists (select 1 from pg_proc proc, lateral aclexplode(proc.proacl) acl
                                  where proc.oid = 'ehr.search_catalog_diagnoses(text,integer)'::regprocedure
                                    and acl.grantee = runtime_role.oid and acl.privilege_type = 'EXECUTE')) then
-    raise exception using errcode = '55000', message = '0157: a runtime lost EXECUTE on the diagnosis search';
+    raise exception using errcode = '55000', message = '0157: a runtime does not hold EXECUTE on the diagnosis search';
   end if;
   if not exists (select 1 from pg_proc proc
                   where proc.oid = 'ehr.catalog_search_query(text)'::regprocedure
