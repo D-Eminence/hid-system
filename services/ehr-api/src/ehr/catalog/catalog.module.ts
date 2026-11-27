@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { CatalogController, TerminologyController } from './catalog.controller';
 import { CatalogService } from './catalog.service';
 import { RecentDiagnosesService } from './recent-diagnoses.service';
+import { LAB_REQUEST_GROUPS_PROVIDER } from '../lab-requests/lab-request-groups';
 import { NAME_ONLY_CODES_PROVIDER } from '../shared/name-only-codes';
 
 /**
@@ -10,7 +11,8 @@ import { NAME_ONLY_CODES_PROVIDER } from '../shared/name-only-codes';
  */
 @Module({
   controllers: [CatalogController, TerminologyController],
-  // NameOnlyCodes: the status's labTestNameOnly and diagnosisNameOnly (0156).
-  providers: [CatalogService, RecentDiagnosesService, NAME_ONLY_CODES_PROVIDER],
+  // NameOnlyCodes: the status's labTestNameOnly and diagnosisNameOnly (0156); LabRequestGroups: its
+  // labRequestGroups (ORD-6, 0158).
+  providers: [CatalogService, RecentDiagnosesService, NAME_ONLY_CODES_PROVIDER, LAB_REQUEST_GROUPS_PROVIDER],
 })
 export class CatalogModule {}

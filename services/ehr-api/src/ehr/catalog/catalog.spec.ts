@@ -21,6 +21,7 @@ import {
 } from './catalog.service';
 import { RECENT_DIAGNOSES_SQL, RecentDiagnosesService, type RecentDiagnosesCaller } from './recent-diagnoses.service';
 import { NAME_ONLY_CODES_OFF, NAME_ONLY_CODES_PROVIDER, NameOnlyCodes } from '../shared/name-only-codes';
+import { LAB_REQUEST_GROUPS_OFF, LAB_REQUEST_GROUPS_PROVIDER, LabRequestGroups } from '../lab-requests/lab-request-groups';
 
 // Fictional identifiers only. Medicine and test names are list facts, not patient data.
 const membershipA = '123e4567-e89b-42d3-a456-426614174004';
@@ -183,7 +184,7 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
         medicines: { available: false, version: null, approvedAt: null, fileSha256: null },
         labTests: { available: false, version: null, approvedAt: null, fileSha256: null },
         diagnoses: { available: false, release: null, fileSha256: null },
-        labTestNameOnly: false, diagnosisNameOnly: false, classDuplicateCheck: false,
+        labTestNameOnly: false, labRequestGroups: false, diagnosisNameOnly: false, classDuplicateCheck: false,
         attribution: [],
       });
       expect(calls).toEqual([{ sql: STATUS_SQL, values: [] }]);
@@ -197,6 +198,24 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
           labTestNameOnly: labRequests, diagnosisNameOnly: diagnoses, classDuplicateCheck: false });
       }
     });
+
+    it('says whether several tests may go in one lab request (ORD-6): labRequestGroups is LAB_REQUEST_GROUPS_ENABLED',
+      async () => {
+        // The website offers the multi-test form only when it is true: through the gateway the group route's 503
+        // LAB_REQUEST_GROUPS_UNAVAILABLE is the gateway's 503 UPSTREAM_UNAVAILABLE, so it cannot rely on that.
+        for (const enabled of [true, false]) {
+          const { database } = fakeDatabase([statusRow('lab_test'), statusRow('medicine')]);
+          await expect(new CatalogService(database, new NameOnlyCodes(true, true), new LabRequestGroups(enabled)).status())
+            .resolves.toMatchObject({ labRequestGroups: enabled, labTestNameOnly: true, diagnosisNameOnly: true });
+        }
+        // Off unless the module gives it the setting; on its own, not with 0156's settings.
+        const { database } = fakeDatabase([statusRow('lab_test'), statusRow('medicine')]);
+        await expect(new CatalogService(database, new NameOnlyCodes(true, true)).status())
+          .resolves.toMatchObject({ labRequestGroups: false });
+        await expect(new CatalogService(database, NAME_ONLY_CODES_OFF, new LabRequestGroups(true)).status())
+          .resolves.toMatchObject({ labRequestGroups: true, labTestNameOnly: false, diagnosisNameOnly: false });
+        expect((Reflect.getMetadata('design:paramtypes', CatalogService) as unknown[])[2]).toBe(LabRequestGroups);
+      });
 
     it('a loaded list is available with its version, sign-off day, seed file and its sources\' notices, once each', async () => {
       const loinc = 'This material contains content from LOINC (http://loinc.org).';
@@ -581,12 +600,13 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       app = undefined;
     });
 
-    const start = async (answer: readonly Record<string, unknown>[] | Error) => {
+    const start = async (answer: readonly Record<string, unknown>[] | Error, groups = LAB_REQUEST_GROUPS_OFF) => {
       const { database, calls } = fakeDatabase(answer);
       // The terminology controller also serves recent diagnoses; these HTTP tests never call that route.
       @Module({ controllers: [CatalogController, TerminologyController],
         providers: [CatalogService, { provide: DatabaseService, useValue: database },
-          { provide: RecentDiagnosesService, useValue: {} }, { provide: NameOnlyCodes, useValue: NAME_ONLY_CODES_OFF }] })
+          { provide: RecentDiagnosesService, useValue: {} }, { provide: NameOnlyCodes, useValue: NAME_ONLY_CODES_OFF },
+          { provide: LabRequestGroups, useValue: groups }] })
       class TestModule {}
       const moduleRef = await Test.createTestingModule({ imports: [TestModule] }).compile();
       app = moduleRef.createNestApplication({ logger: false });
@@ -607,6 +627,17 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       };
       return { get, calls };
     };
+
+    it.each([true, false])('ORD-6: the status sends labRequestGroups %s as LAB_REQUEST_GROUPS_ENABLED says, beside '
+      + 'labTestNameOnly', async (enabled) => {
+      const rows = ['lab_test', 'medicine', 'diagnosis'].map((kind) => ({ kind, available: false, list_version: null,
+        approved_day: null, offered: 0, attribution: [], file_sha256: null }));
+      const { get } = await start(rows, new LabRequestGroups(enabled));
+      const answer = await get('/ehr/catalog/status');
+      expect(answer.status).toBe(200);
+      expect(answer.body).toMatchObject({ labTestNameOnly: false, labRequestGroups: enabled, diagnosisNameOnly: false });
+      expect(answer.cacheControl).toBe('private, max-age=60');
+    });
 
     it.each(['42883', '42P01', '57014'])('a database failure (%s) is sent as 503 CATALOG_UNAVAILABLE with the filter\'s '
       + 'words for every 5xx', async (code) => {
@@ -703,7 +734,7 @@ describe('ORD-9 (0153): recent diagnoses', () => {
     expect(Reflect.getMetadata(AUDIT_FAILURES_ONLY, handler)).toBe(true);
     expect(Reflect.getMetadata(HEADERS_METADATA, handler)).toBeUndefined();
     expect(Reflect.getMetadata('providers', CatalogModule)).toEqual([CatalogService, RecentDiagnosesService,
-      NAME_ONLY_CODES_PROVIDER]);
+      NAME_ONLY_CODES_PROVIDER, LAB_REQUEST_GROUPS_PROVIDER]);
   });
 
   it('the route reads the guards\' actor at this facility, sets no header and needs no X-Purpose-Of-Use', async () => {

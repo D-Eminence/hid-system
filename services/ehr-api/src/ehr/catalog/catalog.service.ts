@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { QueryResultRow } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import { DatabaseService } from '../../database/database.service';
+import { LAB_REQUEST_GROUPS_OFF, LabRequestGroups } from '../lab-requests/lab-request-groups';
 import { NAME_ONLY_CODES_OFF, NameOnlyCodes } from '../shared/name-only-codes';
 import { CATALOG_SEARCH_MAX_LENGTH } from './catalog.dto';
 import type { CATALOG_LAB_CATEGORIES, CatalogDoseForm, SearchCatalogLabTestsQueryDto,
@@ -37,6 +38,12 @@ export interface CatalogStatus {
   diagnoses: { available: boolean; release: string | null; fileSha256: string | null };
   /** Whether a lab request may be saved by its test name only (0156, LAB_REQUEST_NAME_ONLY_ENABLED). */
   labTestNameOnly: boolean;
+  /**
+   * Whether several tests may be saved in one lab request (ORD-6, 0158, LAB_REQUEST_GROUPS_ENABLED): the website
+   * offers the multi-test form only when it is true. The group route's 503 LAB_REQUEST_GROUPS_UNAVAILABLE stays as a
+   * backstop, but through the gateway it is the gateway's 503 UPSTREAM_UNAVAILABLE, so a screen cannot rely on it.
+   */
+  labRequestGroups: boolean;
   /** Whether a diagnosis may be saved by its name only, with codeStatus on its create (0156, DIAGNOSIS_NAME_ONLY_ENABLED). */
   diagnosisNameOnly: boolean;
   /** ORD-10 phase 2. */
@@ -271,14 +278,16 @@ export class CatalogService {
   private readonly searches = new Map<string, { windowEnds: number; count: number }>();
 
   constructor(private readonly database: DatabaseService,
-    private readonly nameOnly: NameOnlyCodes = NAME_ONLY_CODES_OFF) {}
+    private readonly nameOnly: NameOnlyCodes = NAME_ONLY_CODES_OFF,
+    private readonly groups: LabRequestGroups = LAB_REQUEST_GROUPS_OFF) {}
 
   /**
    * What the screens may use. A list is available when its active, signed
    * version offers at least one row. On a schema without 0149 this answers
    * 404 CATALOG_NOT_AVAILABLE, as the contract says it does before ORD-7
    * ships, so the screens keep their built-in lists. labTestNameOnly and
-   * diagnosisNameOnly are the two settings of 0156 (false while off).
+   * diagnosisNameOnly are the two settings of 0156, and labRequestGroups is
+   * ORD-6's LAB_REQUEST_GROUPS_ENABLED (each false while off).
    */
   async status(): Promise<CatalogStatus> {
     let rows: StatusRow[];
@@ -311,6 +320,7 @@ export class CatalogService {
         release: diagnosisList.available ? `ICD-11 MMS ${diagnosisList.version}` : null,
         fileSha256: diagnosisList.fileSha256 },
       labTestNameOnly: this.nameOnly.labRequests,
+      labRequestGroups: this.groups.enabled,
       diagnosisNameOnly: this.nameOnly.diagnoses,
       classDuplicateCheck: false,
       attribution,
