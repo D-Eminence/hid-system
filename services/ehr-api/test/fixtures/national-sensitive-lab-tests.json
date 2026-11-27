@@ -1,5 +1,5 @@
 {
-  "about": "National lab tests the patient chat hides (the sensitive test list), each with every one of its names: the name, other names and LOINC name in docs/codes/drafts/hid-medicines-and-lab-tests.csv at c68ef594 (claude/code-list-drafts), and the display and other names in the built seed hid-lab-tests.json (sha256 eff9ba67...). A test is here when the list hid it by any name at 4e41e132, or Ola made it sensitive on 27 Nov 2026 (LAB-0034 urine TB LAM, LAB-0148 cryptococcal antigen). Every name must be hidden.",
+  "about": "National lab tests the patient chat hides (the sensitive test list), each with every one of its names: the name, other names and LOINC name in docs/codes/drafts/hid-medicines-and-lab-tests.csv at c68ef594 (claude/code-list-drafts), and the display and other names in the built seed hid-lab-tests.json (sha256 eff9ba67...). A test is here when the list hid it by any name at 4e41e132, or Ola made it sensitive on 27 Nov 2026 (LAB-0034 urine TB LAM, LAB-0148 cryptococcal antigen, LAB-0087 India ink). Every name must be hidden but the ambiguous ones the walk tests exempt by name: LAB-0080 \"PT\" (prothrombin time to clinicians) and LAB-0139 \"Wet mount\", \"Wet prep\" and \"Saline wet mount\" (they do not say the sample is vaginal).",
   "items": [
     { "id": "LAB-0004", "names": ["Haemoglobin genotype", "Hb genotype", "Genotype", "Hb electrophoresis", "Hemoglobin pattern [Interpretation] in Blood by Electrophoresis"] },
     { "id": "LAB-0007", "names": ["Bone marrow aspirate", "BMA", "Bone marrow aspiration and trephine", "Bone marrow biopsy"] },
@@ -14,6 +14,7 @@
     { "id": "LAB-0052", "names": ["Pap smear", "Pap test", "Cervical smear", "Cervical cytology", "Microscopic observation [Identifier] in Cervix by Cyto stain"] },
     { "id": "LAB-0074", "names": ["Alpha-fetoprotein", "AFP", "Serum AFP", "Alpha-1-Fetoprotein [Mass/volume] in Serum or Plasma"] },
     { "id": "LAB-0080", "names": ["Urine pregnancy test", "UPT", "PT", "Urine hCG", "Pregnancy test", "Choriogonadotropin [Presence] in Urine"] },
+    { "id": "LAB-0087", "names": ["CSF India ink", "India ink stain", "India ink for Cryptococcus"] },
     { "id": "LAB-0090", "names": ["Hepatitis B surface antigen", "HBsAg", "Hep B screen", "HBV screening", "Hepatitis B virus surface Ag [Presence] in Serum or Plasma by Immunoassay"] },
     { "id": "LAB-0091", "names": ["HBeAg", "Hepatitis B e antigen", "Hepatitis B virus e Ag [Presence] in Serum or Plasma by Immunoassay"] },
     { "id": "LAB-0092", "names": ["Syphilis rapid test", "Syphilis RDT", "Treponemal rapid test", "Treponema pallidum IgG+IgM Ab [Presence] in Serum, Plasma or Blood by Rapid immunoassay"] },

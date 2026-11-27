@@ -100,7 +100,8 @@ export const SENSITIVE_TEST_FRAGMENTS = [
   'herpes', 'hsv[a-z0-9]*', 'trich?omon[a-z]*', 'stis?', 'stds?',
   '(?:beta|b|urine|serum)?hcgs?', 'upts?',
   '[ft]?psas?', 'afps?', 'ceas?', 'ca[^a-z0-9]*125', 'ca[^a-z0-9]*19[^a-z0-9]*9', 'ca[^a-z0-9]*15[^a-z0-9]*3', 'tumou?r[^a-z0-9]*markers?',
-  'biops[a-z]*', 'histolog[a-z]*', 'histopath[a-z]*', 'cytolog[a-z]*', 'pap', 'pap[^a-z0-9]*smears?',
+  // Pap smear: "Pap", "Paps", "PAP's", and a Pap or Paps smear or test with any marks or none between ("Paps smear").
+  'biops[a-z]*', 'histolog[a-z]*', 'histopath[a-z]*', 'cytolog[a-z]*', 'paps?', 'paps?[^a-z0-9]*(?:smears?|tests?)',
   'karyotyp[a-z]*', 'brca[0-9]*s?', 'genetic[a-z]*', 'genotyp[a-z]*',
   'phq[^a-z0-9]*[0-9]*', 'gad[^a-z0-9]*[27]', 'psych[a-z]*',
   // GAD only as the anxiety scales GAD-2 and GAD-7 ("G.A.D.-7"): a 2 or 7 with no digit after it. Plain "GAD", "GAD65"
@@ -111,7 +112,8 @@ export const SENSITIVE_TEST_FRAGMENTS = [
   // The same tests written out in full, as LOINC display names and lab menus write them.
   'prostate[^a-z0-9]*specific', '[a-z]*fetoprotein', 'carcino[^a-z0-9]*embryonic', 'cancer[^a-z0-9]*(?:ag|antigen|screen[a-z]*)',
   'chorionic', 'choriogonadotrop[a-z]*', 'human[^a-z0-9]*immuno[^a-z0-9]*deficiency',
-  'hep[^a-z0-9]*[bcde](?:[^a-z0-9]*[sec])?(?:[^a-z0-9]*a[gb])?',
+  // Hep A to Hep E, with any marks or none ("Hep A", "Hep-B", "HepC", "Hep. B s Ag").
+  'hep[^a-z0-9]*[abcde](?:[^a-z0-9]*[sec])?(?:[^a-z0-9]*a[gb])?',
   'hbs[^a-z0-9]*ag',
   // HIV rapid-test kits named alone: Determine, Uni-Gold and Stat-Pak are the three tests of Nigeria's serial HIV
   // algorithm, and OraQuick is sold for self-testing. A facility's own test is ordered by its name only (0155), so
@@ -140,11 +142,21 @@ export const SENSITIVE_TEST_FRAGMENTS = [
   'drugs?[^a-z0-9]*(?:(?:of[^a-z0-9]*)?abuse(?:[^a-z0-9]*(?:screen[a-z]*|panels?))?|screen[a-z]*)', 'urine[^a-z0-9]*drug[a-z]*', 'paternity',
   // Ola's second list (#258, 27 Nov 2026). First, every name of a national lab test that the list already hid by
   // another of its names: bone marrow aspirate (BMA), "Cervical smear" (and cervical screening) and the LOINC name
-  // "... in Cervix by Cyto stain" (Pap smear), the TORCH screen (its herpes antibodies), "T helper cell count" (CD4)
-  // and the wet mount or prep (for Trichomonas). The pregnancy tests' "PT" and the sickling tests are in the test-only
-  // list below.
-  'bone[^a-z0-9]*marrow[^a-z0-9]*aspirat[a-z]*', 'bmas?', 'cervi(?:cal|x)[^a-z0-9]*(?:smears?|screen[a-z]*)',
-  'cyto[^a-z0-9]*stain[a-z]*', 'torch', 't[^a-z0-9]*helper', 'wet[^a-z0-9]*(?:mount|prep)[a-z]*',
+  // "... in Cervix by Cyto stain" (Pap smear), the TORCH screen (its herpes antibodies) and "T helper cell count" (CD4).
+  // "Serum PT" and the sickling tests are in the test-only list below.
+  // Bone marrow (or BM) aspirate, aspiration, trephine or biopsy: Ola's third list (#258, 27 Nov 2026).
+  '(?:bone[^a-z0-9]*marrow|bm)[^a-z0-9]*(?:aspirat[a-z]*|trephines?|biops[a-z]*)', 'bmas?',
+  'cervi(?:cal|x)[^a-z0-9]*(?:smears?|screen[a-z]*)', 'cyto[^a-z0-9]*stain[a-z]*', 'torch', 't[^a-z0-9]*helper',
+  // A wet mount or prep is hidden only when it is vaginal (for Trichomonas), Ola's third list: vaginal, HVS or high
+  // vaginal (swab) just before it, a saline or KOH wet mount too ("HVS saline wet prep"); vaginal or HVS one or two
+  // words before it ("HVS for wet prep", "Vaginal swab wet mount"); or vaginal or HVS after it, up to two words on
+  // ("Wet mount (HVS)", "Wet prep of high vaginal swab"). TV (Trichomonas vaginalis) counts as vaginal here, so "TV
+  // wet mount" and "Wet prep for TV" stay hidden. A stool, urine, skin, semen or KOH wet mount is shown, and so are
+  // "Wet mount", "Wet prep" and "Saline wet mount" alone, which do not say where the sample is from.
+  '(?:vaginal|hvs|high[^a-z0-9]*vaginal(?:[^a-z0-9]*swab)?)[^a-z0-9]*(?:(?:saline|koh)[^a-z0-9]*)?wet[^a-z0-9]*(?:mount|prep[a-z]*)',
+  '(?:vaginal|hvs|tv)(?:[^a-z0-9]+[a-z]+){1,2}[^a-z0-9]+wet[^a-z0-9]*(?:mount|prep[a-z]*)',
+  'tv[^a-z0-9]*wet[^a-z0-9]*(?:mount|prep[a-z]*)',
+  'wet[^a-z0-9]*(?:mount|prep[a-z]*)(?:[^a-z0-9]+[a-z]+){0,2}[^a-z0-9]+(?:vaginal|hvs|tv)',
   // Hepatitis misspelt ("Hepititis", "Heptitis", "Hepatatis", but not "Hepatic"); hepatitis A, D and E ("HAV",
   // "anti-HEV", "HDV Ag", "Hep D", "Hep-E"); HBs and HBe antigens set apart ("Hb s Ag", "HBe Ag"), and "Australia antigen".
   'hep[a-z]{0,3}t[aiy]t[aiy]s', '(?:anti)?h[ade]v(?:ab|ag|igg|igm|rna)?', 'hb[^a-z0-9]*s[^a-z0-9]*ag',
@@ -155,20 +167,38 @@ export const SENSITIVE_TEST_FRAGMENTS = [
   'h[1l]v[a-z0-9]*', 'retro[^a-z0-9]*(?:screen[a-z]*|tests?)', 'p[^a-z0-9]*24[^a-z0-9]*(?:antigen|ag)', 'western[^a-z0-9]*blots?',
   'lag[^a-z0-9]*avidity', 'infant[^a-z0-9]*dna[^a-z0-9]*pcr', 'cr[^a-z0-9]*ags?', '(?:tb|lf)[^a-z0-9]*lam',
   'cryptococ[a-z]*(?:[^a-z0-9]+[a-z]+)?[^a-z0-9]+(?:antigen|ag)', 'lipoarabinomannan',
+  // More advanced HIV disease tests (Ola's third list): AlereLAM and urine LAM ("LAM" alone is in the test-only list);
+  // crypto Ag or antigen ("Serum crypto Ag") and CSF crypto...; India ink, LAB-0087 by all its names ("CSF India ink",
+  // "India ink for Cryptococcus"). "Cryptosporidium antigen" is shown: crypto must stand apart from the next word.
+  '(?:alere|urine)[^a-z0-9]*lam', 'crypto[^a-z0-9]*(?:antigen|ag)', 'csf[^a-z0-9]*crypto[a-z]*', 'india[^a-z0-9]*ink',
   // Other STIs: syphilis misspelt ("Siphilis", "Sifilis"), venereal, a VD screen, GC culture, C. trachomatis,
-  // T. vaginalis, human papilloma virus written out.
-  's[iy][pf]h?[iy]l[a-z]*', 'vener[a-z]*', 'v[^a-z0-9]*d[^a-z0-9]*screen[a-z]*', 'gc[^a-z0-9]*cultures?',
+  // T. vaginalis, human papilloma virus written out, and "Clamydia" (Ola's third list).
+  's[iy][pf]h?[iy]l[a-z]*', 'vener[a-z]*', 'v[^a-z0-9]*d[^a-z0-9]*screen[a-z]*', 'gc[^a-z0-9]*cultures?', 'clamyd[a-z]*',
   '(?:c[^a-z0-9]*)?trachomatis', 't[^a-z0-9]*vaginalis', 'human[^a-z0-9]*papilloma[^a-z0-9]*vir[a-z]*',
   // Pregnancy screening: NIPT, the triple and quadruple tests, PAPP-A.
   'nipts?', 'triple[^a-z0-9]*tests?', 'quad(?:ruple)?[^a-z0-9]*(?:screen[a-z]*|tests?)', 'papp[^a-z0-9]*a',
   // Cancer: immunohistochemistry, fine needle aspiration, hormone receptors (oestrogen, progesterone, ER status), Ki-67,
-  // CA 27.29, cytopathology, flow cytometry, BCR-ABL, Bence Jones protein, cell block, liquid-based cytology (LBC), a VIA
-  // test or screen (never VIA alone), cancer and malignancy screens.
+  // CA 27.29, cytopathology, BCR-ABL, Bence Jones protein (and BJP), cell block, liquid-based cytology (LBC), cancer and
+  // malignancy screens. Flow cytometry alone is not hidden: it also counts reticulocytes and platelets (Ola's third list).
   'immuno[^a-z0-9]*histochem[a-z]*', 'fine[^a-z0-9]*needle[^a-z0-9]*aspirat[a-z]*', 'o?estrogen[^a-z0-9]*receptors?',
   'progesterone[^a-z0-9]*receptors?', 'hormone[^a-z0-9]*receptors?[^a-z0-9]*status', 'er[^a-z0-9]*status', 'ki[^a-z0-9]*67',
-  'ca[^a-z0-9]*27[^a-z0-9]*29', 'cytopath[a-z]*', 'flow[^a-z0-9]*cytometr[a-z]*', 'bcr[^a-z0-9]*abl[0-9]*',
-  'bence[^a-z0-9]*jones?', 'cell[^a-z0-9]*blocks?', 'lbcs?', 'via[^a-z0-9]*(?:tests?|screen[a-z]*)',
-  'malignan[a-z]*[^a-z0-9]*screen[a-z]*',
+  'ca[^a-z0-9]*27[^a-z0-9]*29', 'cytopath[a-z]*', 'bcr[^a-z0-9]*abl[0-9]*',
+  'bence[^a-z0-9]*jones?', 'bjps?', 'cell[^a-z0-9]*blocks?', 'lbcs?', 'malignan[a-z]*[^a-z0-9]*screen[a-z]*',
+  // Cervical cancer screening by VIA: VIA/VILI, VIA and VILI, VILI, and a VIA screen. VIA alone, and "Glucose via test
+  // strip", are shown.
+  'via[^a-z0-9]*(?:and[^a-z0-9]*)?vili', 'vili', 'via[^a-z0-9]*screen[a-z]*',
+  // Ola's third list (#258, 27 Nov 2026). Tumour markers: HE4, ROMA, NSE, Cyfra 21-1, SCC antigen, CA 242,
+  // chromogranin (A), immunophenotyping, a leukaemia or lymphoma panel, free light chains. Beta-2 microglobulin is shown.
+  'he[^a-z0-9]*4', 'roma', 'nse', 'cyfra(?:[^a-z0-9]*21[^a-z0-9]*1)?', 'scc[^a-z0-9]*(?:antigen|ag)', 'ca[^a-z0-9]*242',
+  'chromogranin(?:[^a-z0-9]*a)?', 'immuno[^a-z0-9]*phenotyp[a-z]*', '(?:leuka?emia|lymphoma)[^a-z0-9]*panels?',
+  'free[^a-z0-9]*light[^a-z0-9]*chains?',
+  // HIV programme tests: PrEP labs, screening, monitoring or baseline (never "prep" alone, so "KOH prep" is shown); ART
+  // monitoring or (baseline) labs; HTS, VCT and PITC (HIV testing services, counselling and testing) as whole words.
+  'prep[^a-z0-9]*(?:labs?|screen[a-z]*|monitoring|baseline)', 'art[^a-z0-9]*(?:baseline[^a-z0-9]*)?(?:monitoring|labs?)',
+  'hts', 'vct', 'pitc',
+  // Relationship and assault tests: maternity, sibling and kinship DNA tests, sexual assault, rape kit, forensic swabs.
+  'maternity[^a-z0-9]*(?:dna[^a-z0-9]*)?tests?', 'sibling[^a-z0-9]*dna', 'dna[^a-z0-9]*(?:relationship|kinship)',
+  'kinship[^a-z0-9]*(?:dna|tests?|analysis)', 'sexual[^a-z0-9]*assault', 'rape[^a-z0-9]*kits?', 'forensic[^a-z0-9]*swabs?',
   // The initialisms above in every form ("H.I.V", "C.D.4", "H-I-V1", "V D R L"): initialismForm.
   ...SENSITIVE_TEST_INITIALISMS.map(initialismForm),
 ] as const;
@@ -180,14 +210,18 @@ export const SENSITIVE_TEST_FRAGMENTS = [
  * the genotype tests are hidden. A pregnancy test is hidden by "preg" as a
  * word ("Preg test"), by pregnan... and by its misspellings ("Pregancy",
  * "Prenancy", "Pragnancy"), but "Pregnenolone" and "Pregabalin level" are
- * shown; the condition list keeps 'pregnan[a-z]*'. A medicine is never read
- * with the test pattern, so "Pregabalin" as a prescription is judged by the
- * medicine list alone.
+ * shown; the condition list has 'pregnan[a-z]*' and the misspellings too. A
+ * medicine is never read with the test pattern, so "Pregabalin" as a
+ * prescription is judged by the medicine list alone.
  */
 const SENSITIVE_TEST_ONLY_FRAGMENTS = [
-  // Pregnancy tests. "PT" is another name of the national pregnancy tests (LAB-0027, LAB-0080); it is also a name of
-  // prothrombin time, which is hidden with it (the safe side), while "Prothrombin time" is shown.
-  'preg', 'pregnan[a-z]*', 'pr[ae]g?n?[ae]n?cy[a-z]*', 'pt',
+  // Pregnancy tests, and "Serum PT" or "Urine PT" (LAB-0027, and a urine pregnancy test). "PT" alone is shown: to every
+  // clinician it is prothrombin time ("PT/INR", "PT & APTT", "Clotting screen: PT, APTT"), though the national code
+  // list also gives it as another name of the urine pregnancy test, LAB-0080 (Ola's third list, #258, 27 Nov 2026).
+  'preg', 'pregnan[a-z]*', 'pr[ae]g?n?[ae]n?cy[a-z]*', '(?:serum|urine)[^a-z0-9]*p[^a-z0-9]*t',
+  // LAM alone, as a test name, is the urine TB LAM test of advanced HIV disease. In a diagnosis it means other things
+  // (the lactational amenorrhoea method of family planning), so it is a test word only.
+  'lam',
   // Genotype tests: sickling or Sickledex (alone, or as a prep or test); a sickle cell test, screen or status; a
   // solubility test with sickle or Hb S before it, up to five words apart ("Hemoglobin S [Presence] in Blood by
   // Solubility test"), but not "Solubility test" alone; Hb typing, electrophoresis, variants, HPLC and pattern; a
@@ -204,6 +238,9 @@ const SENSITIVE_TEST_ONLY_FRAGMENTS = [
   '(?:depression|anxiety)[^a-z0-9]*screen[a-z]*', 'epds', 'hads', 'mental[^a-z0-9]*status', 'tox(?:icology)?[^a-z0-9]*screen[a-z]*',
   'urine[^a-z0-9]*tox(?:icology)?', 'uds', 'doas?',
   '(?:cannabis|thc|opiates?|cocaine|amphetamines?|benzodiazepines?)[^a-z0-9]*(?:screen[a-z]*|tests?)',
+  // Psychiatric drug levels as test names (Ola's third list): a lithium level or assay, and clozapine (or a clozapine
+  // level). Lithium and clozapine as medicines are judged by the medicine list, which does not name them.
+  'lithium[^a-z0-9]*(?:levels?|assay)', 'clozapine(?:[^a-z0-9]*levels?)?',
 ] as const;
 /*
  * LOINC codes of the same tests, matched when the code system is LOINC
@@ -231,13 +268,17 @@ const CANCER_SITES = 'breast|prostate|cervix|cervical|cx|colon|rectum|rectal|col
   + '|testis|testicular|penis|penile|vulva|vulval|oral|tongue|larynx|nasopharynx|head[^a-z0-9]*and[^a-z0-9]*neck';
 /**
  * The initialisms of the condition list below, each also matched in every form, as the test list's are (initialismForm).
- * PMTCT is in the test list's initialisms, which the condition pattern reads too.
+ * PMTCT is in the test list's initialisms, which the condition pattern reads too. GUD (genital ulcer disease), PID
+ * (pelvic inflammatory disease) and HEI (HIV-exposed infant) joined in Ola's third list (#258, 27 Nov 2026).
  */
-const SENSITIVE_CONDITION_INITIALISMS = ['rvd', 'rvi', 'plwha', 'plhiv', 'anc', 'ptsd', 'ocd', 'adhd'] as const;
+const SENSITIVE_CONDITION_INITIALISMS = ['rvd', 'rvi', 'plwha', 'plhiv', 'anc', 'ptsd', 'ocd', 'adhd', 'gud', 'pid', 'hei'] as const;
 /*
  * Where a condition's name has two or more words, any run of marks that are
  * not letters or digits may set them apart, or none, as in the test list
- * ("Self-harm", "Post/natal", "C.section", "Ca. of the cervix").
+ * ("Self-harm", "Post/natal", "Genital/warts"). Two forms keep the narrower
+ * marks they had before (Ola's third list): "Ca" and a cancer site, and C
+ * section. So "Low Ca, renal failure", "Renal (Ca) stones" and "Grade C.
+ * Section 2" are shown.
  */
 const SENSITIVE_CONDITION_FRAGMENTS = [
   'cancers?', '[a-z]*carcinoma[a-z]*', 'malignan[a-z]*', 'neoplas[a-z]*', '[a-z]*lymphoma[a-z]*', 'leuka?emia[a-z]*', '[a-z]*sarcoma[a-z]*',
@@ -248,7 +289,11 @@ const SENSITIVE_CONDITION_FRAGMENTS = [
   // list's pregnancy test names are for tests only:
   'pregnan[a-z]*', 'gestation[a-z]*', 'ante[^a-z0-9]*natal', 'anc', 'post[^a-z0-9]*natal', 'post[^a-z0-9]*partum', 'puerper[a-z]*',
   'obstetric[a-z]*', '[a-z]*gravid[a-z]*', '[a-z]*para', 'miscarri[a-z]*', 'abortion[a-z]*', '(?:pre[^a-z0-9]*)?eclamp[a-z]*',
-  'hyperemesis', 'placenta[a-z]*', 'hydatidiform', 'trimester', 'labou?r', 'ca?esarean', 'c[^a-z0-9]*section',
+  // C section takes only a space, a hyphen or nothing between ("C-section", "C section", "Csection"), as it did before
+  // Ola's second list.
+  'hyperemesis', 'placenta[a-z]*', 'hydatidiform', 'trimester', 'labou?r', 'ca?esarean', 'c[ -]?section',
+  // Pregnancy misspelt ("Pregancy", "Pregnency", "Prenancy", "Pragnancy"), as in the test-only list (Ola's third list).
+  'pr[ae]g?n?[ae]n?cy[a-z]*',
   // Neoplasms (C, D00-D09) named without "cancer" or "carcinoma":
   'hepatoma', 'melanoma[a-z]*', 'myeloma[a-z]*', '[a-z]*blastoma[a-z]*', 'glioma[a-z]*', 'astrocytoma[a-z]*', 'seminoma[a-z]*',
   'mesothelioma[a-z]*', 'hodgkin[a-z]*', 'myelodysplas[a-z]*', 'kaposi[a-z]*', 'in[^a-z0-9]*situ',
@@ -260,10 +305,19 @@ const SENSITIVE_CONDITION_FRAGMENTS = [
   // Sexually transmitted infections (A50-A64) named without the infection's own word:
   'genital[^a-z0-9]*warts?', 'condylom[a-z]*', 'anogenital', 'chancroid', 'lymphogranuloma', 'donovanosis',
   'granuloma[^a-z0-9]*inguinale',
-  // Shorthand: retroviral disease or infection, people living with HIV (PMTCT is in the test list).
-  'rvd', 'rvi', 'plwha', 'plhiv',
-  // "Ca breast", "Ca. of the cervix", "breast Ca": cancer of a named site.
-  `ca(?:[^a-z0-9]*of(?:[^a-z0-9]*the)?)?[^a-z0-9]*(?:${CANCER_SITES})`, `(?:${CANCER_SITES})[^a-z0-9]*ca`,
+  // The syndromes of STI care, and STI written out (Ola's third list): sexually transmitted infection or disease,
+  // urethral discharge, genital ulcer (disease), vaginal discharge syndrome, pelvic inflammatory disease and lower
+  // abdominal pain syndrome. GUD and PID are in the initialisms above.
+  'sexually[^a-z0-9]*transmitted[^a-z0-9]*(?:infections?|diseases?)', 'urethral[^a-z0-9]*discharge',
+  'genital[^a-z0-9]*ulcers?(?:[^a-z0-9]*diseases?)?', 'vaginal[^a-z0-9]*discharge[^a-z0-9]*syndromes?',
+  'pelvic[^a-z0-9]*inflammatory[^a-z0-9]*diseases?',
+  'lower[^a-z0-9]*abdominal[^a-z0-9]*pain[^a-z0-9]*syndromes?',
+  // Shorthand: retroviral disease or infection, people living with HIV (PMTCT is in the test list), and retro or
+  // retroviral positive. An HIV-exposed infant is hidden by its HIV, and HEI is in the initialisms above.
+  'rvd', 'rvi', 'plwha', 'plhiv', 'retro[^a-z0-9]*(?:viral[^a-z0-9]*)?positive',
+  // "Ca breast", "Ca. of the cervix", "breast Ca": cancer of a named site, with only spaces or hyphens between "Ca" and
+  // the site (and a dot after "Ca"), as before Ola's second list.
+  `ca\\.?(?:[ -]+of(?:[ -]+the)?)?[ -]+(?:${CANCER_SITES})`, `(?:${CANCER_SITES})[ -]+ca`,
   // The condition list's own initialisms in every form ("R.V.D.", "R-V-D", "P-T-S-D"), made as the test list's are.
   ...SENSITIVE_CONDITION_INITIALISMS.map(initialismForm),
 ] as const;
@@ -274,6 +328,20 @@ const SENSITIVE_MEDICINE_FRAGMENTS = [
   // Component abbreviations as regimens are written ("TDF/3TC/DTG", "AZT/3TC/NVP"), and brand names.
   'tdf', 'taf', '3tc', 'ftc', 'dtg', 'efv', 'nvp', 'azt', 'zdv', 'abc', 'lpv', 'atv', 'drv', 'ral', 'rpv',
   'truvada', 'atripla', 'kaletra', 'aluvia', 'combivir', 'triomune', 'duovir[a-z]*',
+  // Ola's third list (#258, 27 Nov 2026): the other antiretrovirals, and the antivirals for hepatitis B and C.
+  // Ribavirin is not listed: in Nigeria it is also the treatment for Lassa fever.
+  'didanosine', 'stavudine', 'indinavir', 'nelfinavir', 'saquinavir', 'fosamprenavir', 'tipranavir', 'etravirine', 'doravirine',
+  'maraviroc', 'enfuvirtide', 'bictegravir', 'elvitegravir', 'islatravir', 'lenacapavir',
+  'entecavir', 'adefovir', 'telbivudine',
+  'sofosbuvir', 'daclatasvir', 'ledipasvir', 'velpatasvir', 'voxilaprevir', 'glecaprevir', 'pibrentasvir', 'elbasvir', 'grazoprevir',
+  'simeprevir',
+  // The HIV prophylaxis tablet of isoniazid, pyridoxine, sulfamethoxazole and trimethoprim (Q-TIB): isoniazid and
+  // sulfamethoxazole (or co-trimoxazole) in one name, either first, with at most eight words between ("Isoniazid 300 mg
+  // + pyridoxine 25 mg + sulfamethoxazole 800 mg + trimethoprim 160 mg"). Isoniazid alone (TB) and co-trimoxazole
+  // alone (infections) are shown.
+  'isoniazid(?:[^a-z0-9]+[a-z0-9]+){0,8}[^a-z0-9]+(?:sul(?:f|ph)amethoxazole|co[^a-z0-9]*trimoxazole)',
+  '(?:sul(?:f|ph)amethoxazole|co[^a-z0-9]*trimoxazole)(?:[^a-z0-9]+[a-z0-9]+){0,8}[^a-z0-9]+isoniazid',
+  'q[^a-z0-9]*tib',
 ] as const;
 /** ICD-10: HIV (B20-B24, Z21, R75), viral hepatitis (B15-B19), STIs (A50-A64), neoplasms (C, D00-D09), mental health (F), pregnancy (O, Z32-Z36). */
 const SENSITIVE_ICD10 = /^(?:B2[0-4]|Z21|R75|B1[5-9]|A5\d|A6[0-4]|C\d\d|D0\d|F\d\d|O\d\d|Z3[2-6])/i;
