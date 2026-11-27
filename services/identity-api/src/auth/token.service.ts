@@ -30,6 +30,32 @@ interface SessionRow {
 class RefreshRotationConflict extends Error {}
 
 /**
+ * What SX-6's password change gives the database for the renewed sign-in
+ * (renewSignIn): the new session's id, its access token id, the SHA-256 of
+ * its refresh token (never the token) and the idle end asked for.
+ */
+export interface SessionRenewal {
+  sessionId: string;
+  accessJti: string;
+  refreshTokenSha256: string;
+  refreshExpiresAt: Date;
+}
+
+/** What the database answered for a renewal: the account's new token version and the idle end it kept. */
+export interface SessionRenewed {
+  tokenVersion: number;
+  refreshExpiresAt: Date;
+}
+
+/** The presented staff sign-in renewSignIn renews: its subject, method and product, and the request's Origin. */
+export interface PresentedSignIn {
+  subject: string;
+  authenticationMethod: 'local' | 'oidc';
+  product?: StaffProduct;
+  origin?: string;
+}
+
+/**
  * A sign-in single sign-on asked for whose account changed its credentials
  * after the caller checked them (TokenService.issue with
  * `singleSignOn.accountTokenVersion`): a password reset or recovery raises
@@ -393,6 +419,59 @@ export class TokenService {
       expiresAt: accessExpiresAt,
       refreshExpiresAt,
     };
+  }
+
+  /**
+   * SX-6 (POST /identity/me/password): the presented staff sign-in renewed in
+   * its own family, in the same answer as the password change that raised the
+   * account's token version (which ends every token of the account, this
+   * one's too). As refresh() renews a sign-in, without its refresh cookie
+   * (which is never sent to /identity) and without carrying the old token
+   * version forward: as refresh(), the request's Origin may only confirm the
+   * session's product, never replace it (a session issued on one product
+   * site, presented with any other Origin or none, ends here: 401 before
+   * anything is stored), so the idle lifetime is the session's own site's
+   * (outreach's 24 hours only for an outreach session, or for a session
+   * issued on no product site renewed from an outreach Origin, as refresh()
+   * gives it); the actor is resolved under the session's own product
+   * (a session that no longer fits it ends here, 401, before anything
+   * changes); a new session id, access token id, product-bound refresh token
+   * and CSRF token are made; `commit` (the caller's transaction, which runs
+   * 0205's auth.change_own_password with the refresh token's SHA-256 only)
+   * stores the renewed session and answers the new token version and the
+   * idle end it kept (never past the sign-in's absolute end); the access
+   * token is then signed at that version. Nothing is stored here.
+   */
+  async renewSignIn(presented: PresentedSignIn,
+    commit: (renewal: SessionRenewal) => Promise<SessionRenewed>): Promise<LoginResult> {
+    if (!this.signingKey) throw new Error('Internal token signing is not configured');
+    if (presented.product && productForOrigin(presented.origin) !== presented.product) {
+      throw new UnauthorizedException('Refresh session belongs to another site');
+    }
+    const actor = await this.resolveActor(presented.subject, presented.authenticationMethod, 'staff', undefined,
+      presented.product).catch((error: unknown) => {
+      if (isProductGateRefusal(error)) throw new UnauthorizedException('Session no longer fits this site');
+      throw error;
+    });
+    const sessionId = randomUUID();
+    const accessJti = randomUUID();
+    const refreshToken = this.newRefreshToken(sessionId, presented.authenticationMethod, presented.product);
+    const csrfToken = this.deriveRefreshCsrf(refreshToken);
+    const now = new Date();
+    const renewed = await commit({
+      sessionId,
+      accessJti,
+      refreshTokenSha256: this.sha256(refreshToken),
+      refreshExpiresAt: new Date(now.getTime() + this.lifetimes('staff', presented.origin).refreshSeconds * 1_000),
+    });
+    if (!Number.isSafeInteger(renewed.tokenVersion) || renewed.tokenVersion < 1) {
+      throw new Error('The renewed session has no token version');
+    }
+    const expiresAt = new Date(now.getTime() + this.environment.AUTH_ACCESS_TTL_SECONDS * 1_000);
+    const accessToken = await this.signAccessToken(actor, sessionId, accessJti, renewed.tokenVersion, csrfToken,
+      expiresAt, presented.product);
+    return { actor: { ...actor, sessionId }, accessToken, refreshToken, csrfToken, expiresAt,
+      refreshExpiresAt: renewed.refreshExpiresAt };
   }
 
   async verify(token: string): Promise<{ actor: ActorContext; claims: HidJwtClaims | JWTPayload }> {

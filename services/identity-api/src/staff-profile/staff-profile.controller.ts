@@ -45,7 +45,7 @@ export class StaffProfileController {
       if (sent && sent !== request.facilityId) {
         throw new DomainProblem(403, 'FACILITY_ACCESS_DENIED', 'The actor is not active at this facility');
       }
-      const profile = await this.profiles.read(actor, request.facilityId);
+      const profile = await this.profiles.read(actor, request.facilityId, request.correlationId);
       await this.record(request, actor, 'success');
       return profile;
     } catch (error) {

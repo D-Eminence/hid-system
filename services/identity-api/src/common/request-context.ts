@@ -88,6 +88,15 @@ export interface HidRequest extends Request {
   actor?: ActorContext;
   facilityId?: string;
   authTransport?: 'bearer' | 'cookie';
+  /**
+   * Identity's own access tokens only (AUTH_MODE=local): the staff product
+   * site the session was issued on (the token's `product` claim, Q88-1), and
+   * the token's id (`jti`, auth.sessions.access_jti). Set by the guard; SX-6's
+   * password change renews the session under the same product and binds the
+   * change to this very token.
+   */
+  sessionProduct?: StaffProduct;
+  accessTokenId?: string;
   purposeOfUse?: PurposeOfUse;
   /**
    * The browser read (GET, HEAD or OPTIONS) an authenticated workload reported

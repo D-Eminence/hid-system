@@ -2065,3 +2065,23 @@ grant execute on function ehr.record_recent_diagnosis(text, text, text), ehr.rec
   to hid_ehr_runtime, hid_schema_test_runtime;
 revoke all on function ehr.record_recent_diagnosis(text, text, text), ehr.recent_diagnoses(integer) from public;
 revoke all on ehr.clinician_recent_diagnoses from public;
+
+-- Changing your own password while signed in and editing your own name
+-- (0205, SX-6; design note on hid-system#258, 26 November 2026, at the
+-- recommended defaults), exactly as 0205 grants them: the password change,
+-- the name edit and the own profile version to the Identity runtime alone.
+-- The name rule auth.staff_person_name_acceptable is executed by no role
+-- (the name edit runs it as its owner). No role has any privilege on
+-- auth.staff_name_changes or auth.password_change_requests (row-level
+-- security on, no policy: only the three functions, as their owner, use
+-- them).
+grant execute on function
+  auth.change_own_password(uuid, uuid, text, text, text, uuid, uuid, text, timestamptz, inet, text),
+  auth.change_own_display_name(text, bigint, text, uuid, inet, text),
+  auth.own_profile_version() to hid_identity_runtime;
+revoke all on function
+  auth.change_own_password(uuid, uuid, text, text, text, uuid, uuid, text, timestamptz, inet, text),
+  auth.change_own_display_name(text, bigint, text, uuid, inet, text),
+  auth.own_profile_version(),
+  auth.staff_person_name_acceptable(text) from public;
+revoke all on auth.staff_name_changes, auth.password_change_requests from public;
