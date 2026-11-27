@@ -52,14 +52,7 @@ export class LocalAuthProvider {
     // A patient signs in with an email, a Health ID or a phone number (owner
     // decision of 2026-10-28); staff with an email only.
     const patient = actorKind === 'patient' ? patientPrincipal(principal) : undefined;
-    const principalHash = this.principalHash(loginPrincipalKey(principal, actorKind));
-    const attempt = await this.database.query<{ locked: boolean }>(
-      `select locked_until is not null and locked_until > clock_timestamp() as locked
-         from auth.login_attempts
-        where principal_hmac = $1 and pepper_version = $2`,
-      [principalHash, this.environment.AUTH_LOGIN_PEPPER_VERSION],
-    );
-    if (attempt.rows[0]?.locked) {
+    if (await this.isLockedOut(principal, actorKind)) {
       throw new UnauthorizedException('Invalid credentials');
     }
 
@@ -120,13 +113,8 @@ export class LocalAuthProvider {
     // other (both dummies without an account), so that timing tells neither
     // which accounts still hold a hid-1.0 bcrypt hash (by email, Health ID or
     // phone) nor whether a refused password was right.
-    const legacy = account?.password_algorithm === 'bcrypt_legacy';
-    const bcryptValid = await bcrypt.compare(password,
-      legacy && account?.password_hash ? account.password_hash : await this.dummyBcryptHash).catch(() => false);
-    const argonValid = await argon2.verify(
-      !legacy && account?.password_hash ? account.password_hash : await this.dummyHash, password).catch(() => false);
-    const passwordValid = legacy ? bcryptValid : argonValid;
-    if (!account || !passwordValid || !['argon2id', 'bcrypt_legacy'].includes(account.password_algorithm ?? '')) {
+    const passwordValid = await this.verifyStoredPassword(password, account?.password_hash, account?.password_algorithm);
+    if (!account || !passwordValid) {
       throw new UnauthorizedException('Invalid credentials');
     }
     // Only now, with the password proved right: a suspended, blocked or
@@ -166,6 +154,47 @@ export class LocalAuthProvider {
       authenticationMethod: 'local',
       ...(passwordUpgrade ? { passwordUpgrade } : {}),
     };
+  }
+
+  /**
+   * Whether sign-in is locked for this principal now (auth.login_attempts:
+   * five wrong passwords in 15 minutes lock it for 15 minutes). A read only:
+   * it never counts a try. SX-6's password change asks it before checking the
+   * current password, so a locked person is told so (429) instead of the
+   * try counting again.
+   */
+  async isLockedOut(principal: string, actorKind: 'staff' | 'patient' = 'staff'): Promise<boolean> {
+    const key = this.lockoutKey(principal, actorKind);
+    const attempt = await this.database.query<{ locked: boolean }>(
+      `select locked_until is not null and locked_until > clock_timestamp() as locked
+         from auth.login_attempts
+        where principal_hmac = $1 and pepper_version = $2`,
+      [key.principalHmac, key.pepperVersion],
+    );
+    return attempt.rows[0]?.locked === true;
+  }
+
+  /** The auth.login_attempts key of a principal: what a sign-in's success clears, and SX-6's password change too. */
+  lockoutKey(principal: string, actorKind: 'staff' | 'patient' = 'staff'): { principalHmac: string; pepperVersion: number } {
+    return { principalHmac: this.principalHash(loginPrincipalKey(principal, actorKind)),
+      pepperVersion: this.environment.AUTH_LOGIN_PEPPER_VERSION };
+  }
+
+  /**
+   * Whether `password` is the one a stored hash holds. Every check runs one
+   * bcrypt and one argon2 verification, in that order: the stored hash in its
+   * own algorithm and a dummy hash in the other (both dummies without a hash),
+   * so that timing tells neither which accounts still hold a hid-1.0 bcrypt
+   * hash nor whether a refused password was right. Only argon2id and
+   * bcrypt_legacy hashes can be right.
+   */
+  async verifyStoredPassword(password: string, hash: string | null | undefined,
+    algorithm: string | null | undefined): Promise<boolean> {
+    const legacy = algorithm === 'bcrypt_legacy';
+    const bcryptValid = await bcrypt.compare(password,
+      legacy && hash ? hash : await this.dummyBcryptHash).catch(() => false);
+    const argonValid = await argon2.verify(!legacy && hash ? hash : await this.dummyHash, password).catch(() => false);
+    return Boolean(hash) && ['argon2id', 'bcrypt_legacy'].includes(algorithm ?? '') && (legacy ? bcryptValid : argonValid);
   }
 
   principalHash(email: string): string {

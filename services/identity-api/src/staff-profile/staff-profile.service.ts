@@ -3,6 +3,7 @@ import type { QueryResultRow } from 'pg';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
+import { OWN_PROFILE_VERSION_SQL, ownNameChangeEnabled, ownPasswordChangeEnabled } from './staff-profile-changes';
 
 interface StaffProfileRow extends QueryResultRow {
   account_id: string;
@@ -51,18 +52,39 @@ export function licenceNumberHint(value: string | null): string | null {
 }
 
 /**
- * SX-5 (Akos P1-8, read part): "My profile" for staff. Read only; the
- * changes (password while signed in, preferences, shortcuts) are SX-6 and
- * SX-7. Memberships come from the session already resolved by the guard
- * (every active membership the product gate admits on this site).
+ * SX-5 (Akos P1-8, read part): "My profile" for staff. The changes are SX-6
+ * (password while signed in, the name; 0205, each behind its setting) and
+ * SX-7 (preferences, shortcuts). Memberships come from the session already
+ * resolved by the guard (every active membership the product gate admits on
+ * this site). canChange.name is true while STAFF_NAME_CHANGE_ENABLED is on
+ * (AUTH_MODE=local), and the answer then carries profileVersion; canChange.password is true
+ * while STAFF_PASSWORD_CHANGE_ENABLED is on (AUTH_MODE=local) and the account
+ * has a password. Both routes refuse sealed QA and demo logins
+ * (STAFF_PROFILE_CHANGE_NOT_ALLOWED), and the password route bearer callers.
  */
 @Injectable()
 export class StaffProfileService {
   constructor(private readonly database: DatabaseService) {}
 
-  async read(actor: ActorContext, currentFacilityId: string | undefined) {
-    const result = await this.database.query<StaffProfileRow>(STAFF_PROFILE_SQL, [actor.accountId, actor.subject]);
-    const row = result.rows[0];
+  async read(actor: ActorContext, currentFacilityId: string | undefined, correlationId?: string) {
+    const nameEditable = ownNameChangeEnabled();
+    let row: StaffProfileRow | undefined;
+    let profileVersion: number | undefined;
+    if (nameEditable && correlationId) {
+      // SX-6 (0205): the profile version, through 0205's function (the runtime has no grant on its table), in one
+      // read-only transaction with the account-only context it reads the session's account from. The setting is
+      // on only once the start-up check has found the function and its EXECUTE.
+      ({ row, profileVersion } = await this.database.withTransaction({ actor, facilityId: '', membershipId: '',
+        correlationId, purposeOfUse: 'healthcare-operations' }, async (client) => {
+        const found = (await client.query<StaffProfileRow>(STAFF_PROFILE_SQL, [actor.accountId, actor.subject])).rows[0];
+        const version = found
+          ? Number((await client.query<{ profile_version: string | null }>(OWN_PROFILE_VERSION_SQL)).rows[0]?.profile_version)
+          : undefined;
+        return { row: found, profileVersion: Number.isSafeInteger(version) && (version ?? 0) >= 1 ? version : undefined };
+      }, { readOnly: true }));
+    } else {
+      row = (await this.database.query<StaffProfileRow>(STAFF_PROFILE_SQL, [actor.accountId, actor.subject])).rows[0];
+    }
     if (!row) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
     const name = row.display_name?.trim() || row.full_name?.trim() || actor.displayName || actor.subject;
     // A stored number with no letter or digit ('--') has no hint: no licence is shown.
@@ -88,7 +110,13 @@ export class StaffProfileService {
         isCurrent: facility.id === currentFacilityId,
       })),
       products: [...(actor.products ?? [])],
-      canChange: { name: false, password: false, preferences: false },
+      // SX-6: present while the name edit is on; expectedVersion of POST /identity/me/staff-profile.
+      ...(profileVersion !== undefined ? { profileVersion } : {}),
+      canChange: {
+        name: nameEditable && profileVersion !== undefined,
+        password: ownPasswordChangeEnabled() && row.has_password === true,
+        preferences: false,
+      },
     };
   }
 }

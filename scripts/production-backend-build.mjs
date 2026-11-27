@@ -93,6 +93,8 @@ export const outsideTestInputs = [
   ['services/ehr-api/test/database/desk-nin-holder.integration.sql',['identity-api']],
   // SX-8: open-patient-sql.spec.ts holds this suite to Identity's open-patient statements.
   ['services/ehr-api/test/database/session-open-patient.integration.sql',['identity-api']],
+  // SX-6: staff-profile-changes-sql.spec.ts holds this suite to Identity's own-password and name statements.
+  ['services/ehr-api/test/database/own-password-and-name.integration.sql',['identity-api']],
   ['services/ehr-api/test/fixtures/order-route-cannot-complete-reasons.sql',['lab-api','pharmacy-api']],
   ['services/ocr-worker/src/',['ocr-api']],
   ['services/identity-api/src/identity/dto/authorize-outreach.dto.ts',['outreach-api']],

@@ -294,6 +294,23 @@ const environmentSchema = z.object({
   // time, only once 0140 is applied: with it on, Identity refuses to start
   // while the table or one of its grants is missing (OpenPatientStartupCheck).
   STAFF_OPEN_PATIENT_ENABLED: booleanString,
+  // SX-6 (0205): change your own password while signed in (POST
+  // /identity/me/password). Off (the default): the route answers 404 and SX-5's
+  // canChange.password stays false. Only with AUTH_MODE=local (Identity's own
+  // sessions); with AUTH_MODE=oidc the route answers 404 whatever this says.
+  // Turn it on only once 0205 is applied: with it on, Identity refuses to
+  // start while 0205's function or its EXECUTE is missing
+  // (StaffProfileChangeStartupCheck). The AWS synth setting
+  // (HID_STAFF_PASSWORD_CHANGE_ENABLED) is a separate infra change, as SX-8's was.
+  STAFF_PASSWORD_CHANGE_ENABLED: booleanString,
+  // SX-6 (0205): edit your own name (POST /identity/me/staff-profile). Off
+  // (the default): the route answers 404, SX-5's canChange.name stays false
+  // and its answer carries no profileVersion. Also only with AUTH_MODE=local:
+  // with AUTH_MODE=oidc a session has no Identity session id for 0205 to
+  // check, so the route answers 404 whatever this says. The same start-up
+  // check as the password change; the AWS synth setting
+  // (HID_STAFF_NAME_CHANGE_ENABLED) is the same separate infra change.
+  STAFF_NAME_CHANGE_ENABLED: booleanString,
 }).superRefine((environment, context) => {
   if (environment.AUTH_MODE === 'local') {
     if (!environment.AUTH_SIGNING_SECRET || environment.AUTH_SIGNING_SECRET.length < 32) {

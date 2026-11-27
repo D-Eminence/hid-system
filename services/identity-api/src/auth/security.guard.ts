@@ -22,7 +22,7 @@ import {
 } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
-import { NoActiveFacilityMembershipProblem } from './product-gate';
+import { isStaffProduct, NoActiveFacilityMembershipProblem } from './product-gate';
 import { TokenService } from './token.service';
 import { WorkloadAuthService } from './workload-auth.service';
 
@@ -59,6 +59,12 @@ export class SecurityGuard implements CanActivate {
       const { verified, transport } = signedIn;
       request.actor = verified.actor;
       request.authTransport = transport;
+      // Identity's own token (AUTH_MODE=local): its product and id, for SX-6's renewal.
+      if (this.environment.AUTH_MODE === 'local') {
+        const claims = verified.claims as { product?: unknown; jti?: unknown };
+        if (isStaffProduct(claims.product)) request.sessionProduct = claims.product;
+        if (typeof claims.jti === 'string') request.accessTokenId = claims.jti;
+      }
       await this.enforceRuntimeControls(request);
       if (verified.actor.kind === 'patient' && !this.metadata<boolean>(PATIENT_ALLOWED, context)) {
         throw new DomainProblem(403, 'PATIENT_SCOPE_DENIED', 'This operation requires workforce authorization');

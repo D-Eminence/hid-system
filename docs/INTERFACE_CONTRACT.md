@@ -7188,9 +7188,10 @@ and the audit row; `403 PERMISSION_DENIED` without
 ## SX-5. My staff profile, read only (no migration)
 
 Akos P1-8, read part. The account menu's "My profile" for staff. Changing a
-password while signed in (SX-6), preferences and home shortcuts (SX-7) come
-later; until then `canChange` answers `false` for each, and the screen shows
-no edit control.
+password while signed in and the name (SX-6, below) are served behind their
+settings; preferences and home shortcuts (SX-7) come later. `canChange`
+answers `false` for each change that is not on, and the screen shows no edit
+control for it.
 
 | Route (under `/api/v1`) | Who | Answer |
 | --- | --- | --- |
@@ -7209,10 +7210,25 @@ no edit control.
     { "id": "uuid", "membershipId": "uuid", "name": "Fictional Clinic", "roles": ["doctor"], "isPrimary": true, "isCurrent": true }
   ],
   "products": ["ehr", "migrate"],
-  "canChange": { "name": false, "password": false, "preferences": false }
+  "profileVersion": 1,
+  "canChange": { "name": true, "password": false, "preferences": false }
 }
 ```
 
+The example is the answer with `STAFF_NAME_CHANGE_ENABLED` on (and
+`AUTH_MODE=local`); with it off there is no `profileVersion` and
+`canChange.name` is `false`.
+
+- `profileVersion` (SX-6) is sent only while `STAFF_NAME_CHANGE_ENABLED` is
+  on and `AUTH_MODE` is `local`: 1, plus one for each name change. It is the
+  `expectedVersion` of `POST /identity/me/staff-profile`.
+- `canChange.name` is `true` while `STAFF_NAME_CHANGE_ENABLED` is on and
+  `AUTH_MODE` is `local` (with `AUTH_MODE=oidc` it is `false` whatever the
+  setting says, and the route answers `404`); `canChange.password` is `true`
+  while `STAFF_PASSWORD_CHANGE_ENABLED` is on (Identity's own sign-in,
+  `AUTH_MODE=local`) and `signIn.hasPassword` is `true`. `preferences` stays
+  `false` (SX-7). A sealed QA or demo login is still refused the change
+  itself (`STAFF_PROFILE_CHANGE_NOT_ALLOWED`).
 - `name` is the account's display name, else the staff record's full name.
 - `signIn.method` is `password` or `single_sign_on` (how this session was
   signed in). `hasPassword` is `false` for a login that has never set one
@@ -7238,6 +7254,223 @@ no edit control.
 Screen change (Akos frontend branch): the account menu gains "My profile",
 which shows these fields; the licence is shown as "Licence number ending
 4567".
+
+## SX-6. Change your own password while signed in, and edit your own name (migration 0205, behind settings)
+
+Akos P1-8, edit part. Database: migration 0205 (provisional number), its
+functions `auth.change_own_password`, `auth.change_own_display_name` and
+`auth.own_profile_version` (EXECUTE for the Identity runtime only, granted by
+0205 and by `runtime-grants.sql`), and two append-only tables only those
+functions use (`auth.staff_name_changes`, `auth.password_change_requests`).
+Each route is off by default and answers a plain `404` while off:
+
+| Setting | Route | While off |
+| --- | --- | --- |
+| `STAFF_PASSWORD_CHANGE_ENABLED` (`true`/`false`, default `false`) | `POST /identity/me/password` | `404`; also `404` whenever `AUTH_MODE` is not `local` (no Identity session to renew) |
+| `STAFF_NAME_CHANGE_ENABLED` (`true`/`false`, default `false`) | `POST /identity/me/staff-profile` | `404`, and SX-5 sends no `profileVersion`; also both whenever `AUTH_MODE` is not `local` (a session then has no Identity session id for 0205 to check, so every edit would answer `401`) |
+
+Both are identity-api settings (`services/identity-api/.env.example`). In
+AWS they would be set at synth time as `HID_STAFF_PASSWORD_CHANGE_ENABLED`
+and `HID_STAFF_NAME_CHANGE_ENABLED`, as SX-8's
+`HID_STAFF_OPEN_PATIENT_ENABLED` is; that infra wiring is a separate change
+still to be made, so until it lands both stay off in AWS.
+
+With either setting on, Identity refuses to start unless its runtime may
+execute the 0205 functions that setting needs (the deploy then fails its
+health checks and the running tasks keep serving). Turn a setting on only
+after 0205 and its grants are applied.
+
+Who: any staff session, including a platform administrator with no facility
+membership (as SX-5). A patient session: `403 PATIENT_SCOPE_DENIED`. An
+outreach account-only session: `403 NO_ACTIVE_FACILITY_MEMBERSHIP`. No
+permission: the caller's own account. `X-Facility-ID` is optional; when sent
+it must be one of the caller's own facilities (else
+`403 FACILITY_ACCESS_DENIED`). Cookie calls need Origin and CSRF, as every
+cookie write. Both need `Idempotency-Key` (16-128 URL-safe characters, else
+`400 IDEMPOTENCY_KEY_REQUIRED`). A sealed QA or sealed demo login (shared by
+testers) is refused both: `403 STAFF_PROFILE_CHANGE_NOT_ALLOWED` "This
+shared test login can't be changed."
+
+### POST /identity/me/password
+
+```json
+{ "currentPassword": "…", "newPassword": "…" }
+```
+
+`currentPassword` 1-256 characters, `newPassword` at most 256 (else
+`400 VALIDATION_FAILED`). Cookie sessions only: a bearer caller's token ends
+with the change and cannot be renewed into a cookie, so it is refused first,
+after the guard and the body's validation and before `X-Facility-ID`, the
+Idempotency-Key or anything else is read (`403 COOKIE_SESSION_REQUIRED`
+"Change your password on the Health ID website."). Then, in this order:
+
+1. A replay of the Idempotency-Key (the same key from the same account)
+   answers the stored change with `replayed: true` and changes nothing,
+   before any password is checked. The key alone identifies it: nothing
+   derived from a password is kept, so a reused key with other passwords is
+   also answered as the replay (there is no `IDEMPOTENCY_KEY_REUSED` on this
+   route). A replay sets no cookie: the renewed cookies went with the first
+   answer (a lost first answer means this device is signed out).
+2. No password on the account (Google only): `409 PASSWORD_NOT_SET`, before
+   any check, so it never counts towards the lockout.
+3. Sign-in locked for the account's email (five wrong passwords in 15
+   minutes lock it for 15 minutes): `429 STAFF_REAUTHENTICATION_LOCKED`; the
+   try is not counted.
+4. The current password is checked against the stored hash as a sign-in
+   checks it. A wrong one counts towards the sign-in lockout and answers
+   `403 STAFF_REAUTHENTICATION_FAILED`. An account with no email has no
+   lockout key and cannot be checked: the same `403`.
+5. A new password under 12 characters: `400 PASSWORD_TOO_SHORT`; the same as
+   the current one: `400 PASSWORD_SAME_AS_CURRENT`.
+6. One transaction: the stored hash must still be the one checked (else
+   `409 PASSWORD_CHANGED_MEANWHILE` "Your password was changed meanwhile.
+   Sign in again."); the presented session must still be this account's live
+   staff session with this access token (a refresh in another tab got there
+   first: `401 AUTHENTICATION_REQUIRED`). The new argon2id hash and
+   `password_changed_at` are stored and the account's token version goes up
+   by one; every other session of the account, staff and patient kinds and
+   every product site alike, is revoked with reason `password_changed`; the
+   presented session is renewed in its own sign-in (same family, so the
+   chosen facility, the open patient and single sign-on provenance stay; same
+   product site and authentication method; never past the sign-in's absolute
+   end); the sign-in lockout is cleared; one audit row is written.
+
+Answer `200`, with the renewed sign-in's three cookies (as `POST
+/auth/refresh` sets them) and its `x-csrf-token` header; `Cache-Control:
+no-store`:
+
+```json
+{ "changed": true, "otherSignInsEnded": 2, "passwordChangedAt": "2026-11-20T09:00:00.000Z", "replayed": false }
+```
+
+`otherSignInsEnded` counts the other sign-ins (session families) that were
+live; ones that had already expired are revoked but not counted. After `200`,
+re-read `GET /auth/session` and use the new `x-csrf-token`; run no other
+request meanwhile (a `POST /auth/refresh` with the old refresh cookie fails
+after the change and clears the cookies). Afterwards: "Your Health ID
+password was updated" goes to the account's email through notification-api's
+`password-updated` route (`NotificationOtpClient.deliverPasswordUpdated`,
+`notification-otp.client.ts` lines 251-265), keyed `password-updated:<change
+id>`, greeting the first name of the display name; best-effort, never
+failing the change. A single sign-on provider session from before the change
+opens nothing (section 54's `stale_provider_sign_in`). A "Forgot password"
+code still pending, and a dormant-staff invitation session, are refused after
+the change (they hold the old token version).
+
+### POST /identity/me/staff-profile
+
+```json
+{ "name": "Ada Fictional-Bello", "expectedVersion": 1 }
+```
+
+`name` (at most 200 characters before trimming) and `expectedVersion` (a
+whole number of at least 1, SX-5's `profileVersion`) only, else
+`400 VALIDATION_FAILED`. The name, trimmed, must be a person's name by the
+invitee-name rule (`acceptableStaffPersonName`, `staff-names.ts`), else
+`400 STAFF_NAME_INVALID`. The database checks it again with the same rule
+(0205's `auth.staff_person_name_acceptable`: Unicode letters and every
+combining mark, so Arabic, Devanagari, Thai and Hebrew names with their
+marks pass as in Identity; 2 to 80 characters counted as JavaScript counts
+them). The one difference is the Unicode version of letters: a letter newer
+than the database server's ICU (Unicode 15.1 today) is refused there with
+the same `400 STAFF_NAME_INVALID`. Then, in one
+transaction: a replay of the key with the same name answers the profile as
+it is (`IDEMPOTENCY_KEY_REUSED`, `409`, for the same key with another name);
+`expectedVersion` must be the current profile version (else
+`412 VERSION_CONFLICT`, as Identity's other version checks); the current name
+is refused (`400 STAFF_NAME_UNCHANGED` "That's already your name."); a fourth
+change within 24 hours is refused (`429 STAFF_NAME_CHANGE_LIMITED`). Bearer
+callers may use it. Answer `200`: the SX-5 profile with the new `name` and
+`profileVersion`. If the change has committed but the profile read after it
+fails, the answer is `503 DEPENDENCY_UNAVAILABLE` (the change stands; a
+retry with the same Idempotency-Key and name is answered as a replay, with
+the profile).
+
+The name is written to `auth.accounts.display_name` only. Read at view time,
+it changes what SX-5, the staff names list (SX-9), the facility staff list,
+accepted-by, reported-by and vouched-by names and the session's name show,
+including on records already written. The registered name
+(`identity.staff.full_name`, under which a licence was vouched) is never
+changed here, so order routes (the orderer's name is copied when sent), the
+patient's access log, share search and the outreach team keep showing it.
+Email, licence and roles are not editable here.
+
+### Errors
+
+| HTTP | Code | Message |
+| --- | --- | --- |
+| 400 | `VALIDATION_FAILED` | One or more request fields are invalid. |
+| 400 | `PASSWORD_TOO_SHORT` | Use at least 12 characters. |
+| 400 | `PASSWORD_SAME_AS_CURRENT` | Choose a new password that is different from your current one. |
+| 400 | `STAFF_NAME_INVALID` | Enter your full name: 2 to 6 words of letters (2 to 80 characters in all), joined by single spaces, apostrophes or hyphens, without digits or the words Health ID, HID, support, admin, administrator or ministry. |
+| 400 | `STAFF_NAME_UNCHANGED` | That's already your name. |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED` | Idempotency-Key must contain 16 to 128 URL-safe characters |
+| 401 | `AUTHENTICATION_REQUIRED` | Valid authentication is required |
+| 403 | `PATIENT_SCOPE_DENIED` | This operation requires workforce authorization |
+| 403 | `COOKIE_SESSION_REQUIRED` (password) | Change your password on the Health ID website. |
+| 403 | `STAFF_REAUTHENTICATION_FAILED` (password) | That password isn't right |
+| 403 | `STAFF_PROFILE_CHANGE_NOT_ALLOWED` | This shared test login can't be changed. |
+| 403 | `FACILITY_ACCESS_DENIED` | The actor is not active at this facility |
+| 404 | (plain) | The route's setting is off, or `AUTH_MODE` is not `local`. |
+| 409 | `PASSWORD_NOT_SET` (password) | This account signs in with Google and has no password. Use "Forgot password" on the sign-in page to set one. |
+| 409 | `PASSWORD_CHANGED_MEANWHILE` (password) | Your password was changed meanwhile. Sign in again. |
+| 409 | `IDEMPOTENCY_KEY_REUSED` (name) | This request was already used for a different change. Please reload and try again. |
+| 412 | `VERSION_CONFLICT` (name) | This changed meanwhile; reload before retrying. |
+| 429 | `STAFF_REAUTHENTICATION_LOCKED` (password) | Too many wrong passwords. Try again in 15 minutes. |
+| 429 | `STAFF_NAME_CHANGE_LIMITED` (name) | You have changed your name 3 times today. Try again tomorrow. |
+| 503 | `DEPENDENCY_UNAVAILABLE` | The service could not complete the request. |
+
+`503 DEPENDENCY_UNAVAILABLE` is the answer to any failure of the database
+(or of the password check or hash) in either route, at any step: the
+account and lockout reads, counting a wrong password, the change itself and
+the read after it; never a `500`. As for every 5xx here, the detail sent is
+"The service could not complete the request."; the website matches on the
+code.
+
+Corrections to the planned contract (`docs/EHR_PLANNED_CONTRACT.md`, SX-6):
+`VERSION_CONFLICT` is `412`, not `409`; `STAFF_NAME_INVALID`'s rule is 2 to 6
+words and 2 to 80 characters (not "2 to 80 letters");
+`STAFF_REAUTHENTICATION_LOCKED` and `PASSWORD_TOO_SHORT` are new codes;
+`PASSWORD_CHANGED_MEANWHILE`, `STAFF_NAME_UNCHANGED`,
+`STAFF_PROFILE_CHANGE_NOT_ALLOWED` and `COOKIE_SESSION_REQUIRED` are added; a
+password replay answers `200` without cookies; order screens show the
+registered name for the orderer (only accepted-by names follow the display
+name); and records already written show the new display name wherever it is
+read at view time. The email route is `notification-otp.client.ts` lines
+251-265.
+
+### Audit
+
+`auth.password.change` and `auth.staff-profile.update`, actor staff, resource
+`session` (the renewed session for a password change, the presented one for
+a name), no facility, purpose `healthcare-operations`. A success's row is
+written by 0205's function in the change's own transaction: the password
+row holds only `otherSignInsEnded` and `changeId`, the name row
+`previousName`, `newName` and `profileVersion` (staff data, not patient
+data). A replay (`details.replayed: true`) and every refusal after the guard
+and the body's validation (outcome `denied` for a 4xx, `failure` otherwise;
+`details` the method, the route and the problem code) get their own row
+from Identity. The guard's own refusals (`401`, `403 CSRF_VALIDATION_FAILED`
+and the like) record its row instead (`auth.authorization.denied`, or
+`security.authorization` when a facility was resolved); a patient session's
+`403 PATIENT_SCOPE_DENIED` and a `400 VALIDATION_FAILED` from the body's
+validation get no row of these actions. A name edit that committed but whose profile read failed (`503`) gets
+no refusal row beside 0205's success row. No row, log, request
+digest or stored value holds a password. A wrong current password also
+writes the sign-in lockout's `login_failed` session event, as a failed
+sign-in does. No patient is read.
+
+Tests: `services/ehr-api/test/database/own-password-and-name.integration.sql`
+(0205's tables and functions as the Identity runtime, rollback-only) and
+`own-password-and-name-migration.integration.sql` (the file itself: busy
+refusals, already applied, half states, pinned bodies, its locks);
+`services/identity-api/src/staff-profile/staff-profile-changes.http.spec.ts`
+(supertest through the real module, guard, middlewares, pipe and filter),
+`staff-profile-changes.service.spec.ts`, `staff-profile-changes-startup.spec.ts`,
+`staff-profile-changes-sql.spec.ts` (the suite runs Identity's statements
+verbatim; 0205's name rule has JavaScript's marks and reserved words),
+`staff-profile.spec.ts`, `src/auth/token-renewal.spec.ts` and
+`src/auth/own-password-local-auth.spec.ts`.
 
 ## SX-9. Saved lists: this facility's OCR jobs and staff names (no migration)
 

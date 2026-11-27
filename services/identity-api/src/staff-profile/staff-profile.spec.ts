@@ -12,7 +12,9 @@ import {
 } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext, FacilityAssignment, HidRequest } from '../common/request-context';
+import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
+import { OWN_PROFILE_VERSION_SQL } from './staff-profile-changes';
 import { STAFF_PROFILE_AUDIT_ACTION, StaffProfileController } from './staff-profile.controller';
 import { licenceNumberHint, STAFF_PROFILE_SQL, StaffProfileService } from './staff-profile.service';
 
@@ -32,6 +34,26 @@ const actor: ActorContext = {
     facility(SECOND_FACILITY, '40000000-0000-4000-8000-000000000002', ['nurse', 'lab'], false)],
   authenticationMethod: 'local', products: ['ehr', 'migrate'],
 };
+
+// The read consults SX-6's settings (STAFF_NAME_CHANGE_ENABLED, STAFF_PASSWORD_CHANGE_ENABLED): off unless a test sets them.
+const originalEnvironment = { ...process.env };
+function useEnvironment(settings: Record<string, string> = {}) {
+  for (const key of Object.keys(process.env)) if (!(key in originalEnvironment)) delete process.env[key];
+  Object.assign(process.env, originalEnvironment, { NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid',
+    CORS_ORIGINS: 'https://ehr.staging.healthidentitydirectory.com', AUTH_MODE: 'local',
+    AUTH_SIGNING_SECRET: 'test-signing-secret-with-at-least-32-characters',
+    AUTH_LOGIN_PEPPER: 'test-login-pepper-with-at-least-32-characters' }, settings);
+  delete process.env.STAFF_NAME_CHANGE_ENABLED;
+  delete process.env.STAFF_PASSWORD_CHANGE_ENABLED;
+  Object.assign(process.env, settings);
+  resetEnvironmentForTests();
+}
+beforeEach(() => useEnvironment());
+afterAll(() => {
+  for (const key of Object.keys(process.env)) if (!(key in originalEnvironment)) delete process.env[key];
+  Object.assign(process.env, originalEnvironment);
+  resetEnvironmentForTests();
+});
 
 function route(controller: { prototype: object }, name: string) {
   const handler = (controller.prototype as Record<string, unknown>)[name] as object;
@@ -114,7 +136,7 @@ describe('GET identity/me/staff-profile (SX-5)', () => {
     expect(read).not.toHaveBeenCalled();
     await controller.read({ actor, facilityId: SECOND_FACILITY,
       header: header({ 'x-facility-id': SECOND_FACILITY }) } as unknown as HidRequest);
-    expect(read).toHaveBeenCalledWith(actor, SECOND_FACILITY);
+    expect(read).toHaveBeenCalledWith(actor, SECOND_FACILITY, undefined);
   });
 
   it('shows no licence when the stored number has no letter or digit', async () => {
@@ -122,6 +144,68 @@ describe('GET identity/me/staff-profile (SX-5)', () => {
       const profile = await setup({ ...row, licence_number }).service.read(actor, FACILITY);
       expect(profile.licence).toBeNull();
     }
+  });
+
+  describe('with SX-6 (0205) on', () => {
+    function transactional(found: Record<string, unknown> | undefined, version: string | null = '3') {
+      const client = { query: jest.fn(async (text: string) => (text === OWN_PROFILE_VERSION_SQL
+        ? { rows: [{ profile_version: version }] } : { rows: found ? [found] : [] })) };
+      const withTransaction = jest.fn(async (_context: unknown, work: (c: typeof client) => Promise<unknown>) => work(client));
+      const query = jest.fn();
+      return { client, withTransaction, query,
+        service: new StaffProfileService({ query, withTransaction } as unknown as DatabaseService) };
+    }
+
+    it('the name edit on: profileVersion from 0205, read in one read-only transaction with the account-only context', async () => {
+      useEnvironment({ STAFF_NAME_CHANGE_ENABLED: 'true' });
+      const s = transactional(row);
+      const profile = await s.service.read(actor, FACILITY, 'staff-profile-correlation');
+      expect(s.query).not.toHaveBeenCalled();
+      expect(s.withTransaction).toHaveBeenCalledWith({ actor, facilityId: '', membershipId: '',
+        correlationId: 'staff-profile-correlation', purposeOfUse: 'healthcare-operations' }, expect.any(Function),
+      { readOnly: true });
+      expect(s.client.query).toHaveBeenNthCalledWith(1, STAFF_PROFILE_SQL, [ACCOUNT, 'staff:fictional-ada']);
+      expect(s.client.query).toHaveBeenNthCalledWith(2, 'select auth.own_profile_version()::text as profile_version');
+      expect(profile).toMatchObject({ profileVersion: 3, canChange: { name: true, password: false, preferences: false } });
+    });
+
+    it('the name edit on but no version read: canChange.name stays false and no profileVersion is sent', async () => {
+      useEnvironment({ STAFF_NAME_CHANGE_ENABLED: 'true' });
+      const profile = await transactional(row, null).service.read(actor, FACILITY, 'staff-profile-correlation');
+      expect(profile).not.toHaveProperty('profileVersion');
+      expect(profile.canChange).toEqual({ name: false, password: false, preferences: false });
+    });
+
+    it('the name edit on: an account no longer active is still 401, and 0205 is not asked', async () => {
+      useEnvironment({ STAFF_NAME_CHANGE_ENABLED: 'true' });
+      const s = transactional(undefined);
+      await expect(s.service.read(actor, FACILITY, 'staff-profile-correlation')).rejects.toMatchObject({ code: 'AUTHENTICATION_REQUIRED' });
+      expect(s.client.query).toHaveBeenCalledTimes(1);
+    });
+
+    it('the password change on: canChange.password follows whether the account has a password; no profileVersion', async () => {
+      useEnvironment({ STAFF_PASSWORD_CHANGE_ENABLED: 'true' });
+      const withPassword = await setup(row).service.read(actor, FACILITY, 'c');
+      expect(withPassword).not.toHaveProperty('profileVersion');
+      expect(withPassword.canChange).toEqual({ name: false, password: true, preferences: false });
+      const googleOnly = await setup({ ...row, has_password: false }).service.read(actor, FACILITY, 'c');
+      expect(googleOnly.canChange.password).toBe(false);
+    });
+
+    it('the password change setting under AUTH_MODE=oidc: the route does not exist, so canChange.password is false', async () => {
+      useEnvironment({ STAFF_PASSWORD_CHANGE_ENABLED: 'true', AUTH_MODE: 'oidc', OIDC_ISSUER_URL: 'https://issuer.invalid',
+        OIDC_AUDIENCE: 'hid', OIDC_JWKS_URL: 'https://issuer.invalid/jwks' });
+      expect((await setup(row).service.read(actor, FACILITY, 'c')).canChange.password).toBe(false);
+    });
+
+    it('both settings off (the default): today\'s answer, read on the pool', async () => {
+      const s = transactional(row);
+      const profile = await new StaffProfileService({ query: jest.fn().mockResolvedValue({ rows: [row] }),
+        withTransaction: s.withTransaction } as unknown as DatabaseService).read(actor, FACILITY, 'c');
+      expect(s.withTransaction).not.toHaveBeenCalled();
+      expect(profile).not.toHaveProperty('profileVersion');
+      expect(profile.canChange).toEqual({ name: false, password: false, preferences: false });
+    });
   });
 
   it('keeps the licence hint rule of identity.licence_number_hint', () => {
