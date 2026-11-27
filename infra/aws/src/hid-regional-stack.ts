@@ -770,6 +770,7 @@ export class HidRegionalStack extends Stack {
           QOREID_BASE_URL: 'https://api.qoreid.com', QOREID_TIMEOUT_MS: '5000', QOREID_MAX_RETRIES: '0',
           STAFF_FACILITY_SELECTION_MODE: this.configuration.staffFacilitySelectionMode,
           STAFF_OPEN_PATIENT_ENABLED: this.configuration.staffOpenPatientEnabled ? 'true' : 'false',
+          PATIENT_MERGE_REQUESTS_ENABLED: this.configuration.patientMergeRequestsEnabled ? 'true' : 'false',
           WORKLOAD_ISSUER_URL: issuer, WORKLOAD_JWKS_URL: jwks, WORKLOAD_AUDIENCE: 'hid-identity-api',
           IDENTITY_EHR_CALLER_SUBJECT: subjects.ehr, IDENTITY_LAB_CALLER_SUBJECT: subjects.lab,
           IDENTITY_PHARMACY_CALLER_SUBJECT: subjects.pharmacy, IDENTITY_OCR_CALLER_SUBJECT: subjects.ocr,
