@@ -41,7 +41,7 @@ Rules that hold in every section:
 | [SX-6: Change password while signed in, and edit own profile](#sx-6-change-password-while-signed-in-and-edit-own-profile-planned-release-c-needs-a-migration-yes) | P1-8 | C | yes | M |
 | [SX-7: Preferences and up to 12 home shortcuts](#sx-7-preferences-and-up-to-12-home-shortcuts-planned-release-c-needs-a-migration-yes) | P1-8, home shortcuts | C | yes | S |
 | [CHW-1: A community health worker role for Outreach](#chw-1-a-community-health-worker-role-for-outreach-planned-release-c-needs-a-migration-yes) | N-2 (Outreach row) | C | yes | S |
-| [ORD-6: Several tests in one lab request](#ord-6-several-tests-in-one-lab-request-planned-release-c-needs-a-migration-yes) | N-7 | C | yes | M |
+| [ORD-6: Several tests in one lab request](#ord-6-several-tests-in-one-lab-request-planned-after-0156s-release-needs-a-migration-yes) | N-7 | after 0156 | yes | M |
 | [ORD-8: Order sets, favourites, and note and visit templates](#ord-8-order-sets-favourites-and-note-and-visit-templates-planned-release-c-needs-a-migration-yes) | P0-5, P1-13, P1-12 | C | yes | L |
 | [ORD-11: Result and dispensed notices to the ordering doctor](#ord-11-result-and-dispensed-notices-to-the-ordering-doctor-planned-release-c-needs-a-migration-yes) | P1-6 | C | yes | L |
 | [ORD-13: No drug-interaction checks](#ord-13-no-drug-interaction-checks-not-planned-no-release-needs-a-migration-no) | P0-5, N-9 (interactions) | not planned | no | — |
@@ -1281,9 +1281,18 @@ migration ships it answers 404. ORD-9 and ORD-10 phase 2 fill their own fields.
 { "medicines": { "available": true, "version": "2026.1", "approvedAt": "2026-12-01" },
   "labTests":  { "available": true, "version": "2026.1", "approvedAt": "2026-12-01" },
   "diagnoses": { "available": false, "release": null },
-  "labTestNameOnly": true, "diagnosisNameOnly": false, "classDuplicateCheck": false,
+  "labTestNameOnly": true, "labRequestGroups": false, "diagnosisNameOnly": false, "classDuplicateCheck": false,
   "attribution": ["This material contains content from LOINC (http://loinc.org) ..."] }
 ```
+
+`labRequestGroups` (ORD-6, 0158) is ehr-api's `LAB_REQUEST_GROUPS_ENABLED`:
+whether several tests may be saved in one lab request. The website offers
+the multi-test form only when it is `true`; otherwise it saves one test per
+request. It cannot learn this from the group route: through the gateway
+that route's `503 LAB_REQUEST_GROUPS_UNAVAILABLE` is the gateway's own
+`503 UPSTREAM_UNAVAILABLE`. A backend before ORD-6 sends no
+`labRequestGroups`: read it as `false`. `@hid/api-client` types this answer
+as `EhrCatalogStatus`.
 
 **Medicine search.** `q` 2-100 characters after trimming. `limit` 1-25,
 default 10. Optional `doseForm` is one of section 46's values (`tablet`,
@@ -1480,8 +1489,9 @@ together, like section 46's setting.
 - On 503 or 429, fall back to the built-in list or typing. Never block the
   order.
 - Show the LOINC attribution from `attribution` on the About or Help page.
-- Several tests in one request is ORD-6 (Release C). Order sets and
-  favourites are ORD-8 (Release C).
+- Several tests in one request is ORD-6 (Release C), offered only when
+  `labRequestGroups` is true. Order sets and favourites are ORD-8
+  (Release C).
 - Admin screen: a "This facility's medicines and tests" list with Add and
   Withdraw.
 
@@ -3600,17 +3610,17 @@ No new codes. These are the answers this role meets:
 
 Release C. Size S: role rows, the fence change and the gate test. Treat it as M if section 53's gate needs code beyond the permission rule for a hospital membership with Outreach codes only.
 
-## ORD-6: Several tests in one lab request (planned, Release C, needs a migration: yes)
+## ORD-6: Several tests in one lab request (planned, after 0156's release, needs a migration: yes)
 
 Akos items:
 - N-7 (several tests per request; "send to this facility's lab" on create)
 
-Status: planned, not live.
+Status: planned, not live. Built on 0156 (hid-system#258, the clinical owner's design note 7214746190, after Rahman's review 7167493074): 0158 (a booking; its number is given at integration), and the ehr-api, lab-api and `@hid/api-client` changes, behind ehr-api's `LAB_REQUEST_GROUPS_ENABLED` (off by default). The website part waits for an approved `staff/**` exception.
 
 What exists today, so nothing here repeats it:
-- One lab request holds one test (`ehr.lab_requests.test_code`, `0004:243`; `CreateLabRequestDto`, `clinical.dto.ts:562-588`).
+- One lab request holds one test (`ehr.lab_requests.test_code`, `0004:243`; the shared fields `LabRequestDetailsDto`, `clinical.dto.ts:601-631`, `CreateLabRequestDto`, `:634-644`, and 0156's name-only class `CreateLabRequestNameOnlyDto`, `:654-666`).
 - Sending to this facility's lab on create already works: create with `status: "active"` and the answer carries `labWorkItem` and `labHandoff` (`lab-requests.service.ts` `create`). `status: "draft"` saves without sending. First activation needs no typed reason (Q105).
-- Lab can already hold several requested tests on one work item (`lab.work_item_requested_tests`, `0018:56`), but EHR sends one test per work item (`accept-ehr-order.dto.ts`).
+- Lab holds one requested test per work item. `lab.work_item_requested_tests` (`0018:56`) has an ordinal, but `lab.validate_work_item_child()` allows ordinal 1 only, and a requested test equal to its work item (`0073:58-62`). So each test of a group is its own Lab work item too.
 
 Design: one form, several tests, saved together. Each test becomes its own lab request (as today), linked by a `requestGroupId`. This keeps every per-request rule unchanged: progress (ORD-3), order routes, cancelling or holding one test, released results per order, and the reason rules (FR-1, Q105).
 
@@ -3622,6 +3632,8 @@ Design: one form, several tests, saved together. Each test becomes its own lab r
 | GET | `/api/v1/ehr/patients/:patientId/encounters/:encounterId/lab-requests?requestGroupId=<uuid>` | as today's list | `ehr.lab-request.read` |
 
 Headers as the single create: `X-Facility-Id`, `X-Purpose-Of-Use`, and a required `Idempotency-Key` (16-128 URL-safe characters, `common/idempotency.ts`). One key covers the whole group. Patient and visit are UUIDs; no Health ID anywhere.
+
+Whether groups are on: the catalogue status's `labRequestGroups` (`GET /api/v1/ehr/catalog/status`, ORD-7 above; the clinical owner's call, addendum 7223408785). The website offers the multi-test form only when it is `true`. The route's 503 below is a backstop that the browser never sees as such.
 
 Request:
 
@@ -3644,9 +3656,9 @@ Request:
 | `clinicalInformation` | optional, up to 4000 characters, copied to every test |
 | `tests` | 1-20 entries. Each takes today's single-create test fields with today's limits (R-2): `testCodeSystem` 1-255, `testCode` 1-100, `testDisplay` 1-500, optional `specimenTypeCode` up to 100, optional `priority`. |
 
-- A code is required until ORD-7 makes it optional. Use the HID-LAB codes (Wave 0, R-2) for tests with no LOINC code. Once ORD-7 ships, a test may name a catalogue item instead; that shape is ORD-7's.
-- The same code system and code twice in one group is refused.
-- Any field not listed is refused, and `null` is refused, as on every EHR body.
+- Each test is checked as the single create checks it (0156). While `LAB_REQUEST_NAME_ONLY_ENABLED` is off, its code pair is required. While it is on, a test may leave out `testCodeSystem` and `testCode`, both or neither (`400 LAB_TEST_CODE_INCOMPLETE`, naming each such test as `tests.<n>`, from 0); such a test is saved, answered and sent to Lab with both codes null, as a single one is. A group may mix coded and name-only tests. Use the HID-LAB codes (Wave 0, R-2) for tests with no LOINC code. Once ORD-7 ships, a test may name a catalogue item instead; that shape is ORD-7's.
+- A test that repeats another is refused as a likely double entry (`400 LAB_REQUEST_TEST_REPEATED`, naming each test that repeats an earlier one as `tests.<n>`, once the pair rule passes). Two tests repeat each other when they are the same test, by the same code system and code or by the same name, and their specimens are the same or either is missing. The code system, the code and `specimenTypeCode` (trimmed) are compared without case, so `LOINC` and `loinc`, `MCS` and `mcs`, and `Blood` and `BLOOD` are one; the name is compared without case or extra spaces. A missing or blank `specimenTypeCode` matches any specimen of the same test: a row with no specimen beside the same test with one is most likely the same sample entered twice. The check is pair by pair (at most 190 pairs for 20 tests). So two name-only tests with one name and one specimen are refused, and so is a blood culture on `Blood` beside the same code with no specimen. The clinical owner's calls (addendum 7223408785, and 27 Nov): one culture on blood and on urine goes in one Save; a second blood-culture set from another site, which has the same specimen, goes as its own request, with its site in that request's clinical information (screen notes).
+- Any field not listed is refused, and `null` is refused, as on every EHR body (`400 VALIDATION_FAILED`; a field inside a test is named `tests.<n>.<field>`, and a test that is not an object `tests.<n>`, so the form can mark the row). That includes `requestGroupId`, in the group, in a test, in the single create and in a PATCH (`400 VALIDATION_FAILED`): ehr-api makes the group's id and never takes one from a client.
 
 Answer `201`:
 
@@ -3662,45 +3674,53 @@ Answer `201`:
 
 - Each `labRequests` entry is the single create's full answer, plus `requestGroupId`, in the order sent.
 - All requests are written in one transaction: every one, or none.
-- With `status: "active"`, each is sent to this facility's lab after the commit. Each `labHandoff` reports its own outcome (`accepted`, `already_accepted` or `failed` with a code).
+- With `status: "active"`, each is sent to this facility's lab after the commit, in order, one at a time, with no group: Lab's validator copies the group from the EHR order (0158). Each `labHandoff` reports its own outcome: `accepted`, `already_accepted`, `failed` with a code, or `not_sent` with `LAB_PERMISSION_ABSENT` for a member without `lab.work-item.accept`, or with `ORDER_ROUTED` on a replay, for a test sent to another facility's lab since it was saved (as PATCH answers it).
+- The sends end 25 s after the request reached ehr-api, inside nginx's 30 s. A send cut off then is `failed` with 503 `LAB_SERVICE_UNAVAILABLE`, and a send not tried before then is `failed` with 503 `LAB_HANDOFF_NOT_TRIED`. "Send to lab" sends either safely.
 - Unlike the single create, which answers 409 `LAB_HANDOFF_REFUSED` or 502 `LAB_HANDOFF_UNCONFIRMED`, a group never fails because of the lab. Every request is saved, and a failed send shows only in its `labHandoff`.
-- A replay with the same key and body returns the same group as it is now. A different body gets 409 `IDEMPOTENCY_KEY_REUSED` (`clinical.repository.ts:148`).
-- Every lab request answer (list, read, create, update) gains `requestGroupId`: a UUID, or `null` for a single request.
-- Lab work items (`GET /api/v1/lab/work-items`, and by id) gain `requestGroupId`, so the lab can show a group's tests together.
+- A replay with the same key and body returns the same group as it is now, and sends every active test again, except one routed to another facility since; Lab replays the ones it already holds. It is answered whatever `LAB_REQUEST_GROUPS_ENABLED` says (the clinical owner's call, addendum 7223408785), so a retry never leads a clinician to order twice: while the setting is off only a new group is refused (503, below), and a replay writes no new group. A different body gets 409 `IDEMPOTENCY_KEY_REUSED` (`clinical.repository.ts:221`), whatever the setting says. The key is stored once for the whole call (`lab-request-group.create`) and once per test (`lab-request-group.test.1` to `.20`), so a key used on the single create never clashes with a group.
+- Every lab request answer (list, read, create, update) gains `requestGroupId`: a UUID, or `null` for a single request. It is answered, and the list's `?requestGroupId=` works, whatever `LAB_REQUEST_GROUPS_ENABLED` says.
+- This facility's own Lab work items (`GET /api/v1/lab/work-items`, by id, and the `accept-ehr-order` answer) gain `requestGroupId`, so the lab can show a group's tests together: `null` for a request ordered on its own. A work item from another facility's order route never carries one.
 - Accessions, specimens and results stay per test. Taking one sample for the whole group (one accession) is not in this package.
 
-Audit: today's `ehr.lab-request.create` row for each request, plus one `ehr.lab-request-group.create` row naming the patient, with the request ids and the count. No test names are stored in that row.
+Audit: today's `ehr.lab-request.create` row for each request, plus one `ehr.lab-request-group.create` row naming the patient and the group, with `{ labRequestIds, count, status, idempotentReplay }`. No test names are stored in that row. No group row is written when no group is (ORD-8 while `LAB_REQUEST_GROUPS_ENABLED` is off).
 
 ### Errors
 
 | HTTP | Code | Message |
 |---|---|---|
-| 400 | `VALIDATION_FAILED` | Names the field (for example, more than 20 tests). |
-| 400 | `LAB_REQUEST_TEST_REPEATED` | This test is already in the request. |
+| 400 | `VALIDATION_FAILED` | Names the field (for example, more than 20 tests): `tests.<n>.<field>` for a field inside a test, `tests.<n>` for a test that is not an object. |
+| 400 | `LAB_REQUEST_TEST_REPEATED` | This test is already in the request for this specimen, or with no specimen. If it is for another specimen, choose the specimen on each. To order it again, save this request, then add it on its own. Names each test that repeats an earlier one, on the same specimen or with either specimen missing (`tests.<n>`), each with the same words. |
+| 400 | `LAB_TEST_CODE_INCOMPLETE` | As the single create (0156, while `LAB_REQUEST_NAME_ONLY_ENABLED` is on): a test with one code only. Names each such test. |
 | 400 | `IDEMPOTENCY_KEY_REQUIRED` | As today (`common/idempotency.ts:10`). |
 | 403 | `PERMISSION_DENIED` | As today. |
 | 403 | `CONSENT_REQUIRED` | As today: no access to this patient's records here. |
 | 404 | `CLINICAL_RESOURCE_NOT_FOUND` | As today: the visit is not found. |
 | 409 | `VISIT_ENTERED_IN_ERROR` | As today (EHR-C8a). |
-| 409 | `IDEMPOTENCY_KEY_REUSED`, `REQUEST_IN_PROGRESS` | As today (`clinical.repository.ts:148-151`). |
-| 503 | `LAB_REQUEST_GROUPS_UNAVAILABLE` | Several tests in one request are not available yet. Add each test on its own. |
+| 409 | `IDEMPOTENCY_KEY_REUSED`, `REQUEST_IN_PROGRESS` | As today (`clinical.repository.ts:221`, `:224`). |
+| 503 | `LAB_REQUEST_GROUPS_UNAVAILABLE` | Sent as "The service could not complete the request." (every 5xx detail is replaced by that text; the service's own words are "Several tests in one request are not available yet. Add each test on its own."). A new group while `LAB_REQUEST_GROUPS_ENABLED` is off: after the body and the Idempotency-Key (present, 16-128 URL-safe characters) are checked, when the caller holds no `lab-request-group.create` row for the key, and before the consent check. No lab request, group or key row is written (the usual `http-request` failure audit row is, as for any refusal), and Lab is not called. A same-key retry of a stored group is answered, not refused. A backstop only: through the public gateway the browser gets the gateway's own `503 UPSTREAM_UNAVAILABLE`, as for every ehr-api 502, 503 and 504 (`gateway/nginx.conf.template`), so the website reads the catalogue status's `labRequestGroups` instead. |
 
 ### Screen notes
 
 - **Before this ships:** let the clinician pick several tests. Send one `POST .../lab-requests` per test, each with its own Idempotency-Key and the same `status`. Show any test that failed by name ("Malaria RDT was not saved. Try again."). Keep the group only on the open page; the app stores nothing on the device. After a reload the tests show as separate requests. Treat a 409 or 502 handoff answer as "saved, not sent to lab", with "Send to lab" for that test.
-- **After:** one Save button. Show each test's own state from `labHandoff` and later from `ownProgress` (ORD-3): "Sent to lab", "Sample taken 09:30", "Results ready 11:05". Offer "Send to lab" (today's `POST .../lab-requests/:requestId/lab-work-item`) only on the tests whose send failed. Group rows by `requestGroupId` in the visit's order list, and let the clinician hold or cancel one test at a time.
+- **After:** read `labRequestGroups` from `catalog/status` with the page. While it is `false` (or absent), keep the stopgap above. While it is `true`, one Save button. Show each test's own state from `labHandoff` and later from `ownProgress` (ORD-3): "Sent to lab", "Sample taken 09:30", "Results ready 11:05". Offer "Send to lab" (today's `POST .../lab-requests/:requestId/lab-work-item`) only on the tests whose send failed. Group rows by `requestGroupId` in the visit's order list, and let the clinician hold or cancel one test at a time.
+- **A Save that got no answer, or a 503:** send it again with the same Idempotency-Key and body. The saved group comes back, even if the setting went off meanwhile; nothing is ordered twice. Never fall back to one test per request on the first 503 alone.
+- **If the resend also gets 503:** the setting may have gone off since the page read the status. A page reads the status once, when it loads, and the browser may answer a reload from its cache for up to 60 s (`private, max-age=60`), so a page open at a switch-off still offers the group; while ehr-api restarts, some of its servers may have the setting on and some off. Re-read `catalog/status` past the browser cache (`cache: 'no-store'`):
+  - **`labRequestGroups` now `false`:** re-read the visit's lab requests first, and show any of the tests already there with a `requestGroupId` as saved (a first Save still in progress on another server may have saved them). Then say "Several tests in one request are switched off. Add each test on its own." and open the stopgap above with the remaining tests filled in.
+  - **still `true`:** treat it as an outage. Keep the form, and offer "Try again" with the same key and body.
+- **The same test twice on one specimen, or twice where one has no specimen,** is refused (`LAB_REQUEST_TEST_REPEATED`, naming the row). Mark the row "This test is already in the request for this specimen, or with no specimen. If it is for another specimen, choose the specimen on each. To order it again, save this request, then add it on its own." A row with no specimen beside the same test with one is taken as the same sample entered twice: the clinician chooses the specimen on each, or removes the row. The same test on another specimen (a culture on blood and on urine) goes in the same Save. A second set on the same specimen, such as a second blood-culture set from another site, goes as its own request: Save the group first, then add the second set on its own, with its site in that request's `clinicalInformation` (for example "Blood culture, set 2: right arm"), so the lab can label the bottles (the clinical owner's call, 27 Nov). Ask for the site when the clinician adds the second set.
 - The lab work list may group by `requestGroupId` under one patient card. Its default stays open work plus the last 90 days (Q123 A).
 
 ### Depends on
 
 - ORD-3 (progress) and FR-1 and Q105 (no reason on a first activation): live contract sections.
 - ORD-7 (Release B) for catalogue picks and name-only tests. Its national list is kept by Health ID's named clinical lead (owner decision Q124 A, 19 Nov 2026).
-- Lab's `lab.validate_work_item` (0077) must also check `requestGroupId` against the EHR order.
-- ORD-8 uses groups when it applies an order set's tests.
+- 0156 (name-only tests), applied before 0158.
+- Lab's `lab.validate_work_item` (0086's body, `0086:9352-9419`) copies `requestGroupId` from the EHR order into Lab's own work item (0158), refuses a different one (23514 `LAB_REQUEST_GROUP_MISMATCH`) and refuses any group on a routed one. lab-api sends none and takes none; it only reads the column.
+- ORD-8 uses groups when it applies an order set's tests, through ehr-api's `createInTransaction` with its own part names. Option (b), the clinical owner's call: while `LAB_REQUEST_GROUPS_ENABLED` is off, `createInTransaction` writes a null group, so an order set's tests are saved as separate requests and ORD-8 writes no group audit row.
 
 ### Target
 
-Release C (lane D). Size **M**: one column on `ehr.lab_requests` and on `lab.work_items`, one ehr-api route, an optional field on Lab's `accept-ehr-order`, and one Lab list field.
+0158 in its own release after 0156's (never in 0155's release, and only with files of 0155-0159), then lab-api and ehr-api in either order with `LAB_REQUEST_GROUPS_ENABLED` off, then the setting on, then the website (lane D). Size **M**: one column on `ehr.lab_requests` and on `lab.work_items`, a guard that keeps the group and the validator's copy (0158), one ehr-api route and setting, and one Lab answer field.
 
 ## ORD-8: Order sets, favourites, and note and visit templates (planned, Release C, needs a migration: yes)
 

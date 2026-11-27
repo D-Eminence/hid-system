@@ -54,8 +54,9 @@ export const NAME_ONLY_CODES_OFF = new NameOnlyCodes(false, false);
 /** The module provider: both settings as the environment sets them. */
 export const NAME_ONLY_CODES_PROVIDER = { provide: NameOnlyCodes, useFactory: () => NameOnlyCodes.fromEnvironment() };
 
-export function labTestCodeIncomplete(): DomainProblem {
-  return new DomainProblem(400, 'LAB_TEST_CODE_INCOMPLETE', 'Test code and its code system must be supplied together.');
+export function labTestCodeIncomplete(errors?: ConstructorParameters<typeof DomainProblem>[3]): DomainProblem {
+  return new DomainProblem(400, 'LAB_TEST_CODE_INCOMPLETE', 'Test code and its code system must be supplied together.',
+    errors);
 }
 
 export function diagnosisCodeIncomplete(errors?: ConstructorParameters<typeof DomainProblem>[3]): DomainProblem {

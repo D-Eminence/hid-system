@@ -32,7 +32,7 @@ const noRoutes = { summaries: async () => new Map(), summary: async () => null,
 const row = (status: OrderStatus): LabRequestRow => ({
   id: requestId, encounterId, patientId, facilityId, createdBy: accountId, createdByMembershipId: membershipId,
   testCodeSystem: 'loinc', testCode: '718-7', testDisplay: 'Hemoglobin', priority: 'routine', status,
-  specimenTypeCode: null, clinicalInformation: 'Fatigue', externalOrderReference: null, rowVersion: '1',
+  specimenTypeCode: null, clinicalInformation: 'Fatigue', externalOrderReference: null, requestGroupId: null, rowVersion: '1',
   createdAt: new Date('2026-10-01T09:00:00.123Z'), updatedAt: new Date('2026-10-01T09:00:00.123Z'),
 });
 

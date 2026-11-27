@@ -144,6 +144,42 @@ create function pg_temp.written() returns text language sql as $f$
                               'lab.order_route_result_reports'::regclass);
 $f$;
 
+-- 0158 (ORD-6, lab request groups) comes after 0156 in this tree: it replaced lab.validate_work_item(), which 0156
+-- pins (efac1507), and added request_group_id to ehr.lab_requests and lab.work_items with a guard trigger. Part A
+-- checks 0156 itself, so it runs with 0158 taken back (0158's header undo, as the tables' owner, with the two columns
+-- dropped too), inside savepoint before_0158; after A9 the suite rolls back to it (A10), so part B runs on this
+-- tree's state, 0158 included. On a build without 0158 nothing is taken back.
+savepoint before_0158;
+select (to_regprocedure('ehr.lab_request_group_fixed()') is not null)::text as q156_has_0158 \gset
+do $$
+declare
+  owner_name text := (select pg_get_userbyid(relation.relowner) from pg_class relation
+                       where relation.oid = 'ehr.lab_requests'::regclass);
+  body_0086 text;
+begin
+  if to_regprocedure('ehr.lab_request_group_fixed()') is null then
+    return;
+  end if;
+  -- 0086's body: 0158's body without its two additions.
+  body_0086 := (select replace(replace(proc.prosrc,
+                  E'\n       or new.request_group_id is not null then', ' then'),
+                  E'  if new.request_group_id is not null and new.request_group_id is distinct from source_row.request_group_id then\n'
+                  || E'    raise exception using errcode=''23514'',message=''LAB_REQUEST_GROUP_MISMATCH'';\n'
+                  || E'  end if;\n  new.request_group_id := source_row.request_group_id;\n', '')
+                  from pg_proc proc where proc.oid = 'lab.validate_work_item()'::regprocedure);
+  if md5(body_0086) is distinct from 'efac15072e0a6e68dff199026ff6f73e' then
+    raise exception 'name-only codes suite: lab.validate_work_item() is not 0158''s body, so 0086''s cannot be rebuilt';
+  end if;
+  execute format('set local role %I', owner_name);
+  drop trigger lab_requests_group_fixed on ehr.lab_requests;
+  drop function ehr.lab_request_group_fixed();
+  execute format('create or replace function lab.validate_work_item() returns trigger language plpgsql security definer '
+    || 'set search_path = lab, ehr, identity, auth, platform, pg_temp as %L', body_0086);
+  alter table ehr.lab_requests drop column request_group_id;
+  alter table lab.work_items drop column request_group_id;
+  execute 'reset role';
+end $$;
+
 -- The six tables' owner (the migrator): 0156 and its undo run as this role here, as the runner runs them.
 select relation.relowner::regrole::text as q156_owner from pg_class relation
  where relation.oid = 'ehr.lab_requests'::regclass \gset
@@ -635,6 +671,16 @@ select pg_temp.expect('A8b a row written while 0156 runs: its post-check refuses
 rollback to savepoint undone;
 select pg_temp.expect('A9 back to 0156 as the runner left it', 'as built',
   case when md5(pg_temp.schema_print()) = :'q156_applied' then 'as built' else 'not as built' end);
+
+-- A10. Back to this tree's state: 0158's objects again where the build has them (see before_0158).
+rollback to savepoint before_0158;
+select pg_temp.expect('A10 back to this tree''s state, 0158 included where built', :'q156_has_0158',
+  (to_regprocedure('ehr.lab_request_group_fixed()') is not null
+   and (select count(*) from pg_attribute attribute_row
+         where attribute_row.attrelid in ('ehr.lab_requests'::regclass, 'lab.work_items'::regclass)
+           and attribute_row.attname = 'request_group_id' and not attribute_row.attisdropped) = 2
+   and (select md5(proc.prosrc) from pg_proc proc where proc.oid = 'lab.validate_work_item()'::regprocedure)
+       = '04504d00ebd8940a8178ce35343f4f8c')::text);
 
 -- Part B. The data path, on 0156 as the runner left it. Fixture: the shared P4c fixture of the order route suites
 -- (order-routes-returns.integration.sql), re-prefixed (uuid prefix e56, n156), without its pharmacy helpers and

@@ -119,7 +119,10 @@ export class ClinicalRepository {
    * is audited exactly as its own route audits it (`run`): a refusal writes
    * one `denied` row per event asked for, and a success writes one `success`
    * row per part, in the same transaction. A part that fails rolls back every
-   * part and every row.
+   * part and every row. `scopedLookup` (ORD-6's group, whose visit must exist)
+   * works as `run`'s: when it finds nothing, one `failure` row per event asked
+   * for (reason `not_found`) is written and kept, nothing else is, and the
+   * answer is 404 CLINICAL_RESOURCE_NOT_FOUND.
    */
   async runParts<Value>(
     context: DataAccessContext,
@@ -127,6 +130,7 @@ export class ClinicalRepository {
     access: ClinicalAccess,
     events: readonly SemanticEvent[],
     operation: (client: PoolClient) => Promise<{ value: Value; parts: readonly AuditedPart[] }>,
+    scopedLookup?: (client: PoolClient) => Promise<boolean>,
   ): Promise<Value> {
     try {
       const authorization = await this.identity.authorize(patientId, access, context.purposeOfUse, context);
@@ -151,17 +155,25 @@ export class ClinicalRepository {
         }
         throw new DomainProblem(403, 'CONSENT_REQUIRED', 'Active consent and facility membership are required');
       }
-      return await this.database.withTransaction(context, async (client) => {
-        const result = await operation(client);
-        for (const part of result.parts) {
+      const result = await this.database.withTransaction(context, async (client): Promise<TransactionState<Value>> => {
+        if (scopedLookup && !await scopedLookup(client)) {
+          for (const event of events) await this.record(client, context, patientId, event, 'failure', { reason: 'not_found' });
+          return { state: 'missing' };
+        }
+        const done = await operation(client);
+        for (const part of done.parts) {
           await this.record(client, context, patientId, {
             ...part.event,
             resourceId: part.resourceId ?? part.event.resourceId,
             details: { ...part.event.details, ...part.details },
           }, 'success');
         }
-        return result.value;
+        return { state: 'ok', result: { value: done.value } };
       });
+      if (result.state !== 'ok') {
+        throw new DomainProblem(404, 'CLINICAL_RESOURCE_NOT_FOUND', 'Clinical resource was not found');
+      }
+      return result.result.value;
     } catch (error) {
       throw this.translate(error);
     }
@@ -226,6 +238,35 @@ export class ClinicalRepository {
       [resourceType, created.id, inserted.rows[0]?.id],
     );
     return { value: created.value, resourceId: created.id, details: { ...created.details, idempotentReplay: false } };
+  }
+
+  /**
+   * Whether the caller (this facility, account and membership: the key
+   * table's row-level security) holds an Idempotency-Key row for this
+   * operation and key, in any state. One read in its own read-only
+   * transaction, before any consent check or write. ORD-6's group create
+   * asks it only while LAB_REQUEST_GROUPS_ENABLED is off: no row, and the
+   * call would make a new group, so it is refused with nothing written; a
+   * row, and the call goes on as a replay (executeCreate). It sees committed
+   * rows only (READ COMMITTED), and a key row is never deleted
+   * (idempotency_keys_no_delete, 0004), so a row it finds is still there for
+   * executeCreate. A first call with the same key still in flight is not
+   * seen, so a resend that overtakes it is refused rather than waiting on it
+   * as executeCreate's insert would.
+   */
+  async idempotencyKeyStored(context: DataAccessContext, idempotencyKey: string, operation: string): Promise<boolean> {
+    try {
+      return await this.database.withTransaction(context, async (client) => {
+        const result = await client.query(
+          `select 1 from ehr.idempotency_keys
+           where facility_id = $1 and created_by = $2 and operation = $3 and idempotency_key = $4`,
+          [context.facilityId, context.actor.accountId, operation, idempotencyKey],
+        );
+        return (result.rowCount ?? 0) > 0;
+      }, { readOnly: true });
+    } catch (error) {
+      throw this.translate(error);
+    }
   }
 
   async setChangeReason(client: PoolClient, reason: string): Promise<void> {

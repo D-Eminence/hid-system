@@ -47,6 +47,42 @@ export interface LabAcceptEhrOrderInput {
   requestedAt: string;
 }
 
+/**
+ * A work item as lab-api answers it: GET /api/v1/lab/work-items (its
+ * `items`), GET /api/v1/lab/work-items/:id and the EHR order acceptance. A
+ * work item from another facility's order route (P4c) carries its route card
+ * and never this facility's order id or group (PRIV P4.3).
+ */
+export interface LabWorkItem {
+  id: string;
+  patientId: string;
+  facilityId: string;
+  /** Absent on a work item from another facility's order route. */
+  sourceEhrOrderId?: string;
+  sourceEhrOrderVersion: number;
+  status: 'accepted';
+  priority: 'routine' | 'urgent' | 'asap' | 'stat';
+  acceptedAt: string;
+  version: number;
+  /**
+   * ORD-6 (0158): the EHR order's group, which Lab's validator copied from
+   * the EHR row (lab-api sends none and takes none), so the board can show a
+   * group's tests together. On this facility's own work items only: null for
+   * a request ordered on its own; absent on a routed one.
+   */
+  requestGroupId?: string | null;
+  /** The list's and the read's (not the acceptance answer's). */
+  testName?: string;
+  clinicalIndication?: string | null;
+  accessionId?: string | null;
+  accessionNumber?: string | null;
+  specimenStatuses?: string[];
+  openWork?: boolean;
+  /** lab-api's own shapes (order-route-cards.ts): the route card, and the patient when one may be shown. */
+  orderRoute?: unknown;
+  patient?: unknown;
+}
+
 export interface PatientLabPage {
   records: Array<{id:string;version:string;title:string;recordedAt:string;effectiveAt:string|null;fields:Record<string,unknown>}>;
   nextCursor: string | null;

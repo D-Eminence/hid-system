@@ -23,11 +23,18 @@ interface WorkItemRow extends QueryResultRow {
   order_route_id?: string | null;
   /** The request's clinical information, as the EHR sent it (null when it sent none); read by get and list only. */
   clinical_indication?: string | null;
+  /**
+   * ORD-6 (0158): the EHR order's group, copied by lab.validate_work_item from
+   * the EHR row (lab-api never names the column); null for a request ordered
+   * on its own, and always null on a routed work item.
+   */
+  request_group_id?: string | null;
 }
 
 const WORK_ITEM_SELECT = `select id::text,patient_id::text,facility_id::text,ordering_facility_id::text,
   source_ehr_order_id::text,source_ehr_order_version::text,source_encounter_id::text,status,priority,
-  accepted_by::text,accepted_at,row_version::text,created_at,order_route_id::text,clinical_indication from lab.work_items`;
+  accepted_by::text,accepted_at,row_version::text,created_at,order_route_id::text,
+  request_group_id::text,clinical_indication from lab.work_items`;
 
 const workItemDenied = () => new DomainProblem(403, 'LAB_WORK_ITEM_ACCESS_DENIED', 'Lab work-item access is not authorized');
 
@@ -39,7 +46,8 @@ const workOrder = (q: string) => `${q}.open_work desc,case when ${q}.open_work t
 /** A work item's own columns, as `w` (both in the ordering and in the answer). */
 const WORK_ITEM_COLUMNS = ['id', 'patient_id', 'facility_id', 'ordering_facility_id', 'source_ehr_order_id',
   'source_ehr_order_version', 'source_encounter_id', 'status', 'priority', 'accepted_by', 'accepted_at', 'row_version',
-  'created_at', 'order_route_id', 'test_name', 'clinical_indication'].map((column) => `w.${column}`).join(',');
+  'created_at', 'order_route_id', 'request_group_id', 'test_name', 'clinical_indication'].map((column) => `w.${column}`)
+  .join(',');
 
 /**
  * The work list (200 rows, as before). Open work comes first, oldest first,
@@ -104,7 +112,8 @@ export const WORK_LIST_QUERY = `with released_tests as materialized (
     order by ${workOrder('x')} limit 200)
 select w.id::text,w.patient_id::text,w.facility_id::text,w.ordering_facility_id::text,
   w.source_ehr_order_id::text,w.source_ehr_order_version::text,w.source_encounter_id::text,w.status,w.priority,
-  w.accepted_by::text,w.accepted_at,w.row_version::text,w.created_at,w.order_route_id::text,w.test_name,w.clinical_indication,
+  w.accepted_by::text,w.accepted_at,w.row_version::text,w.created_at,w.order_route_id::text,
+  w.request_group_id::text,w.test_name,w.clinical_indication,
   a.id::text as accession_id,
   a.accession_number,w.open_work,array_remove(array_agg(s.status order by s.created_at),null) as specimen_statuses from shown w
   left join lab.accessions a on a.work_item_id=w.id left join lab.specimens s on s.accession_id=a.id
@@ -154,7 +163,7 @@ export class LabWorkItemsService {
     const existingResult = await client.query<WorkItemRow & { request_sha256: string }>(
       `select id::text,patient_id::text,facility_id::text,ordering_facility_id::text,
         source_ehr_order_id::text,source_ehr_order_version::text,source_encounter_id::text,status,
-        priority,accepted_by::text,accepted_at,row_version::text,created_at,request_sha256
+        priority,accepted_by::text,accepted_at,row_version::text,created_at,request_group_id::text,request_sha256
        from lab.work_items where (facility_id=$1 and accepted_by=$2 and idempotency_key=$3)
          or source_ehr_order_id=$4`,
       [context.facilityId, context.actor.accountId, key, command.sourceEhrOrderId]);
@@ -344,14 +353,18 @@ export class LabWorkItemsService {
    * the other facility's order id (PRIV P4.3); it carries its route card
    * instead, and its patient only while the route allows a read. This
    * facility's own one carries its patient when 0124's reader gave one
-   * (OWN_WORK_PATIENT_CARD_ENABLED on, and the member may read it).
+   * (OWN_WORK_PATIENT_CARD_ENABLED on, and the member may read it), and its
+   * EHR order's group (ORD-6, 0158: `requestGroupId`, null for a request
+   * ordered on its own) on get, list and the acceptance answer alike; a
+   * route-backed one carries none (0158's validator stores none there).
    */
   private project(row: WorkItemRow, card?: OrderRouteCard, ownPatient?: WorkItemRoutePatient): LabWorkItemResult {
     const base = { id: row.id,patientId: row.patient_id,facilityId: row.facility_id,
       sourceEhrOrderVersion: Number(row.source_ehr_order_version),
       status: row.status,priority: row.priority,acceptedAt: row.accepted_at,version: Number(row.row_version) };
     if (!row.order_route_id) {
-      return { ...base, sourceEhrOrderId: row.source_ehr_order_id, ...(ownPatient ? { patient: ownPatient } : {}) };
+      return { ...base, sourceEhrOrderId: row.source_ehr_order_id, requestGroupId: row.request_group_id ?? null,
+        ...(ownPatient ? { patient: ownPatient } : {}) };
     }
     return { ...base, ...(card ? { orderRoute: card.orderRoute, ...(card.patient ? { patient: card.patient } : {}) } : {}) };
   }

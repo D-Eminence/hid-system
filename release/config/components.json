@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0156",
-    "count": 155,
+    "last": "0158",
+    "count": 156,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -717,6 +717,10 @@
       {
         "name": "0156_name_only_lab_tests_and_diagnoses.sql",
         "sha256": "35084f0d50cff4f16eaa4640ab63c460ad2293e817ef59f270aa91589a95e7bf"
+      },
+      {
+        "name": "0158_lab_request_groups.sql",
+        "sha256": "e825ec4077adccbc36acd20f1f4e03aee7313f4dede7a8554c7d4a36a07ad555"
       }
     ]
   },

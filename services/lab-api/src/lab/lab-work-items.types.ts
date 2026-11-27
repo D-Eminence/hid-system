@@ -20,6 +20,13 @@ export interface LabWorkItemResult {
   facilityId: string;
   /** Absent on a work item from another facility's order route (P4c, PRIV P4.3). */
   sourceEhrOrderId?: string;
+  /**
+   * ORD-6 (0158): this facility's own work item's EHR order group, which
+   * Lab's validator copied from the EHR row; null for a request ordered on
+   * its own. Absent on a work item from another facility's order route, which
+   * never carries one.
+   */
+  requestGroupId?: string | null;
   sourceEhrOrderVersion: number;
   status: 'accepted';
   priority: AcceptEhrLabOrderCommand['priority'];

@@ -576,7 +576,8 @@ try {
   const statusBefore = await catalogGet(doctor, '/status');
   assert.deepEqual(expectStatus(statusBefore, 200, 'catalogue status before a list is loaded'), {
     medicines: notLoaded, labTests: notLoaded, diagnoses: { available: false, release: null, fileSha256: null },
-    labTestNameOnly: false, diagnosisNameOnly: false, classDuplicateCheck: false, attribution: [] },
+    labTestNameOnly: false, labRequestGroups: false, diagnosisNameOnly: false, classDuplicateCheck: false,
+    attribution: [] },
   'before a signed list is loaded nothing is available');
   assert.equal(statusBefore.headers.get('cache-control'), 'private, max-age=60',
     'the catalogue answers may be kept a minute by this user\'s browser (the route header wins over the global no-store)');
@@ -612,7 +613,7 @@ try {
   const loaded = seed => ({ available: true, version: '2026.1', approvedAt: '2026-12-01', fileSha256: seed.repeat(64) });
   assert.deepEqual(expectStatus(await catalogGet(ownPharmacist, '/status'), 200, 'catalogue status after a list'),
     { medicines: loaded('a'), labTests: loaded('b'), diagnoses: { available: false, release: null, fileSha256: null }, labTestNameOnly: false,
-      diagnosisNameOnly: false, classDuplicateCheck: false, attribution: [loincNotice] },
+      labRequestGroups: false, diagnosisNameOnly: false, classDuplicateCheck: false, attribution: [loincNotice] },
   'a loaded list is available with its version, its sign-off day (Lagos), its seed file and its sources\' notices');
   const firstAmox = expectStatus(await catalogGet(doctor, '/medicines?q=Amox&limit=1'), 200, 'doctor searches medicines');
   assert.deepEqual(firstAmox, { listVersion: '2026.1', more: true, items: [{ codeSystem: 'HID-MED', code: 'MED-00001',

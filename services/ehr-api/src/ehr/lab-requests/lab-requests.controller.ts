@@ -5,10 +5,10 @@ import { clinicalContext, requireIdempotencyKey } from '../shared/clinical-conte
 import {
   type CreateLabRequestInput,
   SendLabRequestToLabDto,
-  TimelineQueryDto,
   UpdateLabRequestDto,
 } from '../shared/clinical.dto';
 import { CreateLabRequestBodyPipe } from '../shared/name-only-codes';
+import { LabRequestListQueryDto } from './lab-request-groups.dto';
 import { LabRequestsService } from './lab-requests.service';
 import { WorkItemProgressService } from '../../integrations/work-item-progress.service';
 
@@ -18,11 +18,11 @@ export class LabRequestsController {
   constructor(private readonly labRequests: LabRequestsService,
     private readonly progress: WorkItemProgressService) {}
 
-  /** Each item carries `ownProgress` in this facility's own laboratory (ORD-3), read after the list. */
+  /** With `ownProgress` (ORD-3), read after the list; `?requestGroupId=` keeps it to one group (ORD-6). */
   @Get()
   @RequirePermissions('ehr.lab-request.read')
   async list(@Req() request: HidRequest, @Param('patientId', new ParseUUIDPipe()) patientId: string,
-    @Param('encounterId', new ParseUUIDPipe()) encounterId: string, @Query() query: TimelineQueryDto) {
+    @Param('encounterId', new ParseUUIDPipe()) encounterId: string, @Query() query: LabRequestListQueryDto) {
     const context = clinicalContext(request);
     const page = await this.labRequests.list(context, patientId, encounterId, query);
     return this.progress.withLabRequestProgress(context, patientId, page);

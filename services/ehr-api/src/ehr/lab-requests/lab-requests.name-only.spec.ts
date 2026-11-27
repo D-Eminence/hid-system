@@ -32,7 +32,7 @@ const workItem = { id: '123e4567-e89b-42d3-a456-426614174007', sourceEhrOrderId:
 const stored = (status: OrderStatus, rowVersion = '1'): LabRequestRow => ({ id: requestId, encounterId, patientId, facilityId,
   createdBy: accountId, createdByMembershipId: membershipId, testCodeSystem: null, testCode: null,
   testDisplay: 'Sickling test', priority: 'urgent', status, specimenTypeCode: 'blood', clinicalInformation: 'Bone pain',
-  externalOrderReference: null, rowVersion, createdAt: new Date('2026-12-01T09:00:00.123Z'),
+  externalOrderReference: null, requestGroupId: null, rowVersion, createdAt: new Date('2026-12-01T09:00:00.123Z'),
   updatedAt: new Date('2026-12-01T09:00:00.123Z') });
 
 /** A fake database for one request: reads, the row lock, the insert and the update return `row`. */
