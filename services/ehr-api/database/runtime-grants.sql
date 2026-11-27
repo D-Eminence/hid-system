@@ -2074,3 +2074,15 @@ revoke all on ehr.clinician_recent_diagnoses from public;
 -- above. No table privilege changes.
 grant execute on function ehr.catalog_diagnosis_listed(text, text) to hid_ehr_runtime, hid_schema_test_runtime;
 revoke all on function ehr.catalog_diagnosis_listed(text, text) from public;
+
+-- Several tests in one lab request (0158, ORD-6 of the Akos EHR plan; design
+-- note on hid-system#258, 27 November 2026, comment 7214746190), exactly as
+-- 0158 grants and revokes them: no role holds EXECUTE on the group guard
+-- ehr.lab_request_group_fixed() but its owner (the owner of ehr.lab_requests);
+-- its trigger lab_requests_group_fixed runs it as the updating role, without
+-- an EXECUTE check. The new request_group_id columns of ehr.lab_requests and
+-- lab.work_items are covered by those tables' grants above; no table
+-- privilege changes. The replaced lab.validate_work_item() keeps its ACL
+-- (0018's, with PostgreSQL's built-in PUBLIC EXECUTE, which 0017's revoke
+-- ran too early to take away; its trigger runs it as its owner).
+revoke all on function ehr.lab_request_group_fixed() from public;
