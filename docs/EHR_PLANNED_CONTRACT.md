@@ -1446,7 +1446,7 @@ together, like section 46's setting.
 | 400 | `CATALOG_SEARCH_TEXT_TOO_SHORT` | "Type at least 2 letters to search." |
 | 400 | `CATALOG_SEARCH_TEXT_NOT_ALLOWED` | "Search by medicine or test name. Do not type a Health ID or NIN here." |
 | 400 | `LAB_TEST_CODE_INCOMPLETE` | "Test code and its code system must be supplied together." |
-| 400 | `VALIDATION_FAILED` | existing (unknown field, `null`, bad `limit`, `doseForm`, `kind` or `category`) |
+| 400 | `VALIDATION_FAILED` | existing (unknown field, `null`, bad `limit`, `doseForm`, `kind` or `category`); also a `q` with a control character other than tab (U+0000 included: "q must not contain control characters"), before the database, as for ORD-9's diagnosis search (since 0152's ehr-api; Rahman's last look at #320) |
 | 400 | `IDEMPOTENCY_KEY_REQUIRED` | existing (`common/idempotency.ts:8-11`) |
 | 403 | existing permission refusal | — |
 | 404 | `CATALOG_ITEM_NOT_FOUND` | "This list item was not found at this facility." |
@@ -1970,7 +1970,10 @@ names. Those come from `DIAGNOSIS_SYNONYMS` in the same file (HTN, DM,
 "MP+", typhoid...), are kept apart from WHO's words, and contain no ICD-10
 content. A code typed exactly comes first, then an entry whose title or
 one of our other names is `q` itself, then those whose title or other name
-starts with `q`, then shorter titles.
+starts with `q`, then, for a `q` of 2 or more words, those that name more
+of `q`'s words (every word, not only the first 6, that starts a word of the
+title or of one of our other names, never a part of the code; 0157), then
+shorter titles.
 
 Example for `q=falciparum`:
 
@@ -2190,8 +2193,10 @@ file's seed in `docs/codes/catalog-approvals.json`.
 - **Search:** `GET /api/v1/ehr/terminology/diagnoses?q=&limit=` as above,
   with ORD-7's rules for `q` (6 words, never raw `to_tsquery`, no Health ID
   or NIN shapes, never logged) and its 429 and cache. Only the active
-  release is read, through its own rows: a release kept after a newer one
-  went live costs nothing.
+  release's entries are offered. Its id is read first, and a code through
+  the key (release, code); but the words' index finds every kept release's
+  matches, and the scan drops the other releases' (Rahman's last look at
+  #320: about 2 ms per kept release).
   - The code matches too, whole or in parts ("1F40", "1f40.z").
   - Titles and our other names are split into words as `q` is (lower case,
     at anything that is not a letter or a digit), as ORD-7's lists are. So
@@ -2206,16 +2211,47 @@ file's seed in `docs/codes/catalog-approvals.json`.
     word, so these found nothing). When nothing matched, the search runs
     once more with a final s dropped from each word of 4 or more letters
     ("parkinsons", "alzheimers"), and keeps only the entries where each
-    word so shortened is a whole word of the title or of one of our other
-    names. So "parkinsons" puts 8A00.0 Parkinson disease first, and "fits"
-    finds nothing: fit only starts "Fitting or adjustment of ..." entries,
-    which it used to offer. "gallstones" finds what "gallstone" finds.
+    word so shortened, or the word as typed, is a whole word of the title
+    or of one of our other names. So "parkinsons" puts 8A00.0 Parkinson
+    disease first, and "fits" finds nothing: fit only starts "Fitting or
+    adjustment of ..." entries, which it used to offer, and neither fit nor
+    fits is a word of them. "gallstones" finds what "gallstone" finds.
+  - A word that ends in s by itself is kept as typed (0157, Rahman's first
+    minor): before, the second attempt cut it to a word no title has
+    (thyroiditi, sclerosi, site, uteru), so "hashimotos thyroiditis",
+    "hodgkins lymphoma nodular sclerosis", "crohns disease of anastomotic
+    sites", "bitots spots" and "fibroids uterus" found nothing, and "Mature
+    B-cells neoplasms, unspecified" offered only 2A82.Z. Now each finds its
+    entry first (5A03.20, 2B30.10, DD70.6, 5B55.2, and 2E86.0 Leiomyoma of
+    uterus through our other name "fibroid uterus"), and the last gives
+    2A8Z, then 2A82.Z. A one-word `q` reaches the second attempt only when
+    no entry has a word starting with it, so its answer never changes.
   - The order: the entry whose code `q` is; then an entry whose title or
     one of our other names is `q` itself, as words ("ra" is FA20
     Rheumatoid arthritis, whose other name is ra, before shorter titles
     starting with ra; "urti" is CA07.0, "prom" JA89); then entries whose
-    title or other name starts with `q`; then shorter titles. A title's
-    own apostrophe-s is compared as `q`'s is.
+    title or other name starts with `q`; then, for a `q` of 2 or more
+    words, entries that name more of `q`'s words; then shorter titles. A
+    title's own apostrophe-s is compared as `q`'s is.
+  - Naming `q`'s words (0157, Rahman's second minor): each word of `q` as
+    searched (lower case, split as `q` is, each cut to 40 characters, and
+    every word, not only the first 6 that narrow the search) counts when it
+    starts a word of the title or of one of our other names, never a part
+    of the code. Before, words after the 6th did not rank, and a lone
+    stage, grade or type number also matched a code part: "HIV disease
+    stage 1 associated with tuberculosis" put 1C61.0, the malaria entry,
+    first, "grade 2 follicular lymphoma" put 2A80.0, grade 1, first, and
+    "hiv stage 2" put a stage 3 entry second. Now 1C60.0 comes first (then
+    1C61.0), 2A80.1 first, and the stage 2 entries before the stage 3
+    ones; "stage 3" puts 1C60.2 and 1C62.2 before 1C61.3, which is stage
+    4. The count never changes which entries match, how many, or `more`,
+    and the first three keys come before it, so a code typed in any form,
+    and a title typed as written, still come first.
+  - A one-word `q` counts nothing, so its order is as before (Ola, clinical
+    owner): a clinician who types a code fragment such as "1a" or "da"
+    usually means the code, so "1a" still puts 1A00 Cholera before GC51.00
+    Female Genital Mutilation Type 1a and KB88.0 Necrotising enterocolitis
+    of newborn, Stage 1A & B.
   - With the 2026-01 release loaded, each of its 16,883 titles of 2 to 100
     characters, typed as written or in upper case, comes first. The 372
     longer ones, cut to 100 characters, are each in the first 25.
@@ -2266,14 +2302,18 @@ file's seed in `docs/codes/catalog-approvals.json`.
   - A word or a code takes 1–2 ms (`malaria` 1.5 ms, `9A03` 1.3 ms, `NB91`
     at limit 25 1.7 ms).
   - Two-letter `q` take longest: `di` (2,974 entries match) about 49 ms,
-    `in` about 73 ms, and the broadest, `of` (6,715), about 115 ms at limit
-    10 and 121 ms at 25, with single calls up to about 185 ms.
+    `in` about 73 ms, and `of` (6,715) about 115 ms at limit 10 and 121 ms
+    at 25, with single calls up to about 185 ms. The broadest `q` is not
+    `of` but one letter and a mark, such as `o.` (10,110 entries; Rahman's
+    last look at #320).
   - With a second release kept (2027-01 active and 2026-01 kept, as a new
-    WHO release leaves the old one), the times are the same, because only
-    the active release's rows are read: `of` 121 ms, `in` 74 ms, `di` 49
-    ms, `NB91` 1.7 ms. Before, the search read both releases' rows from the
-    sixth call on a connection: `of` 194 ms, `in` 119 ms, `di` 76 ms, `NB91`
-    2.7 ms.
+    WHO release leaves the old one), the times were about the same, because
+    the active release's id is read first: `of` 121 ms, `in` 74 ms, `di` 49
+    ms, `NB91` 1.7 ms. The words' index still finds both releases' matches,
+    and the scan drops the kept one's, about 2 ms per kept release (Rahman's
+    last look at #320). Before, the search read both releases' rows from
+    the sixth call on a connection: `of` 194 ms, `in` 119 ms, `di` 76 ms,
+    `NB91` 2.7 ms.
 - **Not in this slice:** recent diagnoses (the next slice, below), and
   diagnoses by name only and `codeStatus`, which alter `ehr.diagnoses` and
   need a lock plan.
@@ -2396,6 +2436,43 @@ live table is altered.
   `45faa6a7…`).
 - **Not in this slice:** diagnoses by name only and `codeStatus` (with
   the recent read's change for a release switch, above).
+
+### First slice, ranking fixes: Rahman's two minors (0157, draft, not live)
+
+Built on 27 Nov 2026 (lane D), on 0152, as the design note on
+hid-system#258 (Ola, 26 Nov 2026, 13:20 UTC) set out. Rahman's last look
+at #320 cleared 0152 to sign and left two ranking minors, to fix before any
+ICD-11 release is activated: the whole-word rule of the second attempt, and
+the count of `q`'s words named (both described in the first slice, above).
+The number 0157 is a booking, given at integration in release order.
+
+- **Database (0157):** one `create or replace` of
+  `ehr.search_catalog_diagnoses(q, limit)`, with the same columns,
+  PL/pgSQL, STABLE, SECURITY DEFINER and `search_path`, all restated, so
+  its owner, grants and oid are kept. The body is 0152's but for the two
+  fixes and the new fourth key. No table, index, trigger or grant changes,
+  and no table is locked (PL/pgSQL's body check is syntax only); a search
+  in progress finishes on the old body, and the next one uses the new.
+  - Preconditions (55000 "0157: …", nothing applied): 0149's versions
+    table and 0152's list and search; "0157: already applied" when the
+    search's body is 0157's (md5 `d1a07a48…`); otherwise the search as
+    0152 made it (the md5 of its body, `43f331b7…`, PL/pgSQL, SECURITY
+    DEFINER, STABLE, its `search_path`, its owner and its columns), and
+    0149's query helper as 0152 pins it. 0153-0156 and 0159 are not
+    required.
+  - Post-checks: the new body's md5, SECURITY DEFINER, STABLE,
+    `search_path` and owner; EXECUTE for the owner, the EHR runtime and
+    the schema test runtime only, each runtime that exists still holding
+    it; 0149's helper unchanged.
+- **Not changed:** the answer's shape, ehr-api, `runtime-grants.sql`,
+  0149's helper (words after the 6th still do not narrow; they only rank)
+  and the seed.
+- **Undo** (owner-signed, one transaction): `create or replace` with
+  0152's body verbatim, everything restated, and 0152's comment; then
+  check the md5 `43f331b7…`, STABLE, SECURITY DEFINER, `search_path`, owner
+  and grants. No table lock.
+- **Release:** before the first ICD-11 release is activated. It can ride
+  alone, or with any file but 0156, which goes alone.
 
 
 ### Target
