@@ -17,7 +17,7 @@ describe('Lab result queries for the patient and the staff chat (A6)', () => {
   });
 
   it('uses the same sensitive test list as ehr-api (patient-evidence.query.spec.ts pins the same hash)', () => {
-    expect(sha(SENSITIVE_TEST_SQL_PATTERN)).toBe('64614e5da94374bd5050ef85c52fafc590c4dce351851668b51014ae4584c44b');
+    expect(sha(SENSITIVE_TEST_SQL_PATTERN)).toBe('6135ec93975cb095d34aa3ace2f8426b41aff46a7545458e9d9ea5f4957f66f7');
   });
 
   it('never gives the patient the correction reason', () => {
@@ -382,7 +382,8 @@ describe('0155: no routine tests hidden, the remaining clear misses (S4)', () =>
     const fragments = `|${SENSITIVE_TEST_SQL_PATTERN.slice('(^|[^a-z0-9])(?:'.length, -')($|[^a-z0-9])'.length)}|`;
     for (const fragment of ['pt', 'wet[^a-z0-9]*(?:mount|prep)[a-z]*', 'flow[^a-z0-9]*cytometr[a-z]*', 'via[^a-z0-9]*(?:tests?|screen[a-z]*)'])
       expect([fragment, fragments.includes(`|${fragment}|`)]).toEqual([fragment, false]);
-    for (const fragment of ['lam', 'paps?', 'vili', 'india[^a-z0-9]*ink', 'hep[^a-z0-9]*[abcde](?:[^a-z0-9]*[sec])?(?:[^a-z0-9]*a[gb])?'])
+    // "Paps" alone is 'paps' since Ola's fifth list (27 Nov 2026), and "Pap" alone is back (the last block).
+    for (const fragment of ['lam', 'paps', 'vili', 'india[^a-z0-9]*ink', 'hep[^a-z0-9]*[abcde](?:[^a-z0-9]*[sec])?(?:[^a-z0-9]*a[gb])?'])
       expect([fragment, fragments.includes(`|${fragment}|`)]).toEqual([fragment, true]);
     expect(PATIENT_SELF_LAB_QUERY).toContain(`coalesce(t.name,'') !~* '${SENSITIVE_TEST_SQL_PATTERN}'`);
     expect(SENSITIVE_TEST_SQL_PATTERN).not.toContain("'");
@@ -413,8 +414,8 @@ describe('0155: PID and PAPS shown, obstetric spellings back, the last clear mis
   // Each name is written with a space, a dot, a hyphen, an en dash, a slash and nothing between its parts.
   const SEPARATORS = [' ', '.', '-', '–', '/', ''];
   const PARTS = [['Paps', 'smear'], ['PAPS', 'smear'], ['Paps', 'test'], ['Papanicolaou', 'smear'], ['Sexual', 'abuse'], ['Sexual', 'violence'],
-    ['S', 'G', 'B', 'V'], ['G', 'B', 'V'], ['Urethral', 'swab'], ['G', 'N', 'I', 'D'], ['Clamidia', 'trachomatis'], ['Serum', 'lithium'],
-    ['Plasma', 'lithium'], ['Blood', 'lithium'], ['Lithium', 'serum'], ['Lithium', 'plasma'], ['Lithium', 'level'], ['Lithium', 'moles'],
+    ['S', 'G', 'B', 'V'], ['G', 'B', 'V'], ['Urethral', 'swab'], ['G', 'N', 'I', 'D'], ['Clamidia', 'trachomatis'],
+    ['Lithium', 'serum'], ['Lithium', 'plasma'], ['Lithium', 'level'], ['Lithium', 'moles'],
     ['Visual', 'inspection', 'with', 'acetic', 'acid'], ['Visual', 'inspection', 'with', 'Lugol', 'iodine'], ['Neuron', 'specific', 'enolase'],
     ['Squamous', 'cell', 'carcinoma', 'antigen'], ['Cytokeratin', '19', 'fragment'], ['Free', 'kappa'], ['Free', 'lambda'],
     ['Leukaemia', 'screen'], ['Lymphoma', 'screen'], ['Maternity', 'DNA'], ['ART', 'baseline', 'tests'], ['PEP', 'baseline']];
@@ -427,18 +428,88 @@ describe('0155: PID and PAPS shown, obstetric spellings back, the last clear mis
   const SHOWN = ['Grape juice', 'Rapeseed oil', 'Skin scrape', 'Lithium heparin', 'Lithium heparin tube', 'Lithium', 'Culture and sensitivity (C/S)',
     'Urine M/C/S', 'C/S', 'Kappa', 'Free T4', 'Visual acuity', 'Squamous epithelial cells', 'Maternity', 'PEP', 'Gram stain', 'Nasal swab', 'PID',
     'Paraprotein', 'G6PD'];
+  // Serum, plasma or blood lithium left the list in Ola's fifth list (27 Nov 2026): they read the lithium heparin tube as
+  // a lithium test, so "Serum lithium" is shown (the last block). Its fragments are checked here as they now stand.
 
-  it('builds the pattern as decided: "paps?" is a test word, the new fragments are whole alternatives, no "[a-z]*" before a short stem', () => {
+  it('builds the pattern as decided: "paps" is a test word, the new fragments are whole alternatives, no "[a-z]*" before a short stem', () => {
     const fragments = `|${SENSITIVE_TEST_SQL_PATTERN.slice('(^|[^a-z0-9])(?:'.length, -')($|[^a-z0-9])'.length)}|`;
-    for (const fragment of ['paps?', 'papanicolaou[a-z]*', 'clam[iy]d[a-z]*', 'rape[sd]?', 'sexual[^a-z0-9]*(?:assault|abuse|violence)',
-      initialismForm('gbv'), initialismForm('sgbv'), initialismForm('gnid'), '(?:serum|plasma|blood)[^a-z0-9]*lithium'])
+    for (const fragment of ['paps', 'papanicolaou[a-z]*', 'clam[iy]d[a-z]*', 'rape[sd]?', 'sexual[^a-z0-9]*(?:assaults?|abuse|violence)',
+      initialismForm('gbv'), initialismForm('sgbv'), initialismForm('gnid')])
       expect([fragment, fragments.includes(`|${fragment}|`)]).toEqual([fragment, true]);
-    for (const fragment of ['clamyd[a-z]*', 'sexual[^a-z0-9]*assault', 'lithium[^a-z0-9]*(?:levels?|assay)'])
+    for (const fragment of ['clamyd[a-z]*', 'sexual[^a-z0-9]*assault', 'lithium[^a-z0-9]*(?:levels?|assay)', '(?:serum|plasma|blood)[^a-z0-9]*lithium'])
       expect([fragment, fragments.includes(`|${fragment}|`)]).toEqual([fragment, false]);
-    expect(SENSITIVE_TEST_SQL_PATTERN.indexOf('|paps?|')).toBeGreaterThan(SENSITIVE_TEST_SQL_PATTERN.indexOf(`|${initialismForm('pmtct')}|`));
+    expect(SENSITIVE_TEST_SQL_PATTERN.indexOf('|paps|')).toBeGreaterThan(SENSITIVE_TEST_SQL_PATTERN.indexOf(`|${initialismForm('pmtct')}|`));
     // Where a word can start (a fragment, a group or an alternative, or after a mark), '[a-z]*' never comes before a
     // stem of six letters or fewer.
     expect(fragments.match(/(?:\||\(\?:|\[\^a-z0-9\][*+?]?)\[a-z\]\*[a-z]{0,6}(?![a-z])/g)).toBeNull();
+    expect(SENSITIVE_TEST_SQL_PATTERN).not.toContain("'");
+    expect(SENSITIVE_TEST_SQL_PATTERN).not.toContain('\\');
+  });
+
+  it.each(PARTS.map(parts => [parts.join(' '), parts] as const))('%j is hidden with any separator between its parts', (_name, parts) => {
+    for (const name of SEPARATORS.map(separator => parts.join(separator))) expect([name, re.test(name)]).toEqual([name, true]);
+  });
+
+  it.each(WORDS_APART.map(parts => [parts.join(' '), parts] as const))('%j is hidden with any marks between its words', (_name, parts) => {
+    for (const name of MARKS.map(separator => parts.join(separator))) expect([name, re.test(name)]).toEqual([name, true]);
+  });
+
+  it.each(NAMES)('%j is hidden', (name) => {
+    expect([name, re.test(name)]).toEqual([name, true]);
+  });
+
+  it.each(SHOWN)('%j is shown', (name) => {
+    expect([name, re.test(name)]).toEqual([name, false]);
+  });
+});
+
+// Ola's fifth decision as clinical owner (#258, 27 Nov 2026), made the same way in ehr-api (whose spec also has the
+// diagnoses and medicines): the lithium heparin tube is shown again, "Pap" alone is shared again, and the likely
+// misses among tests are hidden. The pattern string is ehr-api's (checked above).
+describe("0155: round 5's false positives out, the likely misses in (S4)", () => {
+  const re = new RegExp(SENSITIVE_TEST_SQL_PATTERN, 'i');
+  // Each name is written with a space, a dot, a hyphen, an en dash, a slash and nothing between its parts.
+  const SEPARATORS = [' ', '.', '-', '–', '/', ''];
+  const PARTS = [['Lithium', 'level'], ['Lithium', 'levels'], ['Lithium', 'assay'], ['Lithium', 'concentration'], ['Lithium', 'moles'],
+    ['Lithium', 'serum'], ['Lithium', 'plasma'], ['Lithium', 'carbonate', 'level'], ['Li', 'level'], ['Serum', 'Li'],
+    ['Visual', 'inspection', 'with', 'Lugol', 'iodine'], ['Visual', 'inspection', 'with', 'Lugols', 'iodine'], ['Sexually', 'assaulted'],
+    ['Sexually', 'abused'], ['Sexual', 'assaults'], ['Assault', 'sexual'], ['Indecent', 'assault'], ['Unlawful', 'carnal', 'knowledge'],
+    ['Gender', 'based', 'violence'], ['Intimate', 'partner', 'violence'], ['Domestic', 'violence'], ['Semen', 'detection'],
+    ['Urethral', 'discharge'], ['Urethral', 'smear'], ['Kappa', 'lambda', 'ratio'], ['Thin', 'Prep'], ['Sure', 'Path'], ['Immuno', 'fixation'],
+    ['TV', 'antigen'], ['TV', 'Ag'], ['HAART', 'monitoring'], ['PEP', 'labs'], ['PEP', 'baseline'], ['ART', 'baseline'], ['ART', 'baseline', 'tests']];
+  // Words that must stand apart: any marks, but not run together.
+  const MARKS = [' ', '.', '-', '–', '/', ' - '];
+  const WORDS_APART = [['Urethral', 'discharge', 'M/C/S'], ['Urethral', 'smear', 'for', 'Gram', 'stain'],
+    ['Visual', 'inspection', 'with', "Lugol's", 'iodine'], ['Lithium', 'carbonate', 'levels'], ['Assault', '(sexual)'], ['Sexual', 'and', 'gender', 'based', 'violence'], ['Victim', 'of', 'domestic', 'violence'],
+    ['HAART', 'monitoring', 'labs'], ['PEP', 'baseline', 'labs'], ['ART', 'baseline', 'bloods'], ['Abnormal', 'Pap'], ['Pap:', 'ASCUS']];
+  const NAMES = ['Pap', "Pap's", 'PAP', 'Abnormal Pap', 'Pap: ASCUS', 'Paps', 'PAPs', 'Lithium (serum)', 'Lithium (plasma)', 'Lithium, serum',
+    'Lithium [Moles/volume] in Serum or Plasma', 'Serum lithium level', 'Lithium concentration', 'Lithium carbonate level', 'Li level', 'Li-level',
+    'Serum Li', 'Defiled', 'Defilement', 'Sodomy', 'Incest', 'Molestation', 'Molested', 'DSH', 'MDD', 'ThinPrep', 'ThinPrep Pap test', 'SurePath',
+    'VIAA', 'Colposcopy', 'Klamydia', 'Klamydia trachomatis', 'SPEP', 'Immunofixation', 'Serum immunofixation', 'Urethral discharge M/C/S',
+    'Kappa/lambda ratio', 'TVAg', 'TV Ag', 'HAART monitoring', 'PEP labs', 'ART baseline', 'Semen detection test'];
+  // The lithium heparin tube is shown; "Serum lithium" and "Lithium" alone are misses Ola accepts. Ola's other names,
+  // and names near the new words.
+  const SHOWN = ['Plasma (lithium heparin)', 'Blood - Lithium Heparin', 'Ammonia (plasma, lithium heparin)', 'Troponin I (plasma lithium heparin)',
+    'Electrolytes [Plasma Lithium-Heparin]', 'Serum lithium', 'Lithium', 'Lithium heparin', 'Plasma lithium heparin', 'Serum (lithium heparin)',
+    'Serum lipase', 'Li', 'CAP (community-acquired pneumonia)', 'METs 5', 'MVA (motor vehicle accident)', 'Culture and sensitivity (C/S)', 'PET scan',
+    'CCM review', 'C/S', 'Kappa', 'Thin film', 'KOH prep', 'Semen analysis', 'TV', 'PEP', 'ART', 'HAART', 'Papain', 'Grape juice', 'Assault'];
+
+  it('builds the pattern as decided: "pap" shared, "paps" a test word, the new fragments whole alternatives, no serum lithium', () => {
+    const fragments = `|${SENSITIVE_TEST_SQL_PATTERN.slice('(^|[^a-z0-9])(?:'.length, -')($|[^a-z0-9])'.length)}|`;
+    for (const fragment of ['pap', 'paps', 'lithium[^a-z0-9]*(?:serum|plasma|levels?|assay|concentrations?|moles)',
+      'lithium[^a-z0-9]*carbonate[^a-z0-9]*levels?', 'li[^a-z0-9]*levels?', 'serum[^a-z0-9]*li', 'klamyd[a-z]*',
+      'urethral[^a-z0-9]*(?:discharges?|smears?)', 'tv[^a-z0-9]*(?:antigen|ag)', 'viaa', 'colposcop[a-z]*', 'thin[^a-z0-9]*prep',
+      'sure[^a-z0-9]*path', 'kappa[^a-z0-9]*lambda[^a-z0-9]*ratios?', 'spep', 'immuno[^a-z0-9]*fixation', 'haart[^a-z0-9]*monitoring',
+      'pep[^a-z0-9]*(?:labs?|baseline)', 'defile[a-z]*', 'sodom[a-z]*', 'molest[a-z]*', 'semen[^a-z0-9]*detection', 'dsh', 'mdd'])
+      expect([fragment, fragments.includes(`|${fragment}|`)]).toEqual([fragment, true]);
+    for (const fragment of ['paps?', '(?:serum|plasma|blood)[^a-z0-9]*lithium', 'defilement'])
+      expect([fragment, fragments.includes(`|${fragment}|`)]).toEqual([fragment, false]);
+    const pmtct = SENSITIVE_TEST_SQL_PATTERN.indexOf(`|${initialismForm('pmtct')}|`);
+    expect(SENSITIVE_TEST_SQL_PATTERN.indexOf('|pap|')).toBeLessThan(pmtct);
+    expect(SENSITIVE_TEST_SQL_PATTERN.indexOf('|paps|')).toBeGreaterThan(pmtct);
+    expect(fragments).toContain('lugol(?:[^a-z0-9]*s)?[^a-z0-9]*iodine');
+    expect(fragments.match(/(?:\||\(\?:|\[\^a-z0-9\][*+?]?)\[a-z\]\*[a-z]{0,6}(?![a-z])/g)).toBeNull();
+    expect(SENSITIVE_TEST_SQL_PATTERN.match(/\(\?[^:]/g)).toEqual(['(?!']);
     expect(SENSITIVE_TEST_SQL_PATTERN).not.toContain("'");
     expect(SENSITIVE_TEST_SQL_PATTERN).not.toContain('\\');
   });
