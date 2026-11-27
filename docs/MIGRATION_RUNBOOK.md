@@ -451,7 +451,11 @@ work item. Its header gives the details and the measurements.
   at 0158 after an earlier file of the same release committed, hold the ORD-6 images until 0158 applies.
 - **Switching off,** before an ehr-api image rollback or the undo: `LAB_REQUEST_GROUPS_ENABLED` off and
   `ORDER_SETS_ENABLED` off. Written groups stay and are still answered, a same-key retry of one included; no new
-  group is written, and the catalogue status's `labRequestGroups` is false, so the website offers no group.
+  group is written, and the catalogue status's `labRequestGroups` is false, so the website offers no group on a page
+  loaded after the switch. A page already open keeps offering groups until it is reloaded, and up to 60 s after a
+  reload (the status is kept `private, max-age=60`); its Save is refused 503, and the website then falls back to one
+  test per request (the planned contract's ORD-6 screen notes). While ehr-api's tasks restart, some may answer with
+  the setting on and some off.
 - **Undo** (a migration, only if the owner signs it; one transaction, after the switch-off): ACCESS SHARE on
   `ehr.order_routes` and ACCESS EXCLUSIVE on `ehr.lab_requests`, NOWAIT, with the 5-second loop, the one-attempt rule
   and both busy refusals under the undo file's own number; then drop the trigger `lab_requests_group_fixed` and the

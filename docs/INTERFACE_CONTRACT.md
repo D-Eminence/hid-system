@@ -9053,14 +9053,21 @@ backend does with the key, the audit and Lab's answers, beside EHR-C5's.
     ORD-6 sends no such field: read it as false.
   - **A new group while off:** `POST
     /ehr/patients/:patientId/encounters/:encounterId/lab-request-groups`
-    checks the body and the key's presence as when on, then the service
-    reads the caller's own `lab-request-group.create` row for the key (one
-    read, in its own read-only transaction). With none it answers `503
-    LAB_REQUEST_GROUPS_UNAVAILABLE` before the consent check: nothing is
-    written and Lab is not called. Only a direct caller sees that code: the
-    gateway replaces it with its own `503 UPSTREAM_UNAVAILABLE`, as it does
-    every ehr-api 502, 503 and 504, so it is a backstop, not the way the
-    website learns that groups are off.
+    checks the body and the Idempotency-Key (present, 16-128 URL-safe
+    characters) as when on, then the service reads the caller's own
+    `lab-request-group.create` row for the key (one read, in its own
+    read-only transaction, which sees committed rows only). With none it
+    answers `503 LAB_REQUEST_GROUPS_UNAVAILABLE` before the consent check:
+    no lab request, group or key row is written (the usual `http-request`
+    failure audit row is, as for any refusal) and Lab is not called. Only a
+    direct caller sees that code: the gateway replaces it with its own `503
+    UPSTREAM_UNAVAILABLE`, as it does every ehr-api 502, 503 and 504, so it
+    is a backstop, not the way the website learns that groups are off. A
+    page that read the status before a switch-off (once per load; a reload
+    may be answered from the browser's cache for up to 60 s) still offers
+    a group; the planned contract's screen notes say how it falls back
+    (resend with the same key first, then re-read the status past the
+    cache).
   - **A same-key retry while off** (the row exists) is answered as any
     replay: it writes no new group, answers the stored one, and sends its
     active tests with the routed check below. Another body under the key is
@@ -9117,10 +9124,12 @@ backend does with the key, the audit and Lab's answers, beside EHR-C5's.
   addendum 7223408785). `LAB_REQUEST_TEST_REPEATED` refuses a test as a
   likely double entry only when an earlier test has the same code system
   (upper-cased) and code, or the same name (case and extra spaces
-  ignored), on the same `specimenTypeCode` (as sent; none counts as one
-  value). One culture on blood and on urine goes in one Save. A second
-  blood-culture set from another site has the same specimen, so it goes as
-  its own request.
+  ignored), on the same `specimenTypeCode` (as sent, trimmed; none counts
+  as one value, and a blank one counts as none). One culture on blood and
+  on urine goes in one Save. A second blood-culture set from another site
+  has the same specimen, so it goes as its own request; the refusal says
+  so ("This test is already in the request for this specimen. To order it
+  again, save this request, then add it on its own.").
 
 ## SX-1: modules map per facility
 
