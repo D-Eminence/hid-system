@@ -35,7 +35,15 @@
 --      or for one replaced after it was live, is refused, and a release
 --      still loading takes rows (Rahman, #318 finding 2); a diagnosis row
 --      for a medicine list's version is refused (nit 7);
---   4. the EHR runtime may search and read no table.
+--   4. the EHR runtime may search and read no table;
+--   5. 0157 (Rahman's two ranking fixes after his last look at #320), on a
+--      release of its own: a word whose final s the second attempt drops is
+--      accepted when it or the word as typed is a whole word (fix 1); entries
+--      naming more of q's words, every word and never a code part, come
+--      after a name that is q or starts with q, for q of 2 or more words
+--      (fix 2), so a stage or grade number no longer ranks by a code part;
+--      a one-word q such as "1a" keeps its order. Each fix case fails on
+--      0152's search. Case 2z also changes with fix 2.
 -- Synthetic version ids: prefix c150. The codes and titles are ICD-11's
 -- (WHO, CC BY-ND 3.0 IGO), verbatim; the other names are ours.
 set plpgsql.variable_conflict = error;
@@ -254,9 +262,11 @@ select pg_temp.expect('2ua the second attempt keeps only entries where each shor
   pg_temp.found('fits', 10) || '|' || pg_temp.found('sweats', 10) || '|' || pg_temp.found('fit', 10) || '|'
   || pg_temp.found('sweat', 10));
 -- A title with its own apostrophe-s is compared as q is, its 's dropped too: typed as written it is still q, and q
--- cut at 100 characters (the first 6 words match all three) still starts it.
+-- cut at 100 characters (the first 6 words match all three) still starts it. Since 0157 (fix 2) every word of q
+-- ranks, not only the first 6: the other title, which names 14 or 15 of q's words, now comes before QC10, which
+-- names 6 or 7 (before, the shorter QC10 came second).
 select pg_temp.expect('2z a title with its own apostrophe-s, typed as written or cut at 100 characters, comes first',
-  'QC11 QC10 QC12 more=false|QC12 QC10 QC11 more=false|QC11 QC12 QC10 more=false',
+  'QC11 QC12 QC10 more=false|QC12 QC11 QC10 more=false|QC11 QC12 QC10 more=false',
   pg_temp.found('Procedure not carried out because of patient''s decision for reasons of belief or group pressure', 10)
   || '|' || pg_temp.found(left('Procedure not carried out because of patient''s decision for reasons other than belief or '
                                 || 'group pressure', 100), 10)
@@ -348,6 +358,73 @@ select pg_temp.expect('4a the EHR runtime searches', '5A11(t2dm) more=false', pg
 select pg_temp.expect('4b the EHR runtime reads no table', '42501',
   left(pg_temp.refusal('select count(*) from ehr.catalog_diagnoses'), 5));
 reset role;
+
+-- 5. 0157: Rahman's two ranking fixes (his last look at #320). A release of its own (2026-02, loaded while still
+-- loading, then switched live), so the rows above keep their answers. WHO's titles verbatim; the other names of
+-- 2E86.0 are ours, as the seed gives them.
+insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference, approvals_sha256, approved_at)
+  values ('c1500000-0000-4000-8000-000000000005', 'diagnosis', '2026-02', repeat('b', 64), 'synthetic ranking sign-off',
+          repeat('5', 64), now());
+insert into ehr.catalog_diagnoses (version_id, code, title, other_names, chapter, residual) values
+  -- Fix 1: titles with words that end in s by themselves (thyroiditis, sites, uterus, neoplasms).
+  ('c1500000-0000-4000-8000-000000000005', '5A03.20', 'Hashimoto thyroiditis', '', '05', false),
+  ('c1500000-0000-4000-8000-000000000005', 'DD70.6', 'Crohn disease of anastomotic sites', '', '13', false),
+  ('c1500000-0000-4000-8000-000000000005', '2E86.0', 'Leiomyoma of uterus', 'fibroid uterus; fibroids; uterine fibroids',
+   '02', false),
+  ('c1500000-0000-4000-8000-000000000005', '2A8Z', 'Mature B-cell neoplasms, unspecified', '', '02', true),
+  ('c1500000-0000-4000-8000-000000000005', '2A82.Z', 'Mature B-cell neoplasm with leukaemic behaviour, unspecified', '',
+   '02', true),
+  -- Fix 2: HIV disease by clinical stage (stages 1 to 3, and 1C61.3, stage 4, whose code part is 3) and follicular
+  -- lymphoma by grade, each with a number that also starts a code part of another.
+  ('c1500000-0000-4000-8000-000000000005', '1C60.0', 'HIV disease clinical stage 1 associated with tuberculosis', '',
+   '01', false),
+  ('c1500000-0000-4000-8000-000000000005', '1C60.1', 'HIV disease clinical stage 2 associated with tuberculosis', '',
+   '01', false),
+  ('c1500000-0000-4000-8000-000000000005', '1C60.2', 'HIV disease clinical stage 3 associated with tuberculosis', '',
+   '01', false),
+  ('c1500000-0000-4000-8000-000000000005', '1C61.0', 'HIV disease clinical stage 1 associated with malaria', '', '01',
+   false),
+  ('c1500000-0000-4000-8000-000000000005', '1C61.1', 'HIV disease clinical stage 2 associated with malaria', '', '01',
+   false),
+  ('c1500000-0000-4000-8000-000000000005', '1C61.2', 'HIV disease clinical stage 3 associated with malaria', '', '01',
+   false),
+  ('c1500000-0000-4000-8000-000000000005', '1C61.3', 'HIV disease clinical stage 4 associated with malaria', '', '01',
+   false),
+  ('c1500000-0000-4000-8000-000000000005', '1C62.1',
+   'HIV disease clinical stage 2 without mention of tuberculosis or malaria', '', '01', false),
+  ('c1500000-0000-4000-8000-000000000005', '1C62.2',
+   'HIV disease clinical stage 3 without mention of tuberculosis or malaria', '', '01', false),
+  ('c1500000-0000-4000-8000-000000000005', '2A80.0', 'Follicular lymphoma grade 1', '', '02', false),
+  ('c1500000-0000-4000-8000-000000000005', '2A80.1', 'Follicular lymphoma grade 2', '', '02', false),
+  ('c1500000-0000-4000-8000-000000000005', '2A80.2', 'Follicular lymphoma grade 3', '', '02', false),
+  -- A one-word code fragment: 1a starts 1A00's code, and is a word of the two others' titles.
+  ('c1500000-0000-4000-8000-000000000005', '1A00', 'Cholera', '', '01', false),
+  ('c1500000-0000-4000-8000-000000000005', 'GC51.00', 'Female Genital Mutilation Type 1a', '', '16', false),
+  ('c1500000-0000-4000-8000-000000000005', 'KB88.0', 'Necrotising enterocolitis of newborn, Stage 1A & B', '', '19',
+   false);
+update ehr.catalog_versions set active = false where kind = 'diagnosis' and active;
+update ehr.catalog_versions set active = true where id = 'c1500000-0000-4000-8000-000000000005';
+-- Fix 1. Before, each shortened word had to be a whole word itself: thyroiditi, site and uteru are not, so the first
+-- three found nothing, and neoplasm is a word of 2A82.Z only, so the fourth offered 2A82.Z alone.
+select pg_temp.expect('5a fix 1: a word that ends in s by itself is accepted as typed, when the second attempt drops its s',
+  '5A03.20 more=false|DD70.6 more=false|2E86.0(fibroid uterus) more=false|2A8Z 2A82.Z more=false',
+  pg_temp.found('hashimotos thyroiditis', 10) || '|' || pg_temp.found('crohns disease of anastomotic sites', 10) || '|'
+  || pg_temp.found('fibroids uterus', 10) || '|' || pg_temp.found('Mature B-cells neoplasms, unspecified', 10));
+-- Fix 2. Before, the 7th word (tuberculosis) did not rank, so the shorter malaria titles came first; and grade 2 and
+-- stage 2 also started the code parts 2A80 and 1C6x.2, so grade 1 and the stage 3 entries ranked with them.
+select pg_temp.expect('5b fix 2: every word of q ranks, and a word that starts only a code part ranks lower',
+  '1C60.0 1C61.0 1C60.1 1C60.2 1C61.1 1C61.2 1C61.3 more=false|2A80.1 2A80.0 2A80.2 more=false|'
+  || '1C61.1 1C60.1 1C62.1 1C61.2 1C60.2 1C62.2 more=false',
+  pg_temp.found('HIV disease stage 1 associated with tuberculosis', 10) || '|'
+  || pg_temp.found('grade 2 follicular lymphoma', 10) || '|' || pg_temp.found('hiv stage 2', 10));
+-- (ii): 3 is a word of the stage 3 titles, and only a code part of 1C61.3 (stage 4). Before, 1C61.3 came second, by
+-- its shorter title.
+select pg_temp.expect('5c fix 2: "stage 3" puts the stage 3 entries before 1C61.3, which is stage 4',
+  '1C61.2 1C60.2 1C62.2 1C61.3 more=false', pg_temp.found('stage 3', 10));
+-- A one-word q keeps 0152's order (Ola, clinical owner): a code fragment usually means the code, so 1A00 stays before
+-- the titles that have 1a as a word.
+select pg_temp.expect('5d a one-word q keeps its order: "1a" puts 1A00 first', '1A00 GC51.00 KB88.0 more=false',
+  pg_temp.found('1a', 10));
 
 do $$
 declare
