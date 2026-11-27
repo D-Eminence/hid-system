@@ -224,6 +224,20 @@ test('the approved other names join their entry\'s other names; a code or title 
   // Its own entry's title or other name is no clash.
   assert.deepEqual(build(entry({ names: ['cholelithiasis', 'gallstones'] }), new Map([['DC11', ['gallstones']]])).items[0].otherNames,
     ['cholelithiasis', 'gallstones'])
+  // An empty name, and any character outside ASCII letters, digits, spaces, apostrophes and hyphens, stop the build:
+  // the clash check compares as 0152 does only for those (Rahman's #342 review, nit 1).
+  assert.throws(() => build(entry({ names: [''] })), /DC11's names must be trimmed, non-empty and without ";"/)
+  assert.throws(() => build(entry({ names: ['sj\u00f8gren syndrome'] })), /DC11's names must be .* in ASCII letters, digits/)
+  assert.throws(() => build(entry({ names: ['gallstone\u00a0disease'] })), /in ASCII letters, digits/)
+  // The clash check drops a word-final 's after the curly apostrophe too (nit 2) ...
+  assert.throws(() => build(entry({ names: ['cholelithiasis\u2019s unspecified'] })),
+    /already a title or other name of DC11\.Z/)
+  // ... only a word-final one: in "cholelithiasi'ss" the s is kept, so it is no clash with DC11's "Cholelithiasis".
+  assert.deepEqual(build([{ code: 'LD40.0', title: 'Complete trisomy 21', names: ["cholelithiasi'ss"], approval: 'ok' }])
+    .items[3].otherNames, ["cholelithiasi'ss"])
+  // ... and trims, so a title or other name ending in a mark still clashes.
+  assert.throws(() => build(entry({ names: ['gallstones'] }), new Map([['DC11.Z', ['Gallstones.']]])),
+    /"gallstones" for DC11 is already a title or other name of DC11\.Z/)
 })
 
 test('the seed: coded entries only, verbatim titles, code order; no extension code, block, chapter 26 or section V', () => {

@@ -38,6 +38,9 @@ export const LEFT_OUT_CHAPTERS = {
  * Our other names for the diagnosis search that ocr-worker's DIAGNOSIS_SYNONYMS does not hold, each with its code,
  * WHO's title for that code (the build stops if the release lacks the code or names it otherwise, or if another entry
  * already has one of the names as its title or other name), the names, and who approved them, with the record.
+ * A name may hold only ASCII letters, digits, spaces, both apostrophes and hyphens. 0152's search splits words at
+ * [[:alnum:]], which follows the database's character type: under the C type every other letter is a word break. So
+ * the clash check below compares exactly as the search does only for those characters, and the build refuses others.
  * Promised on #320: no "Down" query reached LD40.0 Complete trisomy 21, and "gallstones" reached DA91.30 Gallstone
  * ileus of small intestine but not DC11 Cholelithiasis.
  * - LD40.0: WHO lists "Down syndrome" as an inclusion of LD40.0. "Down's syndrome" needs no name of its own: the
@@ -227,8 +230,10 @@ export function buildIcd11Seed(rows, { release, releaseFile, otherNames = new Ma
       throw new Error(`approved other names: ${code} has no approval`);
     }
     if (!Array.isArray(names) || names.length === 0
-        || names.some((name) => typeof name !== 'string' || name.trim() !== name || name === '' || name.includes(';'))) {
-      throw new Error(`approved other names: ${code}'s names must be trimmed, non-empty and without ";"`);
+        || names.some((name) => typeof name !== 'string' || name.trim() !== name || name === '' || name.includes(';')
+          || !/^[A-Za-z0-9 '’-]+$/.test(name))) {
+      throw new Error(`approved other names: ${code}'s names must be trimmed, non-empty and without ";", in ASCII `
+        + 'letters, digits, spaces, apostrophes and hyphens only');
     }
     const item = items.find((entry) => entry.code === code);
     if (!item) throw new Error(`approved other names: ${code} is not in this release`);
