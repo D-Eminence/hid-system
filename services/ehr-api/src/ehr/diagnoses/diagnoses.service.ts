@@ -3,8 +3,9 @@ import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
 import { decodeTimelineCursor, requestDigest, timelineCursorSql, timelinePage } from '../shared/clinical-context';
-import { CreateDiagnosisDto, TimelineQueryDto, UpdateDiagnosisDto } from '../shared/clinical.dto';
+import { type CreateDiagnosisInput, TimelineQueryDto, UpdateDiagnosisDto } from '../shared/clinical.dto';
 import { ClinicalRepository, type OperationResult } from '../shared/clinical.repository';
+import { NAME_ONLY_CODES_OFF, NameOnlyCodes } from '../shared/name-only-codes';
 
 export interface DiagnosisRow extends QueryResultRow {
   id: string;
@@ -13,8 +14,9 @@ export interface DiagnosisRow extends QueryResultRow {
   facilityId: string;
   createdBy: string;
   createdByMembershipId: string;
-  codeSystem: string;
-  code: string;
+  /** Both null for a diagnosis saved by its name only (0156, DIAGNOSIS_NAME_ONLY_ENABLED). */
+  codeSystem: string | null;
+  code: string | null;
   display: string;
   clinicalStatus: string;
   verificationStatus: string;
@@ -24,6 +26,31 @@ export interface DiagnosisRow extends QueryResultRow {
   rowVersion: string;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/**
+ * ORD-9's codeStatus on a diagnosis create answer (0156; only while
+ * DIAGNOSIS_NAME_ONLY_ENABLED is on): `in_list`, an ICD-11 code found in the
+ * active ICD-11 release; `not_in_list`, an ICD-11 code not found (the
+ * diagnosis is still saved); `not_checked`, any other code system, or no
+ * release active; `no_code`, a diagnosis saved by its name only.
+ */
+export type DiagnosisCodeStatus = 'in_list' | 'not_in_list' | 'not_checked' | 'no_code';
+
+/** A diagnosis as its create answers it: with codeStatus while DIAGNOSIS_NAME_ONLY_ENABLED is on. */
+export type DiagnosisCreated = DiagnosisRow & { codeStatus?: DiagnosisCodeStatus };
+
+/** 0156's lookup: true or false for an ICD-11 code against the active release, null when none is active. */
+export const CODE_LISTED_SQL = 'select ehr.catalog_diagnosis_listed($1, $2) as listed';
+
+/**
+ * The code ehr.catalog_diagnosis_listed is asked about: a post-coordinated
+ * code (with & or /) is checked on its first code, the text before the first
+ * & or /, with the spaces at its ends taken off, as the function and the
+ * recent read take it (the contract's rule for codeStatus).
+ */
+export function firstDiagnosisCode(code: string): string {
+  return code.replace(/[&/][\s\S]*$/, '').replace(/^ +| +$/g, '');
 }
 
 const COLUMNS = `
@@ -37,7 +64,8 @@ const COLUMNS = `
 export class DiagnosesService {
   private readonly logger = new Logger(DiagnosesService.name);
 
-  constructor(private readonly repository: ClinicalRepository) {}
+  constructor(private readonly repository: ClinicalRepository,
+    private readonly nameOnly: NameOnlyCodes = NAME_ONLY_CODES_OFF) {}
 
   list(context: DataAccessContext, patientId: string, encounterId: string, query: TimelineQueryDto) {
     const scope = { list: 'ehr.diagnoses', patientId, encounterId };
@@ -69,7 +97,12 @@ export class DiagnosesService {
     );
   }
 
-  create(context: DataAccessContext, patientId: string, encounterId: string, input: CreateDiagnosisDto, key: string) {
+  /**
+   * A new diagnosis. While DIAGNOSIS_NAME_ONLY_ENABLED is on (0156) it may
+   * leave out its code pair (CreateDiagnosisBodyPipe), and the answer carries
+   * codeStatus.
+   */
+  create(context: DataAccessContext, patientId: string, encounterId: string, input: CreateDiagnosisInput, key: string) {
     return this.repository.run(
       context, patientId, 'write_records', { action: 'ehr.diagnosis.create', resourceType: 'diagnosis' },
       (client) => this.createInTransaction(client, context, patientId, encounterId, input, key),
@@ -80,19 +113,20 @@ export class DiagnosesService {
   /**
    * The diagnosis create inside a transaction the caller already holds (the
    * route's own, or EHR-C5's one-call consultation). The caller writes the
-   * `ehr.diagnosis.create` audit row.
+   * `ehr.diagnosis.create` audit row. While DIAGNOSIS_NAME_ONLY_ENABLED is on,
+   * the answer (and a replay's) carries codeStatus (0156).
    */
-  createInTransaction(
+  async createInTransaction(
     client: PoolClient,
     context: DataAccessContext,
     patientId: string,
     encounterId: string,
-    input: CreateDiagnosisDto,
+    input: CreateDiagnosisInput,
     key: string,
     operation = 'diagnosis.create',
-  ): Promise<OperationResult<DiagnosisRow>> {
+  ): Promise<OperationResult<DiagnosisCreated>> {
     const digest = requestDigest(operation, { patientId, encounterId, input });
-    return this.repository.executeCreate(
+    const created = await this.repository.executeCreate(
       client, context, patientId, key, operation, digest, 'diagnosis',
       async () => {
         const result = await client.query<DiagnosisRow>(
@@ -103,16 +137,51 @@ export class DiagnosesService {
            returning ${COLUMNS}`,
           [
             encounterId, patientId, context.facilityId, context.actor.accountId, context.membershipId,
-            input.codeSystem, input.code, input.display, input.clinicalStatus, input.verificationStatus,
+            input.codeSystem ?? null, input.code ?? null, input.display, input.clinicalStatus, input.verificationStatus,
             input.onsetAt ?? null, input.abatementAt ?? null, input.notes ?? null,
           ],
         );
         const row = this.single(result.rows[0]);
-        await this.recordRecent(client, context, row);
+        // A diagnosis by name only is not a pick: ehr.record_recent_diagnosis records nothing with no code.
+        if (row.code !== null) await this.recordRecent(client, context, row);
         return { value: row, id: row.id };
       },
       (id) => this.findById(client, context, patientId, id),
     );
+    if (!this.nameOnly.diagnoses) return created;
+    return { ...created, value: { ...created.value, codeStatus: await this.codeStatus(client, context, created.value) } };
+  }
+
+  /**
+   * ORD-9's codeStatus (0156). Only an `ICD-11` code is looked up, through
+   * ehr.catalog_diagnosis_listed (SECURITY DEFINER: no runtime may read the
+   * list itself), on its first code. The lookup runs in a savepoint in the
+   * save's transaction: any failure of it (a schema without 0156, 42883; a
+   * statement timeout; anything else) is rolled back to the savepoint, the
+   * diagnosis saves as before, and the answer says `not_checked`, with a
+   * warning naming the SQLSTATE and the request's correlation id, never the
+   * code or the patient. Only a serialization failure (40001) in a
+   * SERIALIZABLE transaction is passed on, as for the recent record.
+   */
+  private async codeStatus(client: PoolClient, context: DataAccessContext, row: DiagnosisRow):
+  Promise<DiagnosisCodeStatus> {
+    if (row.code === null || row.codeSystem === null) return 'no_code';
+    if (row.codeSystem !== 'ICD-11') return 'not_checked';
+    await client.query('savepoint ehr_diagnosis_code_status');
+    try {
+      const result = await client.query<{ listed: boolean | null }>(CODE_LISTED_SQL,
+        [row.codeSystem, firstDiagnosisCode(row.code)]);
+      await client.query('release savepoint ehr_diagnosis_code_status');
+      const listed = result.rows[0]?.listed;
+      return listed === true ? 'in_list' : listed === false ? 'not_in_list' : 'not_checked';
+    } catch (error) {
+      const code = sqlState(error);
+      await client.query('rollback to savepoint ehr_diagnosis_code_status');
+      if (code === '40001' && await isSerializable(client)) throw error;
+      this.logger.warn({ message: 'A diagnosis code could not be checked against the ICD-11 list', sqlState: code,
+        correlationId: context.correlationId });
+      return 'not_checked';
+    }
   }
 
   /**

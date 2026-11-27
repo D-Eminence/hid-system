@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { QueryResultRow } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import { DatabaseService } from '../../database/database.service';
+import { NAME_ONLY_CODES_OFF, NameOnlyCodes } from '../shared/name-only-codes';
 import { CATALOG_SEARCH_MAX_LENGTH } from './catalog.dto';
 import type { CATALOG_LAB_CATEGORIES, CatalogDoseForm, SearchCatalogLabTestsQueryDto,
   SearchCatalogMedicinesQueryDto } from './catalog.dto';
@@ -34,10 +35,10 @@ export interface CatalogStatus {
   labTests: CatalogListStatus;
   /** ORD-9 (0152): the ICD-11 release the diagnosis search uses, when one is loaded. */
   diagnoses: { available: boolean; release: string | null; fileSha256: string | null };
-  /** The name-only lab request (a later ORD-7 slice). */
-  labTestNameOnly: false;
-  /** ORD-9. */
-  diagnosisNameOnly: false;
+  /** Whether a lab request may be saved by its test name only (0156, LAB_REQUEST_NAME_ONLY_ENABLED). */
+  labTestNameOnly: boolean;
+  /** Whether a diagnosis may be saved by its name only, with codeStatus on its create (0156, DIAGNOSIS_NAME_ONLY_ENABLED). */
+  diagnosisNameOnly: boolean;
   /** ORD-10 phase 2. */
   classDuplicateCheck: false;
   /** The notices the active lists' sources require (LOINC's, the WHO Model List's), for the About page. */
@@ -269,13 +270,15 @@ export class CatalogService {
   private readonly logger = new Logger(CatalogService.name);
   private readonly searches = new Map<string, { windowEnds: number; count: number }>();
 
-  constructor(private readonly database: DatabaseService) {}
+  constructor(private readonly database: DatabaseService,
+    private readonly nameOnly: NameOnlyCodes = NAME_ONLY_CODES_OFF) {}
 
   /**
    * What the screens may use. A list is available when its active, signed
    * version offers at least one row. On a schema without 0149 this answers
    * 404 CATALOG_NOT_AVAILABLE, as the contract says it does before ORD-7
-   * ships, so the screens keep their built-in lists.
+   * ships, so the screens keep their built-in lists. labTestNameOnly and
+   * diagnosisNameOnly are the two settings of 0156 (false while off).
    */
   async status(): Promise<CatalogStatus> {
     let rows: StatusRow[];
@@ -307,8 +310,8 @@ export class CatalogService {
       diagnoses: { available: diagnosisList.available,
         release: diagnosisList.available ? `ICD-11 MMS ${diagnosisList.version}` : null,
         fileSha256: diagnosisList.fileSha256 },
-      labTestNameOnly: false,
-      diagnosisNameOnly: false,
+      labTestNameOnly: this.nameOnly.labRequests,
+      diagnosisNameOnly: this.nameOnly.diagnoses,
       classDuplicateCheck: false,
       attribution,
     };

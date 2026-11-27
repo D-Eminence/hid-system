@@ -17,9 +17,12 @@ import {
   type CreateDiagnosisDto,
 } from '../shared/clinical.dto';
 import { ClinicalRepository } from '../shared/clinical.repository';
+import { NAME_ONLY_CODES_OFF, NameOnlyCodes } from '../shared/name-only-codes';
 import { VitalsService } from '../vitals/vitals.service';
 import { CreateConsultationDto } from './consultation.dto';
-import { ConsultationPartsGuard, ConsultationsController, consultationPermissions } from './consultations.controller';
+import {
+  ConsultationPartsGuard, ConsultationsController, CreateConsultationBodyPipe, consultationPermissions,
+} from './consultations.controller';
 import { ConsultationsService } from './consultations.service';
 
 // Fictional identifiers and clinical data only.
@@ -73,9 +76,11 @@ interface Tables {
  * the services read. Inserting a diagnosis with code 'FAIL' breaks a CHECK.
  * ehr.record_recent_diagnosis (0153) adds to `recent`, or fails with the
  * code given to failRecent; the transaction is READ COMMITTED unless
- * setIsolation says otherwise.
+ * setIsolation says otherwise. ehr.catalog_diagnosis_listed (0156) answers
+ * for ICD-11 whether the code is in `listed`, and null for any other code
+ * system; DiagnosesService asks it only while `nameOnly` has diagnoses on.
  */
-function fakeDatabase() {
+function fakeDatabase(nameOnly: NameOnlyCodes = NAME_ONLY_CODES_OFF, listed: ReadonlySet<string> = new Set()) {
   let tables: Tables = { keys: [], encounters: [], notes: [], revisions: [], vitals: [], diagnoses: [], recent: [] };
   let recentFailure: string | undefined;
   let isolation = 'read committed';
@@ -202,6 +207,13 @@ function fakeDatabase() {
           savepoints.push(sql.replace(/ ehr_recent_diagnosis$/, ''));
           return one([]);
         }
+        if (/^(savepoint|release savepoint|rollback to savepoint) ehr_diagnosis_code_status$/.test(sql)) {
+          savepoints.push(sql.replace(/ ehr_diagnosis_code_status$/, ' (code status)'));
+          return one([]);
+        }
+        if (sql === 'select ehr.catalog_diagnosis_listed($1, $2) as listed') {
+          return one([{ listed: values[0] === 'ICD-11' ? listed.has(String(values[1])) : null }]);
+        }
         if (sql === "select current_setting('transaction_isolation') as isolation") {
           savepoints.push('read isolation');
           return one([{ isolation }]);
@@ -244,7 +256,7 @@ function fakeDatabase() {
   encounters.now = () => NOW;
   const notes = new ClinicalNotesService(repository);
   const vitals = new VitalsService(repository);
-  const diagnoses = new DiagnosesService(repository);
+  const diagnoses = new DiagnosesService(repository, nameOnly);
   const consultations = new ConsultationsService(repository, encounters, notes, vitals, diagnoses);
   return {
     consultations, encounters, notes, vitals, diagnoses, identity, database, audits, log, savepoints,
@@ -511,6 +523,27 @@ describe('EHR-C5 one-call consultation (service)', () => {
       ['ehr.diagnosis.create', first.diagnoses[0]?.id, true],
       ['ehr.diagnosis.create', first.diagnoses[1]?.id, true],
     ]);
+  });
+
+  it('0156, DIAGNOSIS_NAME_ONLY_ENABLED on: saves a diagnosis by name only, records only coded picks, and answers each '
+    + 'codeStatus, on a replay too', async () => {
+    const db = fakeDatabase(new NameOnlyCodes(false, true), new Set(['1F40']));
+    const input = await new CreateConsultationBodyPipe(new NameOnlyCodes(false, true)).transform(body({ diagnoses: [
+      diagnosis({ codeSystem: 'ICD-11', code: '1F40', display: 'Malaria due to Plasmodium falciparum' }),
+      diagnosis({ codeSystem: 'ICD-11', code: '1F4Z', display: 'Malaria, unspecified (test)' }),
+      diagnosis(),
+      { display: 'Sickle cell crisis (as written, test)', clinicalStatus: DiagnosisClinicalStatus.Active,
+        verificationStatus: DiagnosisVerificationStatus.Provisional } as CreateDiagnosisDto] }));
+    const first = await db.consultations.create(contextFor('correlation-0156-1'), patientId, input, KEY);
+    expect(first.diagnoses.map((row) => [row.codeSystem, row.code, row.codeStatus])).toEqual([
+      ['ICD-11', '1F40', 'in_list'], ['ICD-11', '1F4Z', 'not_in_list'], ['ICD-10', 'B50.9', 'not_checked'],
+      [null, null, 'no_code']]);
+    expect(db.tables().diagnoses.map((row) => row.code)).toEqual(['1F40', '1F4Z', 'B50.9', null]);
+    expect(db.tables().recent.map((row) => row.code)).toEqual(['1F40', '1F4Z', 'B50.9']);
+    const before = structuredClone(db.tables());
+    const replay = await db.consultations.create(contextFor('correlation-0156-2'), patientId, input, KEY);
+    expect(replay).toEqual(first);
+    expect(db.tables()).toEqual(before);
   });
 
   it('treats a body that differs only by reuseOpenVisit: true as the same request', async () => {

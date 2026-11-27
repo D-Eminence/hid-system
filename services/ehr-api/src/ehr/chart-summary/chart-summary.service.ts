@@ -87,8 +87,9 @@ interface VisitRow extends QueryResultRow {
   id: string; encounterNumber?: string | null; encounterType: string; status: string; startedAt: Date;
   endedAt: Date | null; chiefComplaint?: string | null; importedPaperRecords: boolean;
 }
+/** codeSystem and code are both null for a diagnosis saved by its name only (0156). */
 interface ProblemRow extends QueryResultRow {
-  id: string; encounterId: string; codeSystem: string; code: string; display: string; clinicalStatus: string;
+  id: string; encounterId: string; codeSystem: string | null; code: string | null; display: string; clinicalStatus: string;
   verificationStatus: string; onsetAt: Date | null; notes: string | null; createdAt: Date;
 }
 /** A current medicine as the summary answers it (dates as YYYY-MM-DD). */
@@ -101,8 +102,10 @@ export interface Medication {
 interface MedicationRow extends QueryResultRow, Omit<Medication, 'startsOn' | 'endsOn'> {
   startsOn: Date | string | null; endsOn: Date | string | null;
 }
+/** testCodeSystem and testCode are both null for a test ordered by its name only (0156). */
 interface LabRequestRow extends QueryResultRow {
-  id: string; encounterId: string; testCodeSystem: string; testCode: string; testDisplay: string; priority: string;
+  id: string; encounterId: string; testCodeSystem: string | null; testCode: string | null; testDisplay: string;
+  priority: string;
   status: 'active' | 'on_hold'; specimenTypeCode: string | null; clinicalInformation: string | null; createdAt: Date;
 }
 

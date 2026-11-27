@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { LabApiClient,LabApiProblem } from '@hid/api-client';
+import { LabApiClient,LabApiProblem,type LabAcceptEhrOrderInput } from '@hid/api-client';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext,HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
@@ -10,7 +10,8 @@ export class LabApiService {
   private readonly client:LabApiClient;
   constructor(workloadIdentity:ServiceWorkloadIdentityService){const environment=getEnvironment();this.client=new LabApiClient({baseUrl:environment.LAB_API_URL,timeoutMs:10_000,internalServiceToken:environment.LAB_INTERNAL_SERVICE_TOKEN,
     ...(environment.LAB_SERVICE_IDENTITY_MODE==='jwt'?{serviceAuthorizationProvider:()=>workloadIdentity.authorization('lab')}:{})});}
-  acceptEhrOrder(context:DataAccessContext,input:unknown,key:string) {return this.translate(this.client.acceptEhrOrder(input,this.context(context),key));}
+  /** A request by name only carries both codes null (0156). */
+  acceptEhrOrder(context:DataAccessContext,input:LabAcceptEhrOrderInput,key:string) {return this.translate(this.client.acceptEhrOrder(input,this.context(context),key));}
   patientReleasedResults(request:HidRequest,cursor?:string,signal?:AbortSignal) {
     return this.translate(this.client.patientReleasedResults({correlationId:request.correlationId,facilityId:'',purposeOfUse:'patient-self',
       authorization:request.header('authorization'),cookie:request.header('cookie'),origin:request.header('origin')},cursor,signal));

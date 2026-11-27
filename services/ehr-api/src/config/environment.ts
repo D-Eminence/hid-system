@@ -111,6 +111,11 @@ const environmentSchema = z
     OFFLINE_ESCROW_KEYS: optionalString,
     // Prescription strength, form, duration, quantity and priority (0125): off by default, off is exactly as before.
     PRESCRIPTION_DISPENSING_DETAILS_ENABLED: booleanString,
+    // A lab request by its test name only (0156): off by default, off is exactly as before. Stays off until 0155's
+    // sensitive-test list build is live.
+    LAB_REQUEST_NAME_ONLY_ENABLED: booleanString,
+    // A diagnosis by its name only, and codeStatus on a diagnosis create (0156): off by default, off is exactly as before.
+    DIAGNOSIS_NAME_ONLY_ENABLED: booleanString,
   })
   .superRefine((environment, context) => {
     if (environment.AI_ENABLED) {
