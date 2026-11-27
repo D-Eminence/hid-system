@@ -2065,3 +2065,12 @@ grant execute on function ehr.record_recent_diagnosis(text, text, text), ehr.rec
   to hid_ehr_runtime, hid_schema_test_runtime;
 revoke all on function ehr.record_recent_diagnosis(text, text, text), ehr.recent_diagnoses(integer) from public;
 revoke all on ehr.clinician_recent_diagnoses from public;
+
+-- Lab tests and diagnoses by name only (0156, ORD-7 F3 and ORD-9 of the Akos
+-- EHR plan; design note on hid-system#258, 26 November 2026), exactly as
+-- 0156 grants them: whether an ICD-11 code is in the active release, for
+-- codeStatus, to the EHR runtime and the schema test runtime. The recent
+-- read (0153's, replaced by 0156 with the same columns) keeps 0153's grants
+-- above. No table privilege changes.
+grant execute on function ehr.catalog_diagnosis_listed(text, text) to hid_ehr_runtime, hid_schema_test_runtime;
+revoke all on function ehr.catalog_diagnosis_listed(text, text) from public;
