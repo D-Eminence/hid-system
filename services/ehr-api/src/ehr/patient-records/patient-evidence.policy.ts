@@ -62,51 +62,86 @@ const FREE_TEXT_TITLES = new Set<SourceKind>(['note', 'import', 'import_version'
 /*
  * The initialisms of the test list. Each is also matched however its letters
  * are set apart: by dots, hyphens, spaces or any other mark, or by nothing
- * ("R.V.S.", "C.D4", "CD.4", "H-I-V", "V D R L"). dottedInitialism makes that
- * form and initialismForm adds what may follow it: digits for every initialism
- * ("H.I.V1"), and letters too for the five whose own fragment below already
- * takes them ("C.D4count"). Ola's call as clinical owner (design note on #258,
- * 26 Nov 2026). lab-api's copy (patient-results.service.ts) makes the forms
- * the same way from the same lists, so the test pattern stays one string in
- * both.
+ * ("R.V.S.", "C.D.4", "H-I-V", "V D R L"). dottedInitialism makes that form,
+ * and initialismForm lets only digits follow it ("H.I.V1", "C.D.4 count").
+ * Letters after a set-apart form are not read, so "Hb value", "Hb (venous)",
+ * "HC volume" and "HS vWF" are shown: they are not H-B-V, H-C-V or H-S-V.
+ * Only the plain fragments below take letters ("HIVAb", "CD4count"), so
+ * "C.D4count" is shown. Ola's call as clinical owner (#258, 26 and 27 Nov
+ * 2026). lab-api's copy (patient-results.service.ts) makes the forms the same
+ * way from the same list, so the test pattern stays one string in both.
  */
 export const SENSITIVE_TEST_INITIALISMS = [
-  'hiv', 'aids', 'rvs', 'cd4', 'vl', 'hbv', 'hcv', 'hsv', 'vdrl', 'rpr', 'tpha', 'sti', 'std', 'hcg', 'bhcg', 'upt',
+  'hiv', 'aids', 'rvs', 'cd4', 'vl', 'hbv', 'hcv', 'hsv', 'hpv', 'vdrl', 'rpr', 'tpha', 'sti', 'std', 'hcg', 'bhcg', 'upt',
   'psa', 'afp', 'cea', 'phq', 'brca',
 ] as const;
-/** The initialisms whose own fragment takes letters after them ('hiv[a-z0-9]*'), so their spaced form does too. */
-export const INITIALISMS_TAKING_LETTERS = ['hiv', 'cd4', 'hbv', 'hcv', 'hsv'] as const;
 /** An initialism with any run of marks that are not letters or digits, or none, between its letters: 'rvs' gives 'r[^a-z0-9]*v[^a-z0-9]*s'. */
 export const dottedInitialism = (letters: string): string => [...letters].join('[^a-z0-9]*');
-/** dottedInitialism, then digits ('[0-9]*'), or letters and digits ('[a-z0-9]*') for INITIALISMS_TAKING_LETTERS. */
-export const initialismForm = (letters: string): string => dottedInitialism(letters)
-  + ((INITIALISMS_TAKING_LETTERS as readonly string[]).includes(letters) ? '[a-z0-9]*' : '[0-9]*');
+/** dottedInitialism, then digits only: 'hiv' gives 'h[^a-z0-9]*i[^a-z0-9]*v[0-9]*'. */
+export const initialismForm = (letters: string): string => `${dottedInitialism(letters)}[0-9]*`;
+/*
+ * The test list. It is also read in a diagnosis's name (SENSITIVE_CONDITION
+ * below). Where a name has two or more parts, any run of marks that are not
+ * letters or digits may set them apart, or none: '[^a-z0-9]*' ("Viral load",
+ * "Viral-Load", "CA 19-9", "CA.19.9", "Hep B/C", "HBs Ag", "Tumour-markers").
+ * A plain initialism may take a plural s ("STIs", "VLs").
+ */
 export const SENSITIVE_TEST_FRAGMENTS = [
-  'hiv[a-z0-9]*', 'aids', 'rvs', 'retrovir[a-z]*', 'cd[ -]?4[a-z0-9]*', 'viral[ -]?loads?',
-  'hepatitis', 'hbsag', 'hbeag', 'anti[ -]?hbc', 'hbc[ -]?ab', 'hbv[a-z]*', 'hcv[a-z]*',
-  'syphili[a-z]*', 'vdrl', 'rpr', 'tpha', 'treponem[a-z]*', 'chlamydi[a-z]*', 'gonorr[a-z]*', 'gonococc[a-z]*',
-  'herpes', 'hsv[a-z0-9]*', 'trichomon[a-z]*', 'sti', 'std',
-  'b?hcg', 'pregnan[a-z]*', 'upt',
-  'psa', 'afp', 'cea', 'ca[ .-]?125', 'ca[ .-]?19[ .-]?9', 'ca[ .-]?15[ .-]?3', 'tumou?r[ -]?markers?',
-  'biops[a-z]*', 'histolog[a-z]*', 'histopath[a-z]*', 'cytolog[a-z]*', 'pap', 'pap[ -]?smears?',
-  'karyotyp[a-z]*', 'brca[0-9]*', 'genetic[a-z]*', 'genotyp[a-z]*',
-  'phq[ -]?[0-9]*', 'gad[ -]?[0-9]+', 'psych[a-z]*',
-  // GAD only with its number, the anxiety score ("G.A.D.-7", "G-A-D 2"). Plain "GAD" and "anti-GAD" stay shown: anti-GAD
-  // is a diabetes antibody test. So 'gad' is not in the initialisms above.
-  'g[^a-z0-9]*a[^a-z0-9]*d[^a-z0-9]*[0-9]+',
+  // "Anti" or "rapid" may be glued to HIV or HCV ("AntiHIV", "RapidHCV"), and a kit's name to HIV ("UnigoldHIV"). Each
+  // is listed by name, never as '[a-z]*hiv', which would hide "Archive".
+  '(?:anti|rapid)?hiv[a-z0-9]*', '(?:unigold|statpak|oraquick|determine)hiv[a-z0-9]*', 'aids', 'rvs', 'retro[^a-z0-9]*vir[a-z]*',
+  'cd[^a-z0-9]*4[a-z0-9]*', 'viral[^a-z0-9]*loads?',
+  'hepatit[a-z]*', 'hbsag', 'hbeag', 'anti[^a-z0-9]*hbc', 'hbc[^a-z0-9]*ab', 'hbv[a-z]*', '(?:anti|rapid)?hcv[a-z]*',
+  'syph[a-z]*', 'vdrls?', 'rprs?', 'tphas?', 'treponem[a-z]*', 'chlam[a-z]*', 'gonor[a-z]*', 'gonococc[a-z]*',
+  'herpes', 'hsv[a-z0-9]*', 'trich?omon[a-z]*', 'stis?', 'stds?',
+  '(?:beta|b|urine|serum)?hcgs?', 'upts?',
+  '[ft]?psas?', 'afps?', 'ceas?', 'ca[^a-z0-9]*125', 'ca[^a-z0-9]*19[^a-z0-9]*9', 'ca[^a-z0-9]*15[^a-z0-9]*3', 'tumou?r[^a-z0-9]*markers?',
+  'biops[a-z]*', 'histolog[a-z]*', 'histopath[a-z]*', 'cytolog[a-z]*', 'pap', 'pap[^a-z0-9]*smears?',
+  'karyotyp[a-z]*', 'brca[0-9]*s?', 'genetic[a-z]*', 'genotyp[a-z]*',
+  'phq[^a-z0-9]*[0-9]*', 'gad[^a-z0-9]*[27]', 'psych[a-z]*',
+  // GAD only as the anxiety scales GAD-2 and GAD-7 ("G.A.D.-7"): a 2 or 7 with no digit after it. Plain "GAD", "GAD65"
+  // and "Anti-GAD65 antibody" are diabetes antibody tests and stay shown, so 'gad' is not in the initialisms above.
+  'g[^a-z0-9]*a[^a-z0-9]*d[^a-z0-9]*[27]',
   // Shorthand as clinicians write it: VL (viral load); Hb electrophoresis is the genotype test.
-  'vl', 'hb[ -]?electrophoresis', 'ha?emoglobin[ -]?electrophoresis',
+  'vls?', 'hb[^a-z0-9]*electrophoresis', 'ha?emoglobin[^a-z0-9]*electrophoresis',
   // The same tests written out in full, as LOINC display names and lab menus write them.
-  'prostate[ -]specific', '[a-z]*fetoprotein', 'carcinoembryonic', 'cancer[ -]?(?:ag|antigen)', 'chorionic', 'choriogonadotrop[a-z]*',
-  'human[ -]*immuno[ -]*deficiency', 'hep[ .-]*[bc](?:[ .-]*[sec])?(?:[ .-]*a[gb])?', 'hbs[ -]?ag',
+  'prostate[^a-z0-9]*specific', '[a-z]*fetoprotein', 'carcino[^a-z0-9]*embryonic', 'cancer[^a-z0-9]*(?:ag|antigen)', 'chorionic',
+  'choriogonadotrop[a-z]*', 'human[^a-z0-9]*immuno[^a-z0-9]*deficiency', 'hep[^a-z0-9]*[bc](?:[^a-z0-9]*[sec])?(?:[^a-z0-9]*a[gb])?',
+  'hbs[^a-z0-9]*ag',
   // HIV rapid-test kits named alone: Determine, Uni-Gold and Stat-Pak are the three tests of Nigeria's serial HIV
   // algorithm, and OraQuick is sold for self-testing. A facility's own test is ordered by its name only (0155), so
   // its name is all that can hide it. A false match hides a test the patient could have seen: the safe side.
   // "Determine" may run on into letters or digits ("DetermineHIV"); the two parts of the other names may be set apart
-  // by any marks or none ("Uni.Gold", "Stat-Pak", "Ora Quick", "UniGold").
-  'determine[a-z0-9]*', 'uni[^a-z0-9]*gold', 'stat[^a-z0-9]*pak', 'ora[^a-z0-9]*quick',
-  // The initialisms above in every form ("H.I.V", "C.D4", "H-I-V1", "V D R L"): initialismForm.
+  // by any marks or none ("Uni.Gold", "Stat-Pak", "Ora Quick", "UniGold"), and "Stat Pack" is a common misspelling.
+  'determine[a-z0-9]*', 'uni[^a-z0-9]*gold', 'stat[^a-z0-9]*pac?k', 'ora[^a-z0-9]*quick',
+  // Names that were missed (Ola, #258, 27 Nov 2026). Hepatitis B markers:
+  'hbs[^a-z0-9]*ab', 'anti[^a-z0-9]*hbs', 'hbe[^a-z0-9]*ab', 'anti[^a-z0-9]*hbe', 'hbc[^a-z0-9]*igm', 'hbc[^a-z0-9]*ag',
+  // Syphilis (TPPA, T. pallidum, FTA-ABS), chlamydia and gonorrhoea together (CT/NG), and HPV:
+  'tppas?', 'tp[^a-z0-9]*pa', 't[^a-z0-9]*pallidum', 'fta[^a-z0-9]*abs', 'ct[^a-z0-9]*ng', 'hpv[a-z0-9]*',
+  // Cancer pathology (FNA, FNAC, IHC, ER/PR, HER2, frozen section) and tumour markers written out:
+  'fnac?s?', 'ihcs?', 'er[^a-z0-9]*pr', 'her[^a-z0-9]*2', 'frozen[^a-z0-9]*sections?',
+  'alpha[^a-z0-9]*foe?to[^a-z0-9]*proteins?', 'ca[^a-z0-9]*72[^a-z0-9]*4',
+  // HIV programme tests: early infant diagnosis (EID), recency testing, and the Double Check Gold and INSTI kits:
+  'eids?', 'recency', 'double[^a-z0-9]*check[^a-z0-9]*gold', 'insti',
+  // Panels that include these tests, drug screens and paternity tests:
+  'pre[^a-z0-9]*marital', 'ante[^a-z0-9]*natal[^a-z0-9]*(?:profile|panel|screen[a-z]*)', 'anc[^a-z0-9]*(?:profile|panel)',
+  'booking[^a-z0-9]*bloods?', 'drugs?[^a-z0-9]*(?:of[^a-z0-9]*abuse|screen[a-z]*)', 'urine[^a-z0-9]*drug[a-z]*', 'paternity',
+  // The initialisms above in every form ("H.I.V", "C.D.4", "H-I-V1", "V D R L"): initialismForm.
   ...SENSITIVE_TEST_INITIALISMS.map(initialismForm),
+] as const;
+/*
+ * Test wording only. These join the test pattern after the list above but are
+ * never read in a diagnosis's name: SENSITIVE_CONDITION is built from
+ * SENSITIVE_TEST_FRAGMENTS and the condition list, not from these. So a
+ * patient's own "Sickle cell disease" is judged as before (it is shown), while
+ * the genotype tests are hidden. 'preg[a-z]*' takes a pregnancy test however
+ * it is spelt ("Preg test", "Pregancy test"); the condition list keeps
+ * 'pregnan[a-z]*'. A medicine is never read with the test pattern, so
+ * "Pregabalin" as a prescription is judged by the medicine list alone.
+ */
+const SENSITIVE_TEST_ONLY_FRAGMENTS = [
+  'preg[a-z]*', 'sickl[a-z]*[^a-z0-9]*(?:cell[^a-z0-9]*)?(?:test|screen[a-z]*)', 'hb[^a-z0-9]*s[^a-z0-9]*solubility',
+  'hgb[^a-z0-9]*electrophoresis', 'hb[^a-z0-9]*typing',
 ] as const;
 /*
  * LOINC codes of the same tests, matched when the code system is LOINC
@@ -139,8 +174,9 @@ const SENSITIVE_CONDITION_FRAGMENTS = [
   'metasta[a-z]*', 'tumou?rs?', 'depress[a-z]*', 'schizo[a-z]*', 'bipolar', 'psychos[a-z]*', 'psychotic', 'suicid[a-z]*',
   'self[ -]?harm', 'anxiety', 'substance', 'addict[a-z]*',
   // The display text is checked whatever the code system, so each group SENSITIVE_ICD10 (and SENSITIVE_ICD11_GROUPS)
-  // hides by code is named here too. Pregnancy and its care (O, Z32-Z36):
-  'gestation[a-z]*', 'ante[ -]?natal', 'anc', 'post[ -]?natal', 'post[ -]?partum', 'puerper[a-z]*', 'obstetric[a-z]*',
+  // hides by code is named here too. Pregnancy and its care (O, Z32-Z36); 'pregnan[a-z]*' is here because the test
+  // list's 'preg[a-z]*' is for tests only:
+  'pregnan[a-z]*', 'gestation[a-z]*', 'ante[ -]?natal', 'anc', 'post[ -]?natal', 'post[ -]?partum', 'puerper[a-z]*', 'obstetric[a-z]*',
   '[a-z]*gravid[a-z]*', '[a-z]*para', 'miscarri[a-z]*', 'abortion[a-z]*', '(?:pre[ -]?)?eclamp[a-z]*',
   'hyperemesis', 'placenta[a-z]*', 'hydatidiform', 'trimester', 'labou?r', 'ca?esarean', 'c[ -]?section',
   // Neoplasms (C, D00-D09) named without "cancer" or "carcinoma":
@@ -174,8 +210,9 @@ const SENSITIVE_ICD10 = /^(?:B2[0-4]|Z21|R75|B1[5-9]|A5\d|A6[0-4]|C\d\d|D0\d|F\d
 
 const jsPattern = (fragments: readonly string[]) => new RegExp(`(?<![a-z0-9])(?:${fragments.join('|')})(?![a-z0-9])`, 'i');
 /** The PostgreSQL ARE form of the sensitive test list, for `!~*` in patient-only SQL. */
-export const SENSITIVE_TEST_SQL_PATTERN = `(^|[^a-z0-9])(?:${SENSITIVE_TEST_FRAGMENTS.join('|')})($|[^a-z0-9])`;
-const SENSITIVE_TEST = jsPattern(SENSITIVE_TEST_FRAGMENTS);
+export const SENSITIVE_TEST_SQL_PATTERN =
+  `(^|[^a-z0-9])(?:${[...SENSITIVE_TEST_FRAGMENTS, ...SENSITIVE_TEST_ONLY_FRAGMENTS].join('|')})($|[^a-z0-9])`;
+const SENSITIVE_TEST = jsPattern([...SENSITIVE_TEST_FRAGMENTS, ...SENSITIVE_TEST_ONLY_FRAGMENTS]);
 const SENSITIVE_CONDITION = jsPattern([...SENSITIVE_TEST_FRAGMENTS, ...SENSITIVE_CONDITION_FRAGMENTS]);
 const SENSITIVE_MEDICINE = jsPattern(SENSITIVE_MEDICINE_FRAGMENTS);
 const text = (value: unknown) => typeof value === 'string' ? value : '';

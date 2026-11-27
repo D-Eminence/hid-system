@@ -32,54 +32,71 @@ export const STAFF_LAB_QUERY = `select r.id, r.current_version::text||':'||rel.i
 /*
  * Sensitive tests (S4), left out of the patient's own chat until a clinician
  * has discussed them. A constant default list for Ola to approve; it matches
- * SENSITIVE_TEST_FRAGMENTS in ehr-api's patient-evidence.policy.ts, which
- * filters the same names again. No value from a request is interpolated.
+ * the test pattern of ehr-api's patient-evidence.policy.ts, which filters the
+ * same names again. No value from a request is interpolated.
  * SENSITIVE_LOINC_CODES (identical to ehr-api's) are left out when the code
  * system is LOINC, whatever the name: HIV 1+2 Ab/Ag and HIV 1 Ab, HIV 1 RNA
  * viral load, CD4 count, HBsAg, HCV Ab, hCG, PSA, AFP, CEA and CA-125. The
  * code system is LOINC by name or URL, or by its OID (LOINC_SYSTEM_SQL_PATTERN,
  * identical to ehr-api's).
  *
- * SENSITIVE_TEST_INITIALISMS, INITIALISMS_TAKING_LETTERS, dottedInitialism
- * and initialismForm are ehr-api's, letter for letter: each initialism is also
- * matched however its letters are set apart, by dots, hyphens, spaces or any
- * other mark, or by nothing ("R.V.S.", "C.D4", "CD.4", "H-I-V"), then digits
- * ("H.I.V1"), or letters too for the five whose own fragment takes them. So
- * both services build one pattern string: patient-results.query.spec.ts
- * checks it is ehr-api's string, and it and ehr-api's
- * patient-evidence.query.spec.ts pin the same sha256.
+ * SENSITIVE_TEST_INITIALISMS, dottedInitialism and initialismForm are
+ * ehr-api's, letter for letter: each initialism is also matched however its
+ * letters are set apart, by dots, hyphens, spaces or any other mark, or by
+ * nothing ("R.V.S.", "C.D.4", "H-I-V"), then digits only ("H.I.V1"), so "Hb
+ * value" is not read as H-B-V. Only the plain fragments take letters after
+ * them ("HIVAb"). Where a name has two or more parts, any marks or none may
+ * set them apart ('[^a-z0-9]*'). The list is in ehr-api's order: the
+ * fragments ehr-api also reads in a diagnosis's name, the initialism forms,
+ * then the fragments it reads in test names only. So both services build one
+ * pattern string: patient-results.query.spec.ts checks it is ehr-api's
+ * string, and it and ehr-api's patient-evidence.query.spec.ts pin the same
+ * sha256.
  */
 export const SENSITIVE_TEST_INITIALISMS=[
-  'hiv','aids','rvs','cd4','vl','hbv','hcv','hsv','vdrl','rpr','tpha','sti','std','hcg','bhcg','upt',
+  'hiv','aids','rvs','cd4','vl','hbv','hcv','hsv','hpv','vdrl','rpr','tpha','sti','std','hcg','bhcg','upt',
   'psa','afp','cea','phq','brca',
 ] as const;
-/** The initialisms whose own fragment takes letters after them ('hiv[a-z0-9]*'), so their spaced form does too. */
-export const INITIALISMS_TAKING_LETTERS=['hiv','cd4','hbv','hcv','hsv'] as const;
 /** An initialism with any run of marks that are not letters or digits, or none, between its letters: 'rvs' gives 'r[^a-z0-9]*v[^a-z0-9]*s'. */
 export const dottedInitialism=(letters:string):string=>[...letters].join('[^a-z0-9]*');
-/** dottedInitialism, then digits ('[0-9]*'), or letters and digits ('[a-z0-9]*') for INITIALISMS_TAKING_LETTERS. */
-export const initialismForm=(letters:string):string=>dottedInitialism(letters)
-  +((INITIALISMS_TAKING_LETTERS as readonly string[]).includes(letters)?'[a-z0-9]*':'[0-9]*');
+/** dottedInitialism, then digits only: 'hiv' gives 'h[^a-z0-9]*i[^a-z0-9]*v[0-9]*'. */
+export const initialismForm=(letters:string):string=>`${dottedInitialism(letters)}[0-9]*`;
 export const SENSITIVE_TEST_SQL_PATTERN = '(^|[^a-z0-9])(?:'+[
-  'hiv[a-z0-9]*','aids','rvs','retrovir[a-z]*','cd[ -]?4[a-z0-9]*','viral[ -]?loads?',
-  'hepatitis','hbsag','hbeag','anti[ -]?hbc','hbc[ -]?ab','hbv[a-z]*','hcv[a-z]*',
-  'syphili[a-z]*','vdrl','rpr','tpha','treponem[a-z]*','chlamydi[a-z]*','gonorr[a-z]*','gonococc[a-z]*',
-  'herpes','hsv[a-z0-9]*','trichomon[a-z]*','sti','std',
-  'b?hcg','pregnan[a-z]*','upt',
-  'psa','afp','cea','ca[ .-]?125','ca[ .-]?19[ .-]?9','ca[ .-]?15[ .-]?3','tumou?r[ -]?markers?',
-  'biops[a-z]*','histolog[a-z]*','histopath[a-z]*','cytolog[a-z]*','pap','pap[ -]?smears?',
-  'karyotyp[a-z]*','brca[0-9]*','genetic[a-z]*','genotyp[a-z]*',
-  'phq[ -]?[0-9]*','gad[ -]?[0-9]+','psych[a-z]*',
-  // GAD only with its number ("G.A.D.-7"); plain "GAD" and "anti-GAD" (a diabetes antibody test) stay shown.
-  'g[^a-z0-9]*a[^a-z0-9]*d[^a-z0-9]*[0-9]+',
-  'vl','hb[ -]?electrophoresis','ha?emoglobin[ -]?electrophoresis',
-  'prostate[ -]specific','[a-z]*fetoprotein','carcinoembryonic','cancer[ -]?(?:ag|antigen)','chorionic','choriogonadotrop[a-z]*',
-  'human[ -]*immuno[ -]*deficiency','hep[ .-]*[bc](?:[ .-]*[sec])?(?:[ .-]*a[gb])?','hbs[ -]?ag',
+  // "Anti" or "rapid" glued to HIV or HCV, and a kit's name glued to HIV, each by name: never '[a-z]*hiv' ("Archive").
+  '(?:anti|rapid)?hiv[a-z0-9]*','(?:unigold|statpak|oraquick|determine)hiv[a-z0-9]*','aids','rvs','retro[^a-z0-9]*vir[a-z]*',
+  'cd[^a-z0-9]*4[a-z0-9]*','viral[^a-z0-9]*loads?',
+  'hepatit[a-z]*','hbsag','hbeag','anti[^a-z0-9]*hbc','hbc[^a-z0-9]*ab','hbv[a-z]*','(?:anti|rapid)?hcv[a-z]*',
+  'syph[a-z]*','vdrls?','rprs?','tphas?','treponem[a-z]*','chlam[a-z]*','gonor[a-z]*','gonococc[a-z]*',
+  'herpes','hsv[a-z0-9]*','trich?omon[a-z]*','stis?','stds?',
+  '(?:beta|b|urine|serum)?hcgs?','upts?',
+  '[ft]?psas?','afps?','ceas?','ca[^a-z0-9]*125','ca[^a-z0-9]*19[^a-z0-9]*9','ca[^a-z0-9]*15[^a-z0-9]*3','tumou?r[^a-z0-9]*markers?',
+  'biops[a-z]*','histolog[a-z]*','histopath[a-z]*','cytolog[a-z]*','pap','pap[^a-z0-9]*smears?',
+  'karyotyp[a-z]*','brca[0-9]*s?','genetic[a-z]*','genotyp[a-z]*',
+  'phq[^a-z0-9]*[0-9]*','gad[^a-z0-9]*[27]','psych[a-z]*',
+  // GAD only as the anxiety scales GAD-2 and GAD-7 ("G.A.D.-7"); "GAD", "GAD65" and "Anti-GAD65 antibody" stay shown.
+  'g[^a-z0-9]*a[^a-z0-9]*d[^a-z0-9]*[27]',
+  'vls?','hb[^a-z0-9]*electrophoresis','ha?emoglobin[^a-z0-9]*electrophoresis',
+  'prostate[^a-z0-9]*specific','[a-z]*fetoprotein','carcino[^a-z0-9]*embryonic','cancer[^a-z0-9]*(?:ag|antigen)','chorionic',
+  'choriogonadotrop[a-z]*','human[^a-z0-9]*immuno[^a-z0-9]*deficiency','hep[^a-z0-9]*[bc](?:[^a-z0-9]*[sec])?(?:[^a-z0-9]*a[gb])?',
+  'hbs[^a-z0-9]*ag',
   // HIV rapid-test kits named alone (Determine, Uni-Gold and Stat-Pak: Nigeria's serial HIV algorithm; OraQuick:
   // self-testing). A facility's own test (0155) is hidden by its name only. "Determine" may run on into letters or
-  // digits ("DetermineHIV"); the parts of the others may be set apart by any marks or none ("Uni.Gold", "UniGold").
-  'determine[a-z0-9]*','uni[^a-z0-9]*gold','stat[^a-z0-9]*pak','ora[^a-z0-9]*quick',
+  // digits ("DetermineHIV"); the parts of the others may be set apart by any marks or none ("Uni.Gold", "Stat Pack").
+  'determine[a-z0-9]*','uni[^a-z0-9]*gold','stat[^a-z0-9]*pac?k','ora[^a-z0-9]*quick',
+  // Names that were missed (Ola, #258, 27 Nov 2026): hepatitis B markers; syphilis, CT/NG and HPV; cancer pathology
+  // and tumour markers written out; HIV programme tests; panels, drug screens and paternity tests.
+  'hbs[^a-z0-9]*ab','anti[^a-z0-9]*hbs','hbe[^a-z0-9]*ab','anti[^a-z0-9]*hbe','hbc[^a-z0-9]*igm','hbc[^a-z0-9]*ag',
+  'tppas?','tp[^a-z0-9]*pa','t[^a-z0-9]*pallidum','fta[^a-z0-9]*abs','ct[^a-z0-9]*ng','hpv[a-z0-9]*',
+  'fnac?s?','ihcs?','er[^a-z0-9]*pr','her[^a-z0-9]*2','frozen[^a-z0-9]*sections?',
+  'alpha[^a-z0-9]*foe?to[^a-z0-9]*proteins?','ca[^a-z0-9]*72[^a-z0-9]*4',
+  'eids?','recency','double[^a-z0-9]*check[^a-z0-9]*gold','insti',
+  'pre[^a-z0-9]*marital','ante[^a-z0-9]*natal[^a-z0-9]*(?:profile|panel|screen[a-z]*)','anc[^a-z0-9]*(?:profile|panel)',
+  'booking[^a-z0-9]*bloods?','drugs?[^a-z0-9]*(?:of[^a-z0-9]*abuse|screen[a-z]*)','urine[^a-z0-9]*drug[a-z]*','paternity',
   ...SENSITIVE_TEST_INITIALISMS.map(initialismForm),
+  // Test wording only (ehr-api does not read these in a diagnosis's name): a pregnancy test however it is spelt, and
+  // the genotype tests.
+  'preg[a-z]*','sickl[a-z]*[^a-z0-9]*(?:cell[^a-z0-9]*)?(?:test|screen[a-z]*)','hb[^a-z0-9]*s[^a-z0-9]*solubility',
+  'hgb[^a-z0-9]*electrophoresis','hb[^a-z0-9]*typing',
 ].join('|')+')($|[^a-z0-9])';
 export const SENSITIVE_LOINC_CODES=[
   '75622-1','56888-1','7917-8','68961-2','20447-9','24467-3','5196-1','5195-3','16128-1','13955-0',

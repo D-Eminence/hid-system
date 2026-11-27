@@ -1,5 +1,5 @@
-import { INITIALISMS_TAKING_LETTERS, LAB_CORRECTING, PATIENT_FIELDS, LOINC_SYSTEM_SQL_PATTERN, SENSITIVE_ICD11_GROUPS, SENSITIVE_LOINC_CODES,
-  SENSITIVE_TEST_INITIALISMS, SENSITIVE_TEST_SQL_PATTERN, VITAL_FIELDS, ageYears, dottedInitialism, icdRevision, initialismForm,
+import { LAB_CORRECTING, PATIENT_FIELDS, LOINC_SYSTEM_SQL_PATTERN, SENSITIVE_ICD11_GROUPS, SENSITIVE_LOINC_CODES, SENSITIVE_TEST_INITIALISMS,
+  SENSITIVE_TEST_SQL_PATTERN, VITAL_FIELDS, ageYears, dottedInitialism, icdRevision, initialismForm,
   isSensitiveDiagnosisCode, isSensitiveTest, patientEvidence, redactIdentifiers, type PatientProfileInput } from './patient-evidence.policy';
 import { evidence, type Evidence, type SourceKind } from './patient-evidence.types';
 
@@ -660,8 +660,8 @@ describe('0155: HIV rapid-test kits and dotted initialisms (S4)', () => {
   it('makes the dotted form by one rule: any marks, or none, between the letters', () => {
     expect(dottedInitialism('rvs')).toBe('r[^a-z0-9]*v[^a-z0-9]*s');
     expect(dottedInitialism('cd4')).toBe('c[^a-z0-9]*d[^a-z0-9]*4');
-    expect(SENSITIVE_TEST_SQL_PATTERN).toContain('|h[^a-z0-9]*i[^a-z0-9]*v[a-z0-9]*|');
-    expect(DOTTED).toEqual(expect.arrayContaining(['R.V.S.', 'V.D.R.L.', 'H.C.V.', 'C.D.4.', 'H.I.V.', 'B.R.C.A.']));
+    expect(SENSITIVE_TEST_SQL_PATTERN).toContain('|h[^a-z0-9]*i[^a-z0-9]*v[0-9]*|');
+    expect(DOTTED).toEqual(expect.arrayContaining(['R.V.S.', 'V.D.R.L.', 'H.C.V.', 'C.D.4.', 'H.I.V.', 'B.R.C.A.', 'H.P.V.']));
   });
 
   it.each([...DOTTED, 'R. V. S.', 'R.V.S', 'r.v.s.', 'V. D. R. L', 'C.D.4 count', 'C. D. 4', 'Retroviral screening (R.V.S.)', ...KITS])(
@@ -704,7 +704,7 @@ describe('0155: HIV rapid-test kits and dotted initialisms (S4)', () => {
 });
 
 // Ola's decision as clinical owner (#258, 26 Nov 2026): an initialism's letters may be set apart by any marks or none
-// (dot, hyphen, space, en dash), then digits may follow; letters too for HIV, CD4, HBV, HCV and HSV. BRCA joins the
+// (dot, hyphen, space, en dash), then digits may follow (since 27 Nov, digits only: see the next block). BRCA joins the
 // initialisms. GAD counts only with its number. The kit names take any marks between their parts, and "Determine" may
 // run on ("DetermineHIV"). lab-api builds the same pattern string (its spec compares the two).
 describe('0155: any marks between the letters of an initialism, BRCA, numbered GAD and kit names (S4)', () => {
@@ -723,14 +723,13 @@ describe('0155: any marks between the letters of an initialism, BRCA, numbered G
     'GAD (glutamic acid decarboxylase) antibody', 'Fasting blood sugar', 'Stat dose', 'Gold standard culture', 'Statin level',
     'Liver function test', 'Electrolytes'];
 
-  it('builds each initialism form by one rule: marks or none between the letters, then digits, or letters for five', () => {
-    expect(INITIALISMS_TAKING_LETTERS).toEqual(['hiv', 'cd4', 'hbv', 'hcv', 'hsv']);
+  it('builds each initialism form by one rule: marks or none between the letters, then digits', () => {
     expect(initialismForm('rvs')).toBe('r[^a-z0-9]*v[^a-z0-9]*s[0-9]*');
-    expect(initialismForm('hiv')).toBe('h[^a-z0-9]*i[^a-z0-9]*v[a-z0-9]*');
+    expect(initialismForm('hiv')).toBe('h[^a-z0-9]*i[^a-z0-9]*v[0-9]*');
     expect(SENSITIVE_TEST_INITIALISMS).toContain('brca');
     expect(SENSITIVE_TEST_INITIALISMS).not.toContain('gad');
     for (const letters of SENSITIVE_TEST_INITIALISMS) expect(SENSITIVE_TEST_SQL_PATTERN).toContain(`|${initialismForm(letters)}`);
-    for (const fragment of ['g[^a-z0-9]*a[^a-z0-9]*d[^a-z0-9]*[0-9]+', 'determine[a-z0-9]*', 'uni[^a-z0-9]*gold', 'stat[^a-z0-9]*pak',
+    for (const fragment of ['g[^a-z0-9]*a[^a-z0-9]*d[^a-z0-9]*[27]', 'determine[a-z0-9]*', 'uni[^a-z0-9]*gold', 'stat[^a-z0-9]*pac?k',
       'ora[^a-z0-9]*quick']) expect(SENSITIVE_TEST_SQL_PATTERN).toContain(`|${fragment}|`);
     expect(SENSITIVE_TEST_SQL_PATTERN).not.toContain("'");
   });
@@ -751,5 +750,94 @@ describe('0155: any marks between the letters of an initialism, BRCA, numbered G
 
   it('keeps a diagnosis named "Anaemia"', () => {
     expect(clean([diagnosis('Anaemia')])).toHaveLength(1);
+  });
+});
+
+// Ola's decision as clinical owner (#258, 27 Nov 2026), made the same way in lab-api: fewer false positives, and the
+// names and spellings that were missed. A set-apart initialism takes digits only ("H.I.V1"), so "Hb value" is no longer
+// read as H-B-V; GAD counts only as GAD-2 or GAD-7. lab-api builds the same pattern string (its spec compares the two).
+describe('0155: fewer false positives, and the missing names and spellings (S4)', () => {
+  const sql = new RegExp(SENSITIVE_TEST_SQL_PATTERN, 'i');
+  const lab = (test: string) => record('lab_result', { test, codeSystem: 'HID-FACILITY', code: '7d1c3a52-5f0e-4c1b-9a63-2b8e4f6a9c01',
+    specimen: 'Blood', resultType: 'text', textValue: 'Synthetic value', releasedAt: '2026-10-01T10:00:00.000Z', verification: 'released' },
+  { title: test });
+  const request = (test: string) => record('investigation', { ...completed, test, codeSystem: 'HID-FACILITY',
+    code: '7d1c3a52-5f0e-4c1b-9a63-2b8e4f6a9c01', status: 'completed' }, { title: test });
+  const diagnosis = (condition: string) => record('diagnosis', { _encounterId: encounterId, codeSystem: 'LOCAL', code: 'X1', condition,
+    clinicalStatus: 'active', verificationStatus: 'confirmed', onsetAt: null, abatementAt: null }, { title: condition });
+  const rx = (medication: string) => record('prescription', { ...completed, medication, status: 'active' }, { title: medication });
+  // Each name is written with a space, a dot, a hyphen, an en dash, a slash and nothing between its parts.
+  const SEPARATORS = [' ', '.', '-', '–', '/', ''];
+  const PARTS = [['H', 'I', 'V1'], ['C', 'D', '4 count'], ['CD', '4 count'], ['GAD', '7'], ['G', 'A', 'D', '2'], ['Viral', 'load'],
+    ['CA', '125'], ['CA', '19', '9'], ['CA', '15', '3'], ['CA', '72', '4'], ['Hep', 'B'], ['Hep', 'C'], ['Hep', 'Bs', 'Ag'], ['HBs', 'Ag'],
+    ['Anti', 'HBc'], ['HBc', 'Ab'], ['HBs', 'Ab'], ['Anti', 'HBs'], ['HBe', 'Ab'], ['Anti', 'HBe'], ['HBc', 'IgM'], ['HBc', 'Ag'],
+    ['Prostate', 'specific antigen'], ['Tumour', 'marker'], ['Tumor', 'markers'], ['Hb', 'electrophoresis'], ['Haemoglobin', 'electrophoresis'],
+    ['Human', 'immuno', 'deficiency virus'], ['Cancer', 'antigen 125'], ['Pap', 'smear'], ['PHQ', '9'], ['TP', 'PA'], ['T', 'pallidum'],
+    ['FTA', 'ABS'], ['CT', 'NG'], ['H', 'P', 'V16'], ['ER', 'PR'], ['HER', '2'], ['Frozen', 'section'], ['Alpha', 'foeto', 'proteins'],
+    ['Carcino', 'embryonic antigen'], ['Sickle', 'cell', 'test'], ['Sickling', 'test'], ['Sickle', 'screening'], ['Hb', 'S', 'solubility'],
+    ['Hgb', 'electrophoresis'], ['Hb', 'typing'], ['Double', 'check', 'gold'], ['Stat', 'pack'], ['Pre', 'marital screening'],
+    ['Ante', 'natal', 'profile'], ['Ante', 'natal', 'screening'], ['ANC', 'panel'], ['Booking', 'bloods'], ['Retro', 'viral screening'],
+    ['Drugs', 'of', 'abuse'], ['Drug', 'screen'], ['Urine', 'drug screen']];
+  const NAMES = ['H.I.V1', 'C.D.4 count', 'GAD-2', 'GAD-7', 'G.A.D.-7', 'TPPA', 'FTA-ABS', 'CT/NG', 'HPV', 'HPV DNA test', 'H.P.V.', 'FNA',
+    'FNAC', 'IHC', 'ER/PR', 'HER2', 'HER-2/neu', 'Frozen sections', 'CA 72-4', 'Sickle cell screen', 'EID', 'EID (DBS)', 'Recency test',
+    'Double Check Gold', 'INSTI HIV-1/2', 'StatPack', 'Premarital screening', 'Antenatal panel', 'ANC profile', 'Booking blood',
+    'Syph', 'Syphyllis', 'Gonorhoea', 'Chlamidia', 'Tricomonas', 'Preg test', 'Pregancy test', 'Pregnacy test', 'Hepatits B',
+    'Retro-viral', 'AntiHIV', 'RapidHIV', 'AntiHCV', 'RapidHCV', 'BetahCG', 'bhCG', 'UrinehCG', 'SerumhCG', 'fPSA', 'tPSA', 'UnigoldHIV',
+    'StatpakHIV', 'OraquickHIV', 'DetermineHIV', 'STIs', 'STDs', 'VLs', 'PSAs', 'VDRLs', 'Drug of abuse screen', 'Urine drugs',
+    'Paternity test'];
+  const SHOWN = ['Hb (venous)', 'Hb value', 'Hb vs PCV', 'HC volume', 'HS vWF', 'GAD65 antibody', 'GAD65', 'GAD-65', 'Anti-GAD65 antibody',
+    'GAD', 'Anti-GAD antibody', 'Full blood count', 'Haemoglobin', 'Liver function test', 'Hepatic function panel', 'Electrolytes',
+    'Fasting blood sugar', 'Malaria parasite', 'Urinalysis', 'Stool microscopy', 'Widal', 'ESR', 'PCV', 'HbA1c', 'Lipid profile',
+    'Blood group', 'G6PD', 'CRP', 'Archive copy', 'Stat dose', 'Gold standard culture', 'Statin level', 'Erythrocyte count',
+    'Thyroid function',
+    // Ola accepted that this one is shown: letters after a set-apart initialism are not read.
+    'C.D4count'];
+
+  it('builds the forms as decided: digits only after a set-apart initialism, any marks between the parts of a name', () => {
+    expect(initialismForm('hbv')).toBe('h[^a-z0-9]*b[^a-z0-9]*v[0-9]*');
+    expect(SENSITIVE_TEST_INITIALISMS).toContain('hpv');
+    for (const fragment of ['(?:anti|rapid)?hiv[a-z0-9]*', '(?:unigold|statpak|oraquick|determine)hiv[a-z0-9]*', 'cd[^a-z0-9]*4[a-z0-9]*',
+      'hbv[a-z]*', '(?:anti|rapid)?hcv[a-z]*', 'hsv[a-z0-9]*', 'hpv[a-z0-9]*', 'gad[^a-z0-9]*[27]', 'syph[a-z]*', 'hepatit[a-z]*',
+      '(?:beta|b|urine|serum)?hcgs?', '[ft]?psas?', 'stis?', 'stds?', 'vls?', 'h[^a-z0-9]*p[^a-z0-9]*v[0-9]*'])
+      // Each is a whole alternative of the list (the first follows its opening "(?:").
+      expect([fragment, `|${SENSITIVE_TEST_SQL_PATTERN.slice('(^|[^a-z0-9])(?:'.length)}`.includes(`|${fragment}|`)]).toEqual([fragment, true]);
+    // No narrow separator class is left, and nothing hides every word that ends in "hiv" ("Archive").
+    expect(SENSITIVE_TEST_SQL_PATTERN).not.toMatch(/\[ [.-]*\]|\[a-z\]\*hiv|hepat\[/);
+    expect(SENSITIVE_TEST_SQL_PATTERN).not.toContain("'");
+  });
+
+  it.each(PARTS.map(parts => [parts.join(' '), parts] as const))(
+    '%j is hidden with any separator between its parts: by the policy, by the SQL pattern, as a result and as a request', (_name, parts) => {
+      for (const name of SEPARATORS.map(separator => parts.join(separator))) {
+        expect([name, isSensitiveTest(name), sql.test(name)]).toEqual([name, true, true]);
+        expect(clean([lab(name), request(name)])).toEqual([]);
+      }
+    });
+
+  it.each(NAMES)('%j is hidden: by the policy, by the SQL pattern, as a result and as a request', (name) => {
+    expect([name, isSensitiveTest(name), sql.test(name)]).toEqual([name, true, true]);
+    expect(clean([lab(name), request(name)])).toEqual([]);
+  });
+
+  it.each(SHOWN)('%j is shown, as a result and as a request', (name) => {
+    expect([name, isSensitiveTest(name), sql.test(name)]).toEqual([name, false, false]);
+    expect(clean([lab(name), request(name)])).toHaveLength(2);
+  });
+
+  it('shows a diagnosis named "Low Hb, vomiting" again', () => {
+    expect(clean([diagnosis('Low Hb, vomiting')])).toHaveLength(1);
+  });
+
+  it('keeps the genotype tests out of the condition list: a diagnosis of sickle cell disease is shown, as it was before', () => {
+    // Before this change no fragment matched "Sickle cell disease" either. The sickle cell test names are test names only.
+    expect(clean([diagnosis('Sickle cell disease'), diagnosis('Sickle cell anaemia'), diagnosis('Sickle cell screening')])).toHaveLength(3);
+    expect([isSensitiveTest('Sickle cell screening'), isSensitiveTest('Sickle cell disease')]).toEqual([true, false]);
+    // 'preg[a-z]*' is for tests only; the condition list still hides a pregnancy by 'pregnan[a-z]*'.
+    expect(clean([diagnosis('Pregnancy'), diagnosis('Ectopic pregnancy')])).toEqual([]);
+  });
+
+  it('judges a prescription of "Pregabalin" by the medicine list alone, which this change leaves as it was', () => {
+    expect(clean([rx('Pregabalin 75 mg capsules')])).toHaveLength(1);
+    expect(clean([rx('TDF/3TC/DTG')])).toEqual([]);
   });
 });
