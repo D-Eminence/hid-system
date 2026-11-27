@@ -155,8 +155,8 @@ const lab = (answers: ((order: { sourceEhrOrderId: string }, signal?: AbortSigna
   return { labApi: { acceptEhrOrder }, calls, most: () => most };
 };
 
-const service = (store: ReturnType<typeof memory>, labApi: unknown, enabled = true) =>
-  new LabRequestsService(store.repository as never, labApi as never, noRoutes as never, new LabRequestGroups(enabled));
+const service = (store: ReturnType<typeof memory>, labApi: unknown, enabled = true, routes: unknown = noRoutes) =>
+  new LabRequestsService(store.repository as never, labApi as never, routes as never, new LabRequestGroups(enabled));
 const labProblem = (status: number, code: string) => new DomainProblem(status, code, `Lab answered ${code}`);
 const inserts = (store: ReturnType<typeof memory>) => store.statements.filter(({ sql }) => /insert into ehr\.lab_requests/.test(sql));
 
@@ -244,15 +244,54 @@ describe('ORD-6: several tests in one lab request (LAB_REQUEST_GROUPS_ENABLED on
       expect(store.committed[1]?.parts.map((part) => part.details?.idempotentReplay)).toEqual([true, true, true, true]);
     });
 
-  it('a replay answers the group the tests were saved with, whatever the setting says now', async () => {
+  it('a replay answers the group the tests were saved with; while the setting is off the route answers 503 even to a '
+    + 'same-key retry (the design note\'s gate), and the saved group stays', async () => {
     const store = memory();
     const answer = await service(store, lab().labApi).createGroup(context(), patientId, encounterId, group(), key,
       Date.now());
-    // The whole-call row replays; its parts load the stored rows, not a new id.
+    // The setting switched off: the route is gated before the key is read, so the retry is refused and saves nothing.
+    const off = lab();
+    await expect(service(store, off.labApi, false).createGroup(context(), patientId, encounterId, group(), key,
+      Date.now())).rejects.toMatchObject({ status: 503, code: 'LAB_REQUEST_GROUPS_UNAVAILABLE' });
+    expect(off.calls).toHaveLength(0);
+    expect(inserts(store)).toHaveLength(3);
+    expect([...store.rows.values()].map((row) => row.requestGroupId)).toEqual(Array(3).fill(answer.requestGroupId));
+    // On again: the whole-call row replays; its parts load the stored rows, not a new id.
     const replay = await service(store, lab().labApi).createGroup(context(), patientId, encounterId, group(), key,
       Date.now());
+    expect(replay.requestGroupId).toBe(answer.requestGroupId);
     expect(replay.labRequests.map((request) => request.requestGroupId)).toEqual(Array(3).fill(answer.requestGroupId));
+    expect(inserts(store)).toHaveLength(3);
   });
+
+  it('a same-key retry does not send a test routed to another facility since: not_sent ORDER_ROUTED, as PATCH',
+    async () => {
+      const store = memory();
+      const answer = await service(store, lab().labApi).createGroup(context(), patientId, encounterId, group(), key,
+        Date.now());
+      const routedId = answer.labRequests[1]?.id ?? '';
+      const asked: string[][] = [];
+      const routes = { ...noRoutes, summaries: async (_client: unknown, _context: unknown, kind: string, _patient: string,
+        ids: readonly string[]) => {
+        asked.push([kind, ...ids]);
+        return new Map([[routedId, { id: '423e4567-e89b-42d3-a456-426614174011', effectiveState: 'accepted',
+          acceptedAt: '2026-12-01T10:00:00.000Z' }]]);
+      } };
+      const again = lab();
+      const replay = await service(store, again.labApi, true, routes).createGroup(context(), patientId, encounterId,
+        group(), key, Date.now());
+      expect(asked).toEqual([['lab_request', ...answer.labRequests.map((request) => request.id)]]);
+      expect(replay.labRequests.map((request) => request.labHandoff)).toEqual([
+        { state: 'accepted' }, { state: 'not_sent', code: 'ORDER_ROUTED' }, { state: 'accepted' }]);
+      expect(again.calls.map(({ order }) => order.sourceEhrOrderId)).toEqual([answer.labRequests[0]?.id,
+        answer.labRequests[2]?.id]);
+      // A first create reads no route: its tests were just made.
+      const fresh = memory();
+      const unread = { ...noRoutes, summaries: jest.fn(async () => new Map()) };
+      await service(fresh, lab().labApi, true, unread).createGroup(context(), patientId, encounterId, group(), key,
+        Date.now());
+      expect(unread.summaries).not.toHaveBeenCalled();
+    });
 
   it('the same key with another body is 409 IDEMPOTENCY_KEY_REUSED, and nothing more is saved', async () => {
     const store = memory();
@@ -451,6 +490,51 @@ describe('ORD-6 option (b): createInTransaction as ORD-8 (0180) calls it', () =>
     const two = await labRequests.createInTransaction(store.client as never, context(), patientId, encounterId,
       group('draft'), 'lab-request-group-key-0002', orderSetPart);
     expect(one.requestGroupId).not.toBe(two.requestGroupId);
+  });
+
+  it('a key whose part rows replay some tests while others are new is 409 IDEMPOTENCY_KEY_REUSED: no split group',
+    async () => {
+      const store = memory();
+      const labRequests = service(store, lab().labApi, true);
+      const saved = await store.repository.runParts(context(), patientId, 'write_records', [], async (client: unknown) => {
+        const value = await labRequests.createInTransaction(client as never, context(), patientId, encounterId,
+          group('draft'), key, orderSetPart);
+        return { value, parts: value.parts };
+      }) as { requestGroupId: string };
+      // The order set gained a test under the same key (ORD-8's whole-call digest would have to miss it).
+      const grown = { ...group('draft'), tests: [...group('draft').tests, { testCodeSystem: 'LOINC', testCode: '2345-7',
+        testDisplay: 'Glucose' }] } as unknown as CreateLabRequestGroupInput;
+      await expect(store.repository.runParts(context(), patientId, 'write_records', [], async (client: unknown) => {
+        const value = await labRequests.createInTransaction(client as never, context(), patientId, encounterId, grown,
+          key, orderSetPart);
+        return { value, parts: value.parts };
+      })).rejects.toMatchObject({ status: 409, code: 'IDEMPOTENCY_KEY_REUSED' });
+      // The caller's transaction kept nothing: the three saved tests, all in the one group.
+      expect([...store.rows.values()].map((row) => row.requestGroupId)).toEqual(Array(3).fill(saved.requestGroupId));
+      expect(store.keys.has(`order-set.apply.lab-request.4:${key}`)).toBe(false);
+      // The same tests replay whole.
+      const replay = await store.repository.runParts(context(), patientId, 'write_records', [], async (client: unknown) => {
+        const value = await labRequests.createInTransaction(client as never, context(), patientId, encounterId,
+          group('draft'), key, orderSetPart);
+        return { value, parts: value.parts };
+      }) as { requestGroupId: string };
+      expect(replay.requestGroupId).toBe(saved.requestGroupId);
+    });
+
+  it('the caller sends after its own commit with sendGroup, under its own deadline', async () => {
+    const store = memory();
+    const { labApi, calls } = lab();
+    const labRequests = service(store, labApi, true);
+    const saved = await store.repository.runParts(context(), patientId, 'write_records', [], async (client: unknown) => {
+      const value = await labRequests.createInTransaction(client as never, context(), patientId, encounterId, group(),
+        key, orderSetPart);
+      return { value, parts: value.parts };
+    }) as Awaited<ReturnType<LabRequestsService['createInTransaction']>>;
+    expect(calls).toHaveLength(0);
+    const sent = await labRequests.sendGroup(context(), saved.labRequests, Date.now() + LAB_REQUEST_GROUP_SEND_DEADLINE_MS);
+    expect(sent.map((request) => request.labHandoff)).toEqual(Array(3).fill({ state: 'accepted' }));
+    expect(calls.map(({ order }) => order.sourceEhrOrderId)).toEqual(saved.labRequests.map((request) => request.id));
+    expect(sent.every((request) => !('createdAtExact' in request))).toBe(true);
   });
 });
 

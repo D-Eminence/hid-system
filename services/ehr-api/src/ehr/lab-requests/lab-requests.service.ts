@@ -71,7 +71,7 @@ const COLUMNS = `
 const EXACT_CREATED_AT = `${timelineCursorSql('created_at')} as "createdAtExact"`;
 
 /** A row as created, replayed, updated or sent, carrying the exact created_at for Lab. */
-type CreatedLabRequestRow = LabRequestRow & { createdAtExact: string };
+export type CreatedLabRequestRow = LabRequestRow & { createdAtExact: string };
 
 /**
  * What became of asking Lab to accept an active lab request, after the EHR
@@ -280,7 +280,9 @@ export class LabRequestsService {
    * (`lab-request-group.test.<n>`), each of which replays. A replay answers
    * the requests as they are now, and the group they were saved with.
    * After the commit each active test is sent to Lab in order (sendGroup); a
-   * group never fails because of Lab.
+   * group never fails because of Lab. On a same-key retry a test routed to
+   * another facility since it was saved is `not_sent` ORDER_ROUTED, as PATCH
+   * answers it (the routes are read in the transaction, as PATCH reads them).
    */
   async createGroup(context: DataAccessContext, patientId: string, encounterId: string,
     input: CreateLabRequestGroupInput, key: string, receivedAt: number): Promise<LabRequestGroupCreated> {
@@ -300,12 +302,21 @@ export class LabRequestsService {
         // The whole-call row names the group, not a row: each part answers its own saved request again.
         () => parts(),
       );
-      return { value: group.value, parts: group.value.parts };
+      // P4c (§7.5), as PATCH: a test of a replayed group with a route to another facility in force is not sent
+      // here. A new group's tests have no route yet.
+      const routes = group.details?.idempotentReplay === true
+        ? await this.orderRoutes.summaries(client, context, 'lab_request', patientId,
+          group.value.labRequests.map((row) => row.id))
+        : undefined;
+      const routed = new Set([...(routes?.entries() ?? [])].filter(([, summary]) => routeInForce(summary))
+        .map(([id]) => id));
+      return { value: { ...group.value, routed }, parts: group.value.parts };
     }, (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId));
     // Every group the route wrote has an id; a replay of one answers it.
     if (saved.requestGroupId === null) throw labRequestGroupsUnavailable();
     return { requestGroupId: saved.requestGroupId,
-      labRequests: await this.sendGroup(context, saved.labRequests, receivedAt + LAB_REQUEST_GROUP_SEND_DEADLINE_MS) };
+      labRequests: await this.sendGroup(context, saved.labRequests, receivedAt + LAB_REQUEST_GROUP_SEND_DEADLINE_MS,
+        saved.routed) };
   }
 
   /**
@@ -319,7 +330,12 @@ export class LabRequestsService {
    * of a new group get one requestGroupId (randomUUID); while it is off, a
    * null one (option (b)), so an order set's tests go as separate requests
    * and no group audit row is written. A replay answers what was stored.
-   * Nothing is sent to Lab here: the caller sends after its commit.
+   * The caller's whole-call digest must cover every test: a key whose part
+   * rows replay some tests while others are new (an order set changed under
+   * the same key) is 409 IDEMPOTENCY_KEY_REUSED, and the caller's transaction
+   * keeps nothing, so a group is never split across two ids.
+   * Nothing is sent to Lab here: the caller sends after its commit, with
+   * sendGroup.
    */
   async createInTransaction(
     client: PoolClient,
@@ -333,13 +349,17 @@ export class LabRequestsService {
     const newGroupId = this.groups.enabled ? randomUUID() : null;
     const labRequests: CreatedLabRequestRow[] = [];
     const parts: AuditedPart[] = [];
-    let replayed = true;
+    const replays: boolean[] = [];
     for (const [index, test] of input.tests.entries()) {
       const created = await this.createOne(client, context, patientId, encounterId, groupTest(input, test), key,
         partOperation(index), newGroupId);
       parts.push({ event: LAB_REQUEST_CREATE_EVENT, resourceId: created.resourceId, details: created.details });
       labRequests.push(created.value);
-      replayed &&= created.details?.idempotentReplay === true;
+      replays.push(created.details?.idempotentReplay === true);
+    }
+    const replayed = replays.every(Boolean);
+    if (!replayed && replays.some(Boolean)) {
+      throw new DomainProblem(409, 'IDEMPOTENCY_KEY_REUSED', 'Idempotency-Key was already used with a different request');
     }
     // A replay answers the group the tests were saved with (all in one transaction, so all alike).
     const requestGroupId = labRequests[0]?.requestGroupId ?? null;
@@ -397,17 +417,24 @@ export class LabRequestsService {
    * LAB_SERVICE_UNAVAILABLE, and one not tried before it `failed` 503
    * LAB_HANDOFF_NOT_TRIED; "Send to lab" (POST .../lab-work-item) sends
    * either safely. A same-key retry sends every active test again, and Lab
-   * replays the ones it holds. Without lab.work-item.accept a test is
+   * replays the ones it holds; a test in `routed` (a route to another
+   * facility in force, read in the caller's transaction) is `not_sent`
+   * ORDER_ROUTED, as PATCH answers it. Without lab.work-item.accept a test is
    * `not_sent` LAB_PERMISSION_ABSENT, as an activation is (defensive: every
-   * seeded role with ehr.lab-request.write has it).
+   * seeded role with ehr.lab-request.write has it). Public for ORD-8 (0180),
+   * which sends the tests createInTransaction saved after its own commit.
    */
-  private async sendGroup(context: DataAccessContext, rows: readonly CreatedLabRequestRow[], deadline: number):
-  Promise<LabRequestCreated[]> {
+  async sendGroup(context: DataAccessContext, rows: readonly CreatedLabRequestRow[], deadline: number,
+    routed: ReadonlySet<string> = new Set()): Promise<LabRequestCreated[]> {
     const answers: LabRequestCreated[] = [];
     for (const row of rows) {
       const { createdAtExact: _exact, ...created } = row;
       if (row.status !== OrderStatus.Active) {
         answers.push({ ...created, labWorkItem: null, labHandoff: null });
+        continue;
+      }
+      if (routed.has(row.id)) {
+        answers.push({ ...created, labWorkItem: null, labHandoff: { state: 'not_sent', code: 'ORDER_ROUTED' } });
         continue;
       }
       if (!context.actor.permissions.includes('lab.work-item.accept')) {
