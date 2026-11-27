@@ -51,6 +51,8 @@ describe('facility areas for each seeded role (SX-1)', () => {
     ['org_admin_awaiting_review', ['outreach', 'admin', 'audit']],
     ['outreach_organiser', ['outreach']],
     ['outreach_volunteer', ['outreach']],
+    // CHW-1 (0209, Q130 A): the community health worker sees Outreach only (view: no outreach.campaign.write).
+    ['community_health_worker', ['outreach']],
   ])('a %s membership shows %j', (role, shown) => {
     expect(SEEDS.has(role)).toBe(true);
     expect(facilityModules(permissionsOf(role))).toEqual(only(...shown));

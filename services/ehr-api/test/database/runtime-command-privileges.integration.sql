@@ -213,7 +213,9 @@ end $$;
 -- which passes only a campaign UPDATE policy: 0038's (outreach.campaign.write)
 -- or, since 0115, outreach_campaigns_member_lock (a member of the campaign who
 -- holds outreach.registration.write). A role that may register without
--- campaign.write needs that policy; outreach_volunteer (0115) is the only one.
+-- campaign.write needs that policy; outreach_volunteer (0115) and, at hospitals
+-- and clinics, community_health_worker (0209, CHW-1: exactly the volunteer's
+-- three codes) are the only ones. The policy is not tied to outreach groups.
 do $$
 declare missing text := (
   select string_agg(registration.role_code, ', ' order by registration.role_code)
@@ -221,7 +223,7 @@ declare missing text := (
    where registration.permission_code = 'outreach.registration.write'
      and not exists (select 1 from auth.role_permissions campaign
        where campaign.role_code = registration.role_code and campaign.permission_code = 'outreach.campaign.write')
-     and not (registration.role_code = 'outreach_volunteer'
+     and not (registration.role_code in ('outreach_volunteer', 'community_health_worker')
        and exists (select 1 from pg_policy where polrelid = 'outreach.campaigns'::regclass
                     and polname = 'outreach_campaigns_member_lock' and polcmd = 'w' and polpermissive)));
 begin

@@ -95,7 +95,9 @@ Object.assign(process.env, { AUTH_COOKIE_SECURE: 'true', HID_DEPLOYMENT_ENV: 'pr
 for (const key of ['AUTH_COOKIE_DOMAIN', 'PROVIDER_SELF_SERVICE_QOREID_DAILY_CAP', 'NIN_LOOKUP_HMAC_KEY_B64',
   'NOTIFICATION_IDENTITY_WORKLOAD_TOKEN_FILE', 'OTP_HMAC_KEY_VERSION',
   'NIN_ENCRYPTION_KEY_B64', 'METAMAP_CLIENT_ID', 'METAMAP_CLIENT_SECRET', 'QOREID_API_KEY',
-  'DATABASE_SSL_ROOT_CERT_BASE64']) delete process.env[key];
+  'DATABASE_SSL_ROOT_CERT_BASE64',
+  // CHW-1 (0209): the default (off) applies, so the community health worker stays hidden (inviteOptions below).
+  'COMMUNITY_HEALTH_WORKER_ENABLED']) delete process.env[key];
 require('ts-node').register({ project: join(service, 'tsconfig.json'), transpileOnly: true });
 require('reflect-metadata');
 const load = path => require(join(service, 'src', path));
@@ -2108,6 +2110,9 @@ try {
   assert.equal(pendingStaff.body.canInvite, false);
   assert.equal(pendingStaff.body.administratorLicence, null);
   assert.deepEqual(pendingStaff.body.administratorLicenceBodies, ['MDCN', 'NMCN']);
+  // CHW-1 (0209): once 0209 is applied the database also lists community_health_worker for a hospital; with
+  // COMMUNITY_HEALTH_WORKER_ENABLED off (the default, set above) Identity leaves it out, so the list is the same on a
+  // schema with or without 0209.
   assert.deepEqual(pendingStaff.body.inviteOptions.roles, [{ code: 'doctor', licenceBody: 'MDCN' },
     { code: 'nurse', licenceBody: 'NMCN' }, { code: 'lab', licenceBody: 'MLSCN' },
     { code: 'pharmacist', licenceBody: 'PCN' }, { code: 'receptionist', licenceBody: null }]);

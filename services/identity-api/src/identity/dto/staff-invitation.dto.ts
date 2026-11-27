@@ -4,7 +4,8 @@ import {
   registerDecorator, ValidateIf, type ValidationArguments,
 } from 'class-validator';
 import { acceptableStaffPersonName } from '../staff-names';
-import { LICENCE_BODIES, type LicenceBody, STAFF_ROLES, type StaffRole, staffRoleLicenceBody } from '../staff-licence';
+import { CHANGEABLE_STAFF_ROLES, LICENCE_BODIES, type LicenceBody, STAFF_ROLES, type StaffRole, staffRoleLicenceBody }
+  from '../staff-licence';
 
 const trim = ({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() : value;
 const trimLower = ({ value }: { value: unknown }) => typeof value === 'string' ? value.trim().toLowerCase() : value;
@@ -21,9 +22,9 @@ function IsStaffPersonName(): PropertyDecorator {
 }
 
 /**
- * The licence goes with the role (SPEC 4.2): a receptionist has none (both
- * fields absent); every other role has the body its regulator issues and a
- * number. Placed on `role`, it reads the licence fields of the same object.
+ * The licence goes with the role (SPEC 4.2): a receptionist and a community
+ * health worker (CHW-1) have none (both fields absent); every other role has
+ * the body its regulator issues and a number. Placed on `role`, it reads the licence fields of the same object.
  */
 export function LicenceMatchesRole(): PropertyDecorator {
   return (target: object, propertyName: string | symbol) => registerDecorator({
@@ -67,7 +68,7 @@ export class ExpectedVersionDto {
 
 /**
  * Invite a member of staff (SPEC 4.4). The name is the person's own; the
- * email is lower-cased; the role is one of the five invitable roles (the
+ * email is lower-cased; the role is one of the invitable roles (the
  * facility's type narrows them, which the database decides); the licence goes
  * with the role; the administrator attests and re-enters their password.
  */
@@ -103,9 +104,12 @@ export class EndFacilityStaffDto extends ExpectedVersionDto {
   currentPassword!: string;
 }
 
-/** Change a member's role (SPEC 4.5): as an invitation's role and licence, with a reason and the password. */
+/**
+ * Change a member's role (SPEC 4.5): as an invitation's role and licence, with a reason and the password. Not the
+ * community health worker (CHW-1, 0209): SX-4's add and remove give that role, and the database's change refuses it.
+ */
 export class ChangeFacilityStaffRoleDto extends ExpectedVersionDto {
-  @IsIn(STAFF_ROLES) @LicenceMatchesRole()
+  @IsIn(CHANGEABLE_STAFF_ROLES) @LicenceMatchesRole()
   role!: StaffRole;
 
   @IsOptional() @IsIn(LICENCE_BODIES)

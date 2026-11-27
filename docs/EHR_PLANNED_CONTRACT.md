@@ -3266,22 +3266,22 @@ Owner decision Q130 A, 19 Nov 2026. A new Outreach-only role, for field health w
 
 No new route. The role uses existing ones:
 
-- See the campaigns it is a member of, and their staff list (section 40).
+- See the campaigns at its facility (every one: `outreach_campaigns_read` needs only `outreach.campaign.read`), and the staff list of those it is a member of (section 40).
 - Register people into those campaigns (section 8 "Outreach registration boundary", `POST /outreach/registration-cases`, with `Idempotency-Key`).
 - Read and save a screening (section 48, `GET`/`PUT .../screening`).
-- See only the registrations of campaigns it belongs to (0045 row rules, section 48.3).
-- Campaign admins add it to a campaign as `health_worker` or `enumerator` (section 40).
+- See the registrations of campaigns it belongs to, and the facility's registrations with no campaign (0045 and 0121 row rules admit `campaign_id` null; campaigns are optional at a hospital; section 48.3). Limiting it to its own campaigns is a DPO follow-up, not built.
+- Campaign admins add it to a campaign; the screens offer `health_worker` or `enumerator`, and nothing stops `admin` (section 40).
 
 **What it cannot do**
 - It cannot create, open, close or manage a campaign. It has no `outreach.campaign.write`, the same rule 0115 gives volunteers ("a helper must not create campaigns").
 - It cannot search for patients (0132), register at the desk (ID-2), check people in (EHR-C7), open a chart, request access, use an Access PIN, use emergency access, scan paper records, or see any lab or pharmacy work.
 - It cannot link a registration to an existing patient (`link-existing`): that needs Identity's patient authorization, which this role does not have. The facility's front desk or a nurse does it.
 - At a hospital, it cannot create a Health ID through Outreach (section 49), because that route refuses groups that are not outreach groups. Changing that is outside this package.
-- Recording an export (section 48.x) is not given to this role (proposed). Campaign admins export.
+- Recording an export (section 48.x) stays as today: any `outreach.registration.read` holder may record one, so this role may, as volunteers may (design note default; closing it would close it to volunteers too).
 
 **How it is given**
 - An invitation (`POST /identity/staff-invitations`): the role list gains `community_health_worker`, with no licence fields.
-- SX-4's add and remove.
+- SX-4's add and remove. Not 0086's single "Change role" (`identity.change_facility_staff_role` is not changed).
 - At governed facilities, Health ID support does it (owner decision Q129 A, 19 Nov 2026).
 
 **Database (provisional)**
@@ -3289,7 +3289,7 @@ No new route. The role uses existing ones:
 - The 0115 fence change.
 - `staff_invitable_roles` gains the role for hospital and clinic facilities.
 - The SX-1 role-matrix fixture is updated in the same PR.
-- No table changes. No existing member is changed.
+- `identity.staff_invitations`' two role checks are replaced (the role added, with no licence), and the six role functions that name the invitable roles (0086, 0139) are replaced so the role joins the front desk's unlicensed group. No existing member is changed.
 
 ### Errors
 
@@ -3297,9 +3297,9 @@ No new codes. These are the answers this role meets:
 
 | HTTP | Code | Message |
 |---|---|---|
-| 400 | `STAFF_INVITATION_ROLE_NOT_ALLOWED` (today) | This facility cannot invite that role. (At a laboratory, a pharmacy or an outreach group.) |
-| 403 | `PRODUCT_NOT_AUTHORISED` (today, section 53) | This account cannot sign in to this site. (On `ehr.`, `lab.`, `pharmacy.` or `migrate.`.) |
-| 403 | `PERMISSION_DENIED` (today) | You don't have permission to do this. (Any non-Outreach route.) |
+| 400 | `STAFF_INVITATION_ROLE_NOT_ALLOWED` (today) | This facility cannot invite that role. (At a laboratory or a pharmacy; support's add at an outreach group.) |
+| 403 | `PRODUCT_NOT_AUTHORISED` (today, section 53) | This account isn't set up for this Health ID product. (On `ehr.`, `lab.`, `pharmacy.` or `migrate.`.) |
+| 403 | `PERMISSION_DENIED` (today) | Required permission is missing (route guard) / Staff management is not permitted. (Any non-Outreach route, including an invitation or SX-4 add at an outreach group: organisers and volunteers hold no `workforce.manage`.) |
 | 403 | `OUTREACH_CAMPAIGN_ADMIN_REQUIRED` (today, section 40) | Only this campaign's admins can do this. |
 | 404 | `OUTREACH_REGISTRATION_NOT_FOUND` (today, section 48) | This registration was not found. (Another campaign's registration.) |
 

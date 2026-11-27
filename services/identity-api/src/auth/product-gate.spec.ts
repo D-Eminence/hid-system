@@ -167,6 +167,10 @@ const accounts = {
   pharmacist: account('pharmacist', [membership(PHARMACY, 'pharmacist')]),
   organiser: account('outreach-organiser', [membership(OUTREACH_GROUP, 'outreach_organiser')]),
   volunteer: account('outreach-volunteer', [membership(OUTREACH_GROUP, 'outreach_volunteer')]),
+  // CHW-1 (0209, Q130 A): a hospital and a clinic membership holding only community_health_worker.
+  communityHealthWorker: account('community-health-worker', [membership(HOSPITAL, 'community_health_worker')]),
+  clinicCommunityHealthWorker: account('clinic-community-health-worker',
+    [membership(CLINIC, 'community_health_worker', { organizationType: 'clinic' })]),
   noMembership: account('no-membership', [], { eligibility: ELIGIBLE }),
   platformAdmin: account('platform-admin', [], { platform: { roles: ['platform_super_admin'],
     permissions: permissionsOf('platform_super_admin') }, eligibility: { ...ELIGIBLE, platform_role: true } }),
@@ -322,10 +326,13 @@ describe('the permission codes the gate reads are the database seeds\' (auth.rol
     expect(holders('lab.work-item.accept')).toEqual(['clinician', 'doctor', 'lab', 'nurse']);
     expect(holders('pharmacy.work-item.read')).toEqual(['clinician', 'nurse', 'pharmacist', 'work_list_reader']);
     expect(holders('pharmacy.dispensing.read')).toEqual(['admin', 'clinician', 'doctor', 'nurse', 'pharmacist']);
-    expect(holders('outreach.registration.read')).toEqual(['admin', 'clinician', 'nurse', 'org_admin',
-      'org_admin_awaiting_review', 'outreach_organiser', 'outreach_volunteer', 'receptionist']);
-    expect(holders('outreach.campaign.read')).toEqual(['admin', 'clinician', 'nurse', 'org_admin',
-      'org_admin_awaiting_review', 'outreach_organiser', 'outreach_volunteer', 'receptionist']);
+    // CHW-1 (0209, Q130 A): the community health worker holds the volunteer's three outreach codes.
+    expect(holders('outreach.registration.read')).toEqual(['admin', 'clinician', 'community_health_worker', 'nurse',
+      'org_admin', 'org_admin_awaiting_review', 'outreach_organiser', 'outreach_volunteer', 'receptionist']);
+    expect(holders('outreach.campaign.read')).toEqual(['admin', 'clinician', 'community_health_worker', 'nurse',
+      'org_admin', 'org_admin_awaiting_review', 'outreach_organiser', 'outreach_volunteer', 'receptionist']);
+    expect(holders('outreach.campaign.write')).not.toContain('community_health_worker');
+    expect(permissionsOf('community_health_worker')).toEqual(permissionsOf('outreach_volunteer'));
     // Q111 A: doctors keep ocr.job.write (checking readings, confirming their
     // patient); starting a reading also needs ocr.job.start, which 0136 did
     // not give them and 0150 (Q141 B) gives them again.
@@ -403,6 +410,8 @@ describe('the permission codes the gate reads are the database seeds\' (auth.rol
 
   it.each([
     ['lab', ['lab']], ['pharmacist', ['pharmacy']], ['outreach_organiser', ['outreach']], ['outreach_volunteer', ['outreach']],
+    // CHW-1 (0209): a hospital's community health worker fits outreach. only, as the volunteer.
+    ['community_health_worker', ['outreach']],
   ] as const)('a %s membership fits %j only (unchanged)', (role, expected) => {
     const facility = assignment([role], permissionsOf(role));
     expect(PRODUCTS.filter((product) => facilityAdmittedOnProduct(facility, product))).toEqual(expected);
@@ -485,6 +494,10 @@ const MATRIX: [string, Account, Record<StaffProduct, Expectation>][] = [
   ['pharmacist', accounts.pharmacist, only('pharmacy')],
   ['outreach organiser', accounts.organiser, only('outreach')],
   ['outreach volunteer', accounts.volunteer, only('outreach')],
+  // CHW-1 (0209): a hospital (or clinic) membership holding only community_health_worker opens outreach. and is
+  // refused with 403 PRODUCT_NOT_AUTHORISED on ehr., lab., pharmacy. and migrate.
+  ['community health worker at a hospital', accounts.communityHealthWorker, only('outreach')],
+  ['community health worker at a clinic', accounts.clinicCommunityHealthWorker, only('outreach')],
   ['verified staff with no membership', accounts.noMembership, { ehr: 'NO_ACTIVE_FACILITY_MEMBERSHIP',
     lab: 'NO_ACTIVE_FACILITY_MEMBERSHIP', pharmacy: 'NO_ACTIVE_FACILITY_MEMBERSHIP',
     migrate: 'NO_ACTIVE_FACILITY_MEMBERSHIP', outreach: 'account-only' }],
@@ -545,6 +558,29 @@ describe('POST /auth/login on each product site (Q88-1, Q88-2)', () => {
     expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ actorType: 'staff', actorSubject: who.subject,
       action: 'auth.login.refused', resourceType: 'authentication', outcome: 'denied',
       details: { reason: expected.toLowerCase(), product: productForOrigin(origin) } }));
+  });
+
+  // CHW-1 (0209, owner decision Q130 A; the planned contract's test): a hospital membership holding only
+  // community_health_worker resolves on outreach. with exactly the volunteer's three codes, and gets 403
+  // PRODUCT_NOT_AUTHORISED on ehr., lab., pharmacy. and migrate. A membership holding it beside a clinical role
+  // (nurse) is a hospital clinical membership and is refused on outreach. (the design note's default: no gate change).
+  it('a hospital membership holding only community_health_worker opens outreach. and nothing else', async () => {
+    const { controller } = harness();
+    const outreach = await controller.login(login(accounts.communityHealthWorker), request(PROD('outreach')), response());
+    expect(outreach.actor.facility?.id).toBe(HOSPITAL.facility);
+    expect([...outreach.actor.permissions].sort()).toEqual(['outreach.campaign.read', 'outreach.registration.read',
+      'outreach.registration.write']);
+    expect(outreach.actor.products).toEqual(['outreach']);
+    for (const product of ['ehr', 'lab', 'pharmacy', 'migrate'] as const) {
+      const error = await refusal(controller.login(login(accounts.communityHealthWorker), request(PROD(product)),
+        response()));
+      expect([error.getStatus(), (error as DomainProblem).code]).toEqual([403, 'PRODUCT_NOT_AUTHORISED']);
+      expect(error.message).toBe("This account isn't set up for this Health ID product.");
+    }
+    const mixed = { id: HOSPITAL.facility, membershipId: 'm', organizationId: HOSPITAL.organization, name: HOSPITAL.name,
+      roles: ['community_health_worker', 'nurse'], isPrimary: true,
+      permissions: [...new Set([...permissionsOf('community_health_worker'), ...permissionsOf('nurse')])] };
+    expect(PRODUCTS.filter((product) => facilityAdmittedOnProduct(mixed, product))).toEqual(['ehr', 'migrate']);
   });
 
   it('keeps only the fitting facilities of an account with several (lab and outreach volunteer)', async () => {

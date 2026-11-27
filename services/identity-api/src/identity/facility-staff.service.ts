@@ -9,6 +9,7 @@ import { staffCommandProblem, unavailableFor } from './staff-invitation-problems
 import { STAFF_ATTESTATION_VERSION, StaffInvitationsService } from './staff-invitations.service';
 import { normalizeLicenceNumber, staffRoleLicenceBody } from './staff-licence';
 import { StaffReauthenticationService } from './staff-reauthentication.service';
+import { staffRoleOfferedNow } from './staff-role-switch';
 
 type Timestamp = Date | string | null;
 type Count = string | number | null;
@@ -238,7 +239,9 @@ export class FacilityStaffService {
         && limits.emailsToday < limits.emailsPerDay,
       limits,
       inviteOptions: {
-        roles: (state.invitable_roles ?? []).map((code) => ({ code, licenceBody: staffRoleLicenceBody(code) })),
+        // CHW-1 (0209): a role held back by its setting (COMMUNITY_HEALTH_WORKER_ENABLED off) is not offered.
+        roles: (state.invitable_roles ?? []).filter(staffRoleOfferedNow)
+          .map((code) => ({ code, licenceBody: staffRoleLicenceBody(code) })),
         attestation: state.attestation_version
           ? { version: state.attestation_version, text: state.attestation_text } : null,
       },

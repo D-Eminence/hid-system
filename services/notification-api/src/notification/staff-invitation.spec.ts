@@ -77,14 +77,15 @@ describe('Facility staff invitation email (P4b)', () => {
       }
     });
 
-    it('labels exactly the five invitable roles', () => {
+    it('labels exactly the invitable roles (CHW-1, 0209: the community health worker too)', () => {
       expect(STAFF_ROLE_LABELS).toEqual({ doctor: 'doctor', nurse: 'nurse', lab: 'laboratory scientist',
-        pharmacist: 'pharmacist', receptionist: 'receptionist' });
+        pharmacist: 'pharmacist', receptionist: 'receptionist', community_health_worker: 'community health worker' });
     });
 
     it('opens the link on the staff site the role works on, never the patient portal', () => {
       expect(Object.fromEntries(STAFF_INVITATION_ROLES.map((role) => [role, staffSiteForRole(role)]))).toEqual({
-        doctor: 'ehr', nurse: 'ehr', lab: 'lab', pharmacist: 'pharmacy', receptionist: 'ehr', outreach_volunteer: 'outreach' });
+        doctor: 'ehr', nurse: 'ehr', lab: 'lab', pharmacist: 'pharmacy', receptionist: 'ehr',
+        community_health_worker: 'outreach', outreach_volunteer: 'outreach' });
     });
 
     it('words an outreach volunteer\'s invitation for the group and opens it on outreach.', () => {
@@ -142,6 +143,9 @@ describe('Facility staff invitation email (P4b)', () => {
       ['staging', 'lab', 'https://lab.staging.healthidentitydirectory.com'],
       ['staging', 'pharmacist', 'https://pharmacy.staging.healthidentitydirectory.com'],
       ['development', 'doctor', 'http://localhost:5173'],
+      // CHW-1 (0209): the community health worker works on outreach.
+      ['production', 'community_health_worker', 'https://outreach.healthidentitydirectory.com'],
+      ['staging', 'community_health_worker', 'https://outreach.staging.healthidentitydirectory.com'],
     ] as const)('delivers by email in %s for a %s with the link on %s, the stable key and Novu\'s response shape',
       async (deployment, roleCode: FacilityStaffInvitationRole, origin) => {
       process.env.HID_DEPLOYMENT_ENV = deployment;

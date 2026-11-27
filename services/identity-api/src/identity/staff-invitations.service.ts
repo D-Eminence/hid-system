@@ -18,6 +18,7 @@ import { acceptancePreCheckProblem, invitationResultProblem, staffCommandProblem
 import { normalizeLicenceNumber } from './staff-licence';
 import { emailFacilityName, shownInviterName } from './staff-names';
 import { StaffReauthenticationService } from './staff-reauthentication.service';
+import { staffRoleOfferedNow } from './staff-role-switch';
 
 const localInvitationKey = randomBytes(32);
 
@@ -179,6 +180,8 @@ export class StaffInvitationsService {
    */
   async create(context: DataAccessContext, request: HidRequest, input: CreateStaffInvitationDto, idempotencyKey: string) {
     this.requireSelfService(context.actor.facility, 'reviewed');
+    // CHW-1 (0209): a role held back by its setting is not invitable yet, whatever the facility.
+    if (!staffRoleOfferedNow(input.role)) throw staffRefusal('STAFF_INVITATION_ROLE_NOT_ALLOWED');
     await this.assertOpen('staff');
     const key = this.requireKey('staff');
     await this.reauthentication.confirm(context.actor, input.currentPassword, request);

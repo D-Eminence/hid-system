@@ -7,9 +7,9 @@ import {
 import { AddFacilityStaffRoleDto, AdminAddFacilityStaffRoleDto, AdminRemoveFacilityStaffRoleDto,
   RemoveFacilityStaffRoleDto } from './dto/staff-role.dto';
 import {
-  ADMINISTRATOR_GRANTABLE_ROLES, licenceNumberAcceptable, NARROW_ROLE_LABELS, NARROW_ROLES, normalizeLicenceNumber,
-  ORGANIZATION_TYPES, selfServiceAdministratorRole, selfServiceReviewableRoles, STAFF_ROLE_LABELS, STAFF_ROLES,
-  staffInvitableRoles, staffRoleLicenceBody,
+  ADMINISTRATOR_GRANTABLE_ROLES, CHANGEABLE_STAFF_ROLES, licenceNumberAcceptable, NARROW_ROLE_LABELS, NARROW_ROLES,
+  normalizeLicenceNumber, ORGANIZATION_TYPES, selfServiceAdministratorRole, selfServiceReviewableRoles, STAFF_ROLE_LABELS,
+  STAFF_ROLES, staffInvitableRoles, staffRoleLicenceBody, staffRoleOffered,
 } from './staff-licence';
 import {
   acceptableStaffPersonName, DOMAIN_LIKE, EMAIL_FACILITY_NAME, emailFacilityName, hasReservedWord, shownInviterName,
@@ -34,18 +34,21 @@ const token = 'Ab3_-Zx9Qw8Er7Ty6Ui5Op4As3Df2Gh1Jk0LzXcVbNm';
 const invitationId = '3f2a9c1b-7d4e-4a5b-8c6d-0e1f2a3b4c5d';
 
 describe('staff vocabulary (SPEC 3.6, 4.2)', () => {
+  // CHW-1 (0209): the community health worker last at hospitals and clinics (and 'other' with ehr or migrate), as the
+  // database's identity.staff_invitable_roles; never at a laboratory or a pharmacy.
+  const HOSPITAL_ROLES = ['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist', 'community_health_worker'];
   it('invitable roles by organization type and product', () => {
     for (const type of ['hospital', 'clinic']) {
       for (const product of ['ehr', 'migrate', 'laboratory', 'pharmacy']) {
-        expect(staffInvitableRoles(type, product)).toEqual(['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist']);
+        expect(staffInvitableRoles(type, product)).toEqual(HOSPITAL_ROLES);
       }
     }
     for (const product of ['ehr', 'migrate', 'laboratory', 'pharmacy']) {
       expect(staffInvitableRoles('laboratory', product)).toEqual(['lab', 'receptionist']);
       expect(staffInvitableRoles('pharmacy', product)).toEqual(['pharmacist', 'receptionist']);
     }
-    expect(staffInvitableRoles('other', 'ehr')).toEqual(['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist']);
-    expect(staffInvitableRoles('other', 'migrate')).toEqual(['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist']);
+    expect(staffInvitableRoles('other', 'ehr')).toEqual(HOSPITAL_ROLES);
+    expect(staffInvitableRoles('other', 'migrate')).toEqual(HOSPITAL_ROLES);
     expect(staffInvitableRoles('other', 'laboratory')).toEqual(['lab', 'receptionist']);
     expect(staffInvitableRoles('other', 'pharmacy')).toEqual(['pharmacist', 'receptionist']);
     expect(staffInvitableRoles('dental', 'ehr')).toEqual([]);
@@ -69,10 +72,46 @@ describe('staff vocabulary (SPEC 3.6, 4.2)', () => {
   });
 
   it('licence body and labels by role; no clinician, admin or platform role', () => {
-    expect(['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist', 'clinician', 'org_admin'].map(staffRoleLicenceBody))
-      .toEqual(['MDCN', 'NMCN', 'MLSCN', 'PCN', null, null, null]);
+    expect(STAFF_ROLES).toEqual(['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist', 'community_health_worker']);
+    expect(['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist', 'community_health_worker', 'clinician', 'org_admin']
+      .map(staffRoleLicenceBody)).toEqual(['MDCN', 'NMCN', 'MLSCN', 'PCN', null, null, null, null]);
     expect(Object.fromEntries(Object.entries(STAFF_ROLE_LABELS).map(([role, label]) => [role, label.lower]))).toEqual({
-      doctor: 'doctor', nurse: 'nurse', lab: 'laboratory scientist', pharmacist: 'pharmacist', receptionist: 'receptionist' });
+      doctor: 'doctor', nurse: 'nurse', lab: 'laboratory scientist', pharmacist: 'pharmacist', receptionist: 'receptionist',
+      community_health_worker: 'community health worker' });
+    expect(STAFF_ROLE_LABELS.community_health_worker.title).toBe('Community health worker');
+  });
+
+  // CHW-1 (0209, owner decision Q130 A): the community health worker is given like the front desk, with no licence and
+  // no verification method, through an invitation and SX-4's add and remove; 0086's single Change role does not offer
+  // it; and while COMMUNITY_HEALTH_WORKER_ENABLED is off it is not offered at all (staffRoleOffered).
+  it('takes the community health worker with no licence or method, and not in the single Change role', async () => {
+    const role = 'community_health_worker';
+    const invitation = { name: 'Efe Fieldworker', email: 'efe@example.test', role, attested: true, currentPassword: 'p' };
+    const add = { expectedVersion: 2, role, attested: true, reason: 'Works in the community', currentPassword: 'p' };
+    const remove = { expectedVersion: 2, role, reason: 'Back on the ward only', currentPassword: 'p' };
+    const supportAdd = { role, attested: true, reason: 'Works in the community' };
+    const supportRemove = { role, reason: 'Back on the ward only' };
+    await expect(validate(CreateStaffInvitationDto, invitation)).resolves.toMatchObject({ role });
+    await expect(validate(AddFacilityStaffRoleDto, add)).resolves.toMatchObject({ role });
+    await expect(validate(RemoveFacilityStaffRoleDto, remove)).resolves.toMatchObject({ role });
+    await expect(validate(AdminAddFacilityStaffRoleDto, supportAdd)).resolves.toMatchObject({ role });
+    await expect(validate(AdminRemoveFacilityStaffRoleDto, supportRemove)).resolves.toMatchObject({ role });
+    const licence = { licenceBody: 'MDCN', licenceNumber: 'MDCN/1' };
+    await refused(CreateStaffInvitationDto, { ...invitation, ...licence });
+    await refused(CreateStaffInvitationDto, { ...invitation, licenceNumber: 'CHPRBN/1' });
+    await refused(AddFacilityStaffRoleDto, { ...add, ...licence });
+    await refused(AdminAddFacilityStaffRoleDto, { ...supportAdd, verificationMethod: 'in_person' });
+    await refused(AdminAddFacilityStaffRoleDto, { ...supportAdd, ...licence, verificationMethod: 'in_person' });
+    expect(CHANGEABLE_STAFF_ROLES).toEqual(['doctor', 'nurse', 'lab', 'pharmacist', 'receptionist']);
+    await refused(ChangeFacilityStaffRoleDto, { expectedVersion: 2, role, attested: true, reason: 'Works in the community',
+      currentPassword: 'p' });
+  });
+
+  it('offers the community health worker only while COMMUNITY_HEALTH_WORKER_ENABLED is on; every other role always', () => {
+    for (const role of STAFF_ROLES) {
+      expect(staffRoleOffered(role, { communityHealthWorkerEnabled: true })).toBe(true);
+      expect(staffRoleOffered(role, { communityHealthWorkerEnabled: false })).toBe(role !== 'community_health_worker');
+    }
   });
 
   // Owner decision Q137 B (0147): two narrow roles a staff profile names, which nobody invites, grants at review or

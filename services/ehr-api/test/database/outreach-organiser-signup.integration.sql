@@ -396,6 +396,114 @@ select pg_temp.owner_case('5c an outreach role at platform scope is refused', 'P
 select pg_temp.owner_case('5d turning the organiser''s role into a doctor role is refused', 'P0001: OUTREACH_GROUP_ROLE_INVALID',
   format($s$update auth.account_roles set role_code = 'doctor' where membership_id = %L$s$, pg_temp.id('mem1')));
 
+-- 8b. The community health worker (0209, CHW-1, Q130 A): the fence's one new
+-- rule. Fixtures: a laboratory-only, a pharmacy-only and a clinic
+-- organisation (each one approved governed application, so
+-- identity.organization_staff_kinds answers its kind), an organisation with
+-- two (a hospital for ehr and a laboratory: kinds hospital and laboratory),
+-- and a field worker W (n=5) with a membership at each and at hospital H,
+-- holding the front desk role at H and the lab role at the laboratory.
+set local session_replication_role = replica;
+insert into auth.accounts (id, subject, email, display_name, status) values
+  ('0e010000-0000-4000-8000-000000000005', 'synthetic:os-field', 'os-field@example.invalid', 'Efe Fieldworker', 'active');
+insert into identity.staff (id, account_id, full_name, email, verification_status, default_role) values
+  ('0e020000-0000-4000-8000-000000000005', '0e010000-0000-4000-8000-000000000005', 'Efe Fieldworker',
+   'os-field@example.invalid', 'verified', 'receptionist');
+insert into identity.organizations (id, name, slug) values
+  ('0e000000-0000-4000-8000-000000000011', 'Signup Test Laboratory Ltd', 'signup-test-laboratory'),
+  ('0e000000-0000-4000-8000-000000000013', 'Signup Test Pharmacy Ltd', 'signup-test-pharmacy'),
+  ('0e000000-0000-4000-8000-000000000015', 'Signup Test Clinic Ltd', 'signup-test-clinic'),
+  ('0e000000-0000-4000-8000-000000000017', 'Signup Test Hospital and Laboratory Ltd', 'signup-test-hospital-lab');
+insert into identity.facilities (id, organization_id, name, code, timezone, active, lifecycle_status) values
+  ('0e000000-0000-4000-8000-000000000012', '0e000000-0000-4000-8000-000000000011', 'Signup Test Laboratory',
+   'SIGNUP-TEST-L', 'Africa/Lagos', true, 'verified'),
+  ('0e000000-0000-4000-8000-000000000014', '0e000000-0000-4000-8000-000000000013', 'Signup Test Pharmacy',
+   'SIGNUP-TEST-P', 'Africa/Lagos', true, 'verified'),
+  ('0e000000-0000-4000-8000-000000000016', '0e000000-0000-4000-8000-000000000015', 'Signup Test Clinic',
+   'SIGNUP-TEST-C', 'Africa/Lagos', true, 'verified'),
+  ('0e000000-0000-4000-8000-000000000018', '0e000000-0000-4000-8000-000000000017', 'Signup Test Hospital and Laboratory',
+   'SIGNUP-TEST-HL', 'Africa/Lagos', true, 'verified');
+insert into identity.organization_applications (id, product_code, organization_name, organization_type,
+  cac_registration_number, administrator_name, administrator_email, status, verification_result, verified_at,
+  organization_id, facility_id, first_admin_account_id, reviewed_by_account_id, review_reason, reviewed_at,
+  verified_organization_name, approval_mode)
+select ('0e080000-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid, product, organization_name, kind,
+       'RC0000000000000209' || lpad(n::text, 3, '0'), 'Signup Test Admin', 'os-kinds-' || n || '@example.invalid',
+       'approved', 'verified', clock_timestamp(), organization_id, facility_id, '0e010000-0000-4000-8000-000000000003',
+       '0e010000-0000-4000-8000-000000000003', 'Synthetic signup suite application', clock_timestamp(),
+       organization_name, 'admin_review'
+  from (values
+    (1, 'laboratory', 'laboratory', 'Signup Test Laboratory Ltd', '0e000000-0000-4000-8000-000000000011'::uuid,
+     '0e000000-0000-4000-8000-000000000012'::uuid),
+    (2, 'pharmacy', 'pharmacy', 'Signup Test Pharmacy Ltd', '0e000000-0000-4000-8000-000000000013'::uuid,
+     '0e000000-0000-4000-8000-000000000014'::uuid),
+    (3, 'ehr', 'clinic', 'Signup Test Clinic Ltd', '0e000000-0000-4000-8000-000000000015'::uuid,
+     '0e000000-0000-4000-8000-000000000016'::uuid),
+    (4, 'ehr', 'hospital', 'Signup Test Hospital and Laboratory Ltd', '0e000000-0000-4000-8000-000000000017'::uuid,
+     '0e000000-0000-4000-8000-000000000018'::uuid),
+    (5, 'laboratory', 'laboratory', 'Signup Test Hospital and Laboratory Ltd',
+     '0e000000-0000-4000-8000-000000000017'::uuid, '0e000000-0000-4000-8000-000000000018'::uuid))
+    as kinds(n, product, kind, organization_name, organization_id, facility_id);
+insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
+  membership_role, app_role, is_primary, active) values
+  ('0e030000-0000-4000-8000-000000000010', '0e020000-0000-4000-8000-000000000005', '0e010000-0000-4000-8000-000000000005',
+   '0e000000-0000-4000-8000-000000000001', '0e000000-0000-4000-8000-000000000002', 'receptionist', 'receptionist', true, true),
+  ('0e030000-0000-4000-8000-000000000011', '0e020000-0000-4000-8000-000000000005', '0e010000-0000-4000-8000-000000000005',
+   '0e000000-0000-4000-8000-000000000011', '0e000000-0000-4000-8000-000000000012', 'lab', 'lab', false, true),
+  ('0e030000-0000-4000-8000-000000000013', '0e020000-0000-4000-8000-000000000005', '0e010000-0000-4000-8000-000000000005',
+   '0e000000-0000-4000-8000-000000000013', '0e000000-0000-4000-8000-000000000014', 'pharmacist', 'pharmacist', false, true),
+  ('0e030000-0000-4000-8000-000000000015', '0e020000-0000-4000-8000-000000000005', '0e010000-0000-4000-8000-000000000005',
+   '0e000000-0000-4000-8000-000000000015', '0e000000-0000-4000-8000-000000000016', 'doctor', 'doctor', false, true),
+  ('0e030000-0000-4000-8000-000000000017', '0e020000-0000-4000-8000-000000000005', '0e010000-0000-4000-8000-000000000005',
+   '0e000000-0000-4000-8000-000000000017', '0e000000-0000-4000-8000-000000000018', 'lab', 'lab', false, true);
+insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason) values
+  ('0e040000-0000-4000-8000-000000000010', '0e010000-0000-4000-8000-000000000005', 'receptionist', 'facility',
+   '0e030000-0000-4000-8000-000000000010', '0e000000-0000-4000-8000-000000000002', 'Synthetic signup suite role'),
+  ('0e040000-0000-4000-8000-000000000011', '0e010000-0000-4000-8000-000000000005', 'lab', 'facility',
+   '0e030000-0000-4000-8000-000000000011', '0e000000-0000-4000-8000-000000000012', 'Synthetic signup suite role');
+set local session_replication_role = origin;
+create function pg_temp.chw_grant(membership text, facility text, revoked boolean default false) returns text
+language sql as $$
+  select format($s$insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id,
+      grant_reason, revoked_at, revoked_by, revocation_reason)
+    values (gen_random_uuid(), '0e010000-0000-4000-8000-000000000005', 'community_health_worker', 'facility', %L, %L,
+      'Synthetic community health worker grant', %s, %s, %s)$s$, membership, facility,
+    case when revoked then 'clock_timestamp()' else 'null' end,
+    case when revoked then quote_literal('0e010000-0000-4000-8000-000000000003') else 'null' end,
+    case when revoked then quote_literal('Synthetic revoked community health worker grant') else 'null' end) $$;
+select pg_temp.owner_case('5e community_health_worker at a hospital (no kind recorded) is allowed', 'ok',
+  pg_temp.chw_grant('0e030000-0000-4000-8000-000000000010', '0e000000-0000-4000-8000-000000000002'));
+select pg_temp.owner_case('5f community_health_worker at a clinic is allowed', 'ok',
+  pg_temp.chw_grant('0e030000-0000-4000-8000-000000000015', '0e000000-0000-4000-8000-000000000016'));
+select pg_temp.owner_case('5g community_health_worker at an outreach group is refused (0115''s rule)',
+  'P0001: OUTREACH_GROUP_ROLE_INVALID',
+  format($s$insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
+    values (gen_random_uuid(), %L, 'community_health_worker', 'facility', %L, %L, 'Synthetic forbidden grant')$s$,
+    pg_temp.id('acct1'), pg_temp.id('mem1'), pg_temp.id('fac1')));
+select pg_temp.owner_case('5h community_health_worker at a laboratory-only organisation is refused',
+  'P0001: COMMUNITY_HEALTH_WORKER_ONLY_AT_HOSPITAL',
+  pg_temp.chw_grant('0e030000-0000-4000-8000-000000000011', '0e000000-0000-4000-8000-000000000012'));
+select pg_temp.owner_case('5i community_health_worker at a pharmacy-only organisation is refused',
+  'P0001: COMMUNITY_HEALTH_WORKER_ONLY_AT_HOSPITAL',
+  pg_temp.chw_grant('0e030000-0000-4000-8000-000000000013', '0e000000-0000-4000-8000-000000000014'));
+select pg_temp.owner_case('5j community_health_worker at platform scope is refused',
+  'P0001: COMMUNITY_HEALTH_WORKER_ONLY_AT_HOSPITAL',
+  $s$insert into auth.account_roles (id, account_id, role_code, scope_type, grant_reason)
+    values (gen_random_uuid(), '0e010000-0000-4000-8000-000000000003', 'community_health_worker', 'platform',
+      'Synthetic forbidden grant')$s$);
+select pg_temp.owner_case('5k turning the laboratory role into community_health_worker is refused',
+  'P0001: COMMUNITY_HEALTH_WORKER_ONLY_AT_HOSPITAL',
+  $s$update auth.account_roles set role_code = 'community_health_worker'
+      where id = '0e040000-0000-4000-8000-000000000011'$s$);
+select pg_temp.owner_case('5l a revoked community_health_worker row passes even at a laboratory', 'ok',
+  pg_temp.chw_grant('0e030000-0000-4000-8000-000000000011', '0e000000-0000-4000-8000-000000000012', true));
+select pg_temp.owner_case('5m turning the front desk role at the hospital into community_health_worker is allowed', 'ok',
+  $s$update auth.account_roles set role_code = 'community_health_worker'
+      where id = '0e040000-0000-4000-8000-000000000010'$s$);
+-- Kinds that contain hospital (or clinic) are enough: not every kind need be one.
+select pg_temp.owner_case('5n community_health_worker at a hospital-and-laboratory organisation is allowed', 'ok',
+  pg_temp.chw_grant('0e030000-0000-4000-8000-000000000017', '0e000000-0000-4000-8000-000000000018'));
+
 -- 9. The same login: a hospital nurse starts their own group.
 create function pg_temp.start_for_account(group_name text) returns text language sql as $$
   select format($s$select result || case when organization_id is not null then ' true' else '' end

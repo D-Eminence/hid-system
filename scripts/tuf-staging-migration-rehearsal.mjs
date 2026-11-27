@@ -295,16 +295,18 @@ try {
   await artifact('pre-schema-upgrade.dump');
   migration('existing baseline schema upgrade dry run', 'apply-migrations.mjs', 'hid_upgrade', {}, 0, ['--dry-run']);
   // Migration 0150 (owner decision Q141 B) writes one audit row at any data,
-  // so the dry run takes one number from audit.events' identity sequence:
-  // sequences are not transactional, so the rollback leaves that one number
-  // unused (a gap, as any rolled-back audited request leaves; nothing reads
-  // the numbers as gap-free). Every row, and every other sequence, is as
-  // before.
+  // and 0209 (CHW-1, the community health worker role) four (the role and its
+  // three role rows), so the dry run takes five numbers from audit.events'
+  // identity sequence: sequences are not transactional, so the rollback leaves
+  // those numbers unused (a gap, as any rolled-back audited request leaves;
+  // nothing reads the numbers as gap-free). Every row, and every other
+  // sequence, is as before.
   const auditSequence = 'sequence:audit.events_sequence_id_seq';
   const advanced = (sequence, by) => ({ last_value: String(Number(sequence.last_value) + by - (sequence.is_called ? 0 : 1)),
     is_called: true });
+  const auditNumbersPerRun = 1 + 4;
   assert.deepEqual(await snapshot('hid_upgrade'),
-    { ...upgradeBefore, [auditSequence]: advanced(upgradeBefore[auditSequence], 1) },
+    { ...upgradeBefore, [auditSequence]: advanced(upgradeBefore[auditSequence], auditNumbersPerRun) },
     'Upgrade dry run must preserve all historical rows');
   migration('existing baseline schema upgrade', 'apply-migrations.mjs', 'hid_upgrade');
   migration('upgraded baseline role bootstrap', 'bootstrap-database-roles.mjs', 'hid_upgrade');
@@ -362,9 +364,9 @@ try {
   // the upgrade is unchanged. (0147 gives its two to nobody here: 0136's
   // counts are 0, 0 and 0 once the rehearsal has ended this baseline's one
   // synthetic admin membership above, so the auth.account_roles comparison
-  // below holds.)
-  const declaredRoles = ['org_admin_awaiting_review', 'outreach_organiser', 'outreach_volunteer',
-    'reading_starter', 'work_list_reader'];
+  // below holds.) CHW-1's 0209 adds exactly one, community_health_worker (Q130 A), and gives it to nobody.
+  const declaredRoles = ['community_health_worker', 'org_admin_awaiting_review', 'outreach_organiser',
+    'outreach_volunteer', 'reading_starter', 'work_list_reader'];
   await withClient('hid_upgrade', async client => {
     await client.query("set timezone = 'UTC'");
     const kept = (await client.query(`select to_jsonb(t)::text as value from auth.roles t
@@ -373,7 +375,7 @@ try {
       upgradeBefore['auth.roles'], 'Upgrade changed a historical auth.roles row');
     assert.deepEqual((await client.query(`select code, active from auth.roles where code = any($1::text[])
       order by code`, [declaredRoles])).rows, declaredRoles.map(code => ({ code, active: true })),
-    'Migrations 0086, 0115 and 0147 must add exactly their declared roles');
+    'Migrations 0086, 0115, 0147 and 0209 must add exactly their declared roles');
   });
   // Migrations 0105 (document scanning) and 0106 (the OCR worker) each seed
   // exactly one workload account and its platform role; every other row of
@@ -411,12 +413,13 @@ try {
       granted_by: null, revoked_at: null }], 'Migration 0106 must add exactly its declared OCR worker role');
   });
   // Migration 0150 (owner decision Q141 B) writes exactly one audit row, the
-  // system actor's auth.role-permission.add for doctor/ocr.job.start; every
-  // historical audit row is unchanged.
+  // system actor's auth.role-permission.add for doctor/ocr.job.start, and
+  // 0209 exactly four; every historical audit row is unchanged.
   await withClient('hid_upgrade', async client => {
     await client.query("set timezone = 'UTC'");
     const kept = (await client.query(`select to_jsonb(t)::text as value from audit.events t
-      where correlation_id <> '0150-doctors-start-readings-q141b' order by to_jsonb(t)::text collate "C"`)).rows;
+      where correlation_id not in ('0150-doctors-start-readings-q141b', '0209-community-health-worker-role')
+      order by to_jsonb(t)::text collate "C"`)).rows;
     assert.deepEqual({ rows: kept.length, sha256: sha256(kept.map(row => row.value).join('\n')) },
       upgradeBefore['audit.events'], 'Upgrade changed a historical audit.events row');
     assert.deepEqual((await client.query(`select actor_type, action, outcome, resource_type, resource_id, provenance,
@@ -425,9 +428,23 @@ try {
     [{ actor_type: 'system', action: 'auth.role-permission.add', outcome: 'success', resource_type: 'role-permission',
       resource_id: 'doctor/ocr.job.start', provenance: 'migration', source_system: 'hid-0150', actor_account_id: null,
       facility_id: null, patient_id: null }], 'Migration 0150 must write exactly its one audit row');
-    // The dry run's number and the apply's.
-    assert.deepEqual(upgradeAfter[auditSequence], advanced(upgradeBefore[auditSequence], 2),
-      'Only 0150 takes numbers from audit.events\' identity sequence (one in the dry run, one in the apply)');
+    // 0209 (CHW-1): exactly its four rows, as the system actor, naming no person, facility or patient: the role,
+    // then its three role rows (exactly the outreach volunteer's codes).
+    assert.deepEqual((await client.query(`select actor_type, action, outcome, resource_type, resource_id, provenance,
+        source_system, actor_account_id, facility_id, patient_id
+      from audit.events where correlation_id = '0209-community-health-worker-role'
+      order by action collate "C", resource_id collate "C"`)).rows,
+    [...['outreach.campaign.read', 'outreach.registration.read', 'outreach.registration.write'].map(code => ({
+      actor_type: 'system', action: 'auth.role-permission.add', outcome: 'success', resource_type: 'role-permission',
+      resource_id: `community_health_worker/${code}`, provenance: 'migration', source_system: 'hid-0209',
+      actor_account_id: null, facility_id: null, patient_id: null })),
+    { actor_type: 'system', action: 'auth.role.add', outcome: 'success', resource_type: 'role',
+      resource_id: 'community_health_worker', provenance: 'migration', source_system: 'hid-0209',
+      actor_account_id: null, facility_id: null, patient_id: null }],
+    'Migration 0209 must write exactly its four audit rows');
+    // The dry run's numbers and the apply's.
+    assert.deepEqual(upgradeAfter[auditSequence], advanced(upgradeBefore[auditSequence], 2 * auditNumbersPerRun),
+      'Only 0150 and 0209 take numbers from audit.events\' identity sequence (in the dry run and in the apply)');
   });
   const expectedChanged = new Set([
     'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
@@ -567,6 +584,13 @@ try {
       'services/identity-api/scripts/verify-desk-registration-own-facility-runtime.mjs': [
         'assert.equal(registrationAudits, 3);',
         "const replays = (await pool.query(`select count(*)::integer as n from audit.events where action in ('identity.registration.without-nin', 'identity.registration.without-nin.review') and facility_id = $1 and outcome = 'success' and details ? 'replayed'`, [ids.facA])).rows[0].n; assert(replays <= 1, 'At most the one replay is audited as a replay'); assert.equal(registrationAudits - replays, 3);"],
+      // CHW-1 (0209): a hospital's invitable roles gain community_health_worker in the database
+      // (identity.staff_invitable_roles), and today's identity-api answers that list as it is. CHW-1's own
+      // identity-api leaves the role out while COMMUNITY_HEALTH_WORKER_ENABLED is off, so to keep it hidden its
+      // image goes live before 0209; this guard is the worst case, 0209 under today's image.
+      'services/identity-api/scripts/verify-provider-enrollment-runtime.mjs': [
+        "{ code: 'pharmacist', licenceBody: 'PCN' }, { code: 'receptionist', licenceBody: null }]);",
+        "{ code: 'pharmacist', licenceBody: 'PCN' }, { code: 'receptionist', licenceBody: null }, { code: 'community_health_worker', licenceBody: null }]);"],
     };
     const guardsChanged = [];
     const liveScript = async (verifier) => {

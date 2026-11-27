@@ -75,6 +75,12 @@ export interface HidEnvironmentConfig {
   // start while its table or grants are missing, and the deploy rolls back. To
   // roll back the feature, synthesize false again.
   readonly staffOpenPatientEnabled: boolean;
+  // Off unless HID_COMMUNITY_HEALTH_WORKER_ENABLED=true at synth time:
+  // identity-api then offers and accepts the community health worker role
+  // (CHW-1, 0209) in invitations and SX-4's add. Synthesize true only once
+  // 0209 is applied and the website's screens for the role ship. To hide the
+  // role again, synthesize false (removing the role stays allowed).
+  readonly communityHealthWorkerEnabled: boolean;
 }
 
 interface ProfileValues {
@@ -199,6 +205,8 @@ export interface EnvironmentSettings {
   staffFacilitySelectionMode?: string | undefined;
   /** HID_STAFF_OPEN_PATIENT_ENABLED: true or false (default false). SX-8, Release B. */
   staffOpenPatientEnabled?: string | undefined;
+  /** HID_COMMUNITY_HEALTH_WORKER_ENABLED: true or false (default false). CHW-1, 0209. */
+  communityHealthWorkerEnabled?: string | undefined;
 }
 
 /**
@@ -212,6 +220,7 @@ export const environmentSettingVariables = {
   prescriptionDispensingDetailsEnabled: 'HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED',
   staffFacilitySelectionMode: 'HID_STAFF_FACILITY_SELECTION_MODE',
   staffOpenPatientEnabled: 'HID_STAFF_OPEN_PATIENT_ENABLED',
+  communityHealthWorkerEnabled: 'HID_COMMUNITY_HEALTH_WORKER_ENABLED',
 } as const satisfies Record<keyof EnvironmentSettings, string>;
 
 type EnvironmentSettingName = keyof typeof environmentSettingVariables;
@@ -250,6 +259,7 @@ export function environmentConfig(
     prescriptionDispensingDetailsEnabled: prescriptionDispensingDetailsEnabledValue,
     staffFacilitySelectionMode: staffFacilitySelectionModeValue,
     staffOpenPatientEnabled: staffOpenPatientEnabledValue,
+    communityHealthWorkerEnabled: communityHealthWorkerEnabledValue,
   } = settings;
   const selected = value ?? 'development';
   if (!environmentNames.includes(selected as EnvironmentName)) {
@@ -287,6 +297,10 @@ export function environmentConfig(
   if (!['true', 'false'].includes(staffOpenPatientEnabledInput)) {
     throw new Error('HID_STAFF_OPEN_PATIENT_ENABLED must be true or false when supplied');
   }
+  const communityHealthWorkerEnabledInput = communityHealthWorkerEnabledValue ?? 'false';
+  if (!['true', 'false'].includes(communityHealthWorkerEnabledInput)) {
+    throw new Error('HID_COMMUNITY_HEALTH_WORKER_ENABLED must be true or false when supplied');
+  }
   return {
     ...environmentIdentity[name], ...profiles[profile],
     ...(stagingMode ? { stagingMode } : {}),
@@ -295,6 +309,7 @@ export function environmentConfig(
     prescriptionDispensingDetailsEnabled: prescriptionDispensingDetailsEnabledInput === 'true',
     staffFacilitySelectionMode: staffFacilitySelectionMode as StaffFacilitySelectionMode,
     staffOpenPatientEnabled: staffOpenPatientEnabledInput === 'true',
+    communityHealthWorkerEnabled: communityHealthWorkerEnabledInput === 'true',
   };
 }
 

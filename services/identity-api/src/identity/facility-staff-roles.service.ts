@@ -12,7 +12,8 @@ import { unavailableFor } from './staff-invitation-problems';
 import { STAFF_ATTESTATION_VERSION, StaffInvitationsService } from './staff-invitations.service';
 import { normalizeLicenceNumber, staffRoleLicenceBody } from './staff-licence';
 import { StaffReauthenticationService } from './staff-reauthentication.service';
-import { staffRoleProblem } from './staff-role-problems';
+import { staffRoleProblem, staffRoleRefusal } from './staff-role-problems';
+import { staffRoleOfferedNow } from './staff-role-switch';
 
 type Count = string | number | null;
 
@@ -84,6 +85,8 @@ export class FacilityStaffRolesService {
     });
     try {
       this.invitations.requireSelfService(context.actor.facility, 'reviewed');
+      // CHW-1 (0209): a role held back by its setting cannot be added yet (refused and audited like any refusal).
+      if (!staffRoleOfferedNow(input.role)) throw staffRoleRefusal('STAFF_INVITATION_ROLE_NOT_ALLOWED');
       await this.invitations.assertOpen('staff');
       await this.reauthentication.confirm(context.actor, input.currentPassword, request);
       const row = await this.database.withTransaction(context, async (client) => {
@@ -124,6 +127,8 @@ export class FacilityStaffRolesService {
       facilityId, membershipId, expectedVersion, role: input.role, licenceBody: licence.body,
       licenceNumber: licence.number, verificationMethod: method, attested: input.attested, reason: input.reason,
     });
+    // CHW-1 (0209): a role held back by its setting cannot be added yet, by support either.
+    if (!staffRoleOfferedNow(input.role)) throw staffRoleRefusal('STAFF_INVITATION_ROLE_NOT_ALLOWED');
     return this.database.withPlatformTransaction(context, async (client) => {
       let row: RoleChangeRow | undefined;
       try {

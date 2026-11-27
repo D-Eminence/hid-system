@@ -370,6 +370,31 @@ describe('facility staff routes over HTTP', () => {
       expect(notification.deliverStaffInvitation).toHaveBeenCalledTimes(1);
     });
 
+    // CHW-1 (0209): a community health worker is invited with no licence. While COMMUNITY_HEALTH_WORKER_ENABLED is off
+    // (the default) the invitation is refused 400 STAFF_INVITATION_ROLE_NOT_ALLOWED before the password and the database.
+    it('invites a community health worker only while COMMUNITY_HEALTH_WORKER_ENABLED is on, with no licence', async () => {
+      const chw = { ...invite, role: 'community_health_worker' };
+      handlers['identity.create_staff_invitation'] = () => ({ rows: [{ invitation_id: invitationId, row_version: 1,
+        send_id: 'e0000000-0000-4000-8000-000000000001', expires_at: '2026-11-01T13:35:00Z', replayed: false,
+        dispatch: false, facility_name: 'Synthetic Clinic Ltd', role_code: 'community_health_worker',
+        invitee_email: 'bola@example.test' }] });
+      const post = (body: Record<string, unknown>, key: string) => request(server()).post('/api/v1/identity/staff-invitations')
+        .set('Authorization', 'Bearer synthetic').set('X-Facility-ID', facilityId).set('Idempotency-Key', key).send(body);
+      const off = await post(chw, 'invite-dialog-chw-0001');
+      expect([off.status, off.body.code, off.body.detail]).toEqual([400, 'STAFF_INVITATION_ROLE_NOT_ALLOWED',
+        'This facility cannot invite that role']);
+      expect(reauthentication.confirm).not.toHaveBeenCalled();
+      expect(sqlCalls('create_staff_invitation')).toEqual([]);
+      process.env.COMMUNITY_HEALTH_WORKER_ENABLED = 'true';
+      resetEnvironmentForTests();
+      const on = await post(chw, 'invite-dialog-chw-0002');
+      expect(on.status).toBe(201);
+      expect(sqlCalls('identity.create_staff_invitation')[0]?.values.slice(4, 7))
+        .toEqual(['community_health_worker', null, null]);
+      const licensed = await post({ ...chw, licenceBody: 'MDCN', licenceNumber: 'MDCN/1' }, 'invite-dialog-chw-0003');
+      expect([licensed.status, licensed.body.code]).toEqual([400, 'VALIDATION_FAILED']);
+    });
+
     it('takes uuid v4 ids and the version in the body', async () => {
       const badId = await request(server()).post('/api/v1/identity/staff-invitations/not-a-uuid/revoke')
         .set('Authorization', 'Bearer synthetic').set('X-Facility-ID', facilityId).send({ expectedVersion: 1 });

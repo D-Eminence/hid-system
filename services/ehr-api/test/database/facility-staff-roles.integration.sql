@@ -26,6 +26,10 @@
 --      allowed at a governed one, where a remove revokes its own-facility
 --      grant as the system actor), a facility under review, replay and
 --      reuse, remove with replay, its read;
+--   4x. the community health worker (0209): added and removed with no
+--      licence, method or attestation at a hospital and a governed hospital
+--      (refused with a licence, or a licence number alone), refused at a
+--      laboratory, left as a member's only role;
 --   5. the staff-invitations control closes add, not remove; the helpers
 --      are not the runtime's.
 -- See provider-self-enrollment.integration.sql for why FORCE is lifted on
@@ -967,6 +971,144 @@ begin
   exception when check_violation then null;
   end;
 end $$;
+
+-- 4x. The community health worker (0209, CHW-1, Q130 A): added and removed
+-- like the front desk (no licence, no method, no attestation), only where
+-- the facility invites it (a hospital, a governed hospital), never at a
+-- laboratory; a member can be left holding it alone. Undone afterwards
+-- (savepoint), so 5 sees the members as 4 leaves them.
+savepoint chw_roles;
+set local role hid_identity_api_runtime;
+select pg_temp.as_admin(1, 'roles-chw-0001');
+do $$
+declare outcome text; added record; removed record; held text[]; other_role text;
+begin
+  outcome := pg_temp.refusal(format('select identity.add_facility_staff_role(%L, %s, %L, %L, %L, %L, %L, %L, %L)',
+    pg_temp.member(6), pg_temp.version(6), 'community_health_worker', 'MDCN', 'MDCN/6', 'facility-staff-attestation-v1',
+    'Also does community outreach', pg_temp.key('m6-chw-licence'), pg_temp.sha('m6-chw-licence')));
+  if outcome <> '22023 STAFF_INVITATION_INVALID' then
+    raise exception '4x-a: a community health worker with a licence answered %', outcome;
+  end if;
+  -- A licence number with no body: refused too (the role is in the no-licence group of the licence test as well).
+  outcome := pg_temp.refusal(format('select identity.add_facility_staff_role(%L, %s, %L, null, %L, %L, %L, %L, %L)',
+    pg_temp.member(6), pg_temp.version(6), 'community_health_worker', 'CHPRBN/6', 'facility-staff-attestation-v1',
+    'Also does community outreach', pg_temp.key('m6-chw-number'), pg_temp.sha('m6-chw-number')));
+  if outcome <> '22023 STAFF_INVITATION_INVALID' then
+    raise exception '4x-a2: a community health worker with a licence number alone answered %', outcome;
+  end if;
+  select coalesce(array_agg(assignment.role_code order by assignment.role_code), array[]::text[]) into held
+    from auth.account_roles assignment
+   where assignment.membership_id = pg_temp.member(6) and assignment.revoked_at is null;
+  select * into added from identity.add_facility_staff_role(pg_temp.member(6), pg_temp.version(6),
+    'community_health_worker', null, null, 'facility-staff-attestation-v1', 'Also does community outreach',
+    pg_temp.key('m6-chw'), pg_temp.sha('m6-chw'));
+  if added.roles <> (select array_agg(role_code order by role_code)
+                       from unnest(held || 'community_health_worker'::text) role_code)
+     or added.replayed or cardinality(held) = 0 then
+    raise exception '4x-b: the community health worker add answered %', row_to_json(added);
+  end if;
+  -- The other (clinical) roles removed, the community health worker kept alone.
+  foreach other_role in array held loop
+    select * into removed from identity.remove_facility_staff_role(pg_temp.member(6), pg_temp.version(6), other_role,
+      'Now works in the community only');
+  end loop;
+  if removed.roles <> array['community_health_worker'] then
+    raise exception '4x-c: removing the clinical roles answered %', row_to_json(removed);
+  end if;
+  outcome := pg_temp.refusal(format('select identity.remove_facility_staff_role(%L, %s, %L, %L)',
+    pg_temp.member(6), pg_temp.version(6), 'community_health_worker', 'Leaving the community work'));
+  if outcome <> 'P0001 FACILITY_STAFF_LAST_ROLE' then
+    raise exception '4x-d: removing the only role answered %', outcome;
+  end if;
+end $$;
+select pg_temp.as_admin(2, 'roles-chw-lab');
+do $$
+declare outcome text;
+begin
+  outcome := pg_temp.refusal(format('select identity.add_facility_staff_role(%L, %s, %L, null, null, %L, %L, %L, %L)',
+    pg_temp.member(5), pg_temp.version(5), 'community_health_worker', 'facility-staff-attestation-v1',
+    'Also does community outreach', pg_temp.key('m5-chw'), pg_temp.sha('m5-chw')));
+  if outcome <> '22023 STAFF_INVITATION_ROLE_NOT_ALLOWED' then
+    raise exception '4x-e: a laboratory added a community health worker: %', outcome;
+  end if;
+  outcome := pg_temp.refusal(format('select identity.remove_facility_staff_role(%L, %s, %L, %L)',
+    pg_temp.member(5), pg_temp.version(5), 'community_health_worker', 'Not a community health worker'));
+  if outcome <> '22023 STAFF_INVITATION_ROLE_NOT_ALLOWED' then
+    raise exception '4x-f: a laboratory removed a community health worker: %', outcome;
+  end if;
+end $$;
+select pg_temp.as_platform('synthetic:roles:super', 'roles-chw-support');
+do $$
+declare outcome text; added record; removed record;
+begin
+  outcome := pg_temp.refusal(format(
+    'select identity.admin_add_facility_staff_role(%L, %L, %s, %L, null, null, %L, %L, %L, %L)',
+    'e1393000-0000-4000-8000-000000000010', pg_temp.member(7), pg_temp.version(7), 'community_health_worker',
+    'in_person', 'Also does community outreach', pg_temp.key('g-chw-method'), pg_temp.sha('g-chw-method')));
+  if outcome <> '22023 STAFF_INVITATION_INVALID' then
+    raise exception '4x-g: support''s community health worker with a method answered %', outcome;
+  end if;
+  outcome := pg_temp.refusal(format(
+    'select identity.admin_add_facility_staff_role(%L, %L, %s, %L, null, %L, %L, %L, %L, %L)',
+    'e1393000-0000-4000-8000-000000000010', pg_temp.member(7), pg_temp.version(7), 'community_health_worker',
+    'CHPRBN/7', 'in_person', 'Also does community outreach', pg_temp.key('g-chw-number'), pg_temp.sha('g-chw-number')));
+  if outcome <> '22023 STAFF_INVITATION_INVALID' then
+    raise exception '4x-g2: support''s community health worker with a licence number and a method answered %', outcome;
+  end if;
+  outcome := pg_temp.refusal(format(
+    'select identity.admin_add_facility_staff_role(%L, %L, %s, %L, null, null, null, %L, %L, %L)',
+    current_setting('hid.test.r_facility_2'), pg_temp.member(5), pg_temp.version(5), 'community_health_worker',
+    'Also does community outreach', pg_temp.key('lab-chw'), pg_temp.sha('lab-chw')));
+  if outcome <> '22023 STAFF_INVITATION_ROLE_NOT_ALLOWED' then
+    raise exception '4x-h: support added a community health worker at a laboratory: %', outcome;
+  end if;
+  select * into added from identity.admin_add_facility_staff_role('e1393000-0000-4000-8000-000000000010',
+    pg_temp.member(7), pg_temp.version(7), 'community_health_worker', null, null, null, 'Also does community outreach',
+    pg_temp.key('g-chw'), pg_temp.sha('g-chw'));
+  if not ('community_health_worker' = any(added.roles)) or 'community_health_worker' = any(added.previous_roles)
+     or added.replayed then
+    raise exception '4x-i: support''s community health worker add answered %', row_to_json(added);
+  end if;
+  select * into removed from identity.admin_remove_facility_staff_role('e1393000-0000-4000-8000-000000000010',
+    pg_temp.member(7), pg_temp.version(7), 'community_health_worker', 'No longer does community outreach',
+    pg_temp.key('g-chw-remove'), pg_temp.sha('g-chw-remove'));
+  if 'community_health_worker' = any(removed.roles) or not ('community_health_worker' = any(removed.previous_roles)) then
+    raise exception '4x-j: support''s community health worker remove answered %', row_to_json(removed);
+  end if;
+end $$;
+reset role;
+do $$
+begin
+  -- No attestation for either grant; the grant reasons and audit row are the front desk's.
+  if exists (select 1 from identity.staff_licence_attestations attestation
+               join auth.account_roles grant_row on grant_row.id = attestation.role_grant_id
+              where grant_row.role_code = 'community_health_worker')
+     or (select grant_reason from auth.account_roles
+          where membership_id = pg_temp.member(6) and role_code = 'community_health_worker')
+        <> 'Role added by the facility administrator'
+     or (select grant_reason from auth.account_roles
+          where membership_id = pg_temp.member(7) and role_code = 'community_health_worker')
+        <> 'Role added by Health ID support'
+     or not exists (select 1 from audit.events
+                     where action = 'identity.facility-staff.role-add' and resource_id = pg_temp.member(6)::text
+                       and details->>'roleCode' = 'community_health_worker' and details ? 'licenceBody'
+                       and details->'licenceBody' = 'null'::jsonb) then
+    raise exception '4x-k: the community health worker''s grants, attestations or audit row are wrong';
+  end if;
+  -- The member left holding it alone has it in both role columns (the session lists them).
+  if not exists (select 1 from identity.staff_facility_memberships
+                  where id = pg_temp.member(6) and membership_role = 'community_health_worker'
+                    and app_role = 'community_health_worker') then
+    raise exception '4x-l: the role columns did not move to the community health worker';
+  end if;
+  -- Support's list (0139) offers it at the hospitals, not at the laboratory.
+  if not ('community_health_worker' = any(identity.staff_role_change_roles('e1393000-0000-4000-8000-000000000010')))
+     or not ('community_health_worker' = any(identity.staff_role_change_roles(current_setting('hid.test.r_facility_1')::uuid)))
+     or 'community_health_worker' = any(identity.staff_role_change_roles(current_setting('hid.test.r_facility_2')::uuid)) then
+    raise exception '4x-m: support''s role list is wrong about the community health worker';
+  end if;
+end $$;
+rollback to savepoint chw_roles;
 
 -- 5. The control closes add, not remove; the helpers are not the runtime's.
 set local role hid_identity_api_runtime;

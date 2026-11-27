@@ -72,6 +72,11 @@ const openPatientRegional = Template.fromStack(new HidRegionalStack(openPatientA
   'OpenPatientRegionalTest', {
     configuration: environmentConfig('staging', { stagingMode: 'economy', staffOpenPatientEnabled: 'true' }),
   })).toJSON() as typeof regional;
+const communityHealthWorkerApplication = new App();
+const communityHealthWorkerRegional = Template.fromStack(new HidRegionalStack(communityHealthWorkerApplication,
+  'CommunityHealthWorkerRegionalTest', {
+    configuration: environmentConfig('production', { communityHealthWorkerEnabled: 'true' }),
+  })).toJSON() as typeof regional;
 
 function resources(template: typeof regional, type: string): Array<[string, Resource]> {
   return Object.entries(template.Resources).filter(([, resource]) => resource.Type === type);
@@ -142,6 +147,20 @@ test('environment names are typed and production is multi-AZ', () => {
   assert.equal(environmentConfig('staging', { stagingMode: 'economy', staffOpenPatientEnabled: 'false' }).staffOpenPatientEnabled, false);
   assert.equal(environmentConfig('production', { staffOpenPatientEnabled: 'true' }).staffOpenPatientEnabled, true);
   assert.equal(environmentSettingsFrom({ HID_STAFF_OPEN_PATIENT_ENABLED: 'true' }).staffOpenPatientEnabled, 'true');
+  // CHW-1 (0209): the community health worker role offered by identity-api.
+  // Off unless true is given at synth time; anything else refuses to synthesize.
+  for (const invalid of ['on', 'TRUE', 'True', ' true', 'true ', '', '1', 'yes']) {
+    assert.throws(() => environmentConfig('staging', { stagingMode: 'economy', communityHealthWorkerEnabled: invalid }),
+      /HID_COMMUNITY_HEALTH_WORKER_ENABLED must be true or false when supplied/);
+  }
+  assert.equal(environmentConfig('development').communityHealthWorkerEnabled, false);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy' }).communityHealthWorkerEnabled, false);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', staffOpenPatientEnabled: 'true' }).communityHealthWorkerEnabled, false);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', communityHealthWorkerEnabled: 'false' }).communityHealthWorkerEnabled, false);
+  assert.equal(environmentConfig('staging', { stagingMode: 'economy', communityHealthWorkerEnabled: 'true' }).communityHealthWorkerEnabled, true);
+  assert.equal(environmentConfig('production', { communityHealthWorkerEnabled: 'true' }).communityHealthWorkerEnabled, true);
+  assert.equal(environmentConfig('production', { communityHealthWorkerEnabled: 'true' }).staffOpenPatientEnabled, false);
+  assert.equal(environmentSettingsFrom({ HID_COMMUNITY_HEALTH_WORKER_ENABLED: 'true' }).communityHealthWorkerEnabled, 'true');
   assert.equal(environmentConfig('production').staffFacilitySelectionMode, 'off');
   for (const mode of ['off', 'keep', 'ask'] as const) {
     assert.equal(environmentConfig('staging', { stagingMode: 'economy', staffFacilitySelectionMode: mode }).staffFacilitySelectionMode, mode);
@@ -182,17 +201,19 @@ test('each setting is named, read by its own variable, and changes only its own 
     prescriptionDispensingDetailsEnabled: 'HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED',
     staffFacilitySelectionMode: 'HID_STAFF_FACILITY_SELECTION_MODE',
     staffOpenPatientEnabled: 'HID_STAFF_OPEN_PATIENT_ENABLED',
+    communityHealthWorkerEnabled: 'HID_COMMUNITY_HEALTH_WORKER_ENABLED',
   });
   assert.equal(new Set(Object.values(environmentSettingVariables)).size, Object.keys(environmentSettingVariables).length);
   // Read from an environment by name; unset and unrelated variables are left out.
   assert.deepEqual(environmentSettingsFrom({
     HID_INFRA_ENV: 'staging', HID_STAGING_MODE: 'economy', HID_QOREID_ENABLED: 'true',
     HID_OWN_WORK_PATIENT_CARD_ENABLED: 'false', HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED: 'true',
-    HID_STAFF_FACILITY_SELECTION_MODE: 'ask', HID_STAFF_OPEN_PATIENT_ENABLED: 'true', HID_SOMETHING_ELSE: 'true',
-    PATH: '/usr/bin',
+    HID_STAFF_FACILITY_SELECTION_MODE: 'ask', HID_STAFF_OPEN_PATIENT_ENABLED: 'true',
+    HID_COMMUNITY_HEALTH_WORKER_ENABLED: 'false', HID_SOMETHING_ELSE: 'true', PATH: '/usr/bin',
   }), {
     stagingMode: 'economy', qoreIdEnabled: 'true', ownWorkPatientCardEnabled: 'false',
     prescriptionDispensingDetailsEnabled: 'true', staffFacilitySelectionMode: 'ask', staffOpenPatientEnabled: 'true',
+    communityHealthWorkerEnabled: 'false',
   });
   assert.deepEqual(environmentSettingsFrom({}), {});
   assert.deepEqual(environmentSettingsFrom({ HID_QOREID_ENABLED: undefined }), {});
@@ -204,6 +225,7 @@ test('each setting is named, read by its own variable, and changes only its own 
     ['prescriptionDispensingDetailsEnabled', 'true', { prescriptionDispensingDetailsEnabled: true }],
     ['staffFacilitySelectionMode', 'keep', { staffFacilitySelectionMode: 'keep' }],
     ['staffOpenPatientEnabled', 'true', { staffOpenPatientEnabled: true }],
+    ['communityHealthWorkerEnabled', 'true', { communityHealthWorkerEnabled: true }],
   ];
   for (const [name, value, changed] of alone) {
     const fromSettings = environmentConfig('production', { [name]: value });
@@ -742,6 +764,29 @@ test('the open patient setting (SX-8, 0140) is passed to identity-api only, fals
     for (const task of others) {
       assert.doesNotMatch(JSON.stringify(task.ContainerDefinitions), /STAFF_OPEN_PATIENT_ENABLED/,
         `${JSON.stringify(task.Family)} should not carry STAFF_OPEN_PATIENT_ENABLED`);
+    }
+  }
+});
+
+test('the community health worker setting (CHW-1, 0209) is passed to identity-api only, false unless true is given', () => {
+  const cases: Array<[typeof regional, string]> = [
+    [regional, 'false'], [stagingRegional, 'false'], [fidelityRegional, 'false'], [sleepRegional, 'false'],
+    [qoreIdStagingRegional, 'false'], [openPatientRegional, 'false'], [communityHealthWorkerRegional, 'true'],
+  ];
+  for (const [template, expected] of cases) {
+    const tasks = properties(template, 'AWS::ECS::TaskDefinition');
+    const identity = tasks.find(item => JSON.stringify(item.Family).includes('identity-api'));
+    assert.ok(identity, 'missing identity-api');
+    const api = (identity.ContainerDefinitions as Array<{ Name: string; Environment: Array<{ Name: string; Value: unknown }> }>)
+      .find(item => item.Name === 'identity-api')!;
+    const environment = Object.fromEntries(api.Environment.map(item => [item.Name, item.Value]));
+    assert.equal(environment.COMMUNITY_HEALTH_WORKER_ENABLED, expected);
+    assert.equal(environment.STAFF_OPEN_PATIENT_ENABLED, template === openPatientRegional ? 'true' : 'false');
+    const others = tasks.filter(task => task !== identity);
+    assert.ok(others.length > 0);
+    for (const task of others) {
+      assert.doesNotMatch(JSON.stringify(task.ContainerDefinitions), /COMMUNITY_HEALTH_WORKER_ENABLED/,
+        `${JSON.stringify(task.Family)} should not carry COMMUNITY_HEALTH_WORKER_ENABLED`);
     }
   }
 });

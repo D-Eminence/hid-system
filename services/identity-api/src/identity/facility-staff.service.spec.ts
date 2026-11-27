@@ -3,7 +3,7 @@ import type { AuthSessionAuditService } from '../auth/auth-session-audit.service
 import type { LocalAuthProvider } from '../auth/local-auth.provider';
 import type { ActorContext, DataAccessContext, FacilityAssignment, HidRequest,
   PlatformAdminContext } from '../common/request-context';
-import { resetEnvironmentForTests } from '../config/environment';
+import { getEnvironment, resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import { FacilityStaffService } from './facility-staff.service';
 import { STAFF_ATTESTATION_VERSION, StaffInvitationsService } from './staff-invitations.service';
@@ -167,6 +167,33 @@ describe('FacilityStaffService', () => {
       // `licence` stays as it was for older screens.
       expect(answer.members[0]?.licence).toEqual({ body: 'MDCN', numberHint: '2345', vouchedBy: 'Health ID support',
         vouchedAt: '2026-10-25T08:00:00.000Z', method: 'platform_review' });
+    });
+
+    // CHW-1 (0209): the database lists community_health_worker at a hospital once 0209 is applied; Identity offers it
+    // only while COMMUNITY_HEALTH_WORKER_ENABLED is on (off by default), with no licence body.
+    it.each([
+      ['unset (the default)', undefined, false], ['false', 'false', false], ['true', 'true', true],
+    ])('offers the community health worker only while COMMUNITY_HEALTH_WORKER_ENABLED is on (%s)',
+      async (_label, setting, offered) => {
+        if (setting !== undefined) process.env.COMMUNITY_HEALTH_WORKER_ENABLED = setting;
+        resetEnvironmentForTests();
+        const { service } = harness({
+          'facility_staff_management_state': () => ({ rows: [{ ...stateRow,
+            invitable_roles: [...stateRow.invitable_roles, 'community_health_worker'] }] }),
+          'identity.list_facility_staff()': () => ({ rows: [] }),
+          'list_facility_staff_invitations': () => ({ rows: [] }),
+        });
+        const answer = await service.list(staffContext('reviewed'));
+        expect(answer.inviteOptions.roles).toEqual([{ code: 'doctor', licenceBody: 'MDCN' },
+          { code: 'nurse', licenceBody: 'NMCN' }, { code: 'lab', licenceBody: 'MLSCN' },
+          { code: 'pharmacist', licenceBody: 'PCN' }, { code: 'receptionist', licenceBody: null },
+          ...(offered ? [{ code: 'community_health_worker', licenceBody: null }] : [])]);
+      });
+
+    it.each(['yes', 'TRUE', '1', ''])('refuses a COMMUNITY_HEALTH_WORKER_ENABLED of %p (exactly true or false)', (value) => {
+      process.env.COMMUNITY_HEALTH_WORKER_ENABLED = value;
+      resetEnvironmentForTests();
+      expect(() => getEnvironment()).toThrow(/COMMUNITY_HEALTH_WORKER_ENABLED/);
     });
 
     it('leaves `licences` out where 0139 is not applied', async () => {
