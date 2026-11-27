@@ -103,6 +103,7 @@ export type {
   LabInternalCaller,
   LabRequestContext,
   LabResourceReference,
+  LabWorkItem,
   PatientLabPage,
 } from './lab';
 export { PharmacyApiClient, PharmacyApiProblem } from './pharmacy';
@@ -129,10 +130,11 @@ export type {
   PharmacyWorkItemPatient,
   ReversePharmacyDispensingInput,
 } from './pharmacy';
-export { EhrApiClient, EhrApiProblem } from './ehr';
+export { EHR_LAB_REQUEST_GROUP_MAX_TESTS, EHR_LAB_REQUEST_GROUP_TIMEOUT_MS, EhrApiClient, EhrApiProblem } from './ehr';
 export type {
-  EhrClientOptions, EhrInternalCaller, EhrOcrClinicalNoteImport, EhrOcrDocumentSource,
-  EhrRequestContext, EhrResourceReference,
+  EhrClientOptions, EhrInternalCaller, EhrLabHandoff, EhrLabPriority, EhrLabRequest, EhrLabRequestCreated,
+  EhrLabRequestGroupCreated, EhrLabRequestGroupInput, EhrLabRequestGroupTestInput, EhrOcrClinicalNoteImport,
+  EhrOcrDocumentSource, EhrOrderStatus, EhrRequestContext, EhrResourceReference,
 } from './ehr';
 export { OcrApiClient, OcrContractError } from './ocr';
 export type {
