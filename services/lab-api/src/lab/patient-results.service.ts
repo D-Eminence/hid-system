@@ -41,7 +41,8 @@ export const STAFF_LAB_QUERY = `select r.id, r.current_version::text||':'||rel.i
  * identical to ehr-api's).
  *
  * SENSITIVE_TEST_INITIALISMS, dottedInitialism and initialismForm are
- * ehr-api's, letter for letter: each initialism is also matched however its
+ * ehr-api's, letter for letter (SGBV, GBV and GNID joined in Ola's fourth
+ * list, #258, 27 Nov 2026): each initialism is also matched however its
  * letters are set apart, by dots, hyphens, spaces or any other mark, or by
  * nothing ("R.V.S.", "C.D.4", "H-I-V"), then digits only ("H.I.V1"), so "Hb
  * value" is not read as H-B-V. Only the plain fragments take letters after
@@ -57,7 +58,7 @@ export const STAFF_LAB_QUERY = `select r.id, r.current_version::text||':'||rel.i
  */
 export const SENSITIVE_TEST_INITIALISMS=[
   'hiv','aids','rvs','rvst','cd4','vl','hbv','hcv','hsv','hpv','vdrl','rpr','tpha','sti','std','hcg','bhcg','upt',
-  'psa','afp','cea','phq','brca','pmtct',
+  'psa','afp','cea','phq','brca','pmtct','gbv','sgbv','gnid',
 ] as const;
 /** An initialism with any run of marks that are not letters or digits, or none, between its letters: 'rvs' gives 'r[^a-z0-9]*v[^a-z0-9]*s'. */
 export const dottedInitialism=(letters:string):string=>[...letters].join('[^a-z0-9]*');
@@ -73,8 +74,9 @@ export const SENSITIVE_TEST_SQL_PATTERN = '(^|[^a-z0-9])(?:'+[
   'herpes','hsv[a-z0-9]*','trich?omon[a-z]*','stis?','stds?',
   '(?:beta|b|urine|serum)?hcgs?','upts?',
   '[ft]?psas?','afps?','ceas?','ca[^a-z0-9]*125','ca[^a-z0-9]*19[^a-z0-9]*9','ca[^a-z0-9]*15[^a-z0-9]*3','tumou?r[^a-z0-9]*markers?',
-  // Pap smear: "Pap", "Paps", "PAP's", and a Pap or Paps smear or test with any marks or none between ("Paps smear").
-  'biops[a-z]*','histolog[a-z]*','histopath[a-z]*','cytolog[a-z]*','paps?','paps?[^a-z0-9]*(?:smears?|tests?)',
+  // Pap smear: a Pap or Paps smear or test with any marks or none between ("Paps smear"), and Papanicolaou. "Pap" or
+  // "Paps" alone is a test word only (below; Ola's fourth list).
+  'biops[a-z]*','histolog[a-z]*','histopath[a-z]*','cytolog[a-z]*','paps?[^a-z0-9]*(?:smears?|tests?)','papanicolaou[a-z]*',
   'karyotyp[a-z]*','brca[0-9]*s?','genetic[a-z]*','genotyp[a-z]*',
   'phq[^a-z0-9]*[0-9]*','gad[^a-z0-9]*[27]','psych[a-z]*',
   // GAD only as the anxiety scales GAD-2 and GAD-7 ("G.A.D.-7"); "GAD", "GAD65" and "Anti-GAD65 antibody" stay shown.
@@ -110,7 +112,8 @@ export const SENSITIVE_TEST_SQL_PATTERN = '(^|[^a-z0-9])(?:'+[
   // third list (27 Nov) added bone marrow (or BM) trephine and biopsy, and hides a wet mount or prep only when it is
   // vaginal (vaginal, HVS or high vaginal swab before it, or vaginal, HVS or TV up to two words before or after it):
   // a stool, urine, skin, semen or KOH wet mount is shown, and so are "Wet mount", "Wet prep" and "Saline wet mount".
-  '(?:bone[^a-z0-9]*marrow|bm)[^a-z0-9]*(?:aspirat[a-z]*|trephines?|biops[a-z]*)','bmas?',
+  // Ola's fourth list (27 Nov) added BMAT and BMB, "Clamidia", a urethral swab (any words after), and VIA written out.
+  '(?:bone[^a-z0-9]*marrow|bm)[^a-z0-9]*(?:aspirat[a-z]*|trephines?|biops[a-z]*)','bmas?','bmats?','bmbs?',
   'cervi(?:cal|x)[^a-z0-9]*(?:smears?|screen[a-z]*)','cyto[^a-z0-9]*stain[a-z]*','torch','t[^a-z0-9]*helper',
   '(?:vaginal|hvs|high[^a-z0-9]*vaginal(?:[^a-z0-9]*swab)?)[^a-z0-9]*(?:(?:saline|koh)[^a-z0-9]*)?wet[^a-z0-9]*(?:mount|prep[a-z]*)',
   '(?:vaginal|hvs|tv)(?:[^a-z0-9]+[a-z]+){1,2}[^a-z0-9]+wet[^a-z0-9]*(?:mount|prep[a-z]*)',
@@ -124,7 +127,8 @@ export const SENSITIVE_TEST_SQL_PATTERN = '(^|[^a-z0-9])(?:'+[
   // Ola's third list: AlereLAM, urine LAM ("LAM" alone is a test-only word below), crypto Ag or antigen, CSF crypto...,
   // and India ink (LAB-0087).
   '(?:alere|urine)[^a-z0-9]*lam','crypto[^a-z0-9]*(?:antigen|ag)','csf[^a-z0-9]*crypto[a-z]*','india[^a-z0-9]*ink',
-  's[iy][pf]h?[iy]l[a-z]*','vener[a-z]*','v[^a-z0-9]*d[^a-z0-9]*screen[a-z]*','gc[^a-z0-9]*cultures?','clamyd[a-z]*',
+  's[iy][pf]h?[iy]l[a-z]*','vener[a-z]*','v[^a-z0-9]*d[^a-z0-9]*screen[a-z]*','gc[^a-z0-9]*cultures?','clam[iy]d[a-z]*',
+  'urethral[^a-z0-9]*swabs?',
   '(?:c[^a-z0-9]*)?trachomatis','t[^a-z0-9]*vaginalis','human[^a-z0-9]*papilloma[^a-z0-9]*vir[a-z]*',
   'nipts?','triple[^a-z0-9]*tests?','quad(?:ruple)?[^a-z0-9]*(?:screen[a-z]*|tests?)','papp[^a-z0-9]*a',
   'immuno[^a-z0-9]*histochem[a-z]*','fine[^a-z0-9]*needle[^a-z0-9]*aspirat[a-z]*','o?estrogen[^a-z0-9]*receptors?',
@@ -134,25 +138,34 @@ export const SENSITIVE_TEST_SQL_PATTERN = '(^|[^a-z0-9])(?:'+[
   // Ola's third list (#258, 27 Nov 2026), as in ehr-api. Flow cytometry alone is shown (it also counts reticulocytes
   // and platelets). VIA screening: VIA/VILI, VILI, a VIA screen; VIA alone and "Glucose via test strip" are shown.
   'via[^a-z0-9]*(?:and[^a-z0-9]*)?vili','vili','via[^a-z0-9]*screen[a-z]*',
+  'visual[^a-z0-9]*inspection[^a-z0-9]*(?:with[^a-z0-9]*)?(?:acetic[^a-z0-9]*acid|lugol[^a-z0-9]*s?[^a-z0-9]*iodine)',
   // Tumour markers (not beta-2 microglobulin): HE4, ROMA, NSE, Cyfra 21-1, SCC antigen, CA 242, chromogranin (A),
-  // immunophenotyping, a leukaemia or lymphoma panel, free light chains.
+  // immunophenotyping, a leukaemia or lymphoma panel or screen, free light chains; and, from Ola's fourth list,
+  // neuron-specific enolase, squamous cell carcinoma antigen, cytokeratin 19 fragment, free kappa or lambda.
   'he[^a-z0-9]*4','roma','nse','cyfra(?:[^a-z0-9]*21[^a-z0-9]*1)?','scc[^a-z0-9]*(?:antigen|ag)','ca[^a-z0-9]*242',
-  'chromogranin(?:[^a-z0-9]*a)?','immuno[^a-z0-9]*phenotyp[a-z]*','(?:leuka?emia|lymphoma)[^a-z0-9]*panels?',
-  'free[^a-z0-9]*light[^a-z0-9]*chains?',
+  'chromogranin(?:[^a-z0-9]*a)?','immuno[^a-z0-9]*phenotyp[a-z]*','(?:leuka?emia|lymphoma)[^a-z0-9]*(?:panels?|screen[a-z]*)',
+  'free[^a-z0-9]*light[^a-z0-9]*chains?','neurone?[^a-z0-9]*specific[^a-z0-9]*enolase',
+  'squamous[^a-z0-9]*cell[^a-z0-9]*carcinoma[^a-z0-9]*(?:antigen|ag)','cytokeratin[^a-z0-9]*19[^a-z0-9]*fragments?',
+  'free[^a-z0-9]*(?:kappa|lambda)',
   // HIV programme tests: PrEP labs, screening, monitoring or baseline ("KOH prep" is shown); ART monitoring or
-  // (baseline) labs; HTS, VCT and PITC as whole words.
-  'prep[^a-z0-9]*(?:labs?|screen[a-z]*|monitoring|baseline)','art[^a-z0-9]*(?:baseline[^a-z0-9]*)?(?:monitoring|labs?)',
+  // (baseline) labs, ART baseline tests, PEP baseline; HTS, VCT and PITC as whole words.
+  'prep[^a-z0-9]*(?:labs?|screen[a-z]*|monitoring|baseline)',
+  'art[^a-z0-9]*(?:(?:baseline[^a-z0-9]*)?(?:monitoring|labs?)|baseline[^a-z0-9]*tests?)','pep[^a-z0-9]*baseline',
   'hts','vct','pitc',
-  // Relationship and assault tests: maternity, sibling and kinship DNA tests, sexual assault, rape kit, forensic swabs.
-  'maternity[^a-z0-9]*(?:dna[^a-z0-9]*)?tests?','sibling[^a-z0-9]*dna','dna[^a-z0-9]*(?:relationship|kinship)',
-  'kinship[^a-z0-9]*(?:dna|tests?|analysis)','sexual[^a-z0-9]*assault','rape[^a-z0-9]*kits?','forensic[^a-z0-9]*swabs?',
+  // Relationship and assault tests: maternity (DNA), sibling and kinship DNA tests, rape kit, forensic swabs; and (Ola's
+  // fourth list) sexual assault, abuse or violence, rape, raped or rapes as whole words ("Grape" and "Rapeseed" are
+  // shown), and defilement. SGBV and GBV are in the initialisms.
+  'maternity[^a-z0-9]*(?:dna(?:[^a-z0-9]*tests?)?|tests?)','sibling[^a-z0-9]*dna','dna[^a-z0-9]*(?:relationship|kinship)',
+  'kinship[^a-z0-9]*(?:dna|tests?|analysis)','sexual[^a-z0-9]*(?:assault|abuse|violence)','rape[^a-z0-9]*kits?','rape[sd]?',
+  'defilement','forensic[^a-z0-9]*swabs?',
   ...SENSITIVE_TEST_INITIALISMS.map(initialismForm),
   // Test wording only (ehr-api does not read these in a diagnosis's name): pregnancy tests ("preg" as a word,
   // pregnan..., misspellings, "Serum PT" and "Urine PT"; "Pregnenolone" is shown, and so is "PT" alone, which is
-  // prothrombin time to every clinician); "LAM" alone (urine TB LAM); the genotype tests; DBS; mental health and drug
-  // tests by their test names; lithium and clozapine levels.
+  // prothrombin time to every clinician); "LAM" alone (urine TB LAM) and "Pap" or "Paps" alone; the genotype tests;
+  // DBS; mental health and drug tests by their test names; lithium (serum, plasma, blood, a level or assay; "Lithium
+  // heparin", a tube, is shown) and clozapine levels.
   'preg','pregnan[a-z]*','pr[ae]g?n?[ae]n?cy[a-z]*','(?:serum|urine)[^a-z0-9]*p[^a-z0-9]*t',
-  'lam',
+  'lam','paps?',
   'sickl(?:ing|edex)(?:[^a-z0-9]*(?:preps?|tests?))?','sickl[a-z]*[^a-z0-9]*(?:cell[^a-z0-9]*)?(?:tests?|screen[a-z]*|status)',
   '(?:sickl[a-z]*|h(?:a?emoglobin|gb|b)[^a-z0-9]*s)(?:[^a-z0-9]+[a-z]+){0,5}[^a-z0-9]*solubility',
   'hgb[^a-z0-9]*electrophoresis','hb[^a-z0-9]*typing','h(?:a?emoglobin|gb|b)[^a-z0-9]*(?:variants?|hplc|pattern)',
@@ -161,7 +174,7 @@ export const SENSITIVE_TEST_SQL_PATTERN = '(^|[^a-z0-9])(?:'+[
   '(?:depression|anxiety)[^a-z0-9]*screen[a-z]*','epds','hads','mental[^a-z0-9]*status','tox(?:icology)?[^a-z0-9]*screen[a-z]*',
   'urine[^a-z0-9]*tox(?:icology)?','uds','doas?',
   '(?:cannabis|thc|opiates?|cocaine|amphetamines?|benzodiazepines?)[^a-z0-9]*(?:screen[a-z]*|tests?)',
-  'lithium[^a-z0-9]*(?:levels?|assay)','clozapine(?:[^a-z0-9]*levels?)?',
+  '(?:serum|plasma|blood)[^a-z0-9]*lithium','lithium[^a-z0-9]*(?:serum|plasma|levels?|assay|moles)','clozapine(?:[^a-z0-9]*levels?)?',
 ].join('|')+')($|[^a-z0-9])';
 export const SENSITIVE_LOINC_CODES=[
   '75622-1','56888-1','7917-8','68961-2','20447-9','24467-3','5196-1','5195-3','16128-1','13955-0',

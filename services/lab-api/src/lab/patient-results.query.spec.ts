@@ -17,7 +17,7 @@ describe('Lab result queries for the patient and the staff chat (A6)', () => {
   });
 
   it('uses the same sensitive test list as ehr-api (patient-evidence.query.spec.ts pins the same hash)', () => {
-    expect(sha(SENSITIVE_TEST_SQL_PATTERN)).toBe('44da68d124af16e30eb1a35b74fc20a3df5e7a3ac2ea744c049552080233788c');
+    expect(sha(SENSITIVE_TEST_SQL_PATTERN)).toBe('64614e5da94374bd5050ef85c52fafc590c4dce351851668b51014ae4584c44b');
   });
 
   it('never gives the patient the correction reason', () => {
@@ -374,8 +374,9 @@ describe('0155: no routine tests hidden, the remaining clear misses (S4)', () =>
     'Prothrombin time (PT)', 'PT ratio', 'Wet mount', 'Wet prep', 'Saline wet mount', 'Stool wet mount', 'Stool wet prep', 'Urine wet mount',
     'KOH wet mount', 'KOH wet prep', 'Skin scraping KOH wet mount', 'Skin wet mount', 'Semen wet preparation', 'KOH prep', 'VIA', 'VIA test',
     'Glucose via test strip', 'Malaria via test kit', 'Reticulocyte count by flow cytometry', 'Flow cytometry', 'Lyme serology',
-    'Beta-2 microglobulin', 'TB LAMP', 'Cryptosporidium antigen', 'Hepcidin', 'Bone marrow', 'Serum lithium', 'Ribavirin level',
+    'Beta-2 microglobulin', 'TB LAMP', 'Cryptosporidium antigen', 'Hepcidin', 'Bone marrow', 'Ribavirin level',
     'Isoniazid level'];
+  // "Serum lithium" was in SHOWN until Ola's fourth list (27 Nov 2026), which hides a serum lithium level (the next block).
 
   it('builds the pattern as decided, and the patient query carries it', () => {
     const fragments = `|${SENSITIVE_TEST_SQL_PATTERN.slice('(^|[^a-z0-9])(?:'.length, -')($|[^a-z0-9])'.length)}|`;
@@ -385,6 +386,61 @@ describe('0155: no routine tests hidden, the remaining clear misses (S4)', () =>
       expect([fragment, fragments.includes(`|${fragment}|`)]).toEqual([fragment, true]);
     expect(PATIENT_SELF_LAB_QUERY).toContain(`coalesce(t.name,'') !~* '${SENSITIVE_TEST_SQL_PATTERN}'`);
     expect(SENSITIVE_TEST_SQL_PATTERN).not.toContain("'");
+  });
+
+  it.each(PARTS.map(parts => [parts.join(' '), parts] as const))('%j is hidden with any separator between its parts', (_name, parts) => {
+    for (const name of SEPARATORS.map(separator => parts.join(separator))) expect([name, re.test(name)]).toEqual([name, true]);
+  });
+
+  it.each(WORDS_APART.map(parts => [parts.join(' '), parts] as const))('%j is hidden with any marks between its words', (_name, parts) => {
+    for (const name of MARKS.map(separator => parts.join(separator))) expect([name, re.test(name)]).toEqual([name, true]);
+  });
+
+  it.each(NAMES)('%j is hidden', (name) => {
+    expect([name, re.test(name)]).toEqual([name, true]);
+  });
+
+  it.each(SHOWN)('%j is shown', (name) => {
+    expect([name, re.test(name)]).toEqual([name, false]);
+  });
+});
+
+// Ola's fourth decision as clinical owner (#258, 27 Nov 2026), made the same way in ehr-api (whose spec also has the
+// diagnoses and medicines): "Pap" and "Paps" alone stay hidden as test names, and the last clear misses among tests are
+// hidden. The pattern string is ehr-api's (checked above).
+describe('0155: PID and PAPS shown, obstetric spellings back, the last clear misses (S4)', () => {
+  const re = new RegExp(SENSITIVE_TEST_SQL_PATTERN, 'i');
+  // Each name is written with a space, a dot, a hyphen, an en dash, a slash and nothing between its parts.
+  const SEPARATORS = [' ', '.', '-', '–', '/', ''];
+  const PARTS = [['Paps', 'smear'], ['PAPS', 'smear'], ['Paps', 'test'], ['Papanicolaou', 'smear'], ['Sexual', 'abuse'], ['Sexual', 'violence'],
+    ['S', 'G', 'B', 'V'], ['G', 'B', 'V'], ['Urethral', 'swab'], ['G', 'N', 'I', 'D'], ['Clamidia', 'trachomatis'], ['Serum', 'lithium'],
+    ['Plasma', 'lithium'], ['Blood', 'lithium'], ['Lithium', 'serum'], ['Lithium', 'plasma'], ['Lithium', 'level'], ['Lithium', 'moles'],
+    ['Visual', 'inspection', 'with', 'acetic', 'acid'], ['Visual', 'inspection', 'with', 'Lugol', 'iodine'], ['Neuron', 'specific', 'enolase'],
+    ['Squamous', 'cell', 'carcinoma', 'antigen'], ['Cytokeratin', '19', 'fragment'], ['Free', 'kappa'], ['Free', 'lambda'],
+    ['Leukaemia', 'screen'], ['Lymphoma', 'screen'], ['Maternity', 'DNA'], ['ART', 'baseline', 'tests'], ['PEP', 'baseline']];
+  // Words that must stand apart: any marks, but not run together.
+  const MARKS = [' ', '.', '-', '–', '/', ' - '];
+  const WORDS_APART = [['Gram', 'stain', 'for', 'GNID'], ['Child', 'sexual', 'abuse'], ['Alleged', 'rape'], ['Free', 'kappa', 'lambda', 'ratio']];
+  const NAMES = ['PAPs', 'Paps', 'Pap', "Pap's", 'Papanicolaou', 'Rape', 'Raped', 'Rapes', 'Defilement', 'SGBV', 'GBV', 'Urethral swab M/C/S',
+    'GNID', 'Clamidia', 'Lithium [Moles/volume] in Serum or Plasma', 'Serum lithium level', "Visual inspection with Lugol's iodine",
+    'Neuron-specific enolase', 'Free kappa/lambda ratio', 'BMAT', 'BMB', 'Maternity DNA test', 'ART baseline labs', 'PEP baseline tests'];
+  const SHOWN = ['Grape juice', 'Rapeseed oil', 'Skin scrape', 'Lithium heparin', 'Lithium heparin tube', 'Lithium', 'Culture and sensitivity (C/S)',
+    'Urine M/C/S', 'C/S', 'Kappa', 'Free T4', 'Visual acuity', 'Squamous epithelial cells', 'Maternity', 'PEP', 'Gram stain', 'Nasal swab', 'PID',
+    'Paraprotein', 'G6PD'];
+
+  it('builds the pattern as decided: "paps?" is a test word, the new fragments are whole alternatives, no "[a-z]*" before a short stem', () => {
+    const fragments = `|${SENSITIVE_TEST_SQL_PATTERN.slice('(^|[^a-z0-9])(?:'.length, -')($|[^a-z0-9])'.length)}|`;
+    for (const fragment of ['paps?', 'papanicolaou[a-z]*', 'clam[iy]d[a-z]*', 'rape[sd]?', 'sexual[^a-z0-9]*(?:assault|abuse|violence)',
+      initialismForm('gbv'), initialismForm('sgbv'), initialismForm('gnid'), '(?:serum|plasma|blood)[^a-z0-9]*lithium'])
+      expect([fragment, fragments.includes(`|${fragment}|`)]).toEqual([fragment, true]);
+    for (const fragment of ['clamyd[a-z]*', 'sexual[^a-z0-9]*assault', 'lithium[^a-z0-9]*(?:levels?|assay)'])
+      expect([fragment, fragments.includes(`|${fragment}|`)]).toEqual([fragment, false]);
+    expect(SENSITIVE_TEST_SQL_PATTERN.indexOf('|paps?|')).toBeGreaterThan(SENSITIVE_TEST_SQL_PATTERN.indexOf(`|${initialismForm('pmtct')}|`));
+    // Where a word can start (a fragment, a group or an alternative, or after a mark), '[a-z]*' never comes before a
+    // stem of six letters or fewer.
+    expect(fragments.match(/(?:\||\(\?:|\[\^a-z0-9\][*+?]?)\[a-z\]\*[a-z]{0,6}(?![a-z])/g)).toBeNull();
+    expect(SENSITIVE_TEST_SQL_PATTERN).not.toContain("'");
+    expect(SENSITIVE_TEST_SQL_PATTERN).not.toContain('\\');
   });
 
   it.each(PARTS.map(parts => [parts.join(' '), parts] as const))('%j is hidden with any separator between its parts', (_name, parts) => {
