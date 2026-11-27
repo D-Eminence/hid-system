@@ -1,18 +1,31 @@
 import { Injectable, Logger } from '@nestjs/common';
-import type { QueryResultRow } from 'pg';
+import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../../common/problem';
-import { DatabaseService } from '../../database/database.service';
-import { CATALOG_SEARCH_MAX_LENGTH } from './catalog.dto';
+import { DatabaseService, type StaffTransactionContext } from '../../database/database.service';
+import { CATALOG_SEARCH_MAX_LENGTH, CATALOG_SEARCH_MAX_LIMIT } from './catalog.dto';
 import type { CATALOG_LAB_CATEGORIES, CatalogDoseForm, SearchCatalogLabTestsQueryDto,
   SearchCatalogMedicinesQueryDto } from './catalog.dto';
 
 /**
  * ORD-7, first slice (0149): the national medicine and lab-test lists'
- * status and search. The lists hold no patient: no X-Purpose-Of-Use, no
- * patient audit row, and q is never written to an audit row or a log. The
- * database functions are SECURITY DEFINER and read only the active, signed
- * version, so they run on the pool without a request transaction.
+ * status and search; third slice (0155): this facility's own items in both.
+ * The lists hold no patient: no X-Purpose-Of-Use, no patient audit row, and
+ * q is never written to an audit row or a log. The database functions are
+ * SECURITY DEFINER. The status and the medicine and lab-test searches run in
+ * a read-only staff transaction that sets the session's facility
+ * (app.facility_id), because 0155's status counts, and its search returns,
+ * that facility's own items only; with none, the answers are 0149's. The
+ * diagnosis search (0152) reads no facility item and stays on the pool.
  */
+
+/** Who asks: the guards' actor at this facility (the session a transaction sets, and whose searches count together). */
+export interface CatalogCaller extends StaffTransactionContext {
+  accountId?: string;
+  organizationId?: string;
+}
+
+/** 0155: the code system of a facility's own items; the code is the item's id (Billing's option 2 matches the pair). */
+export const FACILITY_CODE_SYSTEM = 'HID-FACILITY';
 
 /** 300 searches per 5 minutes per membership, in each ehr-api instance (planned contract, 429). */
 export const CATALOG_SEARCHES_PER_WINDOW = 300;
@@ -44,32 +57,39 @@ export interface CatalogStatus {
   attribution: string[];
 }
 
+/**
+ * A medicine of the national list (HID-MED, scope national) or, since 0155,
+ * of this facility's own (HID-FACILITY with the item's id as the code, scope
+ * and source facility, its own display; doseForm may be null, doseFormText,
+ * commonAdultDose and matchedName are).
+ */
 export interface CatalogMedicine {
-  codeSystem: 'HID-MED';
+  codeSystem: 'HID-MED' | typeof FACILITY_CODE_SYSTEM;
   code: string;
   display: string;
   genericName: string;
   strength: string | null;
-  doseForm: CatalogDoseForm;
+  doseForm: CatalogDoseForm | null;
   doseFormText: string | null;
   routes: string[];
   /** Always null until the WHOCC terms for ATC codes are settled (planned contract, open points). */
   atcCode: null;
   commonAdultDose: string | null;
   matchedName: string | null;
-  scope: 'national';
+  scope: 'national' | 'facility';
   source: string;
 }
 
+/** A lab test of the national list, or (0155) of this facility's own: HID-FACILITY, no other names, category may be null. */
 export interface CatalogLabTest {
-  codeSystem: 'LOINC' | 'HID-LAB';
+  codeSystem: 'LOINC' | 'HID-LAB' | typeof FACILITY_CODE_SYSTEM;
   code: string;
   display: string;
   otherNames: string[];
   specimen: string | null;
-  category: (typeof CATALOG_LAB_CATEGORIES)[number];
+  category: (typeof CATALOG_LAB_CATEGORIES)[number] | null;
   matchedName: string | null;
-  scope: 'national';
+  scope: 'national' | 'facility';
 }
 
 /** ORD-9: one ICD-11 entry, WHO's title verbatim (CC BY-ND 3.0 IGO). */
@@ -153,6 +173,58 @@ export const DIAGNOSES_SQL = `select code, title, matched_name, list_version, mo
 export const LAB_TESTS_SQL = `select list_id, code_system, code, display, other_names, specimen, category, matched_name,
   list_version, more
   from ehr.search_catalog_lab_tests($1, $2)`;
+/** 0155: the session facility's active items of a kind (none without a session facility), in 0149's order. */
+export const FACILITY_ITEMS_SEARCH_SQL = `select item_id, display, generic_name, strength, dose_form, routes, specimen,
+  category, more
+  from ehr.search_catalog_facility_items($1, $2, $3)`;
+
+interface FacilitySearchRow extends QueryResultRow {
+  item_id: string;
+  display: string;
+  generic_name: string | null;
+  strength: string | null;
+  dose_form: CatalogDoseForm | null;
+  routes: string[] | null;
+  specimen: string | null;
+  category: (typeof CATALOG_LAB_CATEGORIES)[number] | null;
+  more: boolean;
+}
+
+/** One answer row and where 0149's order puts it: names that start with q first, then the name in the "C" collation. */
+interface Ranked<Item> {
+  starts: boolean;
+  name: string;
+  item: Item;
+}
+
+const startsWith = (name: string | null | undefined, q: string): boolean =>
+  typeof name === 'string' && name.toLowerCase().startsWith(q.toLowerCase());
+/** The "C" collation compares UTF-8 bytes. */
+const byName = (left: string, right: string): number => Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'));
+
+/**
+ * The national answer and the facility's, each already in its own search's
+ * order, merged into one in 0149's order: names that start with q first, then
+ * by name ("C" collation; a national item's generic name or display, a
+ * facility item's display), a national item before a facility item of the
+ * same name, then each list's own order. At most `limit`; `more` when either
+ * search had more, or the two together pass the limit.
+ */
+export function mergeInListOrder<Item>(national: readonly Ranked<Item>[], own: readonly Ranked<Item>[], limit: number):
+{ items: Item[]; overLimit: boolean } {
+  const merged: Item[] = [];
+  let left = 0;
+  let right = 0;
+  while (left < national.length || right < own.length) {
+    const a = national[left];
+    const b = own[right];
+    const takeNational = b === undefined
+      || (a !== undefined && (a.starts !== b.starts ? a.starts : byName(a.name, b.name) <= 0));
+    merged.push(takeNational ? a!.item : b!.item);
+    if (takeNational) left += 1; else right += 1;
+  }
+  return { items: merged.slice(0, limit), overLimit: merged.length > limit };
+}
 
 /**
  * A Health ID typed into the search: HID- and its characters, or a bare
@@ -273,14 +345,19 @@ export class CatalogService {
 
   /**
    * What the screens may use. A list is available when its active, signed
-   * version offers at least one row. On a schema without 0149 this answers
-   * 404 CATALOG_NOT_AVAILABLE, as the contract says it does before ORD-7
-   * ships, so the screens keep their built-in lists.
+   * version, or (0155) this facility's own items, offer at least one row;
+   * the version, sign-off day, seed file and notices stay the national
+   * list's. Read in a read-only staff transaction, so 0155's status counts
+   * this facility's items. On a schema without 0149 this answers 404
+   * CATALOG_NOT_AVAILABLE, as the contract says it does before ORD-7 ships,
+   * so the screens keep their built-in lists; on one without 0155, 0152's
+   * status answers without facility items.
    */
-  async status(): Promise<CatalogStatus> {
+  async status(caller: CatalogCaller): Promise<CatalogStatus> {
     let rows: StatusRow[];
     try {
-      rows = (await this.database.query<StatusRow>(STATUS_SQL)).rows;
+      rows = await this.database.withStaffTransaction(caller,
+        async (client) => (await client.query<StatusRow>(STATUS_SQL)).rows, { readOnly: true });
     } catch (error) {
       const code = databaseCode(error);
       if (code === '42883' || code === '42P01') throw catalogNotAvailable();
@@ -314,49 +391,95 @@ export class CatalogService {
     };
   }
 
-  async searchMedicines(membershipKey: string, query: SearchCatalogMedicinesQueryDto):
+  /**
+   * The national list's medicines and (0155) this facility's own, merged in
+   * 0149's order. A facility item is filtered by doseForm and route here (its
+   * search takes no filter): with a filter, up to 25 of its matches are read
+   * and filtered, and `more` is true when it had more than 25.
+   */
+  async searchMedicines(caller: CatalogCaller, query: SearchCatalogMedicinesQueryDto):
   Promise<CatalogSearchAnswer<CatalogMedicine>> {
-    const q = this.admit(membershipKey, query.q);
-    const rows = await this.search<MedicineRow>(MEDICINES_SQL,
-      [q, query.limit, query.doseForm ?? null, query.route === undefined ? null : query.route.toLowerCase()]);
+    const q = this.admit(searchKey(caller), query.q);
+    const route = query.route === undefined ? null : query.route.toLowerCase();
+    const filtered = query.doseForm !== undefined || route !== null;
+    const { national, own } = await this.searchWithFacility<MedicineRow>(caller, MEDICINES_SQL,
+      [q, query.limit, query.doseForm ?? null, route], 'medicine', q, filtered ? CATALOG_SEARCH_MAX_LIMIT : query.limit);
+    const kept = own.filter((row) => (query.doseForm === undefined || row.dose_form === query.doseForm)
+      && (route === null || (row.routes ?? []).some((each) => each.toLowerCase() === route)));
+    const merged = mergeInListOrder<CatalogMedicine>(
+      national.map((row) => ({ starts: startsWith(row.matched_name ?? row.generic_name, q),
+        name: row.generic_name.toLowerCase(), item: {
+          codeSystem: 'HID-MED',
+          code: row.list_id,
+          display: medicineDisplay(row),
+          genericName: row.generic_name,
+          strength: row.strength,
+          doseForm: row.dose_form,
+          doseFormText: row.dose_form_text,
+          routes: row.routes ?? [],
+          atcCode: null,
+          commonAdultDose: row.common_adult_dose,
+          matchedName: row.matched_name,
+          scope: 'national',
+          source: row.source,
+        } })),
+      kept.map((row) => ({ starts: startsWith(row.display, q) || startsWith(row.generic_name, q),
+        name: row.display.toLowerCase(), item: {
+          codeSystem: FACILITY_CODE_SYSTEM,
+          code: row.item_id,
+          display: row.display,
+          genericName: row.generic_name ?? '',
+          strength: row.strength,
+          doseForm: row.dose_form,
+          doseFormText: null,
+          routes: row.routes ?? [],
+          atcCode: null,
+          commonAdultDose: null,
+          matchedName: null,
+          scope: 'facility',
+          source: 'facility',
+        } })),
+      query.limit);
     return {
-      listVersion: rows[0]?.list_version ?? null,
-      more: rows.some((row) => row.more),
-      items: rows.map((row) => ({
-        codeSystem: 'HID-MED',
-        code: row.list_id,
-        display: medicineDisplay(row),
-        genericName: row.generic_name,
-        strength: row.strength,
-        doseForm: row.dose_form,
-        doseFormText: row.dose_form_text,
-        routes: row.routes ?? [],
-        atcCode: null,
-        commonAdultDose: row.common_adult_dose,
-        matchedName: row.matched_name,
-        scope: 'national',
-        source: row.source,
-      })),
+      listVersion: national[0]?.list_version ?? null,
+      more: national.some((row) => row.more) || own.some((row) => row.more) || merged.overLimit,
+      items: merged.items,
     };
   }
 
-  async searchLabTests(membershipKey: string, query: SearchCatalogLabTestsQueryDto):
+  /** The national list's lab tests and (0155) this facility's own, merged in 0149's order. */
+  async searchLabTests(caller: CatalogCaller, query: SearchCatalogLabTestsQueryDto):
   Promise<CatalogSearchAnswer<CatalogLabTest>> {
-    const q = this.admit(membershipKey, query.q);
-    const rows = await this.search<LabTestRow>(LAB_TESTS_SQL, [q, query.limit]);
-    return {
-      listVersion: rows[0]?.list_version ?? null,
-      more: rows.some((row) => row.more),
-      items: rows.map((row) => ({
-        codeSystem: row.code_system,
-        code: row.code,
+    const q = this.admit(searchKey(caller), query.q);
+    const { national, own } = await this.searchWithFacility<LabTestRow>(caller, LAB_TESTS_SQL, [q, query.limit],
+      'lab_test', q, query.limit);
+    const merged = mergeInListOrder<CatalogLabTest>(
+      national.map((row) => ({ starts: startsWith(row.matched_name ?? row.display, q), name: row.display.toLowerCase(),
+        item: {
+          codeSystem: row.code_system,
+          code: row.code,
+          display: row.display,
+          otherNames: row.other_names ?? [],
+          specimen: row.specimen,
+          category: row.category,
+          matchedName: row.matched_name,
+          scope: 'national',
+        } })),
+      own.map((row) => ({ starts: startsWith(row.display, q), name: row.display.toLowerCase(), item: {
+        codeSystem: FACILITY_CODE_SYSTEM,
+        code: row.item_id,
         display: row.display,
-        otherNames: row.other_names ?? [],
+        otherNames: [],
         specimen: row.specimen,
         category: row.category,
-        matchedName: row.matched_name,
-        scope: 'national',
-      })),
+        matchedName: null,
+        scope: 'facility',
+      } })),
+      query.limit);
+    return {
+      listVersion: national[0]?.list_version ?? null,
+      more: national.some((row) => row.more) || own.some((row) => row.more) || merged.overLimit,
+      items: merged.items,
     };
   }
 
@@ -419,11 +542,39 @@ export class CatalogService {
     try {
       return (await this.database.query<Row>(sql, values)).rows;
     } catch (error) {
-      const code = databaseCode(error);
-      if (code !== '42883' && code !== '42P01') {
-        this.logger.warn(`Catalogue search failed (${typeof code === 'string' ? code : 'no database code'})`);
-      }
-      throw unavailable();
+      throw this.searchFailed(error, unavailable);
     }
   }
+
+  /**
+   * The national search and (0155) the facility's, in one read-only staff
+   * transaction with the session's facility. A schema without 0155 (no
+   * facility search: 42883) is 503 CATALOG_UNAVAILABLE, as any failure is.
+   */
+  private async searchWithFacility<Row extends QueryResultRow>(caller: CatalogCaller, sql: string,
+    values: readonly unknown[], kind: 'medicine' | 'lab_test', q: string, facilityLimit: number):
+  Promise<{ national: Row[]; own: FacilitySearchRow[] }> {
+    try {
+      return await this.database.withStaffTransaction(caller, async (client: PoolClient) => {
+        const national = (await client.query<Row>(sql, [...values])).rows;
+        const own = (await client.query<FacilitySearchRow>(FACILITY_ITEMS_SEARCH_SQL, [kind, q, facilityLimit])).rows;
+        return { national, own };
+      }, { readOnly: true });
+    } catch (error) {
+      throw this.searchFailed(error, catalogUnavailable);
+    }
+  }
+
+  private searchFailed(error: unknown, unavailable: () => DomainProblem): DomainProblem {
+    const code = databaseCode(error);
+    if (code !== '42883' && code !== '42P01') {
+      this.logger.warn(`Catalogue search failed (${typeof code === 'string' ? code : 'no database code'})`);
+    }
+    return unavailable();
+  }
+}
+
+/** Whose searches count together: the membership at this facility (the guard has set it). */
+function searchKey(caller: CatalogCaller): string {
+  return caller.membershipId || `${caller.subject}@${caller.facilityId}`;
 }

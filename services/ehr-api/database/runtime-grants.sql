@@ -2065,3 +2065,20 @@ grant execute on function ehr.record_recent_diagnosis(text, text, text), ehr.rec
   to hid_ehr_runtime, hid_schema_test_runtime;
 revoke all on function ehr.record_recent_diagnosis(text, text, text), ehr.recent_diagnoses(integer) from public;
 revoke all on ehr.clinician_recent_diagnoses from public;
+
+-- A facility's own medicines and lab tests (0155, ORD-7 of the Akos EHR plan,
+-- third slice; design note on hid-system#258, 26 November 2026), exactly as
+-- 0155 grants them: SELECT, INSERT and UPDATE on the facility items to the
+-- EHR runtime and no DELETE (row-level security, forced, ties each row to the
+-- session's facility, account and membership); the write check its insert
+-- and update policies call, ehr.facility_item_write_allowed(), to the EHR
+-- runtime alone (a policy wrapper); the facility search to the EHR runtime
+-- and the schema test runtime. The guard is executed by no role: its trigger
+-- runs it as the writing role. The catalogue status keeps 0149's grants.
+grant select, insert, update on ehr.catalog_facility_items to hid_ehr_runtime;
+grant execute on function ehr.facility_item_write_allowed() to hid_ehr_runtime;
+grant execute on function ehr.search_catalog_facility_items(text, text, integer)
+  to hid_ehr_runtime, hid_schema_test_runtime;
+revoke all on function ehr.facility_item_write_allowed(), ehr.search_catalog_facility_items(text, text, integer),
+  ehr.catalog_facility_item_guard() from public;
+revoke all on ehr.catalog_facility_items from public;

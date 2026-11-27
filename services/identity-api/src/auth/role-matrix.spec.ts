@@ -76,7 +76,15 @@ describe('Akos\'s role table against today\'s role rows (SX-1)', () => {
     expect(permissionsOf('reading_starter')).toEqual(['ocr.job.start']);
   });
 
+  // 0155 (ORD-7) gives admin alone ehr.catalog.facility-item.write, part of the area's full use (the facility's own
+  // medicines and lab tests); whether org_admin also holds it is the owner's question 5 on #258, so org_admin is shown
+  // the area without it until then.
   it('records P1-5 today: no clinical role sees the facility profile and staff, and a facility admin does', () => {
-    expect(FIXTURE.todayDifferences.filter((difference) => difference.includes('Facility profile and staff'))).toEqual([]);
+    expect(FIXTURE.todayDifferences.filter((difference) => difference.includes('Facility profile and staff'))).toEqual([
+      'org_admin (Facility admin), Facility profile and staff: narrower. Today shown, without '
+        + 'ehr.catalog.facility-item.write; Akos\'s table full.',
+    ]);
+    expect(permissionsOf('admin')).toContain('ehr.catalog.facility-item.write');
+    expect(permissionsOf('org_admin')).not.toContain('ehr.catalog.facility-item.write');
   });
 });

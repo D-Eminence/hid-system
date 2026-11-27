@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import type { FacilityAssignment } from '../common/request-context';
+import { rolePermissionPairs } from '../../test/role-matrix.fixtures';
 import { facilityAdmittedOnProduct, productsForFacilities, type StaffProduct } from './product-gate';
 
 // Owner decision Q97 ("Q97 A"): each staff site for its own job. Pinned in a
@@ -18,8 +19,7 @@ function seededRolePermissions(): Map<string, Set<string>> {
   for (const file of readdirSync(directory).filter((name) => name.endsWith('.sql')).sort()) {
     const text = readFileSync(join(directory, file), 'utf8');
     for (const statement of text.matchAll(/insert into auth\.role_permissions\s*\([^)]*\)([\s\S]*?);/gi)) {
-      for (const pair of (statement[1] ?? '').matchAll(/\(\s*'([a-z_]+)'\s*,\s*'([a-z0-9.-]+)'\s*\)/g)) {
-        const [, role, permission] = pair as unknown as [string, string, string];
+      for (const [role, permission] of rolePermissionPairs(file, text, statement.index ?? 0, statement[1] ?? '')) {
         const set = grants.get(role) ?? new Set<string>();
         set.add(permission);
         grants.set(role, set);

@@ -94,6 +94,10 @@ export const outsideTestInputs = [
   // SX-8: open-patient-sql.spec.ts holds this suite to Identity's open-patient statements.
   ['services/ehr-api/test/database/session-open-patient.integration.sql',['identity-api']],
   ['services/ehr-api/test/fixtures/order-route-cannot-complete-reasons.sql',['lab-api','pharmacy-api']],
+  // lab-api's patient-results.query.spec.ts holds its sensitive-test pattern equal to ehr-api's policy and walks
+  // the national sensitive lab tests fixture.
+  ['services/ehr-api/src/ehr/patient-records/patient-evidence.policy.ts',['lab-api']],
+  ['services/ehr-api/test/fixtures/national-sensitive-lab-tests.json',['lab-api']],
   ['services/ocr-worker/src/',['ocr-api']],
   ['services/identity-api/src/identity/dto/authorize-outreach.dto.ts',['outreach-api']],
   ['gateway/nginx.conf.template',['outreach-api']],

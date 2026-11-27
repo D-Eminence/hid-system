@@ -1919,6 +1919,133 @@ file.
     COMMIT, the loader still ends with exit 1 and "nothing loaded" and
     leaves nothing, and the same load then loads.
 
+### Third slice: facility items (0155, draft, not live)
+
+Built on 26 Nov 2026 (lane D) as Ola's design note on hid-system#258
+(7192389223) sets out. It takes Rahman's reviews 7167521757 and
+7167526411 and the coordinator's Billing decision 7177222281 (option 2).
+The number 0155 is a booking, given in release order at integration. It
+is written on staging `0cfddcc9` (Release E) and uses only 0149's and
+0152's objects. Lab tests and diagnoses by name only are 0156, a later
+file released alone.
+
+- **Built:** `ehr.catalog_facility_items`, its guard, the write check
+  `ehr.facility_item_write_allowed()`, the search
+  `ehr.search_catalog_facility_items(kind, q, limit)`, a new body for
+  `ehr.catalog_status()`, and the code `ehr.catalog.facility-item.write`
+  on `admin` only (owner question 5 is open: whether `org_admin`, the
+  pharmacist or the lab lead also get it; another role later is one role
+  row). The routes in the table above are built as follows:
+  - `GET .../catalog/facility-items` takes `kind` or none (both kinds),
+    and answers `{ "items": [...], "more": false }`: active and withdrawn,
+    by kind, the active first, then A to Z.
+  - The three facility-item routes are never kept: they answer
+    `Cache-Control: private, no-store`, not the `private, max-age=60` of
+    the status and the searches, since the list changes with each add and
+    withdrawal.
+  - Each item is in its search's shape, plus `itemId`, `kind`, `active`,
+    `rowVersion`, `addedAt` and `changedAt`. A facility item has
+    `codeSystem: "HID-FACILITY"`, `code` equal to `itemId`, `scope:
+    "facility"`, and for a medicine `source: "facility"`.
+  - A `POST` replayed with the same `Idempotency-Key` and body gives the
+    same answer: the item as it was added (`active: true`, `rowVersion: 1`,
+    `changedAt: null`), even if it has been withdrawn since. It adds
+    nothing, and its audit row is `.created` with `idempotentReplay: true`.
+  - `PATCH` asked for the state the item is already in answers it
+    unchanged and changes no row; it is still audited.
+  - Audit rows, one for every answer: `ehr.catalog.facility-item.created`
+    (with `idempotentReplay`), `.changed` (the new state, both row versions
+    and `unchanged`, `true` for a `PATCH` that changed nothing) and
+    `.list-read` (the count), each with the item and the actor and never a
+    name, in the same transaction as the read or write.
+  - A refusal the database makes after the guards let the call in (the
+    code removed since the session was read) is 403 `PERMISSION_DENIED`.
+- **The status and the searches** now run in a read-only transaction that
+  sets the session's facility, because 0155's status counts, and its
+  search returns, only that facility's items.
+  - A list is `available` when its national version or this facility's
+    items offer an item. `version`, `approvedAt`, `fileSha256` and the
+    notices stay the national list's; with only facility items they are
+    `null`.
+  - The medicine and lab-test searches return this facility's active
+    items with the national ones, merged in the first slice's order
+    (names that start with `q` first, then A to Z in the "C" collation),
+    at most `limit` in all. `listVersion` is the national list's (`null`
+    when only facility items matched). They answer when no national
+    version is active.
+  - A facility medicine is filtered by `doseForm` and `route` too: with a
+    filter, up to 25 of its matches are read and filtered, and `more` is
+    `true` when it had more.
+  - The diagnosis search reads no facility item and stays as it was.
+- **Limits:**
+  - at most 500 active items of each kind per facility
+    (`FACILITY_ITEM_LIMIT`), bringing an item back included;
+  - one active item per name and kind, in any letter case
+    (`FACILITY_ITEM_EXISTS`), bringing an item back included; a withdrawn
+    item's name is free;
+  - `display` 1-500, `genericName` 1-200, `strength` up to 80 and
+    `specimen` up to 100 characters, counted as the database counts them;
+    at most 5 `routes`, each a plain word of letters, spaces and hyphens
+    (kept in lower case, as the national list keeps them); no control
+    character in any text;
+  - the list answers at most 1,000 items, with `more`.
+- **Privacy gate (Ola's call as clinical owner of the list).** A facility
+  test's code is a UUID, so only its name can keep it out of the
+  patient's own record chat. The same images carry a longer sensitive-test
+  list, in ehr-api (`patient-evidence.policy.ts`) and in lab-api's copy
+  (`patient-results.service.ts`):
+  - the HIV rapid-test kits named alone: Determine, Uni-Gold, Stat-Pak and
+    OraQuick (`determine`, `uni[ -]?gold`, `stat[ -]?pak`,
+    `ora[ -]?quick`);
+  - each initialism also written with dots or spaces ("R.V.S.",
+    "V.D.R.L.", "H.C.V.", "C.D.4"), made by one rule in both copies, so the
+    pattern stays one string (sha256 `1b7b625d...`, pinned in both specs);
+  - ehr-api's condition list gets the same forms ("R.V.D.", "R.V.I.",
+    "P.M.T.C.T.").
+  A false match hides a test the patient could have seen: the safe side.
+  Until these images are live, `LAB_REQUEST_NAME_ONLY_ENABLED` stays off.
+- **Billing: option 2** (the coordinator's decision, 7177222281). Billing's
+  0163 accepts `HID-FACILITY` codes for both kinds, and 0166's stock and
+  0167's hooks match a facility item by its code pair, as they match a
+  national code. 0155 does not change for it. What 0155 guarantees:
+  - the pair: code system `HID-FACILITY`, and the code is the item's id as
+    PostgreSQL writes it (36 characters, lower case); lab-api and
+    pharmacy-api copy the order's pair into the work item unchanged;
+  - the id is unique and never reused: it is the primary key, the guard
+    refuses any change to it, and rows are never deleted;
+  - withdrawing keeps the row and its id, and bringing it back keeps the
+    same id;
+  - the code reaches an order from the search answer; the create routes do
+    not change, so a hand-typed `HID-FACILITY` code is possible, and it
+    matches a price only if one was set for that code.
+  If Billing's check ever reads the table, it relies on the name
+  `ehr.catalog_facility_items`, the columns `id`, `facility_id`, `kind`
+  (`medicine` for Billing's `drug`, and `lab_test`) and `active`, and the
+  owner read policy, which shows every facility: such a check must match
+  `facility_id` as well as `id`. Two questions are with the coordinator:
+  whether 0163's check reads the table (then Billing ships after 0155),
+  and whether 0167 should skip a routed prescription's `HID-FACILITY` code
+  from another facility.
+- **Release and rollback:** 0155, then ehr-api, lab-api (the sensitive
+  list) and identity-api, then the website. Release E's images never read
+  the table and get the same status answer while a facility has no items,
+  so they can be rolled back to, with one floor: **once a facility lab
+  test has been ordered, ehr-api and lab-api stay at or above 0155's
+  images**, because Release E's lists do not hide a dotted or kit name.
+  Withdrawing items stops new orders only; recorded requests and results
+  keep their names. 0155's undo (owner-signed) removes admin's row, puts
+  back 0152's status and may withdraw every item; the table stays.
+- **Not in this slice:** lab tests and diagnoses by name only (0156),
+  `ehr.duplicate_class_rules` (ORD-10 phase 2, waiting on the WHOCC
+  terms), and the screens (the admin screen, "Added by this facility" in
+  the pickers).
+- **Checks:** the database suite `catalog-facility-items` on both cluster
+  kinds; ehr-api's catalogue, facility-item and client contract specs;
+  the sensitive-list cases in both services; identity-api's role-matrix
+  and product-gate specs; and ehr-api's services run against throwaway
+  0001-0155 builds as `hid_ehr_api_runtime` (27 checks on each cluster
+  kind).
+
 ### Target
 
 Release B (number given at merge).

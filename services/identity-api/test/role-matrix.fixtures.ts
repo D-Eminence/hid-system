@@ -52,6 +52,27 @@ export function readRoleMatrix(): RoleMatrixFixture {
   return JSON.parse(readFileSync(ROLE_MATRIX_PATH, 'utf8')) as RoleMatrixFixture;
 }
 
+const ROLE_ROW = /\(\s*'([a-z_]+)'\s*,\s*(?:'([a-z0-9.-]+)'|([a-z_][a-z0-9_]*))\s*\)/g;
+const CODE_CONSTANT = /\b([a-z_][a-z0-9_]*)\s+constant\s+text\s*:=\s*'([a-z0-9.-]+)'\s*;/g;
+
+/**
+ * The (role, permission) pairs of one role-row statement whose body starts at
+ * `at` in `text`. A permission is a quoted code ('admin', 'ocr.job.start') or,
+ * as 0155 writes it, a constant of its block ('admin', new_code): the nearest
+ * `new_code constant text := '...';` before the statement gives the code. A
+ * name with no such declaration fails the test, so no role row is missed.
+ * product-gate.spec.ts and product-gate-own-job.spec.ts read rows with it too.
+ */
+export function rolePermissionPairs(file: string, text: string, at: number, body: string): [string, string][] {
+  return [...body.matchAll(ROLE_ROW)].map((row) => {
+    const role = row[1] ?? '';
+    if (row[2] !== undefined) return [role, row[2]];
+    const declared = [...text.slice(0, at).matchAll(CODE_CONSTANT)].filter((constant) => constant[1] === row[3]).at(-1);
+    if (!declared?.[2]) throw new Error(`${file}: a role row names ${row[3]}, which no constant before it declares`);
+    return [role, declared[2]];
+  });
+}
+
 /**
  * auth.role_permissions as the migrations leave it: every (role, permission)
  * pair they insert, read the same way as product-gate.spec.ts and
@@ -65,8 +86,6 @@ export function readRoleMatrix(): RoleMatrixFixture {
 export function seededRolePermissions(): Map<string, string[]> {
   const directory = join(__dirname, '../../ehr-api/database/migrations');
   const grants = new Map<string, Set<string>>();
-  const pairs = (text: string) => [...text.matchAll(/\(\s*'([a-z_]+)'\s*,\s*'([a-z0-9.-]+)'\s*\)/g)]
-    .map((pair) => [pair[1], pair[2]] as [string, string]);
   for (const file of readdirSync(directory).filter((name) => name.endsWith('.sql')).sort()) {
     const text = readFileSync(join(directory, file), 'utf8');
     const statements = [
@@ -76,7 +95,7 @@ export function seededRolePermissions(): Map<string, string[]> {
         .map((statement) => ({ at: statement.index ?? 0, kind: 'delete' as const, body: statement[1] ?? '' })),
     ].sort((left, right) => left.at - right.at);
     for (const statement of statements) {
-      for (const [role, permission] of pairs(statement.body)) {
+      for (const [role, permission] of rolePermissionPairs(file, text, statement.at, statement.body)) {
         const set = grants.get(role) ?? new Set<string>();
         if (statement.kind === 'insert') set.add(permission);
         else set.delete(permission);

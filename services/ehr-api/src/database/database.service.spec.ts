@@ -104,6 +104,18 @@ describe('EHR DatabaseService staff session (0133 D13 and D14, owner\'s Q120 B a
     expect(mentionsSwitch(calls)).toBe(false);
   });
 
+  it('makes a staff transaction READ ONLY when asked, right after BEGIN (ORD-7\'s catalogue status and searches, 0155)',
+    async () => {
+      const { database, connections } = service();
+      const staff = { subject: 'synthetic:doctor', facilityId: 'facility', membershipId: 'membership', correlationId: 'c' };
+      await database.withStaffTransaction(staff, async () => 'read', { readOnly: true });
+      await database.withStaffTransaction(staff, async () => 'write');
+      expect(connections.map((calls) => calls.slice(0, 2).map((call) => call.sql.split('\n')[0]!.trim()))).toEqual([
+        ['BEGIN', 'SET TRANSACTION READ ONLY'], ['BEGIN', 'select']]);
+      expect(connections.map((calls) => staffSetting(calls, 'facility_id'))).toEqual(['facility', 'facility']);
+      expect(connections.every((calls) => calls.at(-1)!.sql === 'COMMIT')).toBe(true);
+    });
+
   it('never sets either switch in a patient-self, system or workload transaction', async () => {
     const { database, connections } = service();
     await database.withPatientTransaction({ subject: 'synthetic:patient', accountId: 'account', sessionId: 'session',

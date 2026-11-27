@@ -130,8 +130,11 @@ export type {
 } from './pharmacy';
 export { EhrApiClient, EhrApiProblem } from './ehr';
 export type {
-  EhrClientOptions, EhrInternalCaller, EhrOcrClinicalNoteImport, EhrOcrDocumentSource,
-  EhrRequestContext, EhrResourceReference,
+  CreateEhrFacilityItemInput, EhrCatalogDoseForm, EhrCatalogLabCategory, EhrCatalogLabTest, EhrCatalogLabTestQuery,
+  EhrCatalogListStatus, EhrCatalogMedicine, EhrCatalogMedicineQuery, EhrCatalogSearchAnswer, EhrCatalogStatus,
+  EhrClientOptions, EhrFacilityItem, EhrFacilityItemKind, EhrFacilityItemList, EhrFacilityLabTest, EhrFacilityMedicine,
+  EhrInternalCaller, EhrOcrClinicalNoteImport, EhrOcrDocumentSource, EhrRequestContext, EhrResourceReference,
+  EhrStaffRequestContext, UpdateEhrFacilityItemInput,
 } from './ehr';
 export { OcrApiClient, OcrContractError } from './ocr';
 export type {

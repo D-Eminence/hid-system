@@ -77,8 +77,10 @@ export const FACILITY_MODULE_RULES: readonly FacilityModuleRule[] = Object.freez
   rule('migrate', 'Scan paper records', ['ocr.job.read', 'ocr.publication.write'],
     ['ocr.job.write', 'ocr.validation.write']),
   rule('outreach', 'Outreach', ['outreach.campaign.read'], ['outreach.campaign.write']),
-  // Facility profile and staff (P1-5: hidden from clinical roles, which never hold workforce.manage).
-  rule('admin', 'Facility profile and staff', ['workforce.manage'], ['organization.manage']),
+  // Facility profile and staff (P1-5: hidden from clinical roles, which never hold workforce.manage). Its full use
+  // includes keeping the facility's own medicines and lab tests (ORD-7, 0155: ehr.catalog.facility-item.write, admin
+  // only until the owner answers question 5 of the design note on #258).
+  rule('admin', 'Facility profile and staff', ['workforce.manage'], ['organization.manage', 'ehr.catalog.facility-item.write']),
   // The facility's audit trail (Akos's "View (audit)" cells).
   rule('audit', 'Audit trail', ['audit.read']),
 ]);
