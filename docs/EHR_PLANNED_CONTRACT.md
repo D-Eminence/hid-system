@@ -3644,9 +3644,9 @@ Request:
 | `clinicalInformation` | optional, up to 4000 characters, copied to every test |
 | `tests` | 1-20 entries. Each takes today's single-create test fields with today's limits (R-2): `testCodeSystem` 1-255, `testCode` 1-100, `testDisplay` 1-500, optional `specimenTypeCode` up to 100, optional `priority`. |
 
-- Each test is checked as the single create checks it (0156). While `LAB_REQUEST_NAME_ONLY_ENABLED` is off, its code pair is required. While it is on, a test may leave out `testCodeSystem` and `testCode`, both or neither (`400 LAB_TEST_CODE_INCOMPLETE`, naming `tests.<n>`, from 0); such a test is saved, answered and sent to Lab with both codes null, as a single one is. A group may mix coded and name-only tests. Use the HID-LAB codes (Wave 0, R-2) for tests with no LOINC code. Once ORD-7 ships, a test may name a catalogue item instead; that shape is ORD-7's.
-- A test that repeats another is refused (`400 LAB_REQUEST_TEST_REPEATED`, naming `tests.<n>`): coded tests by code system and code, and every test by its name (case and extra spaces ignored). So two name-only tests with one name are refused.
-- Any field not listed is refused, and `null` is refused, as on every EHR body. That includes `requestGroupId`, in the group, in a test, in the single create and in a PATCH (`400 VALIDATION_FAILED`): ehr-api makes the group's id and never takes one from a client.
+- Each test is checked as the single create checks it (0156). While `LAB_REQUEST_NAME_ONLY_ENABLED` is off, its code pair is required. While it is on, a test may leave out `testCodeSystem` and `testCode`, both or neither (`400 LAB_TEST_CODE_INCOMPLETE`, naming each such test as `tests.<n>`, from 0); such a test is saved, answered and sent to Lab with both codes null, as a single one is. A group may mix coded and name-only tests. Use the HID-LAB codes (Wave 0, R-2) for tests with no LOINC code. Once ORD-7 ships, a test may name a catalogue item instead; that shape is ORD-7's.
+- A test that repeats another is refused (`400 LAB_REQUEST_TEST_REPEATED`, naming each test that repeats an earlier one as `tests.<n>`, once the pair rule passes): coded tests by code system and code, and every test by its name (case and extra spaces ignored). So two name-only tests with one name are refused.
+- Any field not listed is refused, and `null` is refused, as on every EHR body (`400 VALIDATION_FAILED`; a field inside a test is named `tests.<n>.<field>`, and a test that is not an object `tests.<n>`, so the form can mark the row). That includes `requestGroupId`, in the group, in a test, in the single create and in a PATCH (`400 VALIDATION_FAILED`): ehr-api makes the group's id and never takes one from a client.
 
 Answer `201`:
 
@@ -3662,10 +3662,10 @@ Answer `201`:
 
 - Each `labRequests` entry is the single create's full answer, plus `requestGroupId`, in the order sent.
 - All requests are written in one transaction: every one, or none.
-- With `status: "active"`, each is sent to this facility's lab after the commit, in order, one at a time, with no group: Lab's validator copies the group from the EHR order (0158). Each `labHandoff` reports its own outcome: `accepted`, `already_accepted`, `failed` with a code, or `not_sent` with `LAB_PERMISSION_ABSENT` for a member without `lab.work-item.accept`.
+- With `status: "active"`, each is sent to this facility's lab after the commit, in order, one at a time, with no group: Lab's validator copies the group from the EHR order (0158). Each `labHandoff` reports its own outcome: `accepted`, `already_accepted`, `failed` with a code, or `not_sent` with `LAB_PERMISSION_ABSENT` for a member without `lab.work-item.accept`, or with `ORDER_ROUTED` on a replay, for a test sent to another facility's lab since it was saved (as PATCH answers it).
 - The sends end 25 s after the request reached ehr-api, inside nginx's 30 s. A send cut off then is `failed` with 503 `LAB_SERVICE_UNAVAILABLE`, and a send not tried before then is `failed` with 503 `LAB_HANDOFF_NOT_TRIED`. "Send to lab" sends either safely.
 - Unlike the single create, which answers 409 `LAB_HANDOFF_REFUSED` or 502 `LAB_HANDOFF_UNCONFIRMED`, a group never fails because of the lab. Every request is saved, and a failed send shows only in its `labHandoff`.
-- A replay with the same key and body returns the same group as it is now, and sends every active test again; Lab replays the ones it already holds. A different body gets 409 `IDEMPOTENCY_KEY_REUSED` (`clinical.repository.ts:221`). The key is stored once for the whole call (`lab-request-group.create`) and once per test (`lab-request-group.test.1` to `.20`), so a key used on the single create never clashes with a group.
+- A replay with the same key and body returns the same group as it is now, and sends every active test again, except one routed to another facility since; Lab replays the ones it already holds. While `LAB_REQUEST_GROUPS_ENABLED` is off the route answers 503 to a replay too (below); the tests already saved stay, and show in the visit's lab request list. A different body gets 409 `IDEMPOTENCY_KEY_REUSED` (`clinical.repository.ts:221`). The key is stored once for the whole call (`lab-request-group.create`) and once per test (`lab-request-group.test.1` to `.20`), so a key used on the single create never clashes with a group.
 - Every lab request answer (list, read, create, update) gains `requestGroupId`: a UUID, or `null` for a single request. It is answered, and the list's `?requestGroupId=` works, whatever `LAB_REQUEST_GROUPS_ENABLED` says.
 - This facility's own Lab work items (`GET /api/v1/lab/work-items`, by id, and the `accept-ehr-order` answer) gain `requestGroupId`, so the lab can show a group's tests together: `null` for a request ordered on its own. A work item from another facility's order route never carries one.
 - Accessions, specimens and results stay per test. Taking one sample for the whole group (one accession) is not in this package.
@@ -3676,16 +3676,16 @@ Audit: today's `ehr.lab-request.create` row for each request, plus one `ehr.lab-
 
 | HTTP | Code | Message |
 |---|---|---|
-| 400 | `VALIDATION_FAILED` | Names the field (for example, more than 20 tests). |
-| 400 | `LAB_REQUEST_TEST_REPEATED` | This test is already in the request. Names the test (`tests.<n>`). |
-| 400 | `LAB_TEST_CODE_INCOMPLETE` | As the single create (0156, while `LAB_REQUEST_NAME_ONLY_ENABLED` is on): a test with one code only. Names the test. |
+| 400 | `VALIDATION_FAILED` | Names the field (for example, more than 20 tests): `tests.<n>.<field>` for a field inside a test, `tests.<n>` for a test that is not an object. |
+| 400 | `LAB_REQUEST_TEST_REPEATED` | This test is already in the request. Names each test that repeats an earlier one (`tests.<n>`). |
+| 400 | `LAB_TEST_CODE_INCOMPLETE` | As the single create (0156, while `LAB_REQUEST_NAME_ONLY_ENABLED` is on): a test with one code only. Names each such test. |
 | 400 | `IDEMPOTENCY_KEY_REQUIRED` | As today (`common/idempotency.ts:10`). |
 | 403 | `PERMISSION_DENIED` | As today. |
 | 403 | `CONSENT_REQUIRED` | As today: no access to this patient's records here. |
 | 404 | `CLINICAL_RESOURCE_NOT_FOUND` | As today: the visit is not found. |
 | 409 | `VISIT_ENTERED_IN_ERROR` | As today (EHR-C8a). |
 | 409 | `IDEMPOTENCY_KEY_REUSED`, `REQUEST_IN_PROGRESS` | As today (`clinical.repository.ts:221`, `:224`). |
-| 503 | `LAB_REQUEST_GROUPS_UNAVAILABLE` | Several tests in one request are not available yet. Add each test on its own. While `LAB_REQUEST_GROUPS_ENABLED` is off, after the permission check and before the body is read. As for every 5xx, the answer's `detail` is the service's fixed text, so the website shows these words from the code. |
+| 503 | `LAB_REQUEST_GROUPS_UNAVAILABLE` | Several tests in one request are not available yet. Add each test on its own. While `LAB_REQUEST_GROUPS_ENABLED` is off, after the permission check and before the body is validated or the key is read, so a same-key retry is refused too. Only a direct caller sees this code: through the public gateway the browser gets the gateway's own `503 UPSTREAM_UNAVAILABLE`, as for every ehr-api 502, 503 and 504 (`gateway/nginx.conf.template`), so it cannot tell groups off from an outage by this answer. |
 
 ### Screen notes
 

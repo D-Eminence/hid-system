@@ -9048,8 +9048,13 @@ backend does with the key, the audit and Lab's answers, beside EHR-C5's.
   stops new groups only. While it is off, `POST
   /ehr/patients/:patientId/encounters/:encounterId/lab-request-groups`
   answers `503 LAB_REQUEST_GROUPS_UNAVAILABLE` after the permission check
-  and before the body is read, and the service's `createInTransaction`
-  (ORD-8's way in) writes a null group (option (b)). Groups already written
+  and before the body is validated or the Idempotency-Key is read (so a
+  same-key retry of a group saved while it was on is refused too; its tests
+  stay saved), and the service's `createInTransaction` (ORD-8's way in)
+  writes a null group (option (b)). Only a direct caller sees that code:
+  the gateway replaces it with its own `503 UPSTREAM_UNAVAILABLE`, as it
+  does every ehr-api 502, 503 and 504, so the browser cannot tell groups
+  off from an outage by this answer. Groups already written
   are always answered: `requestGroupId` on every lab request answer, and
   the list's `?requestGroupId=<uuid>`, which a cursor binds (a cursor of one
   group pages no other list: `400 INVALID_CURSOR`). Switch it off, and
@@ -9062,7 +9067,12 @@ backend does with the key, the audit and Lab's answers, beside EHR-C5's.
   (`lab-request.create`) never clashes with a group. The same key and body
   answers the group as it is now and sends its active tests to Lab again
   (Lab replays the ones it holds); another body is `409
-  IDEMPOTENCY_KEY_REUSED`.
+  IDEMPOTENCY_KEY_REUSED`. In `createInTransaction` the caller's whole-call
+  digest must cover every test: a key whose part rows replay some tests
+  while others would be new is `409 IDEMPOTENCY_KEY_REUSED` and the
+  caller's transaction keeps nothing, so a group is never split across two
+  ids. The caller sends after its own commit with `sendGroup` (public, for
+  ORD-8).
 - **Audit**, in the same transaction: each test writes the single
   create's `ehr.lab-request.create` row (with `idempotentReplay`), and the
   group writes one `ehr.lab-request-group.create` row (`lab-request-group`,
@@ -9078,9 +9088,16 @@ backend does with the key, the audit and Lab's answers, beside EHR-C5's.
   ehr-api. A send cut off then is `labHandoff: { state: "failed", status:
   503, code: "LAB_SERVICE_UNAVAILABLE" }`; one not tried, `"LAB_HANDOFF_NOT_TRIED"`.
   A member without `lab.work-item.accept` gets `{ state: "not_sent", code:
-  "LAB_PERMISSION_ABSENT" }`. The group answers `201` whatever Lab says.
+  "LAB_PERMISSION_ABSENT" }`. On a same-key retry the tests' routes are read
+  in the transaction, as PATCH reads them, and a test with a route to
+  another facility in force is `{ state: "not_sent", code: "ORDER_ROUTED" }`
+  and is not sent. The group answers `201` whatever Lab says.
 - **A client never sets the group.** `requestGroupId` in the group body, in
   a test, in the single create or in a PATCH is `400 VALIDATION_FAILED`.
+  The group's `VALIDATION_FAILED` names a field inside a test as
+  `tests.<n>.<field>` (from 0), and a test that is not an object as
+  `tests.<n>`; `LAB_TEST_CODE_INCOMPLETE` and `LAB_REQUEST_TEST_REPEATED`
+  name every such test.
 
 ## SX-1: modules map per facility
 

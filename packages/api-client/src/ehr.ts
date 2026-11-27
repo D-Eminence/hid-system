@@ -175,8 +175,11 @@ export class EhrApiClient {
    * internal caller. One Idempotency-Key covers the group; the same key and
    * body answers the saved group again and sends its active tests again.
    * 503 LAB_REQUEST_GROUPS_UNAVAILABLE while ehr-api's
-   * LAB_REQUEST_GROUPS_ENABLED is off: add each test on its own. Each answer
-   * is checked: one requestGroupId, on every request, 1 to 20 requests.
+   * LAB_REQUEST_GROUPS_ENABLED is off (to a same-key retry too): add each
+   * test on its own. Only a direct call to ehr-api sees that code; through
+   * the public gateway it is nginx's 503 UPSTREAM_UNAVAILABLE, as every
+   * ehr-api 502, 503 and 504 is. Each answer is checked: one requestGroupId,
+   * on every request, 1 to 20 requests.
    */
   async createLabRequestGroup(
     patientId: string,
