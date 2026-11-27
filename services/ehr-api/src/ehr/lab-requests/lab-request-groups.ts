@@ -81,17 +81,24 @@ export function labRequestGroupsUnavailable(): DomainProblem {
 }
 
 /**
- * The key a test is repeated by: coded tests by code system and code, and
- * every test by its name (trimmed, case and inner spaces ignored), so two
- * tests by name only with one name are repeated (0156).
+ * The keys a test is repeated by (the clinical owner's addendum,
+ * 7223408785): a coded test by its code system (upper-cased, so LOINC and
+ * loinc are one) and code, and every test by its name (trimmed, case and
+ * inner spaces ignored, so two tests by name only with one name are one,
+ * 0156), each on its specimen type (specimenTypeCode as sent, trimmed; none
+ * counts as one value). So the same culture on blood and on urine goes in
+ * one Save, while two tests with one code, or one name, on one specimen are
+ * refused as a likely double entry: a second blood-culture set from another
+ * site goes as its own request.
  */
 function repeatKeys(test: LabRequestGroupTestInput): string[] {
-  const name = `name:${test.testDisplay.replace(/\s+/g, ' ').toLocaleLowerCase('en')}`;
+  const specimen = test.specimenTypeCode ?? null;
+  const name = JSON.stringify(['name', test.testDisplay.replace(/\s+/g, ' ').toLocaleLowerCase('en'), specimen]);
   return test.testCodeSystem !== undefined && test.testCode !== undefined
-    ? [JSON.stringify(['code', test.testCodeSystem, test.testCode]), name] : [name];
+    ? [JSON.stringify(['code', test.testCodeSystem.toLocaleUpperCase('en'), test.testCode, specimen]), name] : [name];
 }
 
-/** The index of every test that repeats an earlier one, in order (empty when none does). */
+/** The index of every test that repeats an earlier one on its specimen, in order (empty when none does). */
 export function repeatedTests(tests: readonly LabRequestGroupTestInput[]): number[] {
   const seen = new Set<string>();
   const repeated: number[] = [];
@@ -127,7 +134,8 @@ export const groupBodyFields: ValidationFields = (errors) => errors.flatMap((err
  * LAB_REQUEST_NAME_ONLY_ENABLED is off, or 0156's name-only class while on,
  * then the pair rule, 400 LAB_TEST_CODE_INCOMPLETE naming every test with one
  * code only (`tests.<index>`, from 0). Then 400 LAB_REQUEST_TEST_REPEATED
- * naming every test that repeats an earlier one (repeatedTests). One answer
+ * naming every test that repeats an earlier one on the same specimen
+ * (repeatedTests). One answer
  * has one code, so a repeat is named once the pair rule passes. Any field not
  * declared, at the top or in a test, a requestGroupId included, is 400
  * VALIDATION_FAILED, which names a test's field as `tests.<n>.<field>`
