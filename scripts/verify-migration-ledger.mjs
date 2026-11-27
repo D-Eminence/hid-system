@@ -166,7 +166,7 @@ const acceptedMigrations = new Map([
   ['0151_sealed_qa_front_desk_and_nurse_logins.sql', 'abab517679255cec2d67aadae9d44f1b629e8e3e9ee30d77cfee33817b2c75f2'],
   ['0152_catalog_diagnoses.sql', 'abfecc3571808e4ad29fdf8c1e202f65b3cdf890e9f3106b74bd6ef1bd19f9c9'],
   ['0153_clinician_recent_diagnoses.sql', '45faa6a739056cc07426fdb5363b58c7dda1dbcbc096fb6d1769ae746798500b'],
-  ['0156_name_only_lab_tests_and_diagnoses.sql', 'b452298450d950c6f32d598ed8f9cae6fa35bdf82baf7df8e20f59bf2f615ce8'],
+  ['0156_name_only_lab_tests_and_diagnoses.sql', 'e941c2229be4900e2093dbdb7d2780fcc202bf8ce614bc45e95a27db046e3716'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

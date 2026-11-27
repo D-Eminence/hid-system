@@ -169,6 +169,15 @@
 -- VACUUM or write can change it before the scans, and pg_relation_size
 -- waits for nothing. Above the bound, or for a measured hold over 1 s, the
 -- change is NOT VALID here and a follow-up file validates it.
+-- The bound is per table and counts live rows; VALIDATE's time follows the
+-- heap's pages, dead rows included, and the six scans and the route check
+-- add up in one hold. So the file lets through six tables just under
+-- 5,000,000 rows each, about 4-5 s at Rahman's figure. The file does not
+-- check the 1 s rule: the pre-sign measurement on the rehearsal copy does,
+-- and the declaration records the hold.
+-- The note says -1 refuses; here -1 refuses only while the table has a
+-- page on disk, so that a fresh install goes on (the contract lists this
+-- among its differences).
 -- ANALYZE FIRST. Autovacuum may never have analysed a small table (the
 -- routed result reports, say: it analyses after about 50 changes), which
 -- leaves reltuples at -1, and section 2 then refuses. ANALYZE samples pages

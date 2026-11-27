@@ -2606,8 +2606,12 @@ above is the lab request's part.
   are six; the recent read leaves a dropped code out rather than adding an
   in-list flag; `codeStatus` is `not_checked` also while no release is
   active (the function answers null then); only `ICD-11` exactly is
-  looked up; and the lookup's parameters are `requested_code_system` and
-  `requested_code`, not the note's `code_system` and `code`.
+  looked up; the lookup's parameters are `requested_code_system` and
+  `requested_code`, not the note's `code_system` and `code`; and the size
+  bound refuses `reltuples` -1 only while the table has a page on disk, so
+  a fresh install's empty tables go on (the note refuses every -1). The
+  bound is per table; the hold's 1 s rule is checked by the pre-sign
+  measurement on the rehearsal copy, not by the file.
 - **Not in this slice:** the sensitive-test list (0155's PR and images),
   facility items (0155) and the website's screens.
 - **Checks:** the database suites `name-only-codes` (70 cases) and
