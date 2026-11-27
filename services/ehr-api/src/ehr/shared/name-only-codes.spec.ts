@@ -1,7 +1,7 @@
 import { Body, Controller, type INestApplication, Module, Post, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { Transform, type TransformFnParams } from 'class-transformer';
-import { IsDateString, IsEnum, IsString, Length, MaxLength } from 'class-validator';
+import { plainToInstance, Transform, type TransformFnParams } from 'class-transformer';
+import { getMetadataStorage, IsDateString, IsEnum, IsString, Length, MaxLength } from 'class-validator';
 import type { NextFunction, Request, Response } from 'express';
 import type { AddressInfo } from 'node:net';
 import { AuditService } from '../../audit/audit.service';
@@ -286,6 +286,31 @@ describe('the consultation\'s diagnoses (EHR-C5) follow DIAGNOSIS_NAME_ONLY_ENAB
     const body = consultation([{ ...diagnosisBody, ...diagnosisCodes }]);
     expect(requestDigest('consultation.create', { input: await consultationPipe(true).transform(body) }))
       .toBe(requestDigest('consultation.create', { input: await consultationPipe(false).transform(body) }));
+  });
+
+  // CreateConsultationNameOnlyDto repeats CreateConsultationDto's parts so that today's class stays exactly as it is.
+  // This keeps the two in step: a part or check added to one only would be refused as "should not exist" (or let
+  // through) while the setting is on.
+  it('the name-only body has today\'s parts and checks, apart from the diagnoses\' class', () => {
+    const checks = (target: new () => object) => getMetadataStorage().getTargetValidationMetadatas(target, '', true, false)
+      .map((metadata) => [metadata.propertyName, metadata.type, metadata.name ?? '', metadata.each,
+        JSON.stringify((metadata.constraints ?? []).map((constraint: unknown) =>
+          typeof constraint === 'function' ? String(constraint) : constraint))].join(' '))
+      .sort();
+    expect(checks(CreateConsultationNameOnlyDto)).toEqual(checks(CreateConsultationDto));
+    expect(new Set(checks(CreateConsultationDto).map((check) => check.split(' ')[0])))
+      .toEqual(new Set(['visit', 'note', 'vitals', 'diagnoses']));
+    // The nested classes (class-transformer's @Type): the same, but for the diagnoses.
+    const plain = { visit: {}, note: {}, vitals: {}, diagnoses: [{}] };
+    const classes = (target: new () => object) => {
+      const instance = plainToInstance(target, plain) as Record<string, unknown>;
+      return Object.fromEntries(Object.entries(instance).map(([key, value]) =>
+        [key, (Array.isArray(value) ? value[0] : value)?.constructor]));
+    };
+    const today = classes(CreateConsultationDto);
+    const nameOnly = classes(CreateConsultationNameOnlyDto);
+    expect({ ...nameOnly, diagnoses: today.diagnoses }).toEqual(today);
+    expect([today.diagnoses, nameOnly.diagnoses]).toEqual([CreateDiagnosisDto, CreateDiagnosisNameOnlyDto]);
   });
 });
 
