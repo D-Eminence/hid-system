@@ -2490,7 +2490,9 @@ above is the lab request's part.
     above 5,000,000, or -1 (never analysed) with a page on disk. Above the
     bound the checks would go in NOT VALID with a follow-up file. It has no
     DML and reads no row as the migrator; its post-check reads
-    `pg_stat_xact_user_tables` (no row inserted, updated or deleted).
+    `pg_stat_xact_user_tables` (no row inserted, updated or deleted while
+    it ran, against the counts it keeps at its start, so an earlier file's
+    writes in a dry run of several files are not counted).
   - New: `ehr.catalog_diagnosis_listed(requested_code_system,
     requested_code)` for `codeStatus` (no runtime may read
     `ehr.catalog_diagnoses`). The parameters take the `requested_` prefix of
@@ -2587,7 +2589,7 @@ above is the lab request's part.
   `requested_code`, not the note's `code_system` and `code`.
 - **Not in this slice:** the sensitive-test list (0155's PR and images),
   facility items (0155) and the website's screens.
-- **Checks:** the database suites `name-only-codes` (69 cases) and
+- **Checks:** the database suites `name-only-codes` (70 cases) and
   `diagnosis-release-switch` (21), on a superuser and a NOSUPERUSER
   NOBYPASSRLS owner; ehr-api's `diagnoses.name-only.spec.ts` (`codeStatus`,
   the lookup's failures, the replay, a name-only diagnosis in the patient's

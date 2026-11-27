@@ -28,9 +28,12 @@
 --      stand-in for Billing's zz_billing_lab_work_item trigger on
 --      lab.work_items (0167), a column with its own CHECK, an index on the
 --      code pair, a column on ehr.diagnoses; 0156 keeps them;
---   8. a row written in the transaction, even one undone: with the table
---      never analysed (reltuples -1, a page on disk) the size bound refuses;
---      analysed, 0156 refuses at its post-check (pg_stat_xact_user_tables);
+--   8. a row written in the transaction before 0156, even one undone: with
+--      the table never analysed (reltuples -1, a page on disk) the size
+--      bound refuses; analysed, 0156 applies (its post-check counts only
+--      what is written while it runs); a row written while 0156 runs (by an
+--      event trigger on its ALTER TABLE) makes its post-check refuse
+--      (pg_stat_xact_user_tables, against section 0's counts);
 --   9. back to the state the runner left.
 -- B. The data path (the P4c fixture of the order route suites):
 --   1. a lab request by name only is saved (ehr-api's columns); half a pair
@@ -560,10 +563,12 @@ select pg_temp.expect('A7 with other lanes'' additions, 0156 applies and keeps t
   || 'work_items_test_code_pair_ck true,work_items_zz_billing_price_reference_ck true | true | true',
   :'LAST_ERROR_MESSAGE' || ' | ' || :'q156_others');
 
--- A8. A row written to one of the six in this transaction, even one undone (its page stays on disk). With that
--- table's reltuples at -1 (never analysed), the size bound refuses; with it analysed, 0156 refuses at its post-check
--- (pg_stat_xact_user_tables). Nothing applied either way. Last of part A: the count stays for the rest of the
--- transaction.
+-- A8. A row written to one of the six in this transaction before 0156 runs (an earlier file's, in a dry run of
+-- several files), even one undone (its page stays on disk). With that table's reltuples at -1 (never analysed), the
+-- size bound refuses, nothing applied; with it analysed, 0156 applies: its post-check counts only what is written
+-- while it runs, against the counts section 0 keeps. A row written while 0156 runs (an event trigger on its ALTER
+-- TABLE, as the suite runner) makes the post-check refuse, nothing applied. Last of part A: the count stays for the
+-- rest of the transaction.
 savepoint write_one;
 set local session_replication_role = replica;
 insert into lab.work_item_requested_tests (work_item_id, facility_id, patient_id, "ordinal", code_system, code, name)
@@ -584,10 +589,34 @@ set local role :"q156_owner";
 :run0156
 \set ON_ERROR_STOP on
 \set QUIET off
+select md5(pg_temp.schema_print()) as q156_reapplied \gset
 rollback to savepoint refused;
-select pg_temp.expect('A8b analysed: 0156 refuses at its post-check (a row written, and undone, in the transaction)',
-  '55000 0156: rows were written in this transaction: lab.work_item_requested_tests',
-  :'LAST_ERROR_SQLSTATE' || ' ' || :'LAST_ERROR_MESSAGE');
+select pg_temp.expect('A8b analysed: 0156 applies; a row written, and undone, before it ran is not its own',
+  'applied | as built', :'LAST_ERROR_MESSAGE' || ' | '
+  || case when :'q156_reapplied' = :'q156_applied' then 'as built' else 'not as built' end);
+-- A row written while 0156 runs: after each of its ALTER TABLE statements, one coded requested test (no foreign key or
+-- trigger runs for it: replica mode, as above).
+create function pg_temp.write_one_during_0156() returns event_trigger language plpgsql security definer
+set search_path = pg_catalog, pg_temp set session_replication_role = replica as $f$
+begin
+  insert into lab.work_item_requested_tests (work_item_id, facility_id, patient_id, "ordinal", code_system, code, name)
+  values (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 1, 'http://loinc.org', '718-7', 'Haemoglobin');
+end
+$f$;
+create event trigger name_only_codes_write_during_0156 on ddl_command_end when tag in ('ALTER TABLE')
+  execute function pg_temp.write_one_during_0156();
+set local role :"q156_owner";
+\set ON_ERROR_STOP off
+:run0156
+\set ON_ERROR_STOP on
+\set QUIET off
+rollback to savepoint refused;
+select pg_temp.expect('A8c a row written while 0156 runs: its post-check refuses (55000), nothing applied',
+  '55000 0156: rows were written while this file ran: lab.work_item_requested_tests | same | no event trigger',
+  :'LAST_ERROR_SQLSTATE' || ' ' || :'LAST_ERROR_MESSAGE' || ' | '
+  || case when md5(pg_temp.schema_print()) = :'q156_undone' then 'same' else 'changed' end || ' | '
+  || case when exists (select 1 from pg_event_trigger where evtname = 'name_only_codes_write_during_0156')
+          then 'event trigger left' else 'no event trigger' end);
 
 rollback to savepoint undone;
 select pg_temp.expect('A9 back to 0156 as the runner left it', 'as built',

@@ -169,7 +169,18 @@
 -- file has no DML and no query on the six tables' rows. Sizes come from
 -- pg_class (above). VALIDATE reads the heap without the policies. The
 -- post-check reads pg_stat_xact_user_tables: no row inserted, updated or
--- deleted in the six tables in this transaction.
+-- deleted in the six tables while this file ran. That view counts the
+-- whole transaction, so section 0 keeps the counts it finds (an earlier
+-- file's writes, in a dry run of several files) in a setting for this
+-- transaction only (hid.m0156_writes), and section 9 compares with them.
+-- The size bound has no such baseline: in a fresh install, where each
+-- file's tables are new, a table that an earlier file wrote rows to is
+-- never analysed and has a page, so section 2 refuses (55000). No file
+-- 0001-0153 writes the six at migration time; if a file booked before 0156
+-- does, it must end with ANALYZE of the table it wrote (that works inside
+-- the dry run's one transaction: measured, -1 became the row count), or
+-- 0156 refuses in every fresh install, the CI rehearsal and check:db
+-- included.
 --
 -- Undo (by hand only, owner-signed, and only before any name-only row is
 -- saved):
@@ -216,7 +227,8 @@
 --   at once (25-32 ms) with the one-attempt text; the runner's dry run
 --   retries it.
 --
--- 0. Preconditions (catalog reads only; 55000 and nothing applied).
+-- 0. Preconditions (catalog reads only; 55000 and nothing applied), and
+--    the six tables' write counts so far, for section 9.
 -- 1. The locks.             2. The size bound (under the locks).
 -- 3. The five pairs (N1).   4. The route's kind check (N1).
 -- 5. N2.                    6. N3.
@@ -383,6 +395,15 @@ begin
                     and proc.proconfig = array['search_path=pg_catalog, pg_temp']) then
     raise exception using errcode = '55000', message = '0156: 0153''s ehr.recent_diagnoses is not as 0153 made it';
   end if;
+  -- g. The six tables' writes so far in this transaction (an earlier file's, in a dry run of several files), kept
+  -- for this transaction only, so that section 9 counts only what is written while this file runs.
+  perform set_config('hid.m0156_writes',
+    (select jsonb_object_agg(statistics.relid::text,
+                             statistics.n_tup_ins + statistics.n_tup_upd + statistics.n_tup_del)::text
+       from pg_stat_xact_user_tables statistics
+      where statistics.relid in ('ehr.lab_requests'::regclass, 'ehr.diagnoses'::regclass, 'ehr.order_routes'::regclass,
+                                 'lab.work_items'::regclass, 'lab.work_item_requested_tests'::regclass,
+                                 'lab.order_route_result_reports'::regclass)), true);
 end
 $$;
 
@@ -722,15 +743,17 @@ begin
   if mismatch is not null then
     raise exception using errcode = '55000', message = '0156: these functions changed: ' || mismatch;
   end if;
-  -- No row of the six tables inserted, updated or deleted in this transaction (the file has no DML).
-  select string_agg(statistics.relid::regclass::text, ', ') into mismatch
+  -- No row of the six tables inserted, updated or deleted while this file ran (it has no DML): the counts against
+  -- section 0's, so an earlier file's writes in the same transaction are not counted.
+  select string_agg(statistics.relid::regclass::text, ', ' order by statistics.relid::regclass::text) into mismatch
     from pg_stat_xact_user_tables statistics
    where statistics.relid in ('ehr.lab_requests'::regclass, 'ehr.diagnoses'::regclass, 'ehr.order_routes'::regclass,
                               'lab.work_items'::regclass, 'lab.work_item_requested_tests'::regclass,
                               'lab.order_route_result_reports'::regclass)
-     and statistics.n_tup_ins + statistics.n_tup_upd + statistics.n_tup_del > 0;
+     and statistics.n_tup_ins + statistics.n_tup_upd + statistics.n_tup_del
+         > coalesce((current_setting('hid.m0156_writes')::jsonb ->> statistics.relid::text)::bigint, 0);
   if mismatch is not null then
-    raise exception using errcode = '55000', message = '0156: rows were written in this transaction: ' || mismatch;
+    raise exception using errcode = '55000', message = '0156: rows were written while this file ran: ' || mismatch;
   end if;
 end
 $$;
