@@ -46,7 +46,15 @@
 --      too; on the second attempt the words counted are the shortened ones;
 --      a code typed with a space at its dot stays first though another entry
 --      names more of q's words. Each fix case fails on 0152's search. Case 2z
---      also changes with fix 2.
+--      also changes with fix 2. Then Ola's addendum to fix 2's count, on a
+--      release of its own: the count reads no word of a "without ..." clause
+--      (with starts without), to the next comma, unless q has the word
+--      without; and a q shaped like a code counts nothing, so it keeps
+--      0152's order. Cases 5h and 5j fail on 0157's first body (7ad367c1),
+--      and 5h on 0152's; 5i holds on both, and fails when the clause is
+--      taken out even for a q with the word without; 5k fails on both, and
+--      when the count comes before "starts with q" (which 5g showed before
+--      a q shaped like a code counted nothing).
 -- Synthetic version ids: prefix c150. The codes and titles are ICD-11's
 -- (WHO, CC BY-ND 3.0 IGO), verbatim; the other names are ours.
 set plpgsql.variable_conflict = error;
@@ -443,11 +451,90 @@ select pg_temp.expect('5e a one-word q with punctuation around it keeps its orde
 -- infections entries first. Before (0152), infection of lung was the only entry where each shortened word is a word.
 select pg_temp.expect('5f fix 1 and the second attempt''s count: "infections lungs" counts infection and lung',
   'CA4Z 1F73.1 CA4Y more=false', pg_temp.found('infections lungs', 10));
--- The code q is stays first, before the count: in "2A80 1" (2A80.1 with a space at its dot), 1 is a word of 2A80.0's
--- title, grade 1, and only a code part of 2A80.1's.
+-- The code q is stays first: in "2A80 1" (2A80.1 with a space at its dot), 1 is a word of 2A80.0's title, grade 1, and
+-- only a code part of 2A80.1's. Since Ola's addendum a q shaped like a code counts nothing (5j), so the count no
+-- longer orders these; before, the first key put the code before 2A80.0, which named more of q's words.
 select pg_temp.expect('5g a code typed with a space at its dot comes first, though another entry names more of q''s words',
   '2A80.1 2A80.0 more=false|2A80.1 2A80.0 more=false',
   pg_temp.found('2A80 1', 10) || '|' || pg_temp.found('2a80.1', 10));
+
+-- Ola's addendum to 0157 (#258, from its clinical review): two changes to fix 2's count. A release of its own
+-- (2026-03), so the rows above keep their answers. WHO's titles verbatim.
+insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference, approvals_sha256, approved_at)
+  values ('c1500000-0000-4000-8000-000000000006', 'diagnosis', '2026-03', repeat('6', 64),
+          'synthetic addendum sign-off', repeat('7', 64), now());
+insert into ehr.catalog_diagnoses (version_id, code, title, other_names, chapter, residual) values
+  -- With starts without: entries whose "without ..." clause holds words of q.
+  ('c1500000-0000-4000-8000-000000000006', '1C60.3', 'HIV disease clinical stage 4 associated with tuberculosis', '',
+   '01', false),
+  ('c1500000-0000-4000-8000-000000000006', '1C61.3', 'HIV disease clinical stage 4 associated with malaria', '', '01',
+   false),
+  ('c1500000-0000-4000-8000-000000000006', '1C62.3',
+   'HIV disease clinical stage 4 without mention of tuberculosis or malaria', '', '01', false),
+  ('c1500000-0000-4000-8000-000000000006', 'DC11.4', 'Calculus of bile duct with cholangitis', '', '13', false),
+  ('c1500000-0000-4000-8000-000000000006', 'DC11.5', 'Calculus of bile duct with cholecystitis', '', '13', false),
+  ('c1500000-0000-4000-8000-000000000006', 'DC11.6', 'Calculus of bile duct without cholangitis or cholecystitis', '',
+   '13', false),
+  -- A clause ends at the next comma: NB51.0's "lower back or pelvis" is outside it.
+  ('c1500000-0000-4000-8000-000000000006', 'NC91.0', 'Laceration without foreign body of lower leg', '', '22', false),
+  ('c1500000-0000-4000-8000-000000000006', 'NC91.1', 'Laceration with foreign body of lower leg', '', '22', false),
+  ('c1500000-0000-4000-8000-000000000006', 'NB51.0', 'Laceration without foreign body of abdomen, lower back or pelvis',
+   '', '22', false),
+  ('c1500000-0000-4000-8000-000000000006', 'NB51.1', 'Laceration with foreign body of abdomen, lower back or pelvis',
+   '', '22', false),
+  ('c1500000-0000-4000-8000-000000000006', 'NB31.01', 'Minor laceration of heart with haemopericardium', '', '22', false),
+  -- A q with the word without: each pair names all of q's words, one entry only through its clause.
+  ('c1500000-0000-4000-8000-000000000006', 'KB87.1', 'Meconium plug without ileus', '', '19', false),
+  ('c1500000-0000-4000-8000-000000000006', 'KB87.2', 'Meconium ileus without perforation', '', '19', false),
+  ('c1500000-0000-4000-8000-000000000006', 'KB87.4', 'Meconium ileus with perforation', '', '19', false),
+  ('c1500000-0000-4000-8000-000000000006', 'DB94.3', 'Alcoholic cirrhosis of liver without hepatitis', '', '13', false),
+  ('c1500000-0000-4000-8000-000000000006', 'DB95.11',
+   'Drug-induced or toxic liver disease with chronic hepatitis without cirrhosis', '', '13', false),
+  -- A code typed as a code: ME24.A, its subcodes (a starts only their code part), and other ME24 entries with a title
+  -- word starting with a.
+  ('c1500000-0000-4000-8000-000000000006', 'ME24.0', 'Digestive system abscess', '', '21', false),
+  ('c1500000-0000-4000-8000-000000000006', 'ME24.90', 'Acute gastrointestinal bleeding, not elsewhere classified', '',
+   '21', false),
+  ('c1500000-0000-4000-8000-000000000006', 'ME24.A', 'Other digestive system haemorrhage, not elsewhere classified', '',
+   '21', false),
+  ('c1500000-0000-4000-8000-000000000006', 'ME24.A1', 'Haemorrhage of anus or rectum', '', '21', false),
+  ('c1500000-0000-4000-8000-000000000006', 'ME24.A2', 'Oesophageal haemorrhage', '', '21', false),
+  ('c1500000-0000-4000-8000-000000000006', 'ME24.A3', 'Haematochezia', '', '21', false),
+  ('c1500000-0000-4000-8000-000000000006', 'ME24.A4', 'Melaena', '', '21', false),
+  ('c1500000-0000-4000-8000-000000000006', 'ME24.A5', 'Haematemesis', '', '21', false);
+update ehr.catalog_versions set active = false where kind = 'diagnosis' and active;
+update ehr.catalog_versions set active = true where id = 'c1500000-0000-4000-8000-000000000006';
+-- The count reads no word of a "without ..." clause, up to the next comma. Before (7ad367c1), with started without
+-- and the clause's tuberculosis, malaria, cholangitis and cholecystitis counted, so the negative entry came first:
+-- 1C62.3 named 8 of the 9 words, the others 7; DC11.6 named 7 of 8, DC11.4 6. Now 1C62.3 names 5 and DC11.6 4. In the
+-- title typed as written, NC91.0 named all 7 words and came second (on 0152 too, by its shorter title); now it names
+-- laceration only, and NB51.0 also lower, after its clause's comma (were the clause taken to the end, NC91.0 would
+-- come before NB51.0, by its shorter title).
+select pg_temp.expect('5h the count reads no word of a "without ..." clause: a positive entry comes first',
+  '1C61.3 1C60.3 1C62.3 more=false|DC11.4 DC11.6 more=false|NC91.1 NB51.1 NB51.0 NC91.0 more=false',
+  pg_temp.found('hiv disease clinical stage 4 with tuberculosis and malaria', 10) || '|'
+  || pg_temp.found('calculus of bile duct with cholangitis and cholecystitis', 10) || '|'
+  || pg_temp.found('Laceration with foreign body of lower leg', 10));
+-- When q has the word without, the clause counts: each entry names all of q's words, so the shorter title comes first,
+-- the entry q names. Were the clause taken out here too, KB87.1 would name 1 word (meconium) and KB87.2 2, and DB94.3
+-- 1 (liver) and DB95.11 2 (liver, hepatitis): the other entry first.
+select pg_temp.expect('5i a q with the word without still finds its own entry first',
+  'KB87.1 KB87.2 more=false|DB94.3 DB95.11 more=false',
+  pg_temp.found('meconium without ileus', 10) || '|' || pg_temp.found('liver without hepatitis', 10));
+-- A q shaped like a code counts nothing: its own subcodes keep rows 2-5, by their shorter titles. Before (7ad367c1),
+-- "ME24.A" counted as two words, and a only starts a code part of ME24.A2-ME24.A5 but a title word of ME24.0, ME24.A1
+-- and ME24.90, which came second to fourth.
+select pg_temp.expect('5j a q shaped like a code keeps its order: "ME24.A" puts its subcodes in rows 2-5',
+  'ME24.A ME24.A4 ME24.A5 ME24.A3 ME24.A2 ME24.0 ME24.A1 ME24.90 more=false|'
+  || 'ME24.A ME24.A4 ME24.A5 ME24.A3 ME24.A2 ME24.0 ME24.A1 ME24.90 more=false',
+  pg_temp.found('ME24.A', 10) || '|' || pg_temp.found('ME24 A', 10));
+-- The count still comes after "starts with q". An entry that starts with q can now name fewer of q's words: in
+-- "laceration with", with starts only the clause's without in NC91.0 and NB51.0, so the four laceration titles, which
+-- all start with q, put NC91.1 and NB51.1 first; NB31.01 names both words but does not start with q, so it comes last
+-- (were the count before "starts with q", it would come third). Before (7ad367c1, and on 0152 by shorter titles),
+-- NC91.0 came second.
+select pg_temp.expect('5k the count orders entries that start with q among themselves, before the others',
+  'NC91.1 NB51.1 NC91.0 NB51.0 NB31.01 more=false', pg_temp.found('laceration with', 10));
 
 do $$
 declare
