@@ -65,7 +65,14 @@
 --      of their own) fail on the first addendum's body (528bfecf) wherever
 --      it differs: a q without the word with counts every word again
 --      (laceration, pelvic fracture, "w/o"), a clause ends at the next word
---      with, and "type 1" and "lung ca" are counted again.
+--      with, and "type 1" and "lung ca" are counted again. Cases 5u-5x (a
+--      release of their own) hold what only the pin test held before (the
+--      third review's mutants passed every case above): the word with is
+--      read past the sixth word of q (5u, which fails on 7ad367c1's and
+--      0152's), a code with a 0 third counts nothing (5v, 7ad367c1's), a
+--      word that only starts with the letters with is not the word with
+--      (5w, 528bfecf's), and a clause in our other names ends at the next
+--      ; (5x, 0152's and 7ad367c1's).
 -- Synthetic version ids: prefix c150. The codes and titles are ICD-11's
 -- (WHO, CC BY-ND 3.0 IGO), verbatim; the other names are ours.
 set plpgsql.variable_conflict = error;
@@ -721,6 +728,83 @@ select pg_temp.expect('5s "type 1" is counted: 7A20.1 Narcolepsy, Type 2 is not 
 -- the lung carcinomas come first. On the first addendum's body (and 0152) the two shorter CA70 titles came first.
 select pg_temp.expect('5t "lung ca" is counted: the lung carcinomas come first',
   '2E62.2 2C25.3 2C25.1 2C25.2 2C25.4 CA70.0 CA70.4 more=false', pg_temp.found('lung ca', 10));
+
+-- The second addendum's rules where only the pin test held them before (the round 3 review's mutants of the body
+-- passed every case above). A release of its own (2026-06), so the rows above keep their answers. WHO's titles
+-- verbatim; the other names are ours.
+insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference, approvals_sha256, approved_at)
+  values ('c1500000-0000-4000-8000-000000000009', 'diagnosis', '2026-06', repeat('e', 64),
+          'synthetic review sign-off', repeat('f', 64), now());
+insert into ehr.catalog_diagnoses (version_id, code, title, other_names, chapter, residual) values
+  -- The word with as the seventh word of q: DD00's family.
+  ('c1500000-0000-4000-8000-000000000009', 'DD00', 'Diverticulitis of unspecified part of intestine', '', '13', false),
+  ('c1500000-0000-4000-8000-000000000009', 'DD00.0', 'Diverticulitis of unspecified part of intestine with complication',
+   '', '13', false),
+  ('c1500000-0000-4000-8000-000000000009', 'DD00.00',
+   'Diverticulitis of unspecified part of intestine with perforation or abscess', '', '13', false),
+  ('c1500000-0000-4000-8000-000000000009', 'DD00.0Y',
+   'Diverticulitis of unspecified part of intestine with other specified complication', '', '13', true),
+  ('c1500000-0000-4000-8000-000000000009', 'DD00.0Z',
+   'Diverticulitis of unspecified part of intestine with unspecified complication', '', '13', true),
+  ('c1500000-0000-4000-8000-000000000009', 'DD00.1',
+   'Diverticulitis of unspecified part of intestine without complication', '', '13', false),
+  ('c1500000-0000-4000-8000-000000000009', 'DD00.Z',
+   'Diverticulitis of unspecified part of intestine without specification of presence or absence of complications', '',
+   '13', true),
+  -- A code with a 0 third: 3 starts only a code part of NA07.3's subcodes, and the 30 of NA07.02's and NA07.03's titles.
+  ('c1500000-0000-4000-8000-000000000009', 'NA07.3', 'Diffuse brain injury', '', '22', false),
+  ('c1500000-0000-4000-8000-000000000009', 'NA07.30', 'Diffuse injury of cerebrum', '', '22', false),
+  ('c1500000-0000-4000-8000-000000000009', 'NA07.32', 'Diffuse injury of brainstem', '', '22', false),
+  ('c1500000-0000-4000-8000-000000000009', 'NA07.02',
+   'Concussion with loss of consciousness, short duration of less than 30 minutes', '', '22', false),
+  ('c1500000-0000-4000-8000-000000000009', 'NA07.03',
+   'Concussion with loss of consciousness, short duration of 30 minutes to less than one hour', '', '22', false),
+  -- A word that starts with the letters with: 6C40.40's other name says what uncomplicated means.
+  ('c1500000-0000-4000-8000-000000000009', '6C40.40', 'Alcohol withdrawal, uncomplicated',
+   'alcohol withdrawal without seizures or perceptual disturbances', '06', false),
+  ('c1500000-0000-4000-8000-000000000009', '6C40.42', 'Alcohol withdrawal with seizures', '', '06', false),
+  ('c1500000-0000-4000-8000-000000000009', '6C40.43', 'Alcohol withdrawal with perceptual disturbances and seizures', '',
+   '06', false),
+  -- A clause in our other names that ends at the next ; (DC11.3's second other name names chol...).
+  ('c1500000-0000-4000-8000-000000000009', 'DC11.2', 'Calculus of gallbladder or cystic duct with cholangitis',
+   'gallstones with cholangitis', '13', false),
+  ('c1500000-0000-4000-8000-000000000009', 'DC11.3',
+   'Calculus of gallbladder or cystic duct without cholecystitis or cholangitis',
+   'gallstones without cholecystitis or cholangitis; asymptomatic cholelithiasis', '13', false),
+  ('c1500000-0000-4000-8000-000000000009', 'DC11.6', 'Calculus of bile duct without cholangitis or cholecystitis',
+   'gallstones in bile duct without cholangitis or cholecystitis', '13', false);
+update ehr.catalog_versions set active = false where kind = 'diagnosis' and active;
+update ehr.catalog_versions set active = true where id = 'c1500000-0000-4000-8000-000000000009';
+-- The word with is read among every word of q, not only the first 6 that narrow: in "diverticulitis of unspecified
+-- part of intestine with complications" it is the seventh, so the clauses of DD00.1 and DD00.Z are out and DD00.0
+-- (with complication) comes first; complications starts no word of it (typed longer than complication), so the four
+-- with entries name 7 words and the others 6. Read among the first 6 only, the rule would not apply, and DD00.Z,
+-- whose clause names complications, would name all 8 words and come first (as on 7ad367c1); 0152 put DD00 first.
+select pg_temp.expect('5u the word with counts past the sixth word: DD00.0 first, not DD00.Z',
+  'DD00.0 DD00.00 DD00.0Z DD00.0Y DD00 DD00.1 DD00.Z more=false',
+  pg_temp.found('diverticulitis of unspecified part of intestine with complications', 10));
+-- "NA07 3" is NA07.3, an ICD-11 code with a 0 third (a digit): every entry counts 0, and the subcodes keep 0152's
+-- rows 2-3 by their shorter titles. Were a 0 third not a digit, 3 would count for NA07.02 and NA07.03 (it starts their
+-- 30) and for no subcode (only their code parts), so the concussions would come second and third (as on 7ad367c1).
+select pg_temp.expect('5v a code with a 0 third keeps its order: "NA07 3" puts its subcodes in rows 2-3',
+  'NA07.3 NA07.30 NA07.32 NA07.02 NA07.03 more=false|NA07.3 NA07.30 NA07.32 NA07.02 NA07.03 more=false',
+  pg_temp.found('NA07 3', 10) || '|' || pg_temp.found('na07 3', 10));
+-- withdrawal only starts with the letters with: q has no word with, so every word counts, the clause's seizures too.
+-- All three entries name the three words, and the shorter title comes first, as on 0152. Were any word starting with
+-- with to apply the rule, 6C40.40 would name 2 and come last (as on 528bfecf, which applied it to every q).
+select pg_temp.expect('5w a word that starts with the letters with is not the word with: "alcohol withdrawal seizures"',
+  '6C40.42 6C40.40(alcohol withdrawal without seizures or perceptual disturbances) 6C40.43 more=false',
+  pg_temp.found('alcohol withdrawal seizures', 10));
+-- A clause in our other names ends at the next ;, as each other name ends there: "gallstones with chol" (typed on the
+-- way to cholangitis) takes out DC11.3's "without cholecystitis or cholangitis", and chol still starts cholelithiasis
+-- in its second other name, so DC11.3 names 2 words and DC11.6 1 (gallstones; its chol words are all in clauses).
+-- DC11.2's other name starts with q, so it comes first on every body. Were the clause to run past the ;, DC11.3 would
+-- name 1 and come after DC11.6, by its longer title (as on 0152, by title length, and on 7ad367c1, where both name all
+-- three words).
+select pg_temp.expect('5x a clause in our other names ends at the next ;: "gallstones with chol"',
+  'DC11.2(gallstones with cholangitis) DC11.3(gallstones without cholecystitis or cholangitis) '
+  || 'DC11.6(gallstones in bile duct without cholangitis or cholecystitis) more=false',
+  pg_temp.found('gallstones with chol', 10));
 
 do $$
 declare
