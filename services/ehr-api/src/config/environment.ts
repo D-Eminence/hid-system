@@ -119,6 +119,12 @@ const environmentSchema = z
     // Stays off until 0155's sensitive-test list build is live, as the lab request setting does. The first switch-on in
     // production is recorded (hid-system#258); after it lab-api stays at or above 0156's image.
     DIAGNOSIS_NAME_ONLY_ENABLED: booleanString,
+    // Several tests in one lab request (ORD-6, 0158): off by default. It stops new groups only: it gates POST
+    // .../lab-request-groups (503 LAB_REQUEST_GROUPS_UNAVAILABLE while off) and whether createInTransaction writes a
+    // group (null while off: option (b), so an order set's tests are saved as separate requests). Groups already
+    // written are always answered (requestGroupId, the list's ?requestGroupId=). This image selects the column
+    // whatever the setting, so it needs 0158 applied.
+    LAB_REQUEST_GROUPS_ENABLED: booleanString,
   })
   .superRefine((environment, context) => {
     if (environment.AI_ENABLED) {

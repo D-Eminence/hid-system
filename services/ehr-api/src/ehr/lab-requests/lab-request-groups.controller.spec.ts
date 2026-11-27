@@ -1,0 +1,266 @@
+import { type INestApplication, Module } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
+import type { NextFunction, Request, Response } from 'express';
+import type { AddressInfo } from 'node:net';
+import { CorrelationMiddleware } from '../../common/correlation.middleware';
+import { ProblemDetailsFilter } from '../../common/problem';
+import type { HidRequest } from '../../common/request-context';
+import { createValidationPipe } from '../../common/validation-pipe';
+import { getEnvironment, resetEnvironmentForTests } from '../../config/environment';
+import { WorkItemProgressService } from '../../integrations/work-item-progress.service';
+import { NameOnlyCodes } from '../shared/name-only-codes';
+import { LAB_REQUEST_GROUPS_OFF, LAB_REQUEST_GROUPS_PROVIDER, LabRequestGroups, LabRequestGroupsOnGuard } from './lab-request-groups';
+import { LabRequestGroupsController } from './lab-request-groups.controller';
+import {
+  CreateLabRequestGroupDto,
+  CreateLabRequestGroupNameOnlyDto,
+  LAB_REQUEST_GROUP_MAX_TESTS,
+  LabRequestGroupTestDto,
+  LabRequestGroupTestNameOnlyDto,
+  LabRequestListQueryDto,
+} from './lab-request-groups.dto';
+import { LabRequestsController } from './lab-requests.controller';
+import { LabRequestsModule } from './lab-requests.module';
+import { LabRequestsService } from './lab-requests.service';
+
+/*
+ * ORD-6 (0158) over HTTP, through Nest with the app's global pipe and filter:
+ * the group route behind LAB_REQUEST_GROUPS_ENABLED (503 first while off), its
+ * body checks (each test as the single create checks it, name-only tests
+ * while LAB_REQUEST_NAME_ONLY_ENABLED is on, repeats refused), and a client's
+ * requestGroupId refused everywhere a body is taken (Rahman's answer 2).
+ * Fictional data only.
+ */
+const patientId = '123e4567-e89b-42d3-a456-426614174001';
+const encounterId = '123e4567-e89b-42d3-a456-426614174006';
+const facilityId = '123e4567-e89b-42d3-a456-426614174002';
+const requestId = '123e4567-e89b-42d3-a456-426614174005';
+const groupId = '323e4567-e89b-42d3-a456-426614174099';
+const actor = { id: 'actor', subject: 'staff:test', accountId: '123e4567-e89b-42d3-a456-426614174003',
+  authenticationMethod: 'local', roles: ['doctor'], facilityIds: [facilityId], facilities: [],
+  permissions: ['ehr.lab-request.write', 'ehr.lab-request.read', 'lab.work-item.accept'],
+  facility: { id: facilityId, membershipId: '123e4567-e89b-42d3-a456-426614174004' } };
+const coded = { testCodeSystem: 'LOINC', testCode: '58410-2', testDisplay: 'Full blood count' };
+const malaria = { testCodeSystem: 'HID-LAB', testCode: 'MP-RDT', testDisplay: 'Malaria rapid diagnostic test',
+  priority: 'urgent' };
+const body = (fields: Record<string, unknown> = {}) => ({ status: 'active', clinicalInformation: 'Fever for 3 days',
+  tests: [coded, malaria], ...fields });
+const encounter = `/ehr/patients/${patientId}/encounters/${encounterId}`;
+
+describe('the lab request group route over HTTP (ORD-6)', () => {
+  let app: INestApplication | undefined;
+  afterEach(async () => {
+    await app?.close();
+    app = undefined;
+  });
+
+  const start = async (groups: boolean, nameOnly = false) => {
+    const service = {
+      createGroup: jest.fn(async () => ({ requestGroupId: groupId, labRequests: [] })),
+      create: jest.fn(async () => ({ id: requestId })),
+      update: jest.fn(async () => ({ id: requestId })),
+      list: jest.fn(async () => ({ items: [], nextCursor: null })),
+    };
+    @Module({ controllers: [LabRequestsController, LabRequestGroupsController], providers: [
+      { provide: LabRequestsService, useValue: service },
+      { provide: WorkItemProgressService, useValue: { withLabRequestProgress: async (_c: unknown, _p: unknown,
+        page: unknown) => page } },
+      { provide: NameOnlyCodes, useValue: new NameOnlyCodes(nameOnly, false) },
+      { provide: LabRequestGroups, useValue: new LabRequestGroups(groups) }] })
+    class TestModule {}
+    const moduleRef = await Test.createTestingModule({ imports: [TestModule] }).compile();
+    app = moduleRef.createNestApplication({ logger: false });
+    const correlation = new CorrelationMiddleware();
+    app.use((request: Request & Record<string, unknown>, response: Response, next: NextFunction) => {
+      request.actor = actor;
+      request.facilityId = facilityId;
+      correlation.use(request as unknown as HidRequest, response, next);
+    });
+    app.useGlobalPipes(createValidationPipe());
+    app.useGlobalFilters(new ProblemDetailsFilter());
+    await app.listen(0, '127.0.0.1');
+    const port = (app.getHttpServer().address() as AddressInfo).port;
+    const call = async (method: string, path: string, payload?: unknown, key: string | null = 'group-create-key-00001') => {
+      const response = await fetch(`http://127.0.0.1:${port}${path}`, { method,
+        ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+        headers: { 'content-type': 'application/json', 'x-purpose-of-use': 'direct-care',
+          ...(key ? { 'idempotency-key': key } : {}) } });
+      return { status: response.status, body: await response.json() as Record<string, unknown> };
+    };
+    const post = (payload: unknown, key?: string | null) => call('POST', `${encounter}/lab-request-groups`, payload, key);
+    return { call, post, service };
+  };
+  const refused = (field: string) => ({ status: 400, body: expect.objectContaining({ code: 'VALIDATION_FAILED',
+    errors: expect.arrayContaining([expect.objectContaining({ field })]) }) });
+
+  it('off: 503 LAB_REQUEST_GROUPS_UNAVAILABLE before the body or the key is read, and nothing reaches the service',
+    async () => {
+      const { post, service } = await start(false);
+      for (const [payload, key] of [[body(), undefined], [{ tests: 'not a list' }, undefined], [body(), null]] as const) {
+        // A 5xx answer's detail is the filter's fixed text; the website words it from the code.
+        expect(await post(payload, key)).toMatchObject({ status: 503, body: { status: 503,
+          code: 'LAB_REQUEST_GROUPS_UNAVAILABLE' } });
+      }
+      expect(service.createGroup).not.toHaveBeenCalled();
+    });
+
+  it('on: the body reaches the service, with the request\'s arrival time for the send deadline', async () => {
+    const before = Date.now();
+    const { post, service } = await start(true);
+    expect(await post(body())).toMatchObject({ status: 201, body: { requestGroupId: groupId, labRequests: [] } });
+    const [context, patient, visit, input, key, receivedAt] = service.createGroup.mock.calls[0] as unknown as
+      [unknown, string, string, CreateLabRequestGroupDto, string, number];
+    expect([patient, visit, key]).toEqual([patientId, encounterId, 'group-create-key-00001']);
+    expect(context).toMatchObject({ facilityId, purposeOfUse: 'direct-care' });
+    expect(input).toBeInstanceOf(CreateLabRequestGroupDto);
+    expect(input.tests.map((test) => test.constructor)).toEqual([LabRequestGroupTestDto, LabRequestGroupTestDto]);
+    expect(input).toMatchObject({ status: 'active', priority: 'routine', clinicalInformation: 'Fever for 3 days' });
+    expect(receivedAt).toBeGreaterThanOrEqual(before);
+    expect(receivedAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('on: the key is required as on every clinical create (400 IDEMPOTENCY_KEY_REQUIRED)', async () => {
+    const { post, service } = await start(true);
+    expect(await post(body(), null)).toMatchObject({ status: 400, body: { code: 'IDEMPOTENCY_KEY_REQUIRED' } });
+    expect(service.createGroup).not.toHaveBeenCalled();
+  });
+
+  it('refuses a client\'s requestGroupId in the group body and in a test (400 VALIDATION_FAILED)', async () => {
+    const { post, service } = await start(true);
+    expect(await post(body({ requestGroupId: groupId }))).toMatchObject(refused('requestGroupId'));
+    expect(await post(body({ tests: [{ ...coded, requestGroupId: groupId }] }))).toMatchObject(refused('tests'));
+    expect(service.createGroup).not.toHaveBeenCalled();
+  });
+
+  it('refuses a client\'s requestGroupId in the single create (setting on or off) and in a PATCH', async () => {
+    for (const nameOnly of [false, true]) {
+      const { call, service } = await start(true, nameOnly);
+      expect(await call('POST', `${encounter}/lab-requests`, { ...coded, status: 'active', requestGroupId: groupId }))
+        .toMatchObject(refused('requestGroupId'));
+      expect(await call('PATCH', `${encounter}/lab-requests/${requestId}`, { expectedRowVersion: 1, priority: 'stat',
+        changeReason: 'Clinical review', requestGroupId: groupId })).toMatchObject(refused('requestGroupId'));
+      expect(service.create).not.toHaveBeenCalled();
+      expect(service.update).not.toHaveBeenCalled();
+      // Without it, both reach the service as before.
+      expect((await call('POST', `${encounter}/lab-requests`, { ...coded, status: 'active' })).status).toBe(201);
+      expect((await call('PATCH', `${encounter}/lab-requests/${requestId}`, { expectedRowVersion: 1, priority: 'stat',
+        changeReason: 'Clinical review' })).status).toBe(200);
+      await app?.close();
+      app = undefined;
+    }
+  });
+
+  it('takes 1 to 20 tests, a status of draft or active, and each test with the single create\'s fields only', async () => {
+    const { post, service } = await start(true);
+    const many = Array.from({ length: LAB_REQUEST_GROUP_MAX_TESTS + 1 }, (_value, index) => ({ testCodeSystem: 'LOCAL',
+      testCode: `T${index}`, testDisplay: `Test ${index}` }));
+    expect(LAB_REQUEST_GROUP_MAX_TESTS).toBe(20);
+    expect(await post(body({ tests: many }))).toMatchObject(refused('tests'));
+    expect(await post(body({ tests: [] }))).toMatchObject(refused('tests'));
+    expect(await post(body({ tests: undefined }))).toMatchObject(refused('tests'));
+    for (const status of ['on_hold', 'completed', 'cancelled', 'entered_in_error', null]) {
+      expect(await post(body({ status }))).toMatchObject(refused('status'));
+    }
+    for (const field of [{ status: 'active' }, { clinicalInformation: 'Only this test' }, { externalOrderReference: 'X1' },
+      { priority: null }, { testDisplay: '' }, { specimenTypeCode: 'x'.repeat(101) }]) {
+      expect(await post(body({ tests: [{ ...coded, ...field }] }))).toMatchObject(refused('tests'));
+    }
+    expect(await post(body({ priority: null }))).toMatchObject(refused('priority'));
+    expect(await post(body({ clinicalInformation: 'x'.repeat(4001) }))).toMatchObject(refused('clinicalInformation'));
+    expect(service.createGroup).not.toHaveBeenCalled();
+    expect((await post(body({ tests: many.slice(0, 20) }))).status).toBe(201);
+    expect((await post(body({ status: 'draft', tests: [coded] }))).status).toBe(201);
+  });
+
+  it('a test by name only: 400 VALIDATION_FAILED while LAB_REQUEST_NAME_ONLY_ENABLED is off, as the single create', async () => {
+    const { post, service } = await start(true, false);
+    expect(await post(body({ tests: [coded, { testDisplay: 'Sickling test' }] }))).toMatchObject(refused('tests'));
+    expect(service.createGroup).not.toHaveBeenCalled();
+  });
+
+  it('with LAB_REQUEST_NAME_ONLY_ENABLED on, a group mixes coded and name-only tests; one code alone is refused', async () => {
+    const { post, service } = await start(true, true);
+    expect((await post(body({ tests: [coded, { testDisplay: 'Sickling test' }] }))).status).toBe(201);
+    const input = (service.createGroup.mock.calls[0] as unknown as unknown[])[3] as CreateLabRequestGroupNameOnlyDto;
+    expect(input).toBeInstanceOf(CreateLabRequestGroupNameOnlyDto);
+    expect(input.tests.map((test) => test.constructor)).toEqual([LabRequestGroupTestNameOnlyDto, LabRequestGroupTestNameOnlyDto]);
+    expect(input.tests[1]).toMatchObject({ testDisplay: 'Sickling test' });
+    expect(input.tests[1]?.testCode).toBeUndefined();
+    expect(await post(body({ tests: [coded, { testDisplay: 'Sickling test', testCode: 'SICKLE' }] }))).toMatchObject({
+      status: 400, body: { code: 'LAB_TEST_CODE_INCOMPLETE', detail: 'Test code and its code system must be supplied together.',
+        errors: [{ field: 'tests.1' }] } });
+    expect(await post(body({ tests: [{ ...coded, testCode: null }] }))).toMatchObject(refused('tests'));
+  });
+
+  it('refuses a repeated test: the same code system and code, or the same name (400 LAB_REQUEST_TEST_REPEATED)', async () => {
+    const { post, service } = await start(true, true);
+    const repeated = (index: number) => ({ status: 400, body: { code: 'LAB_REQUEST_TEST_REPEATED',
+      detail: 'This test is already in the request.', errors: [{ field: `tests.${index}` }] } });
+    expect(await post(body({ tests: [coded, malaria, { ...coded, testDisplay: 'FBC' }] }))).toMatchObject(repeated(2));
+    expect(await post(body({ tests: [coded, { ...malaria, testDisplay: 'Full blood count' }] }))).toMatchObject(repeated(1));
+    // Two tests by name only with one name; the name is compared without case or extra spaces.
+    expect(await post(body({ tests: [{ testDisplay: 'Sickling test' }, { testDisplay: ' sickling  TEST ' }] })))
+      .toMatchObject(repeated(1));
+    expect(await post(body({ tests: [coded, { testDisplay: 'full blood count' }] }))).toMatchObject(repeated(1));
+    expect(service.createGroup).not.toHaveBeenCalled();
+    // The same code in another code system, and different names, are different tests.
+    expect((await post(body({ tests: [coded, { ...coded, testCodeSystem: 'LOCAL', testDisplay: 'FBC (local)' },
+      { testDisplay: 'Sickling test' }] }))).status).toBe(201);
+  });
+
+  it('the list takes ?requestGroupId= (a UUID) whatever the setting says, and refuses anything else', async () => {
+    const { call, service } = await start(false);
+    expect((await call('GET', `${encounter}/lab-requests?requestGroupId=${groupId}&limit=5`)).status).toBe(200);
+    expect(service.list.mock.calls[0]?.[3 as never]).toBeInstanceOf(LabRequestListQueryDto);
+    expect(service.list.mock.calls[0]?.[3 as never]).toMatchObject({ requestGroupId: groupId, limit: 5 });
+    expect(await call('GET', `${encounter}/lab-requests?requestGroupId=group-1`)).toMatchObject(refused('requestGroupId'));
+    expect((await call('GET', `${encounter}/lab-requests`)).status).toBe(200);
+    expect(service.list.mock.calls.map((args) => (args as unknown[])[3])).toEqual([
+      expect.objectContaining({ requestGroupId: groupId }), expect.not.objectContaining({ requestGroupId: expect.anything() })]);
+  });
+});
+
+describe('LAB_REQUEST_GROUPS_ENABLED and the module', () => {
+  const original = { ...process.env };
+  afterEach(() => {
+    for (const name of Object.keys(process.env)) if (!(name in original)) delete process.env[name];
+    Object.assign(process.env, original);
+    resetEnvironmentForTests();
+  });
+  const environment = (value?: string) => {
+    Object.assign(process.env, { DATABASE_URL: 'postgresql://ehr:test@127.0.0.1/hid', CORS_ORIGINS: 'http://localhost',
+      STORAGE_MODE: 'disabled' });
+    if (value === undefined) delete process.env.LAB_REQUEST_GROUPS_ENABLED;
+    else process.env.LAB_REQUEST_GROUPS_ENABLED = value;
+    resetEnvironmentForTests();
+  };
+
+  it('is off unless set to true', () => {
+    environment();
+    expect(getEnvironment().LAB_REQUEST_GROUPS_ENABLED).toBe(false);
+    expect(LabRequestGroups.fromEnvironment().enabled).toBe(false);
+    environment('true');
+    expect(LabRequestGroups.fromEnvironment().enabled).toBe(true);
+    environment('false');
+    expect(LabRequestGroups.fromEnvironment().enabled).toBe(false);
+    expect(LAB_REQUEST_GROUPS_OFF.enabled).toBe(false);
+  });
+
+  it('the guard answers 503 only while off', () => {
+    expect(new LabRequestGroupsOnGuard(new LabRequestGroups(true)).canActivate()).toBe(true);
+    expect(() => new LabRequestGroupsOnGuard(new LabRequestGroups(false)).canActivate())
+      .toThrow(expect.objectContaining({ code: 'LAB_REQUEST_GROUPS_UNAVAILABLE' }));
+  });
+
+  it('LabRequestsModule gives the service and the guard the setting as the environment sets it', async () => {
+    environment('true');
+    const stand = (token: unknown) => ({ standIn: typeof token === 'function' ? token.name : String(token) });
+    const moduleRef = await Test.createTestingModule({ imports: [LabRequestsModule] }).useMocker(stand).compile();
+    expect(moduleRef.get(LabRequestGroupsController)).toBeInstanceOf(LabRequestGroupsController);
+    expect(moduleRef.get(LabRequestGroups)).toEqual(new LabRequestGroups(true));
+    const labRequests = moduleRef.get(LabRequestsService) as unknown as Record<string, unknown>;
+    expect(labRequests.groups).toBe(moduleRef.get(LabRequestGroups));
+    expect(LAB_REQUEST_GROUPS_PROVIDER.provide).toBe(LabRequestGroups);
+    await moduleRef.close();
+  });
+});

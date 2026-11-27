@@ -24,7 +24,7 @@ const createdAtExact = '2026-10-01T09:00:00.123456Z';
 const row = (status: OrderStatus, rowVersion = '1'): LabRequestRow => ({
   id: requestId, encounterId, patientId, facilityId, createdBy: accountId, createdByMembershipId: membershipId,
   testCodeSystem: 'loinc', testCode: '718-7', testDisplay: 'Hemoglobin', priority: 'routine', status,
-  specimenTypeCode: null, clinicalInformation: 'Fatigue', externalOrderReference: null, rowVersion,
+  specimenTypeCode: null, clinicalInformation: 'Fatigue', externalOrderReference: null, requestGroupId: null, rowVersion,
   createdAt: new Date('2026-10-01T09:00:00.123Z'), updatedAt: new Date('2026-10-01T09:00:00.123Z'),
 });
 const route = (effectiveState: string, acceptedAt: string | null = null): OrderRouteSummary => ({
