@@ -9132,10 +9132,12 @@ backend does with the key, the audit and Lab's answers, beside EHR-C5's.
   most 190 pairs for 20 tests), and it names every test that repeats an
   earlier one. One culture on blood and on urine goes in one Save. A
   second blood-culture set from another site has the same specimen, so it
-  goes as its own request. The refusal says the ways on ("This test is
-  already in the request for this specimen, or with no specimen. If it is
-  for another specimen, choose the specimen on each. To order it again,
-  save this request, then add it on its own.").
+  goes as its own request, with its site in that request's
+  `clinicalInformation` (the planned contract's screen notes). The refusal
+  says the ways on ("This test is already in the request for this
+  specimen, or with no specimen. If it is for another specimen, choose the
+  specimen on each. To order it again, save this request, then add it on
+  its own.").
 
 ## SX-1: modules map per facility
 

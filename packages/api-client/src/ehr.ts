@@ -126,7 +126,8 @@ export interface EhrLabRequestGroupInput {
    * missing or blank, which matches any specimen of the same test. The
    * codes and the specimen are compared without case, the name without
    * case or extra spaces. One culture on blood and on urine goes in one
-   * Save; a second set on the same specimen goes as its own request.
+   * Save; a second set on the same specimen goes as its own request, with
+   * its site in that request's clinicalInformation.
    */
   tests: EhrLabRequestGroupTestInput[];
 }

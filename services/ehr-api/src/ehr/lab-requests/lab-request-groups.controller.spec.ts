@@ -313,6 +313,24 @@ describe('the lab request group route over HTTP (ORD-6)', () => {
     expect(service.createGroup).toHaveBeenCalledTimes(4);
   });
 
+  it('a second set on the same specimen goes as its own request, with its site in its clinical information (the '
+    + 'clinical owner\'s call, 27 Nov)', async () => {
+    const { call, post, service } = await start(true, true);
+    const bloodCulture = { testCodeSystem: 'LOINC', testCode: '600-7', testDisplay: 'Blood culture',
+      specimenTypeCode: 'Blood' };
+    // In one Save it is refused, as a likely double entry ...
+    expect(await post(body({ tests: [bloodCulture, malaria, { ...bloodCulture, testDisplay: 'Blood culture, set 2' }] })))
+      .toMatchObject({ status: 400, body: { code: 'LAB_REQUEST_TEST_REPEATED', errors: [{ field: 'tests.2' }] } });
+    // ... so the group is saved first, then the second set on its own, its site in its clinicalInformation.
+    expect(await post(body({ tests: [bloodCulture, malaria] }))).toMatchObject({ status: 201 });
+    const secondSet = { ...bloodCulture, status: 'active', clinicalInformation: 'Blood culture, set 2: right arm' };
+    expect((await call('POST', `${encounter}/lab-requests`, secondSet, 'second-set-key-000001')).status).toBe(201);
+    expect(service.createGroup).toHaveBeenCalledTimes(1);
+    expect(service.create).toHaveBeenCalledTimes(1);
+    expect(service.create.mock.calls[0]).toEqual(expect.arrayContaining([expect.objectContaining({
+      testCode: '600-7', specimenTypeCode: 'Blood', clinicalInformation: 'Blood culture, set 2: right arm' })]));
+  });
+
   it('repeatedTests: the pairs, case by case', () => {
     const test = (fields: Record<string, string>) => ({ testDisplay: 'Blood culture', ...fields }) as never;
     // Each coded test with a name of its own, so only the code can repeat.
