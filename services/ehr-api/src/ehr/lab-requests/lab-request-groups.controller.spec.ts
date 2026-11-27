@@ -93,16 +93,17 @@ describe('the lab request group route over HTTP (ORD-6)', () => {
   const refused = (field: string) => ({ status: 400, body: expect.objectContaining({ code: 'VALIDATION_FAILED',
     errors: expect.arrayContaining([expect.objectContaining({ field })]) }) });
 
-  it('off: 503 LAB_REQUEST_GROUPS_UNAVAILABLE before the body or the key is read, and nothing reaches the service',
-    async () => {
-      const { post, service } = await start(false);
-      for (const [payload, key] of [[body(), undefined], [{ tests: 'not a list' }, undefined], [body(), null]] as const) {
-        // A 5xx answer's detail is the filter's fixed text; the website words it from the code.
-        expect(await post(payload, key)).toMatchObject({ status: 503, body: { status: 503,
-          code: 'LAB_REQUEST_GROUPS_UNAVAILABLE' } });
-      }
-      expect(service.createGroup).not.toHaveBeenCalled();
-    });
+  it('off: 503 LAB_REQUEST_GROUPS_UNAVAILABLE before the body is validated or the key is read, and nothing reaches '
+    + 'the service', async () => {
+    const { post, service } = await start(false);
+    for (const [payload, key] of [[body(), undefined], [{ tests: 'not a list' }, undefined], [body(), null]] as const) {
+      // Only a direct caller sees this code: through the public gateway the browser gets nginx's own 503
+      // UPSTREAM_UNAVAILABLE, as for every ehr-api 502, 503 and 504.
+      expect(await post(payload, key)).toMatchObject({ status: 503, body: { status: 503,
+        code: 'LAB_REQUEST_GROUPS_UNAVAILABLE' } });
+    }
+    expect(service.createGroup).not.toHaveBeenCalled();
+  });
 
   it('on: the body reaches the service, with the request\'s arrival time for the send deadline', async () => {
     const before = Date.now();
@@ -128,7 +129,8 @@ describe('the lab request group route over HTTP (ORD-6)', () => {
   it('refuses a client\'s requestGroupId in the group body and in a test (400 VALIDATION_FAILED)', async () => {
     const { post, service } = await start(true);
     expect(await post(body({ requestGroupId: groupId }))).toMatchObject(refused('requestGroupId'));
-    expect(await post(body({ tests: [{ ...coded, requestGroupId: groupId }] }))).toMatchObject(refused('tests'));
+    expect(await post(body({ tests: [{ ...coded, requestGroupId: groupId }] })))
+      .toMatchObject(refused('tests.0.requestGroupId'));
     expect(service.createGroup).not.toHaveBeenCalled();
   });
 
@@ -163,7 +165,8 @@ describe('the lab request group route over HTTP (ORD-6)', () => {
     }
     for (const field of [{ status: 'active' }, { clinicalInformation: 'Only this test' }, { externalOrderReference: 'X1' },
       { priority: null }, { testDisplay: '' }, { specimenTypeCode: 'x'.repeat(101) }]) {
-      expect(await post(body({ tests: [{ ...coded, ...field }] }))).toMatchObject(refused('tests'));
+      expect(await post(body({ tests: [malaria, { ...coded, ...field }] })))
+        .toMatchObject(refused(`tests.1.${Object.keys(field)[0] ?? ''}`));
     }
     expect(await post(body({ priority: null }))).toMatchObject(refused('priority'));
     expect(await post(body({ clinicalInformation: 'x'.repeat(4001) }))).toMatchObject(refused('clinicalInformation'));
@@ -174,9 +177,30 @@ describe('the lab request group route over HTTP (ORD-6)', () => {
 
   it('a test by name only: 400 VALIDATION_FAILED while LAB_REQUEST_NAME_ONLY_ENABLED is off, as the single create', async () => {
     const { post, service } = await start(true, false);
-    expect(await post(body({ tests: [coded, { testDisplay: 'Sickling test' }] }))).toMatchObject(refused('tests'));
+    expect(await post(body({ tests: [coded, { testDisplay: 'Sickling test' }] }))).toMatchObject(refused('tests.1.testCode'));
     expect(service.createGroup).not.toHaveBeenCalled();
   });
+
+  it('names a refused field inside a test as tests.<n>.<field> with its messages, and a test refused whole as tests.<n>',
+    async () => {
+      const { post, service } = await start(true, true);
+      // The global pipe would name only `tests`, with no message, so the website could mark no row.
+      expect(await post(body({ tests: [coded, malaria, { testDisplay: '   ' }] }))).toMatchObject({ status: 400,
+        body: { code: 'VALIDATION_FAILED', errors: [{ field: 'tests.2.testDisplay',
+          messages: ['testDisplay must be longer than or equal to 1 characters'] }] } });
+      expect(await post(body({ tests: [coded, { ...malaria, requestGroupId: groupId }] }))).toMatchObject({ status: 400,
+        body: { code: 'VALIDATION_FAILED', errors: [{ field: 'tests.1.requestGroupId',
+          messages: ['property requestGroupId should not exist'] }] } });
+      for (const entry of [null, 'Full blood count']) {
+        expect(await post(body({ tests: [coded, entry] }))).toMatchObject({ status: 400, body: {
+          code: 'VALIDATION_FAILED', errors: [{ field: 'tests.1',
+            messages: ['each value in nested property tests must be either object or array'] }] } });
+      }
+      // Fields outside the tests keep the global pipe's names.
+      expect(await post(body({ status: 'on_hold', tests: [coded, { testDisplay: '' }] }))).toMatchObject({ status: 400,
+        body: { errors: [{ field: 'tests.1.testDisplay' }, { field: 'status' }] } });
+      expect(service.createGroup).not.toHaveBeenCalled();
+    });
 
   it('with LAB_REQUEST_NAME_ONLY_ENABLED on, a group mixes coded and name-only tests; one code alone is refused', async () => {
     const { post, service } = await start(true, true);
@@ -189,7 +213,11 @@ describe('the lab request group route over HTTP (ORD-6)', () => {
     expect(await post(body({ tests: [coded, { testDisplay: 'Sickling test', testCode: 'SICKLE' }] }))).toMatchObject({
       status: 400, body: { code: 'LAB_TEST_CODE_INCOMPLETE', detail: 'Test code and its code system must be supplied together.',
         errors: [{ field: 'tests.1' }] } });
-    expect(await post(body({ tests: [{ ...coded, testCode: null }] }))).toMatchObject(refused('tests'));
+    expect(await post(body({ tests: [{ ...coded, testCode: null }] }))).toMatchObject(refused('tests.0.testCode'));
+    // Every test with one code is named, not only the first.
+    expect(await post(body({ tests: [coded, { testDisplay: 'Sickling test', testCode: 'SICKLE' },
+      { testDisplay: 'Widal test', testCodeSystem: 'HID-LAB' }] }))).toMatchObject({ status: 400, body: {
+      code: 'LAB_TEST_CODE_INCOMPLETE', errors: [{ field: 'tests.1' }, { field: 'tests.2' }] } });
   });
 
   it('refuses a repeated test: the same code system and code, or the same name (400 LAB_REQUEST_TEST_REPEATED)', async () => {
@@ -202,6 +230,10 @@ describe('the lab request group route over HTTP (ORD-6)', () => {
     expect(await post(body({ tests: [{ testDisplay: 'Sickling test' }, { testDisplay: ' sickling  TEST ' }] })))
       .toMatchObject(repeated(1));
     expect(await post(body({ tests: [coded, { testDisplay: 'full blood count' }] }))).toMatchObject(repeated(1));
+    // Every test that repeats an earlier one is named, not only the first.
+    expect(await post(body({ tests: [coded, malaria, { ...coded, testDisplay: 'FBC' }, { testDisplay: 'Malaria rapid '
+      + 'diagnostic test' }] }))).toMatchObject({ status: 400, body: { code: 'LAB_REQUEST_TEST_REPEATED',
+      errors: [{ field: 'tests.2' }, { field: 'tests.3' }] } });
     expect(service.createGroup).not.toHaveBeenCalled();
     // The same code in another code system, and different names, are different tests.
     expect((await post(body({ tests: [coded, { ...coded, testCodeSystem: 'LOCAL', testDisplay: 'FBC (local)' },

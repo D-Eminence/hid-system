@@ -14,8 +14,9 @@ export class LabRequestGroupsController {
    * ORD-6 (0158): several tests in one lab request, one Save. Anyone who may
    * create a lab request (`ehr.lab-request.write`). While
    * LAB_REQUEST_GROUPS_ENABLED is off it answers 503
-   * LAB_REQUEST_GROUPS_UNAVAILABLE before the body is read
-   * (LabRequestGroupsOnGuard). The body is checked by
+   * LAB_REQUEST_GROUPS_UNAVAILABLE before the body is validated
+   * (LabRequestGroupsOnGuard; through the public gateway the browser gets
+   * the gateway's 503 UPSTREAM_UNAVAILABLE). The body is checked by
    * CreateLabRequestGroupBodyPipe (each test as the single create checks it;
    * tests by name only while LAB_REQUEST_NAME_ONLY_ENABLED is on). One
    * Idempotency-Key covers the group. The sends to Lab end 25 s after the
