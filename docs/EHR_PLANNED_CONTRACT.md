@@ -1970,10 +1970,11 @@ names. Those come from `DIAGNOSIS_SYNONYMS` in the same file (HTN, DM,
 "MP+", typhoid...), are kept apart from WHO's words, and contain no ICD-10
 content. A code typed exactly comes first, then an entry whose title or
 one of our other names is `q` itself, then those whose title or other name
-starts with `q`, then, for a `q` of 2 or more words, those that name more
-of `q`'s words (every word, not only the first 6, that starts a word of the
-title or of one of our other names, never a part of the code; 0157), then
-shorter titles.
+starts with `q`, then, for a `q` of 2 or more words not shaped like a
+code, those that name more of `q`'s words (every word, not only the first
+6, that starts a word of the title or of one of our other names, never a
+part of the code, nor a word of a "without ..." clause unless `q` has the
+word without; 0157), then shorter titles.
 
 Example for `q=falciparum`:
 
@@ -2231,8 +2232,9 @@ file's seed in `docs/codes/catalog-approvals.json`.
     Rheumatoid arthritis, whose other name is ra, before shorter titles
     starting with ra; "urti" is CA07.0, "prom" JA89); then entries whose
     title or other name starts with `q`; then, for a `q` of 2 or more
-    words, entries that name more of `q`'s words; then shorter titles. A
-    title's own apostrophe-s is compared as `q`'s is.
+    words not shaped like a code, entries that name more of `q`'s words;
+    then shorter titles. A title's own apostrophe-s is compared as `q`'s
+    is.
   - Naming `q`'s words (0157, Rahman's second minor): each word of `q` as
     searched (lower case, split as `q` is, each cut to 40 characters, and
     every word, not only the first 6 that narrow the search) counts when it
@@ -2247,11 +2249,39 @@ file's seed in `docs/codes/catalog-approvals.json`.
     4. The count never changes which entries match, how many, or `more`,
     and the first three keys come before it, so a code typed in any form,
     and a title typed as written, still come first.
-  - A one-word `q` counts nothing, so its order is as before (Ola, clinical
-    owner): a clinician who types a code fragment such as "1a" or "da"
-    usually means the code, so "1a" still puts 1A00 Cholera before GC51.00
-    Female Genital Mutilation Type 1a and KB88.0 Necrotising enterocolitis
-    of newborn, Stage 1A & B.
+  - Words in a "without ..." clause do not count (0157, Ola's addendum on
+    hid-system#258, 27 Nov 2026): the count reads the entry's words with
+    each "without ..." clause taken out first (the word without, split as
+    `q` is, up to the next `,` or `;` or the end), from the title and from
+    our other names. "with" also starts "without", so before, "hiv disease
+    clinical stage 4 with tuberculosis and malaria" put 1C62.3 ("...
+    without mention of tuberculosis or malaria") first, and "calculus of
+    bile duct with cholangitis and cholecystitis" put DC11.6 ("... without
+    cholangitis or cholecystitis") first: the opposite meaning, in the row
+    a clinician most often picks. Now 1C61.3 and 1C60.3 come before 1C62.3,
+    and DC11.4 before DC11.6; "diverticulitis of unspecified part of
+    intestine with complications" puts DD00.0 (with complication) first,
+    not DD00.Z, and "varicella complications" puts 1E90.Y Varicella with
+    other specified complication before 1E90.0 Varicella without
+    complication. When `q` itself has the word without, every word counts,
+    so "meconium without ileus" still puts KB87.1 Meconium plug without
+    ileus first, and "liver without hepatitis" DB94.3 Alcoholic cirrhosis
+    of liver without hepatitis. A clause also takes a "with ..." that
+    follows it before any `,` or `;` (4 titles of the 2026-01 release:
+    6A02.0, 6A02.2, 6C90.10 and 6C90.11). Which entries match, how many
+    and `more` do not change, and fix 1's whole-word rule still reads every
+    word of the entry.
+  - A one-word `q`, or a `q` shaped like a code, counts nothing, so its
+    order is as before (Ola, clinical owner): a clinician who types a code
+    fragment such as "1a" or "da" usually means the code, so "1a" still
+    puts 1A00 Cholera before GC51.00 Female Genital Mutilation Type 1a and
+    KB88.0 Necrotising enterocolitis of newborn, Stage 1A & B. "ME24.A" or
+    "KA21.2" split into two words, so before (Ola's addendum) their own
+    subcodes fell behind other entries in rows 2-5; now they keep 0152's
+    rows. The shape is the one the code key tests, so it also takes any
+    four letters or digits, a space and one or two more: "type 1" (TYPE.1)
+    and "loss of" keep 0152's order too, and "type 1" again offers 7A20.1
+    Narcolepsy, Type 2 third.
   - With the 2026-01 release loaded, each of its 16,883 titles of 2 to 100
     characters, typed as written or in upper case, comes first. The 372
     longer ones, cut to 100 characters, are each in the first 25.
@@ -2440,7 +2470,10 @@ live table is altered.
 ### First slice, ranking fixes: Rahman's two minors (0157, draft, not live)
 
 Built on 27 Nov 2026 (lane D), on 0152, as the design note on
-hid-system#258 (Ola, 26 Nov 2026, 13:20 UTC) set out. Rahman's last look
+hid-system#258 (Ola, 26 Nov 2026, 13:20 UTC) set out, with Ola's addendum
+there (27 Nov 2026, 10:10 UTC) from the build's clinical review: the count
+reads no word of a "without ..." clause unless `q` has the word, and a `q`
+shaped like a code counts nothing (both described above). Rahman's last look
 at #320 cleared 0152 to sign and left two ranking minors, to fix before any
 ICD-11 release is activated: the whole-word rule of the second attempt, and
 the count of `q`'s words named (both described in the first slice, above).
@@ -2450,12 +2483,17 @@ The number 0157 is a booking, given at integration in release order.
   `ehr.search_catalog_diagnoses(q, limit)`, with the same columns,
   PL/pgSQL, STABLE, SECURITY DEFINER and `search_path`, all restated, so
   its owner, grants and oid are kept. The body is 0152's but for the two
-  fixes and the new fourth key. No table, index, trigger or grant changes,
-  and no table is locked (PL/pgSQL's body check is syntax only); a search
-  in progress finishes on the old body, and the next one uses the new.
+  fixes and the new fourth key, with the addendum's two changes to its
+  count. The words the count reads are listed once per row, beside the
+  entry's own words, only when the count runs, and only for an entry with
+  the letters without in its title or other names (260 titles of the
+  2026-01 release, and no other name); every other entry's count reads its
+  own words. No table, index, trigger or grant changes, and no table is
+  locked (PL/pgSQL's body check is syntax only); a search in progress
+  finishes on the old body, and the next one uses the new.
   - Preconditions (55000 "0157: …", nothing applied): 0149's versions
     table and 0152's list and search; "0157: already applied" when the
-    search's body is 0157's (md5 `d1a07a48…`); otherwise the search as
+    search's body is 0157's (md5 `b5b5ee7a…`); otherwise the search as
     0152 made it (the md5 of its body, `43f331b7…`, PL/pgSQL, SECURITY
     DEFINER, STABLE, its `search_path`, its owner and its columns), and
     0149's query helper as 0152 pins it. 0153-0156 and 0159 are not
@@ -2471,8 +2509,22 @@ The number 0157 is a booking, given at integration in release order.
   0152's body verbatim, everything restated, and 0152's comment; then
   check the md5 `43f331b7…`, STABLE, SECURITY DEFINER, `search_path`, owner
   and grants. No table lock.
-- **Release:** before the first ICD-11 release is activated. It can ride
-  alone, or with any file but 0156, which goes alone.
+- **Known limits** (Ola's addendum: accepted):
+  - Fix 1 and "mumps complications": 0152 found nothing; 0157 offers only
+    1D80.0 Mumps without complication. It is the negation blindness 0152
+    already has for "varicella complications". The fix is an other name
+    in the seed follow-up (#342): "mumps with complication" on
+    1D80.1-1D80.Y.
+  - The cost of queries of many short words: a junk `q` of 50 one-letter
+    words takes about 335 ms, against about 150 ms on 0152, as each word is
+    counted for each of thousands of entries. The 100-character limit and
+    the 429 rate limit bound it. The note's timed queries are unchanged
+    within noise.
+- **Release:** before the first ICD-11 release is activated. It rides
+  alone, or only with files of 0155-0159 (not 0156, which goes alone),
+  never with the sprint's files or 0178-0180 (Rahman's rule for lane D's
+  batch, 7167493074 point 3, as Ola's addendum narrows it). It needs no
+  lock.
 
 
 ### Target
