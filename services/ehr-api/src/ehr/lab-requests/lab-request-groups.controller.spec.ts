@@ -340,7 +340,7 @@ describe('the lab request group route over HTTP (ORD-6)', () => {
     expect(repeatedTests([coded('LOINC', '600-7', 'Blood'), coded('loinc', '600-7', 'Blood')])).toEqual([1]);
     expect(repeatedTests([coded('LOINC', '600-7', 'Blood'), coded('Loinc', '600-7', 'Urine')])).toEqual([]);
     expect(repeatedTests([coded('LOINC', '600-7'), coded('LOINC', '600-7')])).toEqual([1]);
-    // The code and the specimen are compared without case too (27 Nov; they were compared as sent).
+    // The code and the specimen are compared without case too (27 Nov; before, only the code system was).
     expect(repeatedTests([coded('HID-LAB', 'MCS', 'Blood'), coded('HID-LAB', 'mcs', 'Blood')])).toEqual([1]);
     expect(repeatedTests([coded('HID-LAB', 'MCS', 'Blood'), coded('HID-LAB', 'MCS', 'BLOOD')])).toEqual([1]);
     expect(repeatedTests([coded('HID-LAB', 'MCS', 'Blood (EDTA)'), coded('HID-LAB', 'MCS', ' blood (edta) ')])).toEqual([1]);
@@ -352,7 +352,7 @@ describe('the lab request group route over HTTP (ORD-6)', () => {
     // ... and of the same test only.
     expect(repeatedTests([coded('LOINC', '600-7'), coded('LOINC', '600-8', 'Blood'), coded('HID-LAB', '600-7')]))
       .toEqual([]);
-    // The specimen as sent: a specimen named "null" is a specimen, not the missing one.
+    // A specimen named "null" is a specimen, not the missing one, compared without case as any other.
     expect(repeatedTests([coded('LOINC', '600-7', 'null'), coded('LOINC', '600-7', 'Blood')])).toEqual([]);
     expect(repeatedTests([coded('LOINC', '600-7', 'Null'), coded('LOINC', '600-7', 'NULL')])).toEqual([1]);
     // A blank specimen is missing, so it repeats a test with none, another blank one, and one with a specimen.
@@ -364,9 +364,14 @@ describe('the lab request group route over HTTP (ORD-6)', () => {
     // By name on the same specimen, or with a specimen missing, coded or not.
     expect(repeatedTests([test({ specimenTypeCode: 'Blood' }), test({ testDisplay: 'blood  CULTURE',
       specimenTypeCode: 'BLOOD' })])).toEqual([1]);
+    expect(repeatedTests([test({ testCodeSystem: 'LOINC', testCode: '600-7', specimenTypeCode: 'Blood' }),
+      test({ testDisplay: 'BLOOD culture' })])).toEqual([1]);
+    expect(repeatedTests([test({ testCodeSystem: 'LOINC', testCode: '600-7', specimenTypeCode: 'Blood' }),
+      test({ specimenTypeCode: 'Urine' })])).toEqual([]);
     expect(repeatedTests([test({ specimenTypeCode: 'Blood' }), test({ specimenTypeCode: 'Urine' })])).toEqual([]);
     // Pair by pair: a test with no specimen repeats the same test on blood and on urine, which do not repeat each
-    // other, so every later one of the three is named, wherever the one with none stands.
+    // other, so a test is named when any earlier one matches it: blood and urine after the one with none, and the
+    // one with none after blood or urine.
     expect(repeatedTests([test({}), test({ specimenTypeCode: 'Blood' }), test({ specimenTypeCode: 'Urine' })]))
       .toEqual([1, 2]);
     expect(repeatedTests([test({ specimenTypeCode: 'Blood' }), test({}), test({ specimenTypeCode: 'Urine' })]))
