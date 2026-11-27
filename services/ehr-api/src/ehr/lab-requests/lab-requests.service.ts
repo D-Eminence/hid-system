@@ -268,8 +268,13 @@ export class LabRequestsService {
 
   /**
    * ORD-6 (0158): several tests in one lab request, one POST (the group
-   * route; LabRequestGroupsOnGuard has answered 503 while
-   * LAB_REQUEST_GROUPS_ENABLED is off). Each test becomes its own lab request,
+   * route, its body already validated). While LAB_REQUEST_GROUPS_ENABLED is
+   * off only a new group is refused (the clinical owner's addendum,
+   * 7223408785): with no `lab-request-group.create` row for the caller's key
+   * it answers 503 LAB_REQUEST_GROUPS_UNAVAILABLE before the consent check,
+   * with nothing written and Lab not called; a same-key retry of a
+   * stored group goes on and is answered as any replay is, so a retry never
+   * leads a clinician to order twice. Each test becomes its own lab request,
    * linked by one requestGroupId that ehr-api makes, so every rule stays per
    * test. All are written in one transaction, every one or none, under one
    * consent check, and each is checked and audited as the single create
@@ -282,11 +287,16 @@ export class LabRequestsService {
    * After the commit each active test is sent to Lab in order (sendGroup); a
    * group never fails because of Lab. On a same-key retry a test routed to
    * another facility since it was saved is `not_sent` ORDER_ROUTED, as PATCH
-   * answers it (the routes are read in the transaction, as PATCH reads them).
+   * answers it (the routes are read in the transaction, as PATCH reads them),
+   * whatever the setting says.
    */
   async createGroup(context: DataAccessContext, patientId: string, encounterId: string,
     input: CreateLabRequestGroupInput, key: string, receivedAt: number): Promise<LabRequestGroupCreated> {
-    if (!this.groups.enabled) throw labRequestGroupsUnavailable();
+    // Off: the setting stops new groups only. A key with a stored whole-call row replays (or is 409 for another
+    // body, as when on); with none the call would make a group, so it is refused here.
+    if (!this.groups.enabled && !await this.repository.idempotencyKeyStored(context, key, LAB_REQUEST_GROUP_OPERATION)) {
+      throw labRequestGroupsUnavailable();
+    }
     const digest = requestDigest(LAB_REQUEST_GROUP_OPERATION, { patientId, encounterId, input });
     const events = [...input.tests.map(() => LAB_REQUEST_CREATE_EVENT), LAB_REQUEST_GROUP_EVENT];
     const saved = await this.repository.runParts(context, patientId, 'write_records', events, async (client) => {
@@ -296,6 +306,8 @@ export class LabRequestsService {
         client, context, patientId, key, LAB_REQUEST_GROUP_OPERATION, digest, 'lab-request-group',
         async () => {
           const value = await parts();
+          // Off, and the key's row was gone by the time it was written (a first call with the same key rolled
+          // back): createInTransaction wrote a null group, so the whole transaction is refused and keeps nothing.
           if (value.requestGroupId === null) throw labRequestGroupsUnavailable();
           return { value, id: value.requestGroupId };
         },

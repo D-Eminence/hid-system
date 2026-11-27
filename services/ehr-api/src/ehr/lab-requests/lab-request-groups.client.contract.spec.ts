@@ -7,14 +7,14 @@ import type { AddressInfo } from 'node:net';
 import { ProblemDetailsFilter } from '../../common/problem';
 import { createValidationPipe } from '../../common/validation-pipe';
 import { NameOnlyCodes } from '../shared/name-only-codes';
-import { LabRequestGroups } from './lab-request-groups';
+import { LabRequestGroups, labRequestGroupsUnavailable } from './lab-request-groups';
 import { LabRequestGroupsController } from './lab-request-groups.controller';
 import { LAB_REQUEST_GROUP_MAX_TESTS } from './lab-request-groups.dto';
 import { LabRequestsService } from './lab-requests.service';
 
 /*
  * ORD-6 (0158): @hid/api-client's group call against ehr-api's own route
- * (the controller, its guard and body pipe, the global pipe and filter; the
+ * (the controller, its body pipe, the global pipe and filter; the
  * service faked), so the client and the route agree on the path, the
  * headers, the body and the answer. A staff call: the user's credentials and
  * no internal caller. Fictional data only.
@@ -49,7 +49,11 @@ describe('@hid/api-client createLabRequestGroup against ehr-api\'s route (ORD-6)
 
   const start = async (groups = true, reply: unknown = answer) => {
     const seen: { headers: Record<string, unknown> }[] = [];
-    const service = { createGroup: jest.fn(async () => reply) };
+    // While off, the service refuses a new group (LabRequestsService.createGroup reads the key row first).
+    const service = { createGroup: jest.fn(async () => {
+      if (!groups) throw labRequestGroupsUnavailable();
+      return reply;
+    }) };
     @Module({ controllers: [LabRequestGroupsController], providers: [
       { provide: LabRequestsService, useValue: service },
       { provide: NameOnlyCodes, useValue: new NameOnlyCodes(false, false) },
@@ -96,12 +100,14 @@ describe('@hid/api-client createLabRequestGroup against ehr-api\'s route (ORD-6)
     expect([EHR_LAB_REQUEST_GROUP_MAX_TESTS, EHR_LAB_REQUEST_GROUP_TIMEOUT_MS]).toEqual([LAB_REQUEST_GROUP_MAX_TESTS, 30_000]);
   });
 
-  it('while the setting is off: Problem Details 503 LAB_REQUEST_GROUPS_UNAVAILABLE, the same key tried twice at most', async () => {
+  it('while the setting is off, a new group: Problem Details 503 LAB_REQUEST_GROUPS_UNAVAILABLE, the same key tried '
+    + 'twice at most', async () => {
     const { client, service, seen } = await start(false);
     await expect(client.createLabRequestGroup(patientId, encounterId, input, context, 'group-create-key-00001'))
       .rejects.toMatchObject({ status: 503, payload: expect.objectContaining({ code: 'LAB_REQUEST_GROUPS_UNAVAILABLE' }) });
     expect(seen.map(({ headers }) => headers['idempotency-key'])).toEqual(['group-create-key-00001', 'group-create-key-00001']);
-    expect(service.createGroup).not.toHaveBeenCalled();
+    // The route checks the body, then the service refuses (each time: no key row was written).
+    expect(service.createGroup).toHaveBeenCalledTimes(2);
   });
 
   it('a body the route refuses comes back once, as the route answered it', async () => {

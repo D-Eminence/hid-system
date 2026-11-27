@@ -1,4 +1,5 @@
 import { type INestApplication, Module } from '@nestjs/common';
+import { GUARDS_METADATA } from '@nestjs/common/constants';
 import { Test } from '@nestjs/testing';
 import type { NextFunction, Request, Response } from 'express';
 import type { AddressInfo } from 'node:net';
@@ -9,7 +10,9 @@ import { createValidationPipe } from '../../common/validation-pipe';
 import { getEnvironment, resetEnvironmentForTests } from '../../config/environment';
 import { WorkItemProgressService } from '../../integrations/work-item-progress.service';
 import { NameOnlyCodes } from '../shared/name-only-codes';
-import { LAB_REQUEST_GROUPS_OFF, LAB_REQUEST_GROUPS_PROVIDER, LabRequestGroups, LabRequestGroupsOnGuard } from './lab-request-groups';
+import {
+  LAB_REQUEST_GROUPS_OFF, LAB_REQUEST_GROUPS_PROVIDER, LabRequestGroups, labRequestGroupsUnavailable,
+} from './lab-request-groups';
 import { LabRequestGroupsController } from './lab-request-groups.controller';
 import {
   CreateLabRequestGroupDto,
@@ -25,7 +28,8 @@ import { LabRequestsService } from './lab-requests.service';
 
 /*
  * ORD-6 (0158) over HTTP, through Nest with the app's global pipe and filter:
- * the group route behind LAB_REQUEST_GROUPS_ENABLED (503 first while off), its
+ * the group route behind LAB_REQUEST_GROUPS_ENABLED (the body first; while
+ * off the service refuses a new group, 503), its
  * body checks (each test as the single create checks it, name-only tests
  * while LAB_REQUEST_NAME_ONLY_ENABLED is on, repeats refused), and a client's
  * requestGroupId refused everywhere a body is taken (Rahman's answer 2).
@@ -56,7 +60,11 @@ describe('the lab request group route over HTTP (ORD-6)', () => {
 
   const start = async (groups: boolean, nameOnly = false) => {
     const service = {
-      createGroup: jest.fn(async () => ({ requestGroupId: groupId, labRequests: [] })),
+      // While off, the service refuses a new group (LabRequestsService.createGroup reads the key row first).
+      createGroup: jest.fn(async () => {
+        if (!groups) throw labRequestGroupsUnavailable();
+        return { requestGroupId: groupId, labRequests: [] };
+      }),
       create: jest.fn(async () => ({ id: requestId })),
       update: jest.fn(async () => ({ id: requestId })),
       list: jest.fn(async () => ({ items: [], nextCursor: null })),
@@ -93,16 +101,24 @@ describe('the lab request group route over HTTP (ORD-6)', () => {
   const refused = (field: string) => ({ status: 400, body: expect.objectContaining({ code: 'VALIDATION_FAILED',
     errors: expect.arrayContaining([expect.objectContaining({ field })]) }) });
 
-  it('off: 503 LAB_REQUEST_GROUPS_UNAVAILABLE before the body is validated or the key is read, and nothing reaches '
-    + 'the service', async () => {
+  it('off: the body and the key are checked first, as when on; then the service answers (503 '
+    + 'LAB_REQUEST_GROUPS_UNAVAILABLE to a new group)', async () => {
     const { post, service } = await start(false);
-    for (const [payload, key] of [[body(), undefined], [{ tests: 'not a list' }, undefined], [body(), null]] as const) {
-      // Only a direct caller sees this code: through the public gateway the browser gets nginx's own 503
-      // UPSTREAM_UNAVAILABLE, as for every ehr-api 502, 503 and 504.
-      expect(await post(payload, key)).toMatchObject({ status: 503, body: { status: 503,
-        code: 'LAB_REQUEST_GROUPS_UNAVAILABLE' } });
-    }
+    // No guard of the route's own: the setting is the service's (a same-key retry of a stored group is answered).
+    expect(Reflect.getMetadata(GUARDS_METADATA, LabRequestGroupsController.prototype.create)).toBeUndefined();
+    expect(await post({ tests: 'not a list' })).toMatchObject(refused('tests'));
+    expect(await post(body({ tests: [coded, { ...coded, testDisplay: 'FBC' }] }))).toMatchObject({ status: 400,
+      body: { code: 'LAB_REQUEST_TEST_REPEATED' } });
+    expect(await post(body(), null)).toMatchObject({ status: 400, body: { code: 'IDEMPOTENCY_KEY_REQUIRED' } });
     expect(service.createGroup).not.toHaveBeenCalled();
+    // Only a direct caller sees this code: through the public gateway the browser gets nginx's own 503
+    // UPSTREAM_UNAVAILABLE, as for every ehr-api 502, 503 and 504; the website reads the catalogue status instead.
+    // Its detail is the filter's words for every 5xx: a screen reads the code, never the words.
+    expect(await post(body())).toMatchObject({ status: 503, body: { status: 503, code: 'LAB_REQUEST_GROUPS_UNAVAILABLE',
+      detail: 'The service could not complete the request.' } });
+    expect(service.createGroup).toHaveBeenCalledTimes(1);
+    expect((service.createGroup.mock.calls[0] as unknown[]).slice(1, 5)).toEqual([patientId, encounterId,
+      expect.any(CreateLabRequestGroupDto), 'group-create-key-00001']);
   });
 
   it('on: the body reaches the service, with the request\'s arrival time for the send deadline', async () => {
@@ -278,13 +294,7 @@ describe('LAB_REQUEST_GROUPS_ENABLED and the module', () => {
     expect(LAB_REQUEST_GROUPS_OFF.enabled).toBe(false);
   });
 
-  it('the guard answers 503 only while off', () => {
-    expect(new LabRequestGroupsOnGuard(new LabRequestGroups(true)).canActivate()).toBe(true);
-    expect(() => new LabRequestGroupsOnGuard(new LabRequestGroups(false)).canActivate())
-      .toThrow(expect.objectContaining({ code: 'LAB_REQUEST_GROUPS_UNAVAILABLE' }));
-  });
-
-  it('LabRequestsModule gives the service and the guard the setting as the environment sets it', async () => {
+  it('LabRequestsModule gives the service the setting as the environment sets it', async () => {
     environment('true');
     const stand = (token: unknown) => ({ standIn: typeof token === 'function' ? token.name : String(token) });
     const moduleRef = await Test.createTestingModule({ imports: [LabRequestsModule] }).useMocker(stand).compile();

@@ -240,6 +240,30 @@ export class ClinicalRepository {
     return { value: created.value, resourceId: created.id, details: { ...created.details, idempotentReplay: false } };
   }
 
+  /**
+   * Whether the caller (this facility, account and membership: the key
+   * table's row-level security) holds an Idempotency-Key row for this
+   * operation and key, in any state. One read in its own read-only
+   * transaction, before any consent check or write. ORD-6's group create
+   * asks it only while LAB_REQUEST_GROUPS_ENABLED is off: no row, and the
+   * call would make a new group, so it is refused with nothing read or
+   * written; a row, and the call goes on as a replay (executeCreate).
+   */
+  async idempotencyKeyStored(context: DataAccessContext, idempotencyKey: string, operation: string): Promise<boolean> {
+    try {
+      return await this.database.withTransaction(context, async (client) => {
+        const result = await client.query(
+          `select 1 from ehr.idempotency_keys
+           where facility_id = $1 and created_by = $2 and operation = $3 and idempotency_key = $4`,
+          [context.facilityId, context.actor.accountId, operation, idempotencyKey],
+        );
+        return (result.rowCount ?? 0) > 0;
+      }, { readOnly: true });
+    } catch (error) {
+      throw this.translate(error);
+    }
+  }
+
   async setChangeReason(client: PoolClient, reason: string): Promise<void> {
     await client.query(`select set_config('app.change_reason', $1, true)`, [reason]);
   }

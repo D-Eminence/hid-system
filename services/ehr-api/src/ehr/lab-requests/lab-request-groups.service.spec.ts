@@ -1,6 +1,6 @@
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
-import type { AuditedPart, SemanticEvent } from '../shared/clinical.repository';
+import { ClinicalRepository, type AuditedPart, type SemanticEvent } from '../shared/clinical.repository';
 import { OrderStatus } from '../shared/clinical.dto';
 import {
   LAB_REQUEST_GROUP_OPERATION,
@@ -126,6 +126,9 @@ const memory = () => {
       store.set(`${operation}:${idempotencyKey}`, { digest, id: created.id });
       return { value: created.value, resourceId: created.id, details: { idempotentReplay: false } };
     }),
+    // Its own read, outside any transaction: the committed key rows only.
+    idempotencyKeyStored: jest.fn(async (_context: unknown, idempotencyKey: string, operation: string) =>
+      keys.has(`${operation}:${idempotencyKey}`)),
     encounterExists: jest.fn(async () => true),
     exists: jest.fn(async () => true),
     setChangeReason: jest.fn(async () => undefined),
@@ -244,24 +247,103 @@ describe('ORD-6: several tests in one lab request (LAB_REQUEST_GROUPS_ENABLED on
       expect(store.committed[1]?.parts.map((part) => part.details?.idempotentReplay)).toEqual([true, true, true, true]);
     });
 
-  it('a replay answers the group the tests were saved with; while the setting is off the route answers 503 even to a '
-    + 'same-key retry (the design note\'s gate), and the saved group stays', async () => {
+  it('a replay answers the group the tests were saved with, the setting on, off and on again (the addendum, '
+    + '7223408785: a retry never leads a clinician to order twice)', async () => {
     const store = memory();
     const answer = await service(store, lab().labApi).createGroup(context(), patientId, encounterId, group(), key,
       Date.now());
-    // The setting switched off: the route is gated before the key is read, so the retry is refused and saves nothing.
-    const off = lab();
-    await expect(service(store, off.labApi, false).createGroup(context(), patientId, encounterId, group(), key,
-      Date.now())).rejects.toMatchObject({ status: 503, code: 'LAB_REQUEST_GROUPS_UNAVAILABLE' });
-    expect(off.calls).toHaveLength(0);
-    expect(inserts(store)).toHaveLength(3);
-    expect([...store.rows.values()].map((row) => row.requestGroupId)).toEqual(Array(3).fill(answer.requestGroupId));
-    // On again: the whole-call row replays; its parts load the stored rows, not a new id.
-    const replay = await service(store, lab().labApi).createGroup(context(), patientId, encounterId, group(), key,
-      Date.now());
-    expect(replay.requestGroupId).toBe(answer.requestGroupId);
-    expect(replay.labRequests.map((request) => request.requestGroupId)).toEqual(Array(3).fill(answer.requestGroupId));
-    expect(inserts(store)).toHaveLength(3);
+    // On: the key row is not read first; the whole-call row is written and replays as before.
+    expect(store.repository.idempotencyKeyStored).not.toHaveBeenCalled();
+    for (const enabled of [false, true, false]) {
+      const again = lab();
+      const replay = await service(store, again.labApi, enabled).createGroup(context(), patientId, encounterId, group(),
+        key, Date.now());
+      // The whole-call row replays; its parts load the stored rows, not a new id, and no group is written.
+      expect(replay.requestGroupId).toBe(answer.requestGroupId);
+      expect(replay.labRequests.map((request) => [request.id, request.requestGroupId])).toEqual(
+        answer.labRequests.map((request) => [request.id, answer.requestGroupId]));
+      expect(inserts(store)).toHaveLength(3);
+      // Sent as any replay is: every active test again, and Lab replays the ones it holds.
+      expect(again.calls.map(({ order }) => order.sourceEhrOrderId)).toEqual(answer.labRequests.map((request) => request.id));
+      expect(store.committed.at(-1)?.parts.map((part) => [part.event.action, part.details?.idempotentReplay])).toEqual([
+        ['ehr.lab-request.create', true], ['ehr.lab-request.create', true], ['ehr.lab-request.create', true],
+        ['ehr.lab-request-group.create', true]]);
+    }
+    // Off, the caller's own key row was read (by operation and key) before anything else.
+    expect(store.repository.idempotencyKeyStored.mock.calls).toEqual([[expect.anything(), key, 'lab-request-group.create'],
+      [expect.anything(), key, 'lab-request-group.create']]);
+    expect(store.rows.size).toBe(3);
+  });
+
+  it('setting off: a new key is 503 LAB_REQUEST_GROUPS_UNAVAILABLE before the consent check, nothing written, Lab not '
+    + 'called; on, the same call saves the group', async () => {
+    const store = memory();
+    const { labApi } = lab();
+    await expect(service(store, labApi, false).createGroup(context(), patientId, encounterId, group(), key, Date.now()))
+      .rejects.toMatchObject({ status: 503, code: 'LAB_REQUEST_GROUPS_UNAVAILABLE',
+        message: 'Several tests in one request are not available yet. Add each test on its own.' });
+    expect(store.repository.idempotencyKeyStored).toHaveBeenCalledWith(expect.objectContaining({ facilityId }), key,
+      'lab-request-group.create');
+    expect(store.repository.runParts).not.toHaveBeenCalled();
+    expect(store.repository.executeCreate).not.toHaveBeenCalled();
+    expect([store.rows.size, store.keys.size, store.committed.length, store.statements.length]).toEqual([0, 0, 0, 0]);
+    expect(labApi.acceptEhrOrder).not.toHaveBeenCalled();
+    // A key stored by another route (the single create's, or a group test's part row) is not a stored group.
+    store.keys.set(`lab-request.create:${key}`, { digest: 'other', id: 'other' });
+    store.keys.set(`lab-request-group.test.1:${key}`, { digest: 'other', id: 'other' });
+    await expect(service(store, labApi, false).createGroup(context(), patientId, encounterId, group(), key, Date.now()))
+      .rejects.toMatchObject({ status: 503, code: 'LAB_REQUEST_GROUPS_UNAVAILABLE' });
+    expect(store.repository.runParts).not.toHaveBeenCalled();
+    // On: the same body and key make the group.
+    const fresh = memory();
+    const on = lab();
+    const answer = await service(fresh, on.labApi, true).createGroup(context(), patientId, encounterId, group(),
+      'lab-request-group-key-0002', Date.now());
+    expect(answer.requestGroupId).toMatch(UUID_V4);
+    expect(inserts(fresh)).toHaveLength(3);
+    expect(on.calls).toHaveLength(3);
+  });
+
+  it('setting off: a stored key with another body is 409 IDEMPOTENCY_KEY_REUSED, as when on, and nothing is saved',
+    async () => {
+      const store = memory();
+      await service(store, lab().labApi).createGroup(context(), patientId, encounterId, group(), key, Date.now());
+      const other = { ...group(), clinicalInformation: 'Fever for 4 days' } as CreateLabRequestGroupInput;
+      const off = lab();
+      await expect(service(store, off.labApi, false).createGroup(context(), patientId, encounterId, other, key,
+        Date.now())).rejects.toMatchObject({ status: 409, code: 'IDEMPOTENCY_KEY_REUSED' });
+      expect(store.rows.size).toBe(3);
+      expect(off.calls).toHaveLength(0);
+    });
+
+  it('setting off: a same-key retry still does not send a test routed to another facility since (ORDER_ROUTED)',
+    async () => {
+      const store = memory();
+      const answer = await service(store, lab().labApi).createGroup(context(), patientId, encounterId, group(), key,
+        Date.now());
+      const routedId = answer.labRequests[0]?.id ?? '';
+      const routes = { ...noRoutes, summaries: async () => new Map([[routedId, { id: '423e4567-e89b-42d3-a456-426614174011',
+        effectiveState: 'accepted', acceptedAt: '2026-12-01T10:00:00.000Z' }]]) };
+      const again = lab();
+      const replay = await service(store, again.labApi, false, routes).createGroup(context(), patientId, encounterId,
+        group(), key, Date.now());
+      expect(replay.labRequests.map((request) => request.labHandoff)).toEqual([
+        { state: 'not_sent', code: 'ORDER_ROUTED' }, { state: 'accepted' }, { state: 'accepted' }]);
+      expect(again.calls.map(({ order }) => order.sourceEhrOrderId)).toEqual([answer.labRequests[1]?.id,
+        answer.labRequests[2]?.id]);
+    });
+
+  it('setting off: a key row gone by the time it is written (a racing first call rolled back) is still refused, '
+    + 'and keeps nothing', async () => {
+    const store = memory();
+    // The read finds the row; the write then finds none, so the call would make a group.
+    store.repository.idempotencyKeyStored.mockResolvedValueOnce(true);
+    const { labApi } = lab();
+    await expect(service(store, labApi, false).createGroup(context(), patientId, encounterId, group(), key, Date.now()))
+      .rejects.toMatchObject({ status: 503, code: 'LAB_REQUEST_GROUPS_UNAVAILABLE' });
+    expect(inserts(store).map(({ values }) => values[13])).toEqual([null, null, null]);
+    expect([store.rows.size, store.keys.size, store.committed.length]).toEqual([0, 0, 0]);
+    expect(labApi.acceptEhrOrder).not.toHaveBeenCalled();
   });
 
   it('a same-key retry does not send a test routed to another facility since: not_sent ORDER_ROUTED, as PATCH',
@@ -386,6 +468,42 @@ describe('ORD-6: several tests in one lab request (LAB_REQUEST_GROUPS_ENABLED on
     expect(answer.labRequests.map((request) => request.labHandoff))
       .toEqual(Array(3).fill({ state: 'not_sent', code: 'LAB_PERMISSION_ABSENT' }));
     expect(labApi.acceptEhrOrder).not.toHaveBeenCalled();
+  });
+});
+
+describe('ClinicalRepository.idempotencyKeyStored: the off-setting\'s read of the caller\'s key row', () => {
+  const repository = (rowCount: number | Error) => {
+    const calls: { sql: string; values: unknown[]; options: unknown }[] = [];
+    const database = { withTransaction: jest.fn(async (_context: unknown, work: (client: unknown) => Promise<unknown>,
+      options: unknown) => work({ query: async (sql: string, values: unknown[]) => {
+      calls.push({ sql, values, options });
+      if (rowCount instanceof Error) throw rowCount;
+      return { rowCount, rows: Array(rowCount).fill({ '?column?': 1 }) };
+    } })) };
+    const audit = { record: jest.fn(), recordWithClient: jest.fn() };
+    const identity = { authorize: jest.fn() };
+    return { calls, database, audit, identity,
+      clinical: new ClinicalRepository(database as never, audit as never, identity as never) };
+  };
+
+  it('reads the caller\'s row by facility, account, operation and key, in one read-only transaction, with no consent '
+    + 'check and no audit row', async () => {
+    for (const [rowCount, stored] of [[1, true], [0, false]] as const) {
+      const { calls, database, audit, identity, clinical } = repository(rowCount);
+      await expect(clinical.idempotencyKeyStored(context(), key, 'lab-request-group.create')).resolves.toBe(stored);
+      expect(database.withTransaction).toHaveBeenCalledTimes(1);
+      expect(calls.map(({ sql, ...rest }) => ({ sql: sql.replace(/\s+/g, ' '), ...rest }))).toEqual([{
+        sql: 'select 1 from ehr.idempotency_keys where facility_id = $1 and created_by = $2 and operation = $3 and '
+          + 'idempotency_key = $4',
+        values: [facilityId, accountId, 'lab-request-group.create', key], options: { readOnly: true } }]);
+      expect([audit.record, audit.recordWithClient, identity.authorize].every((fn) => fn.mock.calls.length === 0)).toBe(true);
+    }
+  });
+
+  it('a database refusal is translated as every repository read is (42501 is 403 ACCESS_DENIED)', async () => {
+    const { clinical } = repository(Object.assign(new Error('permission denied'), { code: '42501' }));
+    await expect(clinical.idempotencyKeyStored(context(), key, 'lab-request-group.create'))
+      .rejects.toMatchObject({ status: 403, code: 'ACCESS_DENIED' });
   });
 });
 
@@ -556,16 +674,18 @@ describe('ORD-6 with LAB_REQUEST_GROUPS_ENABLED off: no new group, stored groups
     const repository = { run: jest.fn(async (_c: unknown, _p: unknown, _a: unknown, _e: unknown,
       operation: (client: unknown) => Promise<{ value: unknown }>) => (await operation({ query })).value),
     runParts: jest.fn(), executeCreate: jest.fn(async (...args: unknown[]) => (args[7] as () => Promise<unknown>)()),
-    setChangeReason: jest.fn(async () => undefined), exists: jest.fn(async () => true) };
+    setChangeReason: jest.fn(async () => undefined), exists: jest.fn(async () => true),
+    idempotencyKeyStored: jest.fn(async () => false) };
     return { statements, repository, labRequests: new LabRequestsService(repository as never, lab().labApi as never,
       noRoutes as never, new LabRequestGroups(false)) };
   };
 
-  it('the group create answers 503 LAB_REQUEST_GROUPS_UNAVAILABLE and writes nothing', async () => {
+  it('the group create answers 503 LAB_REQUEST_GROUPS_UNAVAILABLE to a new key and writes nothing', async () => {
     const { repository, labRequests } = reader();
     await expect(labRequests.createGroup(context(), patientId, encounterId, group(), key, Date.now()))
       .rejects.toMatchObject({ status: 503, code: 'LAB_REQUEST_GROUPS_UNAVAILABLE',
         message: 'Several tests in one request are not available yet. Add each test on its own.' });
+    expect(repository.idempotencyKeyStored).toHaveBeenCalledTimes(1);
     expect(repository.runParts).not.toHaveBeenCalled();
     expect(repository.executeCreate).not.toHaveBeenCalled();
   });

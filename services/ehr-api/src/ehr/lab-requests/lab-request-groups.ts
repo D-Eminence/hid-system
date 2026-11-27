@@ -1,4 +1,4 @@
-import { type CanActivate, Injectable, type PipeTransform } from '@nestjs/common';
+import { Injectable, type PipeTransform } from '@nestjs/common';
 import { DomainProblem } from '../../common/problem';
 import { createValidationPipe, type ValidationFields } from '../../common/validation-pipe';
 import { getEnvironment } from '../../config/environment';
@@ -14,8 +14,13 @@ import {
  * ORD-6 (0158; Ola's design note on hid-system#258, 7214746190): several
  * tests in one lab request. One ehr-api setting, LAB_REQUEST_GROUPS_ENABLED,
  * off by default. It stops new groups only:
- * - it gates POST .../lab-request-groups (503 LAB_REQUEST_GROUPS_UNAVAILABLE
- *   while off, before the body is validated), and
+ * - while off, POST .../lab-request-groups refuses a new group (503
+ *   LAB_REQUEST_GROUPS_UNAVAILABLE, LabRequestsService.createGroup, after the
+ *   body is validated: no `lab-request-group.create` row for the caller's
+ *   key) and answers a same-key retry of a stored group as any replay;
+ * - the catalogue status's labRequestGroups is this setting, so the website
+ *   offers the multi-test form only while it is on (the clinical owner's
+ *   addendum, 7223408785); and
  * - whether LabRequestsService.createInTransaction writes a group: while off
  *   it writes a null group (option (b), the clinical owner's call), so an
  *   order set's tests (ORD-8) are saved as separate requests, as today, and
@@ -58,31 +63,21 @@ export const LAB_REQUEST_GROUP_PART = (index: number) => `lab-request-group.test
  */
 export const LAB_REQUEST_GROUP_SEND_DEADLINE_MS = 25_000;
 
+/**
+ * 503 LAB_REQUEST_GROUPS_UNAVAILABLE: a new group while
+ * LAB_REQUEST_GROUPS_ENABLED is off (LabRequestsService.createGroup). It
+ * comes after the caller's permission (403), the body (400) and the
+ * Idempotency-Key's presence (400 IDEMPOTENCY_KEY_REQUIRED), and before the
+ * consent check. A same-key retry of a stored group is not refused. A
+ * backstop only: only a direct caller sees this code. Through the public
+ * gateway the browser gets nginx's own 503 UPSTREAM_UNAVAILABLE instead
+ * (proxy_intercept_errors; gateway/nginx.conf.template, error_page 502 503
+ * 504), as for every ehr-api 502, 503 and 504, so the website reads the
+ * catalogue status's labRequestGroups instead.
+ */
 export function labRequestGroupsUnavailable(): DomainProblem {
   return new DomainProblem(503, 'LAB_REQUEST_GROUPS_UNAVAILABLE',
     'Several tests in one request are not available yet. Add each test on its own.');
-}
-
-/**
- * 503 LAB_REQUEST_GROUPS_UNAVAILABLE while LAB_REQUEST_GROUPS_ENABLED is off.
- * A guard, so it answers after the caller's permission (403 first) and before
- * the body is validated (Express has parsed the JSON already, so a body that
- * is not JSON is still 400), and before the Idempotency-Key is read: a
- * same-key retry of a group saved while the setting was on is refused too.
- * Only a direct caller sees this code. Through the public gateway the browser
- * gets nginx's own 503 UPSTREAM_UNAVAILABLE instead (proxy_intercept_errors;
- * gateway/nginx.conf.template, error_page 502 503 504), as for every ehr-api
- * 502, 503 and 504, so a website cannot tell groups off from an outage by
- * this answer.
- */
-@Injectable()
-export class LabRequestGroupsOnGuard implements CanActivate {
-  constructor(private readonly groups: LabRequestGroups) {}
-
-  canActivate(): boolean {
-    if (!this.groups.enabled) throw labRequestGroupsUnavailable();
-    return true;
-  }
 }
 
 /**
