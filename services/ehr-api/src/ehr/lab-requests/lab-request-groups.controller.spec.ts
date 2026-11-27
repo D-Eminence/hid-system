@@ -236,11 +236,11 @@ describe('the lab request group route over HTTP (ORD-6)', () => {
       code: 'LAB_TEST_CODE_INCOMPLETE', errors: [{ field: 'tests.1' }, { field: 'tests.2' }] } });
   });
 
-  it('refuses a repeated test: the same code system and code, or the same name, on the same specimen (none is one '
-    + 'value) (400 LAB_REQUEST_TEST_REPEATED)', async () => {
+  it('refuses a repeated test: the same code system and code, or the same name, on the same specimen or with either '
+    + 'specimen missing (400 LAB_REQUEST_TEST_REPEATED)', async () => {
     const { post, service } = await start(true, true);
-    const words = 'This test is already in the request for this specimen. To order it again, save this request, then '
-      + 'add it on its own.';
+    const words = 'This test is already in the request for this specimen, or with no specimen. If it is for another '
+      + 'specimen, choose the specimen on each. To order it again, save this request, then add it on its own.';
     const repeated = (index: number) => ({ status: 400, body: { code: 'LAB_REQUEST_TEST_REPEATED', detail: words,
       errors: [{ field: `tests.${index}`, messages: [words] }] } });
     expect(await post(body({ tests: [coded, malaria, { ...coded, testDisplay: 'FBC' }] }))).toMatchObject(repeated(2));
@@ -259,68 +259,104 @@ describe('the lab request group route over HTTP (ORD-6)', () => {
       { testDisplay: 'Sickling test' }] }))).status).toBe(201);
   });
 
-  it('the repeat rule includes the specimen (the addendum, 7223408785): one culture on blood and on urine goes in '
-    + 'one Save; a second set on the same specimen is refused', async () => {
+  it('the repeat rule includes the specimen (the addendum, 7223408785; 27 Nov): one culture on blood and on urine goes '
+    + 'in one Save; a second set on the same specimen, or the same test with a specimen missing, is refused', async () => {
     const { post, service } = await start(true, true);
-    const repeated = (index: number) => ({ status: 400, body: { code: 'LAB_REQUEST_TEST_REPEATED',
-      errors: [{ field: `tests.${index}` }] } });
+    const repeated = (...indexes: number[]) => ({ status: 400, body: { code: 'LAB_REQUEST_TEST_REPEATED',
+      errors: indexes.map((index) => ({ field: `tests.${index}` })) } });
     const culture = { testCodeSystem: 'HID-LAB', testCode: 'MCS', testDisplay: 'Culture and sensitivity' };
     const bloodCulture = { testCodeSystem: 'LOINC', testCode: '600-7', testDisplay: 'Blood culture',
       specimenTypeCode: 'Blood' };
-    // Allowed: one code (or one name) on two specimens, and a test with a specimen beside one with none.
+    // Allowed: one code (or one name) on two specimens, whatever their case; and a test with no specimen beside
+    // another test.
     for (const tests of [
       [{ ...culture, specimenTypeCode: 'Blood' }, { ...culture, specimenTypeCode: 'Urine' }],
-      [{ testDisplay: 'Culture', specimenTypeCode: 'Blood' }, { testDisplay: 'culture', specimenTypeCode: 'Urine' }],
-      [{ ...culture, specimenTypeCode: 'Blood' }, culture],
+      [{ testDisplay: 'Culture', specimenTypeCode: 'Blood' }, { testDisplay: 'culture', specimenTypeCode: 'URINE' }],
       [bloodCulture, { ...bloodCulture, testCodeSystem: 'loinc', specimenTypeCode: 'Wound swab' }],
+      [{ ...culture, specimenTypeCode: 'Blood' }, coded, { testDisplay: 'Sickling test' }],
     ]) {
       expect(await post(body({ tests }))).toMatchObject({ status: 201 });
     }
     expect(service.createGroup).toHaveBeenCalledTimes(4);
-    // Refused: one code on one specimen (LOINC and loinc are one system), by code or by name, and none twice.
+    // Refused: one code on one specimen (code system, code and specimen without case), by code or by name, and none
+    // twice.
     expect(await post(body({ tests: [bloodCulture, { ...bloodCulture, testDisplay: 'Blood culture, second set' }] })))
       .toMatchObject(repeated(1));
     expect(await post(body({ tests: [bloodCulture, { ...bloodCulture, testCodeSystem: 'loinc',
       testDisplay: 'Blood culture, second set' }] }))).toMatchObject(repeated(1));
-    expect(await post(body({ tests: [bloodCulture, { testDisplay: ' BLOOD  culture ', specimenTypeCode: 'Blood' }] })))
+    expect(await post(body({ tests: [{ ...culture, specimenTypeCode: 'Urine' }, { ...culture, testCode: 'mcs',
+      testDisplay: 'Urine MCS', specimenTypeCode: 'Urine' }] }))).toMatchObject(repeated(1));
+    expect(await post(body({ tests: [bloodCulture, { ...bloodCulture, testDisplay: 'Blood culture, second set',
+      specimenTypeCode: ' BLOOD ' }] }))).toMatchObject(repeated(1));
+    expect(await post(body({ tests: [bloodCulture, { testDisplay: ' BLOOD  culture ', specimenTypeCode: 'blood' }] })))
       .toMatchObject(repeated(1));
     expect(await post(body({ tests: [culture, { ...culture, testDisplay: 'Culture and sensitivity, again' }] })))
       .toMatchObject(repeated(1));
     expect(await post(body({ tests: [{ ...culture, specimenTypeCode: 'Urine' }, { ...culture, specimenTypeCode: 'Blood' },
       { ...culture, specimenTypeCode: 'Urine', testDisplay: 'Urine culture' }] }))).toMatchObject(repeated(2));
+    // A missing specimen matches any specimen of the same test, by code or by name, before or after it; every
+    // test that repeats an earlier one is named.
+    expect(await post(body({ tests: [{ ...culture, specimenTypeCode: 'Blood' }, culture] }))).toMatchObject(repeated(1));
+    expect(await post(body({ tests: [{ testDisplay: 'Sickling test' }, { testDisplay: 'sickling test',
+      specimenTypeCode: 'Blood' }] }))).toMatchObject(repeated(1));
+    expect(await post(body({ tests: [culture, { ...culture, testDisplay: 'Blood MCS', specimenTypeCode: 'Blood' },
+      { ...culture, testDisplay: 'Urine MCS', specimenTypeCode: 'Urine' }] }))).toMatchObject(repeated(1, 2));
     // A blank specimen is none (the body trims '   ' to ''), by code or by name: no way round the rule.
     for (const blank of ['', '   ']) {
       expect(await post(body({ tests: [culture, { ...culture, testDisplay: 'Culture, again', specimenTypeCode: blank }] })))
         .toMatchObject(repeated(1));
       expect(await post(body({ tests: [{ testDisplay: 'Sickling test', specimenTypeCode: blank },
         { testDisplay: 'sickling test' }] }))).toMatchObject(repeated(1));
+      expect(await post(body({ tests: [bloodCulture, { ...bloodCulture, testDisplay: 'Blood culture, again',
+        specimenTypeCode: blank }] }))).toMatchObject(repeated(1));
     }
     expect(service.createGroup).toHaveBeenCalledTimes(4);
   });
 
-  it('repeatedTests: the keys, case by case', () => {
+  it('repeatedTests: the pairs, case by case', () => {
     const test = (fields: Record<string, string>) => ({ testDisplay: 'Blood culture', ...fields }) as never;
-    // Each coded test with a name of its own, so only the code key can repeat.
+    // Each coded test with a name of its own, so only the code can repeat.
     let named = 0;
     const coded = (system: string, code: string, specimen?: string) => test({ testCodeSystem: system, testCode: code,
       ...(specimen === undefined ? {} : { specimenTypeCode: specimen }), testDisplay: `Test ${named += 1}` });
     expect(repeatedTests([coded('LOINC', '600-7', 'Blood'), coded('loinc', '600-7', 'Blood')])).toEqual([1]);
     expect(repeatedTests([coded('LOINC', '600-7', 'Blood'), coded('Loinc', '600-7', 'Urine')])).toEqual([]);
     expect(repeatedTests([coded('LOINC', '600-7'), coded('LOINC', '600-7')])).toEqual([1]);
-    expect(repeatedTests([coded('LOINC', '600-7'), coded('LOINC', '600-7', 'Blood')])).toEqual([]);
-    // The code is compared as sent; only the code system is upper-cased.
-    expect(repeatedTests([coded('HID-LAB', 'MCS', 'Blood'), coded('HID-LAB', 'mcs', 'Blood')])).toEqual([]);
-    // The specimen as sent: a specimen named "null" is not the absent one.
-    expect(repeatedTests([coded('LOINC', '600-7'), coded('LOINC', '600-7', 'null')])).toEqual([]);
-    // A blank specimen is none, so it repeats a test with none, and another blank one.
+    // The code and the specimen are compared without case too (27 Nov; they were compared as sent).
+    expect(repeatedTests([coded('HID-LAB', 'MCS', 'Blood'), coded('HID-LAB', 'mcs', 'Blood')])).toEqual([1]);
+    expect(repeatedTests([coded('HID-LAB', 'MCS', 'Blood'), coded('HID-LAB', 'MCS', 'BLOOD')])).toEqual([1]);
+    expect(repeatedTests([coded('HID-LAB', 'MCS', 'Blood (EDTA)'), coded('HID-LAB', 'MCS', ' blood (edta) ')])).toEqual([1]);
+    expect(repeatedTests([coded('HID-LAB', 'MCS', 'Blood'), coded('HID-LAB', 'MCS', 'Blood (EDTA)')])).toEqual([]);
+    expect(repeatedTests([coded('HID-LAB', 'MCS', 'Blood'), coded('HID-LAB', 'MCSX', 'Blood')])).toEqual([]);
+    // A missing specimen matches any specimen of the same test, either way round (27 Nov; it was a value of its own).
+    expect(repeatedTests([coded('LOINC', '600-7'), coded('LOINC', '600-7', 'Blood')])).toEqual([1]);
+    expect(repeatedTests([coded('LOINC', '600-7', 'Urine'), coded('LOINC', '600-7')])).toEqual([1]);
+    // ... and of the same test only.
+    expect(repeatedTests([coded('LOINC', '600-7'), coded('LOINC', '600-8', 'Blood'), coded('HID-LAB', '600-7')]))
+      .toEqual([]);
+    // The specimen as sent: a specimen named "null" is a specimen, not the missing one.
+    expect(repeatedTests([coded('LOINC', '600-7', 'null'), coded('LOINC', '600-7', 'Blood')])).toEqual([]);
+    expect(repeatedTests([coded('LOINC', '600-7', 'Null'), coded('LOINC', '600-7', 'NULL')])).toEqual([1]);
+    // A blank specimen is missing, so it repeats a test with none, another blank one, and one with a specimen.
     expect(repeatedTests([coded('LOINC', '600-7'), coded('LOINC', '600-7', '')])).toEqual([1]);
     expect(repeatedTests([coded('LOINC', '600-7', '   '), coded('LOINC', '600-7')])).toEqual([1]);
     expect(repeatedTests([coded('LOINC', '600-7', ''), coded('LOINC', '600-7', ' ')])).toEqual([1]);
-    expect(repeatedTests([coded('LOINC', '600-7', ''), coded('LOINC', '600-7', 'Blood')])).toEqual([]);
-    // By name on the same specimen, coded or not.
+    expect(repeatedTests([coded('LOINC', '600-7', ''), coded('LOINC', '600-7', 'Blood')])).toEqual([1]);
+    expect(repeatedTests([coded('LOINC', '600-7', 'Blood'), coded('LOINC', '600-7', '  ')])).toEqual([1]);
+    // By name on the same specimen, or with a specimen missing, coded or not.
     expect(repeatedTests([test({ specimenTypeCode: 'Blood' }), test({ testDisplay: 'blood  CULTURE',
-      specimenTypeCode: 'Blood' })])).toEqual([1]);
-    expect(repeatedTests([test({}), test({ specimenTypeCode: 'Blood' }), test({})])).toEqual([2]);
+      specimenTypeCode: 'BLOOD' })])).toEqual([1]);
+    expect(repeatedTests([test({ specimenTypeCode: 'Blood' }), test({ specimenTypeCode: 'Urine' })])).toEqual([]);
+    // Pair by pair: a test with no specimen repeats the same test on blood and on urine, which do not repeat each
+    // other, so every later one of the three is named, wherever the one with none stands.
+    expect(repeatedTests([test({}), test({ specimenTypeCode: 'Blood' }), test({ specimenTypeCode: 'Urine' })]))
+      .toEqual([1, 2]);
+    expect(repeatedTests([test({ specimenTypeCode: 'Blood' }), test({}), test({ specimenTypeCode: 'Urine' })]))
+      .toEqual([1, 2]);
+    expect(repeatedTests([test({ specimenTypeCode: 'Blood' }), test({ specimenTypeCode: 'Urine' }), test({})]))
+      .toEqual([2]);
+    expect(repeatedTests([test({}), test({ specimenTypeCode: 'Blood' }), test({})])).toEqual([1, 2]);
+    expect(repeatedTests([])).toEqual([]);
   });
 
   it('the list takes ?requestGroupId= (a UUID) whatever the setting says, and refuses anything else', async () => {

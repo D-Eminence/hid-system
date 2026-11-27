@@ -9120,16 +9120,22 @@ backend does with the key, the audit and Lab's answers, beside EHR-C5's.
   `tests.<n>.<field>` (from 0), and a test that is not an object as
   `tests.<n>`; `LAB_TEST_CODE_INCOMPLETE` and `LAB_REQUEST_TEST_REPEATED`
   name every such test.
-- **The repeat rule includes the specimen** (the clinical owner's call,
-  addendum 7223408785). `LAB_REQUEST_TEST_REPEATED` refuses a test as a
-  likely double entry only when an earlier test has the same code system
-  (upper-cased) and code, or the same name (case and extra spaces
-  ignored), on the same `specimenTypeCode` (as sent, trimmed; none counts
-  as one value, and a blank one counts as none). One culture on blood and
-  on urine goes in one Save. A second blood-culture set from another site
-  has the same specimen, so it goes as its own request; the refusal says
-  so ("This test is already in the request for this specimen. To order it
-  again, save this request, then add it on its own.").
+- **The repeat rule includes the specimen** (the clinical owner's calls,
+  addendum 7223408785 and 27 Nov). `LAB_REQUEST_TEST_REPEATED` refuses a
+  test as a likely double entry when an earlier test is the same test, by
+  code system and code or by name, and their specimens are the same or
+  either is missing. The code system, the code and `specimenTypeCode`
+  (trimmed) are compared without case, and the name without case or extra
+  spaces. A missing or blank specimen matches any specimen of the same
+  test: a row with no specimen beside the same test with one is most
+  likely the same sample entered twice. So the check is pair by pair (at
+  most 190 pairs for 20 tests), and it names every test that repeats an
+  earlier one. One culture on blood and on urine goes in one Save. A
+  second blood-culture set from another site has the same specimen, so it
+  goes as its own request. The refusal says the ways on ("This test is
+  already in the request for this specimen, or with no specimen. If it is
+  for another specimen, choose the specimen on each. To order it again,
+  save this request, then add it on its own.").
 
 ## SX-1: modules map per facility
 

@@ -84,41 +84,63 @@ export function labRequestGroupsUnavailable(): DomainProblem {
 }
 
 /**
- * The keys a test is repeated by (the clinical owner's addendum,
- * 7223408785): a coded test by its code system (upper-cased, so LOINC and
- * loinc are one) and code, and every test by its name (trimmed, case and
- * inner spaces ignored, so two tests by name only with one name are one,
- * 0156), each on its specimen type (specimenTypeCode as sent, trimmed; none
- * counts as one value, and a blank one, which the body accepts as '', is
- * none). So the same culture on blood and on urine goes in one Save, while
- * two tests with one code, or one name, on one specimen are refused as a
- * likely double entry: a second blood-culture set from another site goes as
- * its own request.
+ * What the repeat rule compares of a test (the clinical owner's calls:
+ * addendum 7223408785, and 27 Nov): its code, the code system and the code
+ * without case (so LOINC and loinc are one, and MCS and mcs), none for a test
+ * by name only (0156); its name, trimmed, case and inner spaces ignored (so
+ * two tests by name only with one name are one test); and its specimen,
+ * specimenTypeCode trimmed and without case (so Blood and BLOOD are one),
+ * none when it is missing or blank (the body accepts '').
  */
-function repeatKeys(test: LabRequestGroupTestInput): string[] {
-  const specimen = test.specimenTypeCode?.trim() || null;
-  const name = JSON.stringify(['name', test.testDisplay.replace(/\s+/g, ' ').toLocaleLowerCase('en'), specimen]);
-  return test.testCodeSystem !== undefined && test.testCode !== undefined
-    ? [JSON.stringify(['code', test.testCodeSystem.toLocaleUpperCase('en'), test.testCode, specimen]), name] : [name];
+interface RepeatForm {
+  code: string | null;
+  name: string;
+  specimen: string | null;
+}
+
+function repeatForm(test: LabRequestGroupTestInput): RepeatForm {
+  const fold = (value: string) => value.toLocaleUpperCase('en');
+  const specimen = test.specimenTypeCode?.trim() ?? '';
+  return {
+    code: test.testCodeSystem !== undefined && test.testCode !== undefined
+      ? JSON.stringify([fold(test.testCodeSystem), fold(test.testCode)]) : null,
+    name: test.testDisplay.replace(/\s+/g, ' ').toLocaleLowerCase('en'),
+    specimen: specimen === '' ? null : fold(specimen),
+  };
+}
+
+/**
+ * Whether two tests are a likely double entry: the same test (the same code,
+ * or the same name) on the same specimen, or with either specimen missing,
+ * since a row with no specimen beside the same test with one is most likely
+ * the same sample entered twice. The same culture on blood and on urine goes
+ * in one Save; a second set on the same specimen (a second blood-culture set
+ * from another site) goes as its own request.
+ */
+function sameEntry(earlier: RepeatForm, later: RepeatForm): boolean {
+  const sameTest = (earlier.code !== null && earlier.code === later.code) || earlier.name === later.name;
+  return sameTest && (earlier.specimen === null || later.specimen === null || earlier.specimen === later.specimen);
 }
 
 /**
  * 400 LAB_REQUEST_TEST_REPEATED's words, the answer's and each named test's:
- * what was refused, and the way on for a second set on the same specimen.
+ * what was refused, and the ways on: the specimen, for the same test on
+ * another one, and a request of its own, for a second set on the same one.
  */
 export const LAB_REQUEST_TEST_REPEATED_TEXT =
-  'This test is already in the request for this specimen. To order it again, save this request, then add it on its own.';
+  'This test is already in the request for this specimen, or with no specimen. If it is for another specimen, choose '
+  + 'the specimen on each. To order it again, save this request, then add it on its own.';
 
-/** The index of every test that repeats an earlier one on its specimen, in order (empty when none does). */
+/**
+ * The index of every test that repeats an earlier one (sameEntry), in order
+ * (empty when none does). Pair by pair, since a test with no specimen repeats
+ * the same test on any specimen, which no single key per test can say; a
+ * group holds at most LAB_REQUEST_GROUP_MAX_TESTS (20) tests, so at most 190
+ * pairs.
+ */
 export function repeatedTests(tests: readonly LabRequestGroupTestInput[]): number[] {
-  const seen = new Set<string>();
-  const repeated: number[] = [];
-  for (const [index, test] of tests.entries()) {
-    const keys = repeatKeys(test);
-    if (keys.some((key) => seen.has(key))) repeated.push(index);
-    keys.forEach((key) => seen.add(key));
-  }
-  return repeated;
+  const forms = tests.map(repeatForm);
+  return forms.flatMap((later, index) => forms.slice(0, index).some((earlier) => sameEntry(earlier, later)) ? [index] : []);
 }
 
 /**
@@ -145,9 +167,9 @@ export const groupBodyFields: ValidationFields = (errors) => errors.flatMap((err
  * LAB_REQUEST_NAME_ONLY_ENABLED is off, or 0156's name-only class while on,
  * then the pair rule, 400 LAB_TEST_CODE_INCOMPLETE naming every test with one
  * code only (`tests.<index>`, from 0). Then 400 LAB_REQUEST_TEST_REPEATED
- * naming every test that repeats an earlier one on the same specimen
- * (repeatedTests). One answer
- * has one code, so a repeat is named once the pair rule passes. Any field not
+ * naming every test that repeats an earlier one on the same specimen, or with
+ * either specimen missing (repeatedTests). One answer has one code, so a
+ * repeat is named once the pair rule passes. Any field not
  * declared, at the top or in a test, a requestGroupId included, is 400
  * VALIDATION_FAILED, which names a test's field as `tests.<n>.<field>`
  * (groupBodyFields). The controller's body type is a union, so the global
