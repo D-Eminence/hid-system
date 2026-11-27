@@ -46,19 +46,26 @@
 --      too; on the second attempt the words counted are the shortened ones;
 --      a code typed with a space at its dot stays first though another entry
 --      names more of q's words. Each fix case fails on 0152's search. Case 2z
---      also changes with fix 2. Then Ola's addendum to fix 2's count, on a
---      release of its own: the count reads no word of a "without ..." clause
---      (with starts without), to the next comma, unless q has the word
---      without; and a q shaped like a code counts nothing, so it keeps
---      0152's order. Cases 5h and 5j fail on 0157's first body (7ad367c1),
---      and 5h on 0152's; 5i holds on both, and fails when the clause is
---      taken out even for a q with the word without; 5k fails on both, and
---      when the count comes before "starts with q" (which 5g showed before
---      a q shaped like a code counted nothing). Fix 1's whole-word check
---      still reads a clause's words (5l, which also fails on 0152's); and,
---      on a release of its own, a clause in our other names does not count
---      either, for an entry whose title has none, and it ends at the "; "
---      between two other names (5m, which fails on 0152's and 7ad367c1's).
+--      also changes with fix 2. Then Ola's two addenda to fix 2's count
+--      (the second narrows the first), on releases of their own: when q has
+--      the word with and not the word without, the count reads no word of a
+--      "without ..." clause (with starts without), which runs to the next
+--      comma or semicolon or the next word with; any other q counts every
+--      word; and a q shaped like an ICD-11 code (a digit third) counts
+--      nothing, so it keeps 0152's order. Cases 5h and 5j fail on 0157's
+--      first body (7ad367c1), and 5h on 0152's; 5i holds on both addenda's
+--      bodies and 7ad367c1's (its last q fails on 0152's), and fails when
+--      the clause is taken out even for a q with the word without; 5k fails
+--      on 7ad367c1's and 0152's, and when the count comes before "starts
+--      with q" (which 5g showed before a q shaped like a code counted
+--      nothing). Fix 1's whole-word check still reads a clause's
+--      words (5l, which also fails on 0152's); a clause in our other names
+--      does not count either, for an entry whose title has none (5m, on a
+--      release of its own). The second addendum's cases (5n-5t, on a release
+--      of their own) fail on the first addendum's body (528bfecf) wherever
+--      it differs: a q without the word with counts every word again
+--      (laceration, pelvic fracture, "w/o"), a clause ends at the next word
+--      with, and "type 1" and "lung ca" are counted again.
 -- Synthetic version ids: prefix c150. The codes and titles are ICD-11's
 -- (WHO, CC BY-ND 3.0 IGO), verbatim; the other names are ours.
 set plpgsql.variable_conflict = error;
@@ -456,14 +463,15 @@ select pg_temp.expect('5e a one-word q with punctuation around it keeps its orde
 select pg_temp.expect('5f fix 1 and the second attempt''s count: "infections lungs" counts infection and lung',
   'CA4Z 1F73.1 CA4Y more=false', pg_temp.found('infections lungs', 10));
 -- The code q is stays first: in "2A80 1" (2A80.1 with a space at its dot), 1 is a word of 2A80.0's title, grade 1, and
--- only a code part of 2A80.1's. Since Ola's addendum a q shaped like a code counts nothing (5j), so the count no
--- longer orders these; before, the first key put the code before 2A80.0, which named more of q's words.
+-- only a code part of 2A80.1's. Since Ola's addenda a q shaped like an ICD-11 code (2A80.1: a digit third) counts
+-- nothing (5j), so the count no longer orders these; before, the first key put the code before 2A80.0, which named
+-- more of q's words.
 select pg_temp.expect('5g a code typed with a space at its dot comes first, though another entry names more of q''s words',
   '2A80.1 2A80.0 more=false|2A80.1 2A80.0 more=false',
   pg_temp.found('2A80 1', 10) || '|' || pg_temp.found('2a80.1', 10));
 
--- Ola's addendum to 0157 (#258, from its clinical review): two changes to fix 2's count. A release of its own
--- (2026-03), so the rows above keep their answers. WHO's titles verbatim.
+-- Ola's addendum to 0157 (#258, from its clinical review): two changes to fix 2's count, which her second addendum
+-- narrows (5n-5t, below). A release of its own (2026-03), so the rows above keep their answers. WHO's titles verbatim.
 insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference, approvals_sha256, approved_at)
   values ('c1500000-0000-4000-8000-000000000006', 'diagnosis', '2026-03', repeat('6', 64),
           'synthetic addendum sign-off', repeat('7', 64), now());
@@ -494,6 +502,13 @@ insert into ehr.catalog_diagnoses (version_id, code, title, other_names, chapter
   ('c1500000-0000-4000-8000-000000000006', 'DB94.3', 'Alcoholic cirrhosis of liver without hepatitis', '', '13', false),
   ('c1500000-0000-4000-8000-000000000006', 'DB95.11',
    'Drug-induced or toxic liver disease with chronic hepatitis without cirrhosis', '', '13', false),
+  -- A q with the words with and without: DB95.11's family, with and without cirrhosis.
+  ('c1500000-0000-4000-8000-000000000006', 'DB95.1', 'Drug-induced or toxic liver disease with chronic hepatitis', '',
+   '13', false),
+  ('c1500000-0000-4000-8000-000000000006', 'DB95.10',
+   'Drug-induced or toxic liver disease with chronic hepatitis with cirrhosis', '', '13', false),
+  ('c1500000-0000-4000-8000-000000000006', 'DB95.1Z',
+   'Drug-induced or toxic liver disease with chronic hepatitis, unspecified', '', '13', true),
   -- A code typed as a code: ME24.A, its subcodes (a starts only their code part), and other ME24 entries with a title
   -- word starting with a.
   ('c1500000-0000-4000-8000-000000000006', 'ME24.0', 'Digestive system abscess', '', '21', false),
@@ -508,15 +523,15 @@ insert into ehr.catalog_diagnoses (version_id, code, title, other_names, chapter
   ('c1500000-0000-4000-8000-000000000006', 'ME24.A5', 'Haematemesis', '', '21', false);
 update ehr.catalog_versions set active = false where kind = 'diagnosis' and active;
 update ehr.catalog_versions set active = true where id = 'c1500000-0000-4000-8000-000000000006';
--- The count reads no word of a "without ..." clause, up to the next comma. Before (7ad367c1), with started without
--- and the clause's tuberculosis, malaria, cholangitis and cholecystitis counted, so the negative entry came first:
--- 1C62.3 named 8 of the 9 words, the others 7; DC11.6 named 7 of 8, DC11.4 6. Now 1C62.3 names 5 and DC11.6 4. The
--- third q is NC91.1's title typed as written, which stays first. NC91.0's clause runs to the end of its title, so its
--- site (lower leg) goes with foreign body: it now names laceration only and comes last, where it came second before
--- (on 0152 too, by its shorter title). That is the rule as Ola's addendum words it, not a clinical choice: it puts
--- "Laceration without foreign body of <site>" behind other entries when a site is typed, and the contract names it as
--- a known effect. NB51.0's clause ends at its comma, so lower back or pelvis still count (were the clause taken to the
--- end, NC91.0 would come before NB51.0, by its shorter title).
+-- When q has the word with (and not without), the count reads no word of a "without ..." clause, up to the next
+-- comma. Before (7ad367c1), with started without and the clause's tuberculosis, malaria, cholangitis and cholecystitis
+-- counted, so the negative entry came first: 1C62.3 named 8 of the 9 words, the others 7; DC11.6 named 7 of 8, DC11.4
+-- 6. Now 1C62.3 names 5 and DC11.6 4 (the second addendum keeps this: each q has the word with). The third q is
+-- NC91.1's title typed as written, which stays first. It has the word with too, and NC91.0's clause runs to the end of
+-- its title, so its site (lower leg) goes with foreign body: it names laceration only and comes last, where it came
+-- second before (on 0152 too, by its shorter title). A q without the word with counts NC91.0's site again (5n).
+-- NB51.0's clause ends at its comma, so lower back or pelvis still count (were the clause taken to the end, NC91.0
+-- would come before NB51.0, by its shorter title).
 select pg_temp.expect('5h the count reads no word of a "without ..." clause: a positive entry comes first',
   '1C61.3 1C60.3 1C62.3 more=false|DC11.4 DC11.6 more=false|NC91.1 NB51.1 NB51.0 NC91.0 more=false',
   pg_temp.found('hiv disease clinical stage 4 with tuberculosis and malaria', 10) || '|'
@@ -524,10 +539,15 @@ select pg_temp.expect('5h the count reads no word of a "without ..." clause: a p
   || pg_temp.found('Laceration with foreign body of lower leg', 10));
 -- When q has the word without, the clause counts: each entry names all of q's words, so the shorter title comes first,
 -- the entry q names. Were the clause taken out here too, KB87.1 would name 1 word (meconium) and KB87.2 2, and DB94.3
--- 1 (liver) and DB95.11 2 (liver, hepatitis): the other entry first.
-select pg_temp.expect('5i a q with the word without still finds its own entry first',
-  'KB87.1 KB87.2 more=false|DB94.3 DB95.11 more=false',
-  pg_temp.found('meconium without ileus', 10) || '|' || pg_temp.found('liver without hepatitis', 10));
+-- 1 (liver) and DB95.11 2 (liver, hepatitis): the other entry first. The same holds when q also has the word with
+-- (since the second addendum the only q whose clauses are taken out has with and not without): in "toxic liver
+-- disease with chronic hepatitis without cirrhosis" DB95.11 names all 8 words, DB95.10 (with cirrhosis) 7, so the
+-- entry q names comes first. Were the clauses taken out because q has with, DB95.11 would name 6 (not without nor
+-- cirrhosis) and DB95.10 7: the entry with cirrhosis first. On 0152 the shorter titles came first, DB95.11 last.
+select pg_temp.expect('5i a q with the word without still finds its own entry first, with the word with too',
+  'KB87.1 KB87.2 more=false|DB94.3 DB95.11 more=false|DB95.11 DB95.10 DB95.1 DB95.1Z more=false',
+  pg_temp.found('meconium without ileus', 10) || '|' || pg_temp.found('liver without hepatitis', 10) || '|'
+  || pg_temp.found('toxic liver disease with chronic hepatitis without cirrhosis', 10));
 -- A q shaped like a code counts nothing: its own subcodes keep rows 2-5, by their shorter titles. Before (7ad367c1),
 -- "ME24.A" counted as two words, and a only starts a code part of ME24.A2-ME24.A5 but a title word of ME24.0, ME24.A1
 -- and ME24.90, which came second to fourth.
@@ -543,12 +563,16 @@ select pg_temp.expect('5j a q shaped like a code keeps its order: "ME24.A" puts 
 select pg_temp.expect('5k the count orders entries that start with q among themselves, before the others',
   'NC91.1 NB51.1 NC91.0 NB51.0 NB31.01 more=false', pg_temp.found('laceration with', 10));
 -- Fix 1's whole-word check still reads every word of the entry, a clause's too; only the count leaves them out. In
--- "meconium ileus perforations" the first attempt finds nothing (no word starts with perforations); the second drops
--- the final s of ileus and perforations, and perforation is a whole word of KB87.2 only inside its clause. So KB87.2
--- is still found, and the count puts it after KB87.4, which names all three words. Were the check to read the count's
--- words, KB87.2 would not be found at all, and which entries match would change. 0152 finds nothing (ileu is no word).
+-- "meconium ileus with perforations" the first attempt finds nothing (no word starts with perforations); the second
+-- drops the final s of ileus and perforations, and perforation is a whole word of KB87.2 only inside its clause. So
+-- KB87.2 is still found, and the count, which leaves its clause out (q has the word with), puts it after KB87.4, which
+-- names all four words. Were the check to read the count's words, KB87.2 would not be found at all, and which entries
+-- match would change. "meconium ileus perforations" (the first addendum's q) has no word with since the second
+-- addendum, so both entries name all three words, and the shorter title comes first: the same answer. 0152 finds
+-- nothing for either (ileu is no word).
 select pg_temp.expect('5l fix 1''s whole-word check still reads a clause''s words; only the count leaves them out',
-  'KB87.4 KB87.2 more=false', pg_temp.found('meconium ileus perforations', 10));
+  'KB87.4 KB87.2 more=false|KB87.4 KB87.2 more=false',
+  pg_temp.found('meconium ileus with perforations', 10) || '|' || pg_temp.found('meconium ileus perforations', 10));
 
 -- A clause in our other names. A release of its own (2026-04), so the rows above keep their answers. WHO's titles
 -- verbatim (neither has the word without); the other names are ours.
@@ -562,16 +586,141 @@ insert into ehr.catalog_diagnoses (version_id, code, title, other_names, chapter
    'febrile seizure with focal features; complex febrile convulsion', '08', false);
 update ehr.catalog_versions set active = false where kind = 'diagnosis' and active;
 update ehr.catalog_versions set active = true where id = 'c1500000-0000-4000-8000-000000000007';
--- "focal febrile seizure": focal is a word of 8A63.00 only inside its other name's clause, so 8A63.01, which names all
--- three words, comes first. Were other names' clauses counted, or only titles checked for the letters without,
--- 8A63.00 would name all three too and come first, by its shorter title (as on 0152 and 7ad367c1). "febrile
--- convulsion": the clause ends at the "; " between two other names, so 8A63.00's "simple febrile convulsion" counts,
--- both entries name both words, and the shorter title comes first. Were the clause to run on past "; " (to a comma
--- or the end only), 8A63.00 would name febrile only and come second.
-select pg_temp.expect('5m a clause in our other names does not count either, and ends at the "; " before the next one',
+-- "seizure with focal features": focal and features are words of 8A63.00 only inside its other name's clause, and q
+-- has the word with, so 8A63.01, which names all four words, comes first; 8A63.00 names seizure only. Were other
+-- names' clauses counted, or only titles checked for the letters without, 8A63.00 would name all four too and come
+-- first, by its shorter title (as on 0152 and 7ad367c1). "focal febrile seizure" has no word with, so since the second
+-- addendum every word counts (on the first addendum's body, 8A63.01 came first): both entries name all three, and the
+-- shorter title comes first, as on 0152. "febrile convulsion" has no word with either: both name both words through
+-- their second other name, and the shorter title comes first.
+select pg_temp.expect('5m a clause in our other names does not count either, when q has the word with',
   '8A63.01(febrile seizure with focal features) 8A63.00(febrile seizure without focal features) more=false|'
+  || '8A63.00(febrile seizure without focal features) 8A63.01(febrile seizure with focal features) more=false|'
   || '8A63.00(simple febrile convulsion) 8A63.01(complex febrile convulsion) more=false',
-  pg_temp.found('focal febrile seizure', 10) || '|' || pg_temp.found('febrile convulsion', 10));
+  pg_temp.found('seizure with focal features', 10) || '|' || pg_temp.found('focal febrile seizure', 10) || '|'
+  || pg_temp.found('febrile convulsion', 10));
+
+-- Ola's second addendum (#258, from the first addendum's review): the clause rule applies only when q has the word
+-- with and not the word without, a clause also ends at the next word with, and only an ICD-11 code's shape (a digit
+-- third) counts nothing. A release of its own (2026-05), so the rows above keep their answers. WHO's titles verbatim;
+-- 5A10's other names are ours, as in the 2026-01 seed.
+insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference, approvals_sha256, approved_at)
+  values ('c1500000-0000-4000-8000-000000000008', 'diagnosis', '2026-05', repeat('c', 64),
+          'synthetic second addendum sign-off', repeat('d', 64), now());
+insert into ehr.catalog_diagnoses (version_id, code, title, other_names, chapter, residual) values
+  -- Laceration of forearm: the site of NC31.0 is inside its clause.
+  ('c1500000-0000-4000-8000-000000000008', 'NC31.0', 'Laceration without foreign body of forearm', '', '22', false),
+  ('c1500000-0000-4000-8000-000000000008', 'NC31.1', 'Laceration with foreign body of forearm', '', '22', false),
+  ('c1500000-0000-4000-8000-000000000008', 'NC35.00', 'Laceration of ulnar artery at forearm level', '', '22', false),
+  ('c1500000-0000-4000-8000-000000000008', 'NC35.10', 'Laceration of radial artery at forearm level', '', '22', false),
+  ('c1500000-0000-4000-8000-000000000008', 'NC35.20', 'Laceration of vein at forearm level', '', '22', false),
+  ('c1500000-0000-4000-8000-000000000008', 'NC36.01',
+   'Laceration of flexor muscle, fascia or tendon of thumb at forearm level', '', '22', false),
+  ('c1500000-0000-4000-8000-000000000008', 'NC36.11',
+   'Laceration of long flexor muscle, fascia or tendon of other finger at forearm level', '', '22', false),
+  ('c1500000-0000-4000-8000-000000000008', 'NC36.21',
+   'Laceration of other flexor muscle, fascia or tendon at forearm level', '', '22', false),
+  ('c1500000-0000-4000-8000-000000000008', 'NC36.31',
+   'Laceration of extensor or abductor muscles or tendons of thumb at forearm level', '', '22', false),
+  ('c1500000-0000-4000-8000-000000000008', 'NC36.41',
+   'Laceration of extensor muscle, fascia or tendon of other finger at forearm level', '', '22', false),
+  ('c1500000-0000-4000-8000-000000000008', 'NC36.51',
+   'Laceration of other extensor muscle, fascia or tendon at forearm level', '', '22', false),
+  -- Pelvic fractures: pelvic is inside the clause of the stable single-bone fractures.
+  ('c1500000-0000-4000-8000-000000000008', 'NB52.1',
+   'Fracture of pelvic bone without disruption of posterior arch of pelvic ring', '', '22', false),
+  ('c1500000-0000-4000-8000-000000000008', 'NB52.10', 'Fracture of sacrum without disruption of pelvic ring', '', '22',
+   false),
+  ('c1500000-0000-4000-8000-000000000008', 'NB52.12', 'Fracture of ilium without disruption of pelvic ring', '', '22',
+   false),
+  ('c1500000-0000-4000-8000-000000000008', 'NB52.13', 'Fracture of acetabulum without disruption of pelvic ring', '',
+   '22', false),
+  ('c1500000-0000-4000-8000-000000000008', 'NB52.14', 'Fracture of pubis without disruption of pelvic ring', '', '22',
+   false),
+  ('c1500000-0000-4000-8000-000000000008', 'NB52.15', 'Fracture of ischium without disruption of pelvic ring', '', '22',
+   false),
+  ('c1500000-0000-4000-8000-000000000008', 'NB52.1Y',
+   'Fracture of other specified pelvic bone without disruption of posterior arch of pelvic ring', '', '22', true),
+  ('c1500000-0000-4000-8000-000000000008', 'NB52.1Z',
+   'Fracture of unspecified pelvic bone without disruption of posterior arch of pelvic ring', '', '22', true),
+  ('c1500000-0000-4000-8000-000000000008', 'NB52.2',
+   'Fracture of the pelvic ring with incomplete disruption of posterior arch', '', '22', false),
+  ('c1500000-0000-4000-8000-000000000008', 'NB52.3', 'Fracture of pelvic ring with complete disruption of posterior arch',
+   '', '22', false),
+  -- A q typed with "w/o": complication is inside JA00.09's clause.
+  ('c1500000-0000-4000-8000-000000000008', 'JA00.08',
+   'Spontaneous abortion, complete or unspecified, with other or unspecified complications', '', '18', false),
+  ('c1500000-0000-4000-8000-000000000008', 'JA00.09',
+   'Spontaneous abortion, complete or unspecified, without complication', '', '18', false),
+  -- A clause that ends at the next word with: "... without disorder of intellectual development and with ...".
+  ('c1500000-0000-4000-8000-000000000008', '6A02.0',
+   'Autism spectrum disorder without disorder of intellectual development and with mild or no impairment of functional language',
+   '', '06', false),
+  ('c1500000-0000-4000-8000-000000000008', '6A02.1',
+   'Autism spectrum disorder with disorder of intellectual development and with mild or no impairment of functional language',
+   '', '06', false),
+  ('c1500000-0000-4000-8000-000000000008', '6A02.2',
+   'Autism spectrum disorder without disorder of intellectual development and with impaired functional language', '',
+   '06', false),
+  ('c1500000-0000-4000-8000-000000000008', '6A02.3',
+   'Autism spectrum disorder with disorder of intellectual development and with impaired functional language', '',
+   '06', false),
+  ('c1500000-0000-4000-8000-000000000008', '6A02.5',
+   'Autism spectrum disorder with disorder of intellectual development and with absence of functional language', '',
+   '06', false),
+  -- Two words with a code's shape for the first key (TYPE.1, LUNG.CA), but no digit third: a number or ca that starts
+  -- only a code part of 7A20.1 and CA70.x.
+  ('c1500000-0000-4000-8000-000000000008', '5A10', 'Type 1 diabetes mellitus', 'dm1; t1dm; type 1 dm; type i dm', '05',
+   false),
+  ('c1500000-0000-4000-8000-000000000008', '7A20.0', 'Narcolepsy, Type 1', '', '07', false),
+  ('c1500000-0000-4000-8000-000000000008', '7A20.1', 'Narcolepsy, Type 2', '', '07', false),
+  ('c1500000-0000-4000-8000-000000000008', '5C50.11', 'Tyrosinaemia type 1', '', '05', false),
+  ('c1500000-0000-4000-8000-000000000008', 'CA70.0', 'Farmer lung', '', '12', false),
+  ('c1500000-0000-4000-8000-000000000008', 'CA70.4', 'Malt worker lung', '', '12', false),
+  ('c1500000-0000-4000-8000-000000000008', '2E62.2', 'Carcinoma in situ of bronchus or lung', '', '02', false),
+  ('c1500000-0000-4000-8000-000000000008', '2C25.1', 'Small cell carcinoma of bronchus or lung', '', '02', false),
+  ('c1500000-0000-4000-8000-000000000008', '2C25.2', 'Squamous cell carcinoma of bronchus or lung', '', '02', false),
+  ('c1500000-0000-4000-8000-000000000008', '2C25.3', 'Large cell carcinoma of bronchus or lung', '', '02', false),
+  ('c1500000-0000-4000-8000-000000000008', '2C25.4',
+   'Carcinoid or other malignant neuroendocrine neoplasms of bronchus or lung', '', '02', false);
+update ehr.catalog_versions set active = false where kind = 'diagnosis' and active;
+update ehr.catalog_versions set active = true where id = 'c1500000-0000-4000-8000-000000000008';
+-- "laceration of forearm" has no word with, so every word counts: NC31.0 names all three and keeps 0152's third row.
+-- On the first addendum's body its clause took its site, so it named laceration only and came 11th, past the default
+-- page of 10.
+select pg_temp.expect('5n a q without the word with counts every word: "laceration of forearm" keeps NC31.0 third',
+  'NC35.20 NC31.1 NC31.0 NC35.00 NC35.10 NC36.21 NC36.51 NC36.01 NC36.31 NC36.41 more=true',
+  pg_temp.found('laceration of forearm', 10));
+-- With the word with, NC31.0's clause is out again, and the entry q names comes first (as on 0152 and both addenda,
+-- by the shorter title too).
+select pg_temp.expect('5o "laceration of forearm with foreign body" puts NC31.1 first', 'NC31.1 NC31.0 more=false',
+  pg_temp.found('laceration of forearm with foreign body', 10));
+-- "pelvic fracture": pelvic is a word of the stable fractures only inside their clause ("without disruption of pelvic
+-- ring"). With every word counted they keep 0152's order, by their shorter titles. On the first addendum's body they
+-- named fracture only, so NB52.3 and the other pelvic ring entries came first, and the single bones in rows 6-10.
+select pg_temp.expect('5p "pelvic fracture" in 0152''s order',
+  'NB52.12 NB52.14 NB52.10 NB52.15 NB52.13 NB52.3 NB52.2 NB52.1 NB52.1Z NB52.1Y more=false',
+  pg_temp.found('pelvic fracture', 10));
+-- "w/o" is the words w and o, not the word without (nor the word with), so every word counts: JA00.09, the entry q
+-- names, keeps 0152's first row. On the first addendum's body its clause (complication) was out, and JA00.08, with
+-- complications, came first.
+select pg_temp.expect('5q a q typed with "w/o" in 0152''s order', 'JA00.09 JA00.08 more=false',
+  pg_temp.found('spontaneous abortion complete w/o complication', 10));
+-- A clause ends at the next word with: 6A02.2's "without disorder of intellectual development and" is out, and "with
+-- impaired functional language" counts, so it names all four words of q, as the three entries with no clause do, and
+-- keeps 0152's place by its title's length. On the first addendum's body the clause ran to the end and took functional
+-- and language, so 6A02.2 came after 6A02.1. 6A02.0, the same shape, has the longest title and stays last.
+select pg_temp.expect('5r a clause ends at the next word with: "... and with ..." still counts',
+  '6A02.3 6A02.5 6A02.2 6A02.1 6A02.0 more=false', pg_temp.found('autism with functional language', 10));
+-- "type 1" has the first key's code shape (TYPE.1) but no digit third, so it is counted: 1 starts only a code part of
+-- 7A20.1, Narcolepsy, Type 2, which comes after Tyrosinaemia type 1. On the first addendum's body every shape of the
+-- first key counted nothing, and 7A20.1 came third, as on 0152.
+select pg_temp.expect('5s "type 1" is counted: 7A20.1 Narcolepsy, Type 2 is not third',
+  '5A10 7A20.0 5C50.11 7A20.1 more=false', pg_temp.found('type 1', 10));
+-- "lung ca" (LUNG.CA) is counted too: ca starts carcinoma and carcinoid, and only a code part of CA70.0 and CA70.4, so
+-- the lung carcinomas come first. On the first addendum's body (and 0152) the two shorter CA70 titles came first.
+select pg_temp.expect('5t "lung ca" is counted: the lung carcinomas come first',
+  '2E62.2 2C25.3 2C25.1 2C25.2 2C25.4 CA70.0 CA70.4 more=false', pg_temp.found('lung ca', 10));
 
 do $$
 declare
