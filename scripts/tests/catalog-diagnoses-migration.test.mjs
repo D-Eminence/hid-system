@@ -136,31 +136,66 @@ test('0157\'s body is 0152\'s but for the two fixes, the new key and their comme
   assert.match(searchAfter, /typed_words := array\(select left\(split\.word, 40\)\s+from regexp_split_to_table\(lower\(searched\), '\[\^\[:alnum:\]\]\+'\) as split\(word\)\s+where split\.word <> ''\);/)
   assert.match(searchAfter, /case when cardinality\(typed_words\) < 2 then 0/)
   assert.match(searchAfter, /order by shown\.code_hit desc, shown\.name_is_q desc, shown\.starts_with_q desc,\s+shown\.words_named desc, length\(shown\.title\), lower\(shown\.title\) collate "C", shown\.code collate "C"\)/)
-  // Line by line, with comments set aside, only these lines differ from 0152's body.
-  const before = code(searchBefore).split('\n')
-  const after = code(searchAfter).split('\n')
-  const removed = before.filter((line) => !after.includes(line))
-  const added = after.filter((line) => !before.includes(line))
-  assert.deepEqual(removed.map((line) => line.trim()), [
-    'as compared_other',
-    "where word.shortened_word <> all (string_to_array(btrim(found.title_words || ' '",
-    "|| regexp_replace(lower(found.other_names), '[^[:alnum:]]+', ' ', 'g')), ' '))))),",
-    'length(shown.title), lower(shown.title) collate "C", shown.code collate "C") as position',
-  ])
-  assert.deepEqual(added.map((line) => line.trim()), [
-    'typed_words text[];',
-    'typed_words := array(select left(split.word, 40)',
-    "from regexp_split_to_table(lower(searched), '[^[:alnum:]]+') as split(word)",
-    "where split.word <> '');",
-    "string_to_array(btrim(candidate.title_words || ' '",
-    "|| regexp_replace(lower(candidate.other_names), '[^[:alnum:]]+', ' ', 'g')), ' ') as entry_words,",
-    'as compared_other,',
-    'case when cardinality(typed_words) < 2 then 0',
-    'else (select count(*)::integer from unnest(typed_words) as typed(word)',
-    'where exists (select 1 from unnest(found.entry_words) as entry(word)',
-    'where starts_with(entry.word, typed.word))) end as words_named',
-    "where not (array[word.shortened_word, word.shortened_word || 's'] && found.entry_words)))),",
-    'shown.words_named desc, length(shown.title), lower(shown.title) collate "C", shown.code collate "C")',
-    'as position',
-  ])
+  // Line by line, with comments set aside and indentation kept, 0157's body is 0152's with these edits, in this order
+  // and nowhere else: so a line moved (typed_words set before the loop, say, where the second attempt would count the
+  // words as typed) or re-indented fails here even with the md5 pins updated to match.
+  const edits = [
+    { find: ['  exact text;'], put: ['  exact text;', '  typed_words text[];'] },
+    {
+      find: ["    exact := btrim(regexp_replace(lower(searched), '[^[:alnum:]]+', ' ', 'g'));"],
+      put: [
+        "    exact := btrim(regexp_replace(lower(searched), '[^[:alnum:]]+', ' ', 'g'));",
+        '    typed_words := array(select left(split.word, 40)',
+        "                           from regexp_split_to_table(lower(searched), '[^[:alnum:]]+') as split(word)",
+        "                          where split.word <> '');",
+      ],
+    },
+    {
+      find: ['               compared.title as compared_title,'],
+      put: [
+        '               compared.title as compared_title,',
+        "               string_to_array(btrim(candidate.title_words || ' '",
+        "                 || regexp_replace(lower(candidate.other_names), '[^[:alnum:]]+', ' ', 'g')), ' ') as entry_words,",
+      ],
+    },
+    {
+      find: ['                 as compared_other'],
+      put: [
+        '                 as compared_other,',
+        '               case when cardinality(typed_words) < 2 then 0',
+        '                    else (select count(*)::integer from unnest(typed_words) as typed(word)',
+        '                           where exists (select 1 from unnest(found.entry_words) as entry(word)',
+        '                                          where starts_with(entry.word, typed.word))) end as words_named',
+      ],
+    },
+    {
+      find: [
+        "                                where word.shortened_word <> all (string_to_array(btrim(found.title_words || ' '",
+        "                                        || regexp_replace(lower(found.other_names), '[^[:alnum:]]+', ' ', 'g')), ' '))))),",
+      ],
+      put: ["                                where not (array[word.shortened_word, word.shortened_word || 's'] && found.entry_words)))),"],
+    },
+    {
+      find: [
+        '               row_number() over (order by shown.code_hit desc, shown.name_is_q desc, shown.starts_with_q desc,',
+        '                 length(shown.title), lower(shown.title) collate "C", shown.code collate "C") as position',
+      ],
+      put: [
+        '               row_number() over (order by shown.code_hit desc, shown.name_is_q desc, shown.starts_with_q desc,',
+        '                 shown.words_named desc, length(shown.title), lower(shown.title) collate "C", shown.code collate "C")',
+        '                 as position',
+      ],
+    },
+  ]
+  const expected = code(searchBefore).split('\n')
+  let from = 0
+  for (const { find, put } of edits) {
+    const at = (index) => find.every((line, offset) => expected[index + offset] === line)
+    const places = expected.map((_, index) => index).filter(at)
+    assert.equal(places.length, 1, `0152's body has once: ${find[0].trim()}`)
+    assert.ok(places[0] >= from, `in order: ${find[0].trim()}`)
+    expected.splice(places[0], find.length, ...put)
+    from = places[0] + put.length
+  }
+  assert.deepEqual(code(searchAfter).split('\n'), expected)
 })

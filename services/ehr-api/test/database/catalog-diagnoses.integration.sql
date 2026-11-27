@@ -42,8 +42,11 @@
 --      naming more of q's words, every word and never a code part, come
 --      after a name that is q or starts with q, for q of 2 or more words
 --      (fix 2), so a stage or grade number no longer ranks by a code part;
---      a one-word q such as "1a" keeps its order. Each fix case fails on
---      0152's search. Case 2z also changes with fix 2.
+--      a one-word q such as "1a" keeps its order, with punctuation around it
+--      too; on the second attempt the words counted are the shortened ones;
+--      a code typed with a space at its dot stays first though another entry
+--      names more of q's words. Each fix case fails on 0152's search. Case 2z
+--      also changes with fix 2.
 -- Synthetic version ids: prefix c150. The codes and titles are ICD-11's
 -- (WHO, CC BY-ND 3.0 IGO), verbatim; the other names are ours.
 set plpgsql.variable_conflict = error;
@@ -374,6 +377,11 @@ insert into ehr.catalog_diagnoses (version_id, code, title, other_names, chapter
   ('c1500000-0000-4000-8000-000000000005', '2A8Z', 'Mature B-cell neoplasms, unspecified', '', '02', true),
   ('c1500000-0000-4000-8000-000000000005', '2A82.Z', 'Mature B-cell neoplasm with leukaemic behaviour, unspecified', '',
    '02', true),
+  -- Fix 1 and the second attempt's count: infection and lung, as shortened, are words of all three; infections, as
+  -- typed, of two, and lungs of none.
+  ('c1500000-0000-4000-8000-000000000005', 'CA4Z', 'Lung infections, unspecified', '', '12', true),
+  ('c1500000-0000-4000-8000-000000000005', '1F73.1', 'Echinococcus infection of lung', '', '01', false),
+  ('c1500000-0000-4000-8000-000000000005', 'CA4Y', 'Other specified lung infections', '', '12', true),
   -- Fix 2: HIV disease by clinical stage (stages 1 to 3, and 1C61.3, stage 4, whose code part is 3) and follicular
   -- lymphoma by grade, each with a number that also starts a code part of another.
   ('c1500000-0000-4000-8000-000000000005', '1C60.0', 'HIV disease clinical stage 1 associated with tuberculosis', '',
@@ -425,6 +433,21 @@ select pg_temp.expect('5c fix 2: "stage 3" puts the stage 3 entries before 1C61.
 -- the titles that have 1a as a word.
 select pg_temp.expect('5d a one-word q keeps its order: "1a" puts 1A00 first', '1A00 GC51.00 KB88.0 more=false',
   pg_temp.found('1a', 10));
+-- Punctuation around one word makes empty pieces when q is split; they are not words, so "(1a)" and "1a." are one
+-- word too and keep the order of "1a".
+select pg_temp.expect('5e a one-word q with punctuation around it keeps its order', '1A00 GC51.00 KB88.0 more=false|'
+  || '1A00 GC51.00 KB88.0 more=false',
+  pg_temp.found('(1a)', 10) || '|' || pg_temp.found('1a.', 10));
+-- On the second attempt the words counted are the words as shortened, as the match uses them: infection and lung are
+-- words of all three entries, so the shorter titles come first. Counted as typed, infections would put the two lung
+-- infections entries first. Before (0152), infection of lung was the only entry where each shortened word is a word.
+select pg_temp.expect('5f fix 1 and the second attempt''s count: "infections lungs" counts infection and lung',
+  'CA4Z 1F73.1 CA4Y more=false', pg_temp.found('infections lungs', 10));
+-- The code q is stays first, before the count: in "2A80 1" (2A80.1 with a space at its dot), 1 is a word of 2A80.0's
+-- title, grade 1, and only a code part of 2A80.1's.
+select pg_temp.expect('5g a code typed with a space at its dot comes first, though another entry names more of q''s words',
+  '2A80.1 2A80.0 more=false|2A80.1 2A80.0 more=false',
+  pg_temp.found('2A80 1', 10) || '|' || pg_temp.found('2a80.1', 10));
 
 do $$
 declare
