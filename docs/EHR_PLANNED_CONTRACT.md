@@ -1970,11 +1970,11 @@ names. Those come from `DIAGNOSIS_SYNONYMS` in the same file (HTN, DM,
 "MP+", typhoid...), are kept apart from WHO's words, and contain no ICD-10
 content. A code typed exactly comes first, then an entry whose title or
 one of our other names is `q` itself, then those whose title or other name
-starts with `q`, then, for a `q` of 2 or more words not shaped like a
-code, those that name more of `q`'s words (every word, not only the first
-6, that starts a word of the title or of one of our other names, never a
-part of the code, nor a word of a "without ..." clause unless `q` has the
-word without; 0157), then shorter titles.
+starts with `q`, then, for a `q` of 2 or more words not shaped like an
+ICD-11 code, those that name more of `q`'s words (every word, not only the
+first 6, that starts a word of the title or of one of our other names,
+never a part of the code, nor, when `q` has the word with and not the word
+without, a word of a "without ..." clause; 0157), then shorter titles.
 
 Example for `q=falciparum`:
 
@@ -2249,40 +2249,55 @@ file's seed in `docs/codes/catalog-approvals.json`.
     4. The count never changes which entries match, how many, or `more`,
     and the first three keys come before it, so a code typed in any form,
     and a title typed as written, still come first.
-  - Words in a "without ..." clause do not count (0157, Ola's addendum on
-    hid-system#258, 27 Nov 2026): the count reads the entry's words with
-    each "without ..." clause taken out first (the word without, split as
-    `q` is, up to the next `,` or `;` or the end), from the title and from
-    our other names. "with" also starts "without", so before, "hiv disease
-    clinical stage 4 with tuberculosis and malaria" put 1C62.3 ("...
-    without mention of tuberculosis or malaria") first, and "calculus of
-    bile duct with cholangitis and cholecystitis" put DC11.6 ("... without
-    cholangitis or cholecystitis") first: the opposite meaning, in the row
-    a clinician most often picks. Now 1C61.3 and 1C60.3 come before 1C62.3,
-    and DC11.4 before DC11.6; "diverticulitis of unspecified part of
-    intestine with complications" puts DD00.0 (with complication) first,
-    not DD00.Z, and "varicella complications" puts 1E90.Y Varicella with
-    other specified complication before 1E90.0 Varicella without
-    complication. When `q` itself has the word without, every word counts,
-    so "meconium without ileus" still puts KB87.1 Meconium plug without
-    ileus first, and "liver without hepatitis" DB94.3 Alcoholic cirrhosis
-    of liver without hepatitis. A clause also takes whatever follows the
-    negated words before any `,` or `;`: a "with ..." (4 titles of the
-    2026-01 release: 6A02.0, 6A02.2, 6C90.10 and 6C90.11), a site, or an
-    included term (0157's known effects, below). Which entries match, how
-    many and `more` do not change, and fix 1's whole-word rule still reads
-    every word of the entry.
-  - A one-word `q`, or a `q` shaped like a code, counts nothing, so its
-    order is as before (Ola, clinical owner): a clinician who types a code
-    fragment such as "1a" or "da" usually means the code, so "1a" still
-    puts 1A00 Cholera before GC51.00 Female Genital Mutilation Type 1a and
-    KB88.0 Necrotising enterocolitis of newborn, Stage 1A & B. "ME24.A" or
-    "KA21.2" split into two words, so before (Ola's addendum) their own
-    subcodes fell behind other entries in rows 2-5; now they keep 0152's
-    rows. The shape is the one the code key tests, so it also takes any
-    four letters or digits, a space and one or two more: "type 1" (TYPE.1)
-    and "loss of" keep 0152's order too, and "type 1" again offers 7A20.1
-    Narcolepsy, Type 2 third.
+  - When `q` has the word with, words in a "without ..." clause do not
+    count (0157, Ola's two addenda on hid-system#258, 27 Nov 2026): for a
+    `q` with the word with and not the word without, the count reads the
+    entry's words with each "without ..." clause taken out first, from the
+    title and from our other names. A clause is the word without, split as
+    `q` is, up to the next `,` or `;`, or the next word with, or the end.
+    "with" also starts "without", so before, "hiv disease clinical stage 4
+    with tuberculosis and malaria" put 1C62.3 ("... without mention of
+    tuberculosis or malaria") first, and "calculus of bile duct with
+    cholangitis and cholecystitis" put DC11.6 ("... without cholangitis or
+    cholecystitis") first: the opposite meaning, in the row a clinician
+    most often picks. Now 1C61.3 and 1C60.3 come before 1C62.3, and DC11.4
+    before DC11.6, and "diverticulitis of unspecified part of intestine with
+    complications" puts DD00.0 (with complication) first, not DD00.Z. A
+    clause ends at the next word with, so 6A02.2 "Autism spectrum disorder
+    without disorder of intellectual development and with impaired
+    functional language" still names functional and language ("autism with
+    functional language" keeps 0152's order); 4 titles of the 2026-01
+    release have such a clause (6A02.0, 6A02.2, 6C90.10 and 6C90.11).
+  - Any other `q` counts every word, the clause's too (the second addendum:
+    taken out for every `q`, a clause also took a site or a term that
+    follows the negated words). So "laceration of forearm" keeps NC31.0
+    Laceration without foreign body of forearm third, as on 0152, and
+    "pelvic fracture" keeps the stable single-bone fractures ("... without
+    disruption of pelvic ring") first. `q` typed with "w/o", "w.o" or
+    "w/out" has neither word, so "spontaneous abortion complete w/o
+    complication" keeps JA00.09 (without complication) first. When `q` has
+    the word without, every word counts too, even with the word with:
+    "meconium without ileus" still puts KB87.1 Meconium plug without ileus
+    first, "liver without hepatitis" DB94.3 Alcoholic cirrhosis of liver
+    without hepatitis, and "toxic liver disease with chronic hepatitis
+    without cirrhosis" DB95.11 before DB95.10 (with cirrhosis). Which
+    entries match, how many and `more` do not change, and fix 1's
+    whole-word rule still reads every word of the entry.
+  - A one-word `q`, or a `q` of an ICD-11 code's shape, counts nothing, so
+    its order is as before (Ola, clinical owner): a clinician who types a
+    code fragment such as "1a" or "da" usually means the code, so "1a"
+    still puts 1A00 Cholera before GC51.00 Female Genital Mutilation Type
+    1a and KB88.0 Necrotising enterocolitis of newborn, Stage 1A & B. The
+    shape is the code key's with a digit third, as every ICD-11 code has
+    ("ME24.A", "KA21.2", "1C62.3", "NC31 0"). "ME24.A" or "KA21.2" split
+    into two words, so before (Ola's addendum) their own subcodes fell
+    behind other entries in rows 2-5; now they keep 0152's rows. Four
+    letters or digits, a space and one or two more have the code key's
+    shape but no digit third, and are counted (the second addendum): "type
+    1" puts 7A20.1 Narcolepsy, Type 2 18th (third on 0152), after the type
+    1 entries, and "lung ca" the lung carcinomas first (Farmer lung,
+    CA70.0, whose code part starts with ca, first on 0152); "loss of"
+    keeps 0152's order.
   - With the 2026-01 release loaded, each of its 16,883 titles of 2 to 100
     characters, typed as written or in upper case, comes first. The 372
     longer ones, cut to 100 characters, are each in the first 25.
@@ -2472,9 +2487,12 @@ live table is altered.
 
 Built on 27 Nov 2026 (lane D), on 0152, as the design note on
 hid-system#258 (Ola, 26 Nov 2026, 13:20 UTC) set out, with Ola's addendum
-there (27 Nov 2026, 10:10 UTC) from the build's clinical review: the count
-reads no word of a "without ..." clause unless `q` has the word, and a `q`
-shaped like a code counts nothing (both described above). Rahman's last look
+there (27 Nov 2026, 10:10 UTC) from the build's clinical review, as her
+second addendum (16:20 UTC, from the first addendum's review) narrows it:
+when `q` has the word with and not the word without, the count reads no
+word of a "without ..." clause, which ends at the next `,`, `;` or word
+with; and a `q` of an ICD-11 code's shape counts nothing (both described
+above). Rahman's last look
 at #320 cleared 0152 to sign and left two ranking minors, to fix before any
 ICD-11 release is activated: the whole-word rule of the second attempt, and
 the count of `q`'s words named (both described in the first slice, above).
@@ -2484,17 +2502,21 @@ The number 0157 is a booking, given at integration in release order.
   `ehr.search_catalog_diagnoses(q, limit)`, with the same columns,
   PL/pgSQL, STABLE, SECURITY DEFINER and `search_path`, all restated, so
   its owner, grants and oid are kept. The body is 0152's but for the two
-  fixes and the new fourth key, with the addendum's two changes to its
+  fixes and the new fourth key, with the addenda's two changes to its
   count. The words the count reads are listed once per row, beside the
-  entry's own words, only when the count runs, and only for an entry with
-  the letters without in its title or other names (260 titles of the
-  2026-01 release, and no other name); every other entry's count reads its
-  own words. No table, index, trigger or grant changes, and no table is
+  entry's own words, only for a `q` with the word with and not the word
+  without, and only for an entry with the letters without in its title or
+  other names (260 titles of the 2026-01 release, and no other name); every
+  other entry's count reads its own words. A `,` is put before each word
+  with, and each clause then runs to the next `,` or `;`, so no pattern
+  nests a look-around; on the 17,255 titles and the other names of both
+  seeds it leaves the same words as the nested form and as a word-by-word
+  scan. No table, index, trigger or grant changes, and no table is
   locked (PL/pgSQL's body check is syntax only); a search in progress
   finishes on the old body, and the next one uses the new.
   - Preconditions (55000 "0157: …", nothing applied): 0149's versions
     table and 0152's list and search; "0157: already applied" when the
-    search's body is 0157's (md5 `b5b5ee7a…`); otherwise the search as
+    search's body is 0157's (md5 `c9071a17…`); otherwise the search as
     0152 made it (the md5 of its body, `43f331b7…`, PL/pgSQL, SECURITY
     DEFINER, STABLE, its `search_path`, its owner and its columns), and
     0149's query helper as 0152 pins it. 0153-0156 and 0159 are not
@@ -2510,66 +2532,78 @@ The number 0157 is a booking, given at integration in release order.
   0152's body verbatim, everything restated, and 0152's comment; then
   check the md5 `43f331b7…`, STABLE, SECURITY DEFINER, `search_path`, owner
   and grants. No table lock.
-- **Known limits** (Ola's addendum: accepted):
+- **Known limits** (Ola's addenda: accepted):
   - Fix 1 and "mumps complications": 0152 found nothing; 0157 offers only
     1D80.0 Mumps without complication. It is the negation blindness 0152
-    already has for "varicella complications". The fix is an other name
+    already has for "varicella complications", which again puts 1E90.0
+    Varicella without complication first, as on 0152 (it has no word with;
+    the first addendum's body put 1E90.Y first). The fix is an other name
     in the seed follow-up (#342): "mumps with complication" on
     1D80.1-1D80.Y.
   - The cost of queries of many short words: a junk `q` of 50 one-letter
-    words takes about 335 ms, against about 150 ms on 0152, as each word is
-    counted for each of thousands of entries. The 100-character limit and
-    the 429 rate limit bound it. The note's timed queries are unchanged
-    within noise.
-- **Known effects of the addendum's rules as worded** (found by the
-  build's second clinical and SQL reviews, on the 2026-01 release; not yet
-  ruled on by the clinical owner, and listed in 0157's PR). Which entries
-  match, how many and `more` never change; only the order does:
-  - The clause runs on to the next `,` or `;` or the end, so it also
-    takes a site or a term that follows the negated words:
-    - 22 titles "Laceration without foreign body of <site>" and "Puncture
-      wound without foreign body of <site>" (11 of each; the two for
-      "abdomen, lower back or pelvis" keep the words after the comma).
-      Such an entry now counts laceration (or puncture wound) only, so
-      when a site is typed it comes last: "laceration of forearm" puts
-      NC31.0 11th (3rd before, and on 0152), off the default page of 10,
-      and "laceration of hand" or "... wrist" NC52.10 11th (5th before);
-      "... lower leg", "... thigh", "... finger" and "... shoulder" move
-      NC91.0, NC71.0, NC52.00 and NC11.0 from row 2 or 3 to the last row.
-      Across 21 sites in three word orders, 54 of 63 laceration answers
-      move the entry down, and the 9 for abdomen, lower back and pelvis do
-      not. Puncture wound answers do not change: only the pair matches, and
-      the entry without foreign body was already second.
-    - 11 titles "... without disruption of (posterior arch of) pelvic ring"
-      (NB52.1, NB52.10, NB52.12-NB52.15, NB52.1Y, NB52.1Z, NB53.2-NB53.4):
-      "pelvic fracture" now puts NB52.3 (pelvic ring with complete
-      disruption of posterior arch) first, and the stable single-bone
-      fractures in rows 6-10, where they came first before.
-    - 2 titles "... with or without ..." (NA06.1, KA84.5), whose clause
-      includes rather than negates: "orbit foreign body" puts NA06.2
-      (retained foreign body, a late sequela) before NA06.1 Penetrating
-      wound of orbit with or without foreign body.
-    - QA21.60 Retained intrauterine device without injury or harm in
-      non-pregnant uterus counts retained intrauterine device only.
-  - Only the word without, as typed, keeps a clause's words. "w/o", "w.o"
-    and "w/out" are split into other words, so the clause is taken out
-    and an entry of the opposite meaning can come first: "spontaneous
-    abortion complete w/o complication" puts JA00.08 (with complications)
-    before JA00.09, and "hiv stage 3 w/o tuberculosis or malaria" puts
-    1C60.3Y (stage 4, associated with tuberculosis) first. Each of the 260
-    "without" titles typed as written keeps its place; typed with "w/o",
-    91 of them move their own entry down (2 up), and with "w/out", 40.
-  - The code shape also takes two-word queries of four letters, a space
-    and one or two more, which keep 0152's order: "lung ca" puts CA70.0
-    Farmer lung first and the lung carcinomas (rows 1-5 on 0157's first
-    body) in rows 16-20, as on 0152; "type 3", "type 4", "nose ca" and
-    "cord ca" change the same way. Of 4,102 such pairs (each four-letter
-    title word with 14 short words), 64 have a new first row.
+    words takes about 405 ms, against about 177 ms on 0152 (about 2.3
+    times), as each word is counted for each of thousands of entries. The
+    100-character limit and the 429 rate limit bound it. The note's timed
+    queries are unchanged within noise.
+  - Two problems 0152 already has, outside 0157 (Ola tracks them
+    separately): "1C62.3 hiv", a code and a word, is not a code, so 1C62.2
+    comes first (the same answer on 0152 and 0157); and "gestational
+    hypertension with proteinuria" matches only "... without hypertension"
+    entries (JA22.0, JA22, JA22.2, KA00.1). It has the word with, so 0157
+    puts JA22.2 Gestational oedema with proteinuria without hypertension
+    first, where 0152 put JA22.0; neither is pre-eclampsia.
+- **The first addendum's known effects, as the second addendum resolves
+  them** (found by the build's second clinical and SQL reviews, on the
+  2026-01 release). Which entries match, how many and `more` never change;
+  only the order does:
+  - A clause taken out for every `q` also took a site or a term that
+    follows the negated words: "laceration of forearm" put NC31.0 11th, off
+    the default page of 10 (54 of 63 laceration answers across 21 sites in
+    three word orders moved the entry down), "pelvic fracture" put NB52.3
+    first and the stable single-bone fractures in rows 6-10, and "orbit
+    foreign body" put NA06.2 before NA06.1 Penetrating wound of orbit with
+    or without foreign body. Now such a `q`, with no word with, counts
+    every word, and each keeps 0152's order: all 63 laceration answers and
+    the 84 puncture wound answers put the entry where 0152 does.
+  - "w/o", "w.o" and "w/out" are not the word without, so a `q` typed with
+    them had the clauses taken out: "spontaneous abortion complete w/o
+    complication" put JA00.08 (with complications) first. Now such a `q`
+    counts every word, unless it also has the word with (below), and puts
+    JA00.09 first again. Of the 93 "without" titles that the first
+    addendum's body moved when typed with "w/o" (91 down, 2 up), 84 now
+    give the design note's answer, and the other 9 have the word with;
+    against 0152 the title's own entry comes higher 61 times (by the count
+    of every word), as high 31 times and lower once. Typed with "w/out", 35
+    of 40 give the note's answer, and the other 5 have the word with.
+  - The code shape took two-word queries such as "type 1", "lung ca",
+    "type 3", "type 4", "nose ca" and "cord ca", which kept 0152's order.
+    Now only an ICD-11 code's shape does, and those are counted (above).
+- **Known effects of the second addendum's rules** (open, listed in
+  0157's PR; the 2026-01 release, the same on #342's seed). A `q` with the
+  word with still has the clauses taken out, so an entry whose clause
+  names what was typed comes lower:
+  - Of the 305,791 probe queries, 14 change order against 0152 this way:
+    10 two-word queries such as "measles with", "rubella with", "varicella
+    with" and "zoster with", which now put an entry with a complication
+    first, not the one without, and "migraine with", which puts 8A80.0
+    Migraine without aura third, after two aura entries (second on 0152);
+    and 4 titles typed as written, each still first. A site after a clause
+    still goes with it: "Laceration with foreign body of lower leg" puts
+    NC91.0 Laceration without foreign body of lower leg last, after NB51.1
+    and NB51.0 (second on 0152).
+  - A `q` with the word with and "w/o", "w.o" or "w/out" (not the word
+    without) has the clause typed after "w/o" taken out too, as in 9 of
+    the 93 "w/o" titles and 5 of the 40 "w/out" ones: "drug-induced or
+    toxic liver disease with chronic hepatitis w/o cirrhosis" puts DB95.10
+    (with cirrhosis) first and DB95.11, the entry typed, 4th (19th on 0152,
+    2nd on the design note's body); "syndromes with multiple structural
+    anomalies, w/o predominant body system involvement" puts LD2F 5th (4th
+    on 0152).
 - **Release:** before the first ICD-11 release is activated. It rides
   alone, or only with files of 0155-0159 (not 0156, which goes alone),
   never with the sprint's files or 0178-0180 (Rahman's rule for lane D's
-  batch, 7167493074 point 3, as Ola's addendum narrows it). It needs no
-  lock.
+  batch, 7167493074 point 3, as Ola's first addendum narrows it). It needs
+  no lock.
 
 
 ### Target
