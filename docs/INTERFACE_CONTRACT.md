@@ -1721,6 +1721,24 @@ the route allows a read. The answer to `accept-ehr-order` is unchanged.
 Earlier backends do not send it, so clients treat it as optional. No
 migration.
 
+### Lab request group on Lab work items (ORD-6, 0158)
+
+Each of this facility's own Lab work items carries `requestGroupId` (UUID
+or null): the group of the EHR lab request it was accepted from, which
+0158's `lab.validate_work_item` copies from the EHR row into
+`lab.work_items.request_group_id`. It is null for a request ordered on its
+own. lab-api takes no group from its caller (`accept-ehr-order` is
+unchanged and refuses the field) and names none in its insert; it only
+reads the column. Every own work item answer sends it: each item of
+`GET /api/v1/lab/work-items`, `GET /api/v1/lab/work-items/{id}`, and the
+answer to `accept-ehr-order` (a replay too). It is read in the same
+statement and under the same row-level security as the rest of the row,
+and adds no audit row. A work item from another facility's order route
+never carries it (0158 stores none there). The lab board may show a
+patient's tests of one group on one card. This image selects the column,
+so it needs 0158 applied. Earlier backends do not send it, so clients
+treat it as optional.
+
 ### Lab results: check, release and correction
 
 Checking a result (`POST /api/v1/lab/results/{resultId}/verify`) needs
@@ -2640,6 +2658,7 @@ others it answers `unknown`, and the client re-reads instead.
 | `ehr.document.upload` (upload intent) | POST `/api/v1/ehr/documents/upload-intents` | `document.upload-intent` (`document.service.ts`); `…/complete` takes no key |
 | `ehr.prescription.to-pharmacy` | POST `E/{eid}/prescriptions/{id}/pharmacy-work-item` | **none**: the key is passed to Pharmacy (`acceptEhrPrescription`), which keeps its own idempotency |
 | `ehr.lab-request.to-lab` | POST `E/{eid}/lab-requests/{id}/lab-work-item` | **none**: the key is checked and not used; Lab is called with `ehr-order:<requestId>:<rowVersion>` |
+| not in the registry (ORD-6, 0158: no offline group create) | POST `E/{eid}/lab-request-groups` | `lab-request-group.create` for the whole call (result `lab-request-group`, the group's id), and `lab-request-group.test.1` to `.20`, one per test (result `lab-request`, the request's id) (`lab-requests.service.ts`); C1 lists every one of these rows under the one key |
 | `ehr.encounter.update`, `ehr.note.update`, `ehr.diagnosis.update` | PATCH | **none**: the PATCH routes take no key (A1 not built) |
 | `identity.grant.close` | POST `/api/v1/identity/consent-grants/{gid}/close` | not an EHR route |
 
@@ -9017,6 +9036,51 @@ names a part (`visit`, `note`, `vitals` or `diagnoses`), show it with that
 section. After a `201` with `encounter.reusedOpenVisit: true`, the complaint
 typed in "Start consultation" is not on the visit (above): save it as a
 visit edit, or put it in the note before sending.
+
+## ORD-6: several tests in one lab request (0158, behind LAB_REQUEST_GROUPS_ENABLED)
+
+Planned, not live: 0158 (a booking, after 0156's release) and its ehr-api
+and lab-api images. The route, its body, its answer and its errors are in
+`docs/EHR_PLANNED_CONTRACT.md`, ORD-6; this section records what the
+backend does with the key, the audit and Lab's answers, beside EHR-C5's.
+
+- **The setting.** ehr-api's `LAB_REQUEST_GROUPS_ENABLED`, off by default,
+  stops new groups only. While it is off, `POST
+  /ehr/patients/:patientId/encounters/:encounterId/lab-request-groups`
+  answers `503 LAB_REQUEST_GROUPS_UNAVAILABLE` after the permission check
+  and before the body is read, and the service's `createInTransaction`
+  (ORD-8's way in) writes a null group (option (b)). Groups already written
+  are always answered: `requestGroupId` on every lab request answer, and
+  the list's `?requestGroupId=<uuid>`, which a cursor binds (a cursor of one
+  group pages no other list: `400 INVALID_CURSOR`). Switch it off, and
+  `ORDER_SETS_ENABLED` off, before an ehr-api image rollback or 0158's undo.
+- **Idempotency-Key**, as EHR-C5's: one key covers the group. It is stored
+  once for the whole call (operation `lab-request-group.create`, whose
+  result names the group, not a table row, so a replay re-runs the parts)
+  and once per test (`lab-request-group.test.1` to `.20`), each of which
+  replays the request it saved. A key used on the single create
+  (`lab-request.create`) never clashes with a group. The same key and body
+  answers the group as it is now and sends its active tests to Lab again
+  (Lab replays the ones it holds); another body is `409
+  IDEMPOTENCY_KEY_REUSED`.
+- **Audit**, in the same transaction: each test writes the single
+  create's `ehr.lab-request.create` row (with `idempotentReplay`), and the
+  group writes one `ehr.lab-request-group.create` row (`lab-request-group`,
+  the group's id) with `{ labRequestIds, count, status, idempotentReplay }`
+  and no test name or code. No group row is written when no group is
+  (ORD-8 while the setting is off). A consent refusal writes one `denied`
+  row per test and one for the group; a visit that is not found, one
+  `failure` row each (reason `not_found`), and `404
+  CLINICAL_RESOURCE_NOT_FOUND`.
+- **Sending to Lab.** After the commit, each active test is sent with the
+  single create's order (no group: Lab's validator copies it from the EHR
+  row), in order and one at a time, until 25 s after the request reached
+  ehr-api. A send cut off then is `labHandoff: { state: "failed", status:
+  503, code: "LAB_SERVICE_UNAVAILABLE" }`; one not tried, `"LAB_HANDOFF_NOT_TRIED"`.
+  A member without `lab.work-item.accept` gets `{ state: "not_sent", code:
+  "LAB_PERMISSION_ABSENT" }`. The group answers `201` whatever Lab says.
+- **A client never sets the group.** `requestGroupId` in the group body, in
+  a test, in the single create or in a PATCH is `400 VALIDATION_FAILED`.
 
 ## SX-1: modules map per facility
 
