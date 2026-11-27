@@ -2484,7 +2484,10 @@ above is the lab request's part.
   - The six are locked in one NOWAIT step with both busy refusals, each
     starting "0156: ", which a dry run tries again. While they are held,
     every read and write of the six waits, and so does nearly all lab-api
-    work (35 policies on 16 lab tables join `lab.work_items`). The hold was
+    work (35 policies on 16 lab tables join `lab.work_items`), and every
+    write to the ten tables whose foreign keys point at the six (route
+    events, accessions, test executions, pharmacy work items and others;
+    0156's header lists them). The hold was
     34-52 ms with 20,000 fictional rows in each table.
   - The file refuses (55000) while any of the six has `pg_class.reltuples`
     above 5,000,000, or -1 (never analysed) with a page on disk. Above the

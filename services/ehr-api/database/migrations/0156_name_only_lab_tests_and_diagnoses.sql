@@ -155,9 +155,20 @@
 -- row-level security policy joins one of them. After Release E, 35 policies
 -- on 16 lab tables join lab.work_items, so nearly all lab-api work waits:
 -- result entry, verification and release included (Rahman's 7167493074,
--- item 3). They wait; none fails unless its own lock_timeout or
--- statement_timeout is shorter than the hold. In the dry run the locks last
--- until the dry run ends; this file goes alone, so that hold is its own.
+-- item 3). Such a read by a superuser or BYPASSRLS role does not wait (no
+-- policy runs); the services' runtime roles do. Writes to the ten tables
+-- whose foreign keys point at the six wait too: the key check locks the
+-- row it points at FOR KEY SHARE, which takes ROW SHARE on that table
+-- (measured: a ROW SHARE request on ehr.order_routes waited):
+-- ehr.order_route_events,
+-- ehr.order_route_accept_attempts, ehr.order_route_unable_endings,
+-- ehr.order_route_wrong_patient_reports, pharmacy.work_items and
+-- pharmacy.order_route_dispensing_reports (to ehr.order_routes);
+-- lab.accessions, lab.accession_events and lab.work_item_events (to
+-- lab.work_items); lab.test_executions (to lab.work_item_requested_tests).
+-- They wait; none fails unless its own lock_timeout or statement_timeout
+-- is shorter than the hold. In the dry run the locks last until the dry
+-- run ends; this file goes alone, so that hold is its own.
 --
 -- THE SIZE BOUND (Rahman's answer 4). Each VALIDATE scans its table under
 -- ACCESS EXCLUSIVE (the house pattern of 0122, 0125, 0144 and 0154; Rahman
