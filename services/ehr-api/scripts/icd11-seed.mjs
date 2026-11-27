@@ -14,7 +14,8 @@
 // (LEFT_OUT_CHAPTERS); blocks and chapters have no code and are left out. Our other names are kept apart from WHO's
 // words, and only where they name a coded title. A title with accented letters also gets its plain-letter spelling
 // as one of our other names ("Sjogren syndrome" for "Sjögren syndrome"; Ola, clinical owner), so a search typed
-// without the accents finds it; the title itself is never changed.
+// without the accents finds it; the title itself is never changed. A few more of our other names are listed here,
+// each approved by the clinical owner (APPROVED_OTHER_NAMES).
 import { inflateRawSync } from 'node:zlib';
 import { SEED_FORMAT } from './catalog-seed.mjs';
 
@@ -32,6 +33,35 @@ export const LEFT_OUT_CHAPTERS = {
   26: 'Supplementary chapter: traditional medicine conditions, used beside a conventional diagnosis, never instead of one',
   V: 'Supplementary section for functioning assessment (WHODAS items), not diagnoses',
 };
+
+/**
+ * Our other names for the diagnosis search that ocr-worker's DIAGNOSIS_SYNONYMS does not hold, each with its code,
+ * WHO's title for that code (the build stops if the release lacks the code or names it otherwise, or if another entry
+ * already has one of the names as its title or other name), the names, and who approved them, with the record.
+ * A name may hold only ASCII letters, digits, spaces, both apostrophes and hyphens. 0152's search splits words at
+ * [[:alnum:]], which follows the database's character type: under the C type every other letter is a word break. So
+ * the clash check below compares exactly as the search does only for those characters, and the build refuses others.
+ * Promised on #320: no "Down" query reached LD40.0 Complete trisomy 21, and "gallstones" reached DA91.30 Gallstone
+ * ileus of small intestine but not DC11 Cholelithiasis.
+ * - LD40.0: WHO lists "Down syndrome" as an inclusion of LD40.0. "Down's syndrome" needs no name of its own: the
+ *   search drops a word-final 's from what is typed and from our names alike (0152). The name is in lower case, as
+ *   every hand-written other name is; the search ignores case.
+ * - DC11: as in DIAGNOSIS_SYNONYMS, a name that does not say which narrower entry is meant names the broader title
+ *   true of all of them. "gallstone" says neither where the stones are nor whether there is cholecystitis or
+ *   cholangitis, so it is DC11, not one of DC11.0-DC11.7. WHO's index files "gallstone" under DC11.3 Calculus of
+ *   gallbladder or cystic duct without cholecystitis or cholangitis; DC11.3 adds "without cholecystitis or
+ *   cholangitis", which a chart saying "gallstones" does not state, so the name stays on DC11, knowingly.
+ * - "gallstones" is not one of DC11's names: 0152's second attempt (a final s dropped) finds it through "gallstone",
+ *   so "gallstones" finds DC11 first, then DA91.30 Gallstone ileus of small intestine, as "gallstone" does. Listed,
+ *   it would be found on the first attempt, the second would not run, and "gallstones" would offer DC11 alone,
+ *   without DA91.30. Ola, clinical owner, dropped "gallstones" from the list on 25 Nov 2026 for that reason.
+ */
+export const APPROVED_OTHER_NAMES = Object.freeze([
+  Object.freeze({ code: 'LD40.0', title: 'Complete trisomy 21', names: Object.freeze(['down syndrome']),
+    approval: 'approved by Ola as clinical owner, 25 Nov 2026 (#320, comments 7141511470 and 7168535216)' }),
+  Object.freeze({ code: 'DC11', title: 'Cholelithiasis', names: Object.freeze(['gallstone']),
+    approval: 'approved by Ola as clinical owner, 25 Nov 2026 (#320, comments 7141511470 and 7168535216)' }),
+]);
 
 /** One member of a ZIP file (stored or deflated), found through the central directory. */
 export function zipMember(bytes, name) {
@@ -158,12 +188,23 @@ export function plainLetters(title) {
 }
 
 /**
+ * A title or name as 0152's search compares it with q, as words: a word-final 's or ’s dropped (any case), lower
+ * case, split at anything that is not a letter or a digit. "Down's-Syndrome" is "down syndrome".
+ */
+const searchedWords = (name) => name.replace(/([\p{L}\p{N}])['’][sS](?![\p{L}\p{N}])/gu, '$1').toLowerCase()
+  .replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+/**
  * The diagnosis seed: every coded, non-extension entry of the tabulation,
  * in code order, with its verbatim title, chapter, whether it is residual,
  * and our other names. `release` is the version label (2026-01);
  * `releaseFile` names the WHO file and its sha256, recorded in the seed.
+ * `approvedNames` is a list shaped as APPROVED_OTHER_NAMES (the build
+ * passes that list): each entry's names are added to its code's other names,
+ * once its code is in the seed with exactly the title it gives and no other
+ * entry has one of the names as its title or other name.
  */
-export function buildIcd11Seed(rows, { release, releaseFile, otherNames = new Map() }) {
+export function buildIcd11Seed(rows, { release, releaseFile, otherNames = new Map(), approvedNames = [] }) {
   const items = [];
   const seen = new Set();
   const leftOut = Object.fromEntries(Object.keys(LEFT_OUT_CHAPTERS).map((chapter) => [chapter, 0]));
@@ -181,6 +222,46 @@ export function buildIcd11Seed(rows, { release, releaseFile, otherNames = new Ma
   items.sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
   const unused = [...otherNames.keys()].filter((code) => !items.some((item) => item.code === code));
   if (unused.length > 0) throw new Error(`other names for codes not in this release: ${unused.join(', ')}`);
+  const approvedCodes = new Set();
+  for (const { code, title, names, approval } of approvedNames) {
+    if (approvedCodes.has(code)) throw new Error(`approved other names: ${code} is listed twice`);
+    approvedCodes.add(code);
+    if (typeof approval !== 'string' || approval.trim() === '') {
+      throw new Error(`approved other names: ${code} has no approval`);
+    }
+    if (!Array.isArray(names) || names.length === 0
+        || names.some((name) => typeof name !== 'string' || name.trim() !== name || name === '' || name.includes(';')
+          || !/^[A-Za-z0-9 '’-]+$/.test(name))) {
+      throw new Error(`approved other names: ${code}'s names must be trimmed, non-empty and without ";", in ASCII `
+        + 'letters, digits, spaces, apostrophes and hyphens only');
+    }
+    const item = items.find((entry) => entry.code === code);
+    if (!item) throw new Error(`approved other names: ${code} is not in this release`);
+    if (item.title !== title) {
+      throw new Error(`approved other names: ${code} is "${item.title}" in this release, not "${title}"`);
+    }
+    item.otherNames = [...new Set([...item.otherNames, ...names])].sort();
+  }
+  // An approved name is no other entry's title or other name, compared as the search compares them: a search for it
+  // would otherwise offer two entries that each are q.
+  const holders = new Map();
+  if (approvedNames.length > 0) {
+    for (const item of items) {
+      for (const name of [item.title, ...item.otherNames]) {
+        const words = searchedWords(name);
+        holders.set(words, [...(holders.get(words) ?? []), item.code]);
+      }
+    }
+  }
+  for (const { code, names } of approvedNames) {
+    for (const name of names) {
+      const others = [...new Set(holders.get(searchedWords(name)))].filter((holder) => holder !== code);
+      if (others.length > 0) {
+        throw new Error(`approved other names: "${name}" for ${code} is already a title or other name of `
+          + others.join(', '));
+      }
+    }
+  }
   return {
     format: SEED_FORMAT,
     kind: 'diagnosis',
