@@ -12423,3 +12423,254 @@ when `dateOfBirthEstimated`, and "NIN Not Verified". On `sent_for_review`
 show the message and nobody else's details. After `identified`, offer
 "Verify NIN" (ID-6). Never show `firstName`/`lastName` of a record whose
 `recordKind` is `unknown`.
+
+## ID-8a. Merge requests and the review list (Release C, migration 0207, provisional; not live until signed)
+
+Akos P0-4 and the duplicate risk of P0-1. The planned contract's "ID-8"
+(docs/EHR_PLANNED_CONTRACT.md) is the spec; this section is what ID-8a builds:
+routes 1, 2, 3, 5 and 6. Routes 4 (approve) and 7 (undo) are ID-8b's (0208, not
+built: its mechanism waits for the owner) and answer 503 `MERGE_UNAVAILABLE`.
+Owner decision Q127 A applies: one member asks and another decides; the source
+is an unknown or NIN Not Verified record that nobody signs in to, made at this
+facility; the target is an active standard record on the same side of the
+seals. In ID-8a nothing moves and no record changes: a member asks, an approver
+refuses, the asker cancels.
+
+### Setting
+
+`PATIENT_MERGE_REQUESTS_ENABLED` (Identity; `true` or `false`, default
+`false`; any other value refuses to boot). While it is `false` every route
+below answers a plain 404 before any guard (as an Identity without the routes).
+With it `true`, Identity starts only on a definite answer that the runtime may
+execute each of 0207's five functions, so a deploy made before 0207 (or before
+its grants) rolls back. A start-up read that fails is tried 5 times, 2 seconds
+apart; with still no answer Identity refuses to start. In AWS it is synthesized
+from `HID_PATIENT_MERGE_REQUESTS_ENABLED` (`true` or `false`, default `false`;
+any other value refuses to synthesize), passed to identity-api only.
+
+### Routes
+
+All under `/api/v1/identity/patient-merges`, with `X-Facility-Id`. POST bodies
+carry `purpose: "healthcare-operations"`; GETs send
+`X-Purpose-Of-Use: healthcare-operations` (else 400 `PURPOSE_OF_USE_REQUIRED`).
+Every POST needs `Idempotency-Key` (else 400 `IDEMPOTENCY_KEY_REQUIRED`); the
+same key with the same body answers the stored request again with
+`replayed: true` (200); with another body, or the same key at another facility,
+or on another merge request, 409 `IDEMPOTENCY_KEY_REUSED`.
+
+**1. `POST /api/v1/identity/patient-merges`**: ask for a merge. Permission
+`identity.registration.write`.
+
+```json
+{ "sourcePatientId": "uuid", "targetMatchRef": "psr_...",
+  "reason": "Identified on 19 Nov; her own record found by full name and date of birth.",
+  "purpose": "healthcare-operations" }
+```
+
+- `sourcePatientId`: this facility's own record, active: an unknown record
+  (ID-7) made here whose status is open, in review or identified, or a desk
+  record (ID-2) made here (its registration case at this facility, no NIN
+  evidence, approved as a new identity, the patient registered by the desk).
+  Anything else, a missing patient included, is 404 `PATIENT_NOT_FOUND`
+  (Q100 B). It must also be NIN Not Verified (no verified, unrevoked NIN) and
+  signed in to by nobody: no login (`account_id`; both enrolment paths, staff
+  0032 and public 0051, set it in the same transaction, and nothing clears it)
+  and no open outreach Health ID claim (an unclaimed code, not invalidated,
+  not expired). Else 409 `MERGE_SOURCE_NOT_ALLOWED`. The enrolment tables are
+  not read directly: their row-level security lets the owner read staff
+  enrolments only at the session's facility and only for an approver, and
+  public enrolments only in Identity's own sign-up session, so a direct read
+  would answer a desk member and an approver differently.
+- `targetMatchRef`: a card's matchRef from this member's own standard search
+  (0132) at this facility in the last 10 minutes. The search runs under
+  `direct-care` and the request under `healthcare-operations`: 0207 reads the
+  ref with the purpose `direct-care` named, never the session's (0132's
+  resolver answers only a ref of the session's purpose). An empty ref or one
+  over 200 characters is 400 `VALIDATION_FAILED`; any other ref that does not
+  resolve (another member's, an expired one, an emergency search's, a
+  malformed one) is 403 `MERGE_SEARCH_FIRST` (one answer for all). The source
+  itself is 409
+  `MERGE_SAME_RECORD`; a target that is not active, is an unknown record, or
+  is across the seals (sealed demo or sealed QA, compared with the source and
+  with the facility) is 409 `MERGE_TARGET_NOT_ALLOWED`. The target is never
+  given as a Health ID or a patient id.
+- `reason`: 8-500 characters, trimmed.
+- One open request per source: another is 409 `MERGE_ALREADY_OPEN`, until the
+  open one is refused or cancelled.
+
+Answer `201` (`200` with `replayed: true` for a replay):
+
+```json
+{ "mergeId": "uuid", "status": "requested", "version": 1, "requestedAt": "2026-11-27T10:00:00.123Z",
+  "reason": "Identified on 19 Nov; her own record found by full name and date of birth.",
+  "requestedByMe": true, "sourceStillAllowed": true,
+  "decidedAt": null, "decisionReason": null, "cancelledAt": null,
+  "source": { "patientId": "uuid", "fullName": "Unknown patient U-0007", "sex": "male", "dateOfBirth": "1991-07-01",
+              "dateOfBirthEstimated": true, "healthIdLast4": "QX7P", "ninStatus": "not_verified", "recordKind": "unknown" },
+  "target": { "fullName": "Musa Bello", "sex": "male", "dateOfBirth": "1990-03-14",
+              "healthIdLast4": "AB12", "ninStatus": "verified", "recordKind": "standard" },
+  "moves": { "visits": 2, "notes": 3, "vitals": 5, "diagnoses": 1, "prescriptions": 2,
+             "labRequests": 1, "documents": 0, "allergies": 0 },
+  "replayed": false }
+```
+
+- The target card is the search card's fields: no `patientId` and no clinical
+  counts.
+- `moves` counts the source's rows only, read live on every answer: visits of
+  every status at any facility, notes, recorded vitals (vitals entered in
+  error are hidden from every reader by 0142 and not counted), diagnoses,
+  prescriptions, lab requests, documents and recorded allergies. All eight
+  are counted (each of the seven clinical tables has 0145's marker-gated owner
+  read; the visits 0131's owner read). Notes and vitals are counted through
+  the source's visits (every note and vital belongs to one visit of its
+  patient), so a count reads the source's own rows by index, never the whole
+  table. Lab, pharmacy, waiting-list and OCR rows are not counted (ID-8b
+  decides what moves).
+- **Added to the plan's shape:** `reason` (the asker's), `requestedByMe` (so
+  the approver's screen can hide Refuse and Approve on its own requests),
+  `sourceStillAllowed` (while `requested`: whether the source still meets the
+  rule; false once it has gained a verified NIN, a login or an open claim;
+  `null` once decided), `decidedAt`, `decisionReason` (a refusal's reason),
+  `cancelledAt`. `mergedAt` and `undoUntil` appear only once the request is
+  `merged` or `undone` (ID-8b).
+
+**2. `GET /api/v1/identity/patient-merges?view=mine|facility&status=requested|merged|undone|refused|cancelled&limit=1..100&cursor=`**
+
+- `view` is required. `mine` (`identity.registration.write`): this account's
+  requests at this facility. `facility` (`identity.registration.approve`):
+  every request at this facility. Without the permission: 403
+  `PERMISSION_DENIED`.
+- Newest first; `limit` defaults to 25. `nextCursor` (opaque) pages by the
+  request time and id; `null` at the end.
+- Answer: `{ "items": [ <the answer above, without replayed> ], "nextCursor": "..." | null }`.
+
+**3. `GET /api/v1/identity/patient-merges/:mergeId`**: one request, for the
+member who asked (`identity.registration.write`) or an approver at this
+facility (`identity.registration.approve`). A member with neither permission:
+403 `PERMISSION_DENIED`. A member with one of them who may not see the
+request (another desk member's request, another facility's, or a missing
+one): 404 `MERGE_NOT_FOUND`.
+
+**4. `POST /api/v1/identity/patient-merges/:mergeId/approve`** (ID-8b):
+`identity.registration.approve`, body `{ "expectedVersion": 1, "purpose":
+"healthcare-operations" }`, `Idempotency-Key`. Answers 503 `MERGE_UNAVAILABLE`
+in this release, with a denied audit row.
+
+**5. `POST /api/v1/identity/patient-merges/:mergeId/refuse`**: an approver
+(`identity.registration.approve`) refuses. Body `{ "expectedVersion": 1,
+"reason": "8-500 characters", "purpose": "healthcare-operations" }`. Answer 200:
+the request with `status: "refused"`, the version plus one, `decidedAt` and
+`decisionReason`, and `replayed`.
+- The member who asked: 403 `MERGE_SECOND_PERSON_REQUIRED` (Q127 A).
+- Not `requested`: 409 `MERGE_ALREADY_DECIDED`.
+- Another version: 412 `VERSION_CONFLICT`.
+
+**6. `POST /api/v1/identity/patient-merges/:mergeId/cancel`**: the member who
+asked (`identity.registration.write`) withdraws it. Body `{ "expectedVersion":
+1, "purpose": "healthcare-operations" }`. Answer 200: `status: "cancelled"`,
+the version plus one, `cancelledAt`, `replayed`. An approver who did not ask:
+403 `PERMISSION_DENIED`; another member: 404 `MERGE_NOT_FOUND`; not
+`requested`: 409 `MERGE_ALREADY_DECIDED`; another version: 412
+`VERSION_CONFLICT`.
+
+**7. `POST /api/v1/identity/patient-merges/:mergeId/undo`** (ID-8b):
+`identity.registration.approve`, body `{ "expectedVersion", "reason" (8-500),
+"purpose" }`, `Idempotency-Key`. Answers 503 `MERGE_UNAVAILABLE` in this
+release, with a denied audit row.
+
+### Errors
+
+| HTTP | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED`, `PURPOSE_OF_USE_REQUIRED`, `IDEMPOTENCY_KEY_REQUIRED` | as ID-6 |
+| 403 | `PERMISSION_DENIED` | "You do not have permission to do this." |
+| 403 | `MERGE_SECOND_PERSON_REQUIRED` | "Another approver must approve this. You asked for this merge." |
+| 403 | `MERGE_SEARCH_FIRST` | "Search for the right record first, then ask to merge. A search result can be used for 10 minutes." |
+| 404 | `MERGE_NOT_FOUND` | "No merge request of this facility matches." |
+| 404 | `PATIENT_NOT_FOUND` | "No such patient." |
+| 409 | `MERGE_SOURCE_NOT_ALLOWED` | "Only an unknown or NIN Not Verified record that nobody signs in to can be merged into another." |
+| 409 | `MERGE_SAME_RECORD` | "These are the same record." |
+| 409 | `MERGE_TARGET_NOT_ALLOWED` | "This record cannot receive a merge." |
+| 409 | `MERGE_ALREADY_OPEN` | "There is already a merge request for this record." |
+| 409 | `MERGE_ALREADY_DECIDED` | "This merge request has already been decided." |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | "This request was already sent with different details. Please reload and try again." |
+| 412 | `VERSION_CONFLICT` | "Someone else changed this merge request. Reload it and try again." |
+| 503 | `MERGE_UNAVAILABLE` | the code only: like every 5xx, the problem's `detail` is Identity's generic "The service could not complete the request." (a database without 0207, any other database failure, and approve and undo in this release) |
+
+`MERGE_SOURCE_HAS_OPEN_ROUTED_ORDER` and `MERGE_UNDO_EXPIRED` are ID-8b's and
+are not answered in this release.
+
+### Audit
+
+- 0207 writes, in the request's transaction: `identity.patient-merge.request`,
+  `.read`, `.refuse` and `.cancel`, one row per call, replays included
+  (`replayed: true`). `patient_id` is the source, the resource the merge, and
+  `details` hold `mergeId`, `targetPatientId`, the `moves` counts and the
+  outcome or status. The typed reason (the asker's or the refusal's) is the
+  row's `reason`.
+- Identity writes `identity.patient-merge.list` (the view, the status, the
+  count, the merge ids) and one `identity.patient-merge.list.shown` per
+  patient shown: one naming the source (the target's id in details) and one
+  naming the target (the source's id in details), in the list's transaction.
+- Every refusal the database answers, plus approve and undo, writes one
+  denied row from Identity, with the refusal's code. A request Identity
+  refuses before the database writes no `identity.patient-merge.*` row: a
+  missing permission is the guard's `security.authorization` denied row, and
+  a missing header, key or field the interceptor's `api.*` failure row.
+  When the caller may see the request, the database names the merge and both
+  patients (the source as the row's patient, the target's id in details);
+  otherwise only the ids the caller sent (`requestedSourcePatientId` in
+  details, never as the row's patient). Approve and undo write a denied row
+  with `MERGE_UNAVAILABLE`.
+- No row holds a name, date of birth, phone or Health ID.
+
+### Database (0207)
+
+- `identity.patient_merges`: one row per request (facility, source and
+  target with foreign keys `ON DELETE RESTRICT`, so both are on the "kept"
+  side of any merge; the asker and decider by the membership's
+  `(id, facility_id, account_id)`; reason; status; version; decision; cancel;
+  the key and SHA-256 of each command). `merged_at`, `undo_until`
+  (`merged_at` + 30 days), `undone_*`, `undo_reason` and the undo key are
+  reserved for ID-8b and null in 0207, and the status CHECK already admits
+  `merged` and `undone` with their shapes, so 0208 needs no ALTER TABLE here.
+  Row-level security on with no policy; no runtime role has any privilege on
+  it.
+- Five SECURITY DEFINER functions, EXECUTE to `hid_identity_runtime` only:
+  `identity.request_patient_merge`, `list_patient_merges`,
+  `read_patient_merge`, `refuse_patient_merge`, `cancel_patient_merge`
+  (runtime-grants.sql carries the same block). Six helpers no role may
+  execute, among them `identity.patient_merge_source_state` (the source rule,
+  which ID-8b re-checks under its locks) and `identity.patient_merge_target`
+  (the ref read with `direct-care`).
+- Locks: SHARE ROW EXCLUSIVE on `identity.patients` and
+  `identity.staff_facility_memberships` (readers go on) and ACCESS SHARE on
+  `identity.patient_search_refs` (whose CHECKs it reads; only an ACCESS
+  EXCLUSIVE waits), each NOWAIT; no clinical table is locked or changed, not
+  even for a moment: the pinned policies are read without opening their
+  tables, and the migrations suite applies 0207 while another session holds
+  every `ehr.`, `lab.` and `pharmacy.` table in ACCESS EXCLUSIVE. The counts
+  reuse 0145's marker-gated policies, which 0207 pins and does not change.
+
+### Corrections to the planned contract (design note on #258, part ID-8a)
+
+- **ID-7 is migration 0145**, not 0146 (0146 is the document guard).
+- **`identity.patients.merged_into_patient_id` is not added:** that would be
+  an ALTER of `identity.patients` against 0145 D1. The link lives in
+  `identity.patient_merges` (ID-8b decides finally).
+- **The source rule** is the one above: this facility's unknown record (open,
+  in review or identified) or 0130 desk record, not 0131's wider
+  "registered here", which also holds NIN and linked cases.
+- **"No enrolment in progress"** names no table or state in the schema; it is
+  built as: no login (which both enrolment paths set in the same transaction
+  as their row) and no open outreach Health ID claim. The enrolment tables
+  themselves are not read: under their row-level security the owner sees
+  staff enrolments only at the session's facility and only for an approver,
+  and public enrolments only in Identity's sign-up session.
+- **The matchRef pairing:** 0132's `resolvePatientMatchRef` cannot resolve a
+  `direct-care` ref under `healthcare-operations` (the resolver requires the
+  session's purpose), so 0207 reads the ref itself with `direct-care` named.
+- **For ID-8b (0208):** `identity.unknown_patients_identified_ck` (0145)
+  refuses status `merged` for a record that was never identified, so 0208
+  must change that CHECK (the plan's "already a value in the CHECK" holds for
+  `identity.patients` only, `0002_auth_and_canonical_identity.sql` line 180).

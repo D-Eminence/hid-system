@@ -75,6 +75,13 @@ export interface HidEnvironmentConfig {
   // start while its table or grants are missing, and the deploy rolls back. To
   // roll back the feature, synthesize false again.
   readonly staffOpenPatientEnabled: boolean;
+  // Off unless HID_PATIENT_MERGE_REQUESTS_ENABLED=true at synth time:
+  // identity-api then serves the merge requests and the review list (ID-8a,
+  // 0207). Synthesize true only once 0207 and its grants are applied:
+  // identity-api refuses to start while the runtime cannot execute 0207's five
+  // functions, and the deploy rolls back. To roll back the feature, synthesize
+  // false again (the routes then answer 404).
+  readonly patientMergeRequestsEnabled: boolean;
 }
 
 interface ProfileValues {
@@ -199,6 +206,8 @@ export interface EnvironmentSettings {
   staffFacilitySelectionMode?: string | undefined;
   /** HID_STAFF_OPEN_PATIENT_ENABLED: true or false (default false). SX-8, Release B. */
   staffOpenPatientEnabled?: string | undefined;
+  /** HID_PATIENT_MERGE_REQUESTS_ENABLED: true or false (default false). ID-8a, 0207. */
+  patientMergeRequestsEnabled?: string | undefined;
 }
 
 /**
@@ -212,6 +221,7 @@ export const environmentSettingVariables = {
   prescriptionDispensingDetailsEnabled: 'HID_PRESCRIPTION_DISPENSING_DETAILS_ENABLED',
   staffFacilitySelectionMode: 'HID_STAFF_FACILITY_SELECTION_MODE',
   staffOpenPatientEnabled: 'HID_STAFF_OPEN_PATIENT_ENABLED',
+  patientMergeRequestsEnabled: 'HID_PATIENT_MERGE_REQUESTS_ENABLED',
 } as const satisfies Record<keyof EnvironmentSettings, string>;
 
 type EnvironmentSettingName = keyof typeof environmentSettingVariables;
@@ -250,6 +260,7 @@ export function environmentConfig(
     prescriptionDispensingDetailsEnabled: prescriptionDispensingDetailsEnabledValue,
     staffFacilitySelectionMode: staffFacilitySelectionModeValue,
     staffOpenPatientEnabled: staffOpenPatientEnabledValue,
+    patientMergeRequestsEnabled: patientMergeRequestsEnabledValue,
   } = settings;
   const selected = value ?? 'development';
   if (!environmentNames.includes(selected as EnvironmentName)) {
@@ -287,6 +298,10 @@ export function environmentConfig(
   if (!['true', 'false'].includes(staffOpenPatientEnabledInput)) {
     throw new Error('HID_STAFF_OPEN_PATIENT_ENABLED must be true or false when supplied');
   }
+  const patientMergeRequestsEnabledInput = patientMergeRequestsEnabledValue ?? 'false';
+  if (!['true', 'false'].includes(patientMergeRequestsEnabledInput)) {
+    throw new Error('HID_PATIENT_MERGE_REQUESTS_ENABLED must be true or false when supplied');
+  }
   return {
     ...environmentIdentity[name], ...profiles[profile],
     ...(stagingMode ? { stagingMode } : {}),
@@ -295,6 +310,7 @@ export function environmentConfig(
     prescriptionDispensingDetailsEnabled: prescriptionDispensingDetailsEnabledInput === 'true',
     staffFacilitySelectionMode: staffFacilitySelectionMode as StaffFacilitySelectionMode,
     staffOpenPatientEnabled: staffOpenPatientEnabledInput === 'true',
+    patientMergeRequestsEnabled: patientMergeRequestsEnabledInput === 'true',
   };
 }
 

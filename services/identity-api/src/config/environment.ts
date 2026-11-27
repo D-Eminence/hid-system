@@ -294,6 +294,13 @@ const environmentSchema = z.object({
   // time, only once 0140 is applied: with it on, Identity refuses to start
   // while the table or one of its grants is missing (OpenPatientStartupCheck).
   STAFF_OPEN_PATIENT_ENABLED: booleanString,
+  // ID-8a (0207): merge requests and the review list (no merge until ID-8b,
+  // 0208). Off (the default): every /identity/patient-merges route answers
+  // 404. Turn it on only once 0207 is applied: with it on, Identity refuses to
+  // start while one of 0207's five functions or the runtime's EXECUTE on it
+  // is missing (PatientMergeStartupCheck). 'true' or 'false' only; any other
+  // value refuses to boot.
+  PATIENT_MERGE_REQUESTS_ENABLED: booleanString,
 }).superRefine((environment, context) => {
   if (environment.AUTH_MODE === 'local') {
     if (!environment.AUTH_SIGNING_SECRET || environment.AUTH_SIGNING_SECRET.length < 32) {

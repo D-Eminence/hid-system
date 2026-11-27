@@ -2065,3 +2065,29 @@ grant execute on function ehr.record_recent_diagnosis(text, text, text), ehr.rec
   to hid_ehr_runtime, hid_schema_test_runtime;
 revoke all on function ehr.record_recent_diagnosis(text, text, text), ehr.recent_diagnoses(integer) from public;
 revoke all on ehr.clinician_recent_diagnoses from public;
+
+-- Merge requests and the review list (0207, ID-8a; owner decision Q127 A of
+-- 19 November 2026; design note on hid-system#258, 27 November 2026), exactly
+-- as 0207 grants them: the request, the list, the read, the refusal and the
+-- cancel to the Identity runtime alone (as 0145 grants Identity's unknown
+-- patient commands); no privilege for any runtime on identity.patient_merges
+-- (row-level security on, no policy: only those five functions, as its
+-- owner, use it) or on the six helpers they run as the owner. ID-8b (0208)
+-- adds the approve and undo grants when it is built.
+grant execute on function identity.request_patient_merge(uuid, text, text, text, text),
+  identity.list_patient_merges(text, text, integer, timestamp with time zone, uuid),
+  identity.read_patient_merge(uuid),
+  identity.refuse_patient_merge(uuid, bigint, text, text, text),
+  identity.cancel_patient_merge(uuid, bigint, text, text) to hid_identity_runtime;
+revoke all on function identity.request_patient_merge(uuid, text, text, text, text),
+  identity.list_patient_merges(text, text, integer, timestamp with time zone, uuid),
+  identity.read_patient_merge(uuid),
+  identity.refuse_patient_merge(uuid, bigint, text, text, text),
+  identity.cancel_patient_merge(uuid, bigint, text, text),
+  identity.patient_merge_actor(),
+  identity.patient_merge_audit(record, text, text, uuid, uuid, text, jsonb),
+  identity.patient_merge_source_state(uuid, uuid),
+  identity.patient_merge_target(text, uuid, uuid, uuid),
+  identity.patient_merge_items(uuid[], uuid),
+  identity.patient_merge_refusal(text, text, uuid, uuid, uuid) from public;
+revoke all on identity.patient_merges from public;

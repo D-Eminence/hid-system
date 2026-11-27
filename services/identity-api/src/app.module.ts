@@ -21,12 +21,14 @@ import { StaffProfileModule } from './staff-profile/staff-profile.module';
 // 0132 (lane B): staff patient search and emergency search.
 import { PatientSearchModule } from './patient-search/patient-search.module';
 import { OpenPatientModule } from './open-patient/open-patient.module';
+// ID-8a (0207): merge requests and the review list.
+import { PatientMergesModule } from './patient-merges/patient-merges.module';
 
 @Module({
   imports: [DatabaseModule, AuditModule, IntegrationModule, AuthModule, ConsentModule, IdentityModule, AdminModule, CommercialModule,
     PatientSafetyModule, PatientProfileModule, WebPushModule, OutreachOrganisersModule,
     StaffProfileModule,
-    PatientSearchModule, OpenPatientModule],
+    PatientSearchModule, OpenPatientModule, PatientMergesModule],
   controllers: [HealthController],
   providers: [
     { provide: APP_GUARD, useExisting: SecurityGuard },

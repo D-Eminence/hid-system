@@ -166,6 +166,8 @@ const acceptedMigrations = new Map([
   ['0151_sealed_qa_front_desk_and_nurse_logins.sql', 'abab517679255cec2d67aadae9d44f1b629e8e3e9ee30d77cfee33817b2c75f2'],
   ['0152_catalog_diagnoses.sql', 'abfecc3571808e4ad29fdf8c1e202f65b3cdf890e9f3106b74bd6ef1bd19f9c9'],
   ['0153_clinician_recent_diagnoses.sql', '45faa6a739056cc07426fdb5363b58c7dda1dbcbc096fb6d1769ae746798500b'],
+  // ID-8a (merge requests and the review list), number provisional (given at integration, in release order: #258), unsigned.
+  ['0207_patient_merge_requests.sql', 'a6b5a31db7520f87947a7cb4db7be6cc5de8a11fb6527c259defaefbd54272e7'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))
