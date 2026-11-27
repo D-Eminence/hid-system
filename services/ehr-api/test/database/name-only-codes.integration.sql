@@ -28,8 +28,9 @@
 --      stand-in for Billing's zz_billing_lab_work_item trigger on
 --      lab.work_items (0167), a column with its own CHECK, an index on the
 --      code pair, a column on ehr.diagnoses; 0156 keeps them;
---   8. a row written in the transaction, even one undone, and 0156 refuses at
---      its post-check (pg_stat_xact_user_tables);
+--   8. a row written in the transaction, even one undone: with the table
+--      never analysed (reltuples -1, a page on disk) the size bound refuses;
+--      analysed, 0156 refuses at its post-check (pg_stat_xact_user_tables);
 --   9. back to the state the runner left.
 -- B. The data path (the P4c fixture of the order route suites):
 --   1. a lab request by name only is saved (ehr-api's columns); half a pair
@@ -559,20 +560,32 @@ select pg_temp.expect('A7 with other lanes'' additions, 0156 applies and keeps t
   || 'work_items_test_code_pair_ck true,work_items_zz_billing_price_reference_ck true | true | true',
   :'LAST_ERROR_MESSAGE' || ' | ' || :'q156_others');
 
--- A8. A row written to one of the six in this transaction, even one undone, and 0156 refuses at its post-check
--- (pg_stat_xact_user_tables), nothing applied. Last of part A: the count stays for the rest of the transaction.
+-- A8. A row written to one of the six in this transaction, even one undone (its page stays on disk). With that
+-- table's reltuples at -1 (never analysed), the size bound refuses; with it analysed, 0156 refuses at its post-check
+-- (pg_stat_xact_user_tables). Nothing applied either way. Last of part A: the count stays for the rest of the
+-- transaction.
 savepoint write_one;
 set local session_replication_role = replica;
 insert into lab.work_item_requested_tests (work_item_id, facility_id, patient_id, "ordinal", code_system, code, name)
 values (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 1, 'http://loinc.org', '718-7', 'Haemoglobin');
 rollback to savepoint write_one;
+update pg_class set reltuples = -1 where oid = 'lab.work_item_requested_tests'::regclass;
 set local role :"q156_owner";
 \set ON_ERROR_STOP off
 :run0156
 \set ON_ERROR_STOP on
 \set QUIET off
 rollback to savepoint refused;
-select pg_temp.expect('A8 a row written (and undone) in the transaction: 0156 refuses at its post-check',
+select pg_temp.expect('A8a never analysed (reltuples -1) with a page on disk: the size bound refuses',
+  '55000 0156: too large to validate here, or never analysed: lab.work_item_requested_tests (reltuples -1, N bytes); nothing applied',
+  :'LAST_ERROR_SQLSTATE' || ' ' || regexp_replace(:'LAST_ERROR_MESSAGE', '\d+ bytes', 'N bytes'));
+set local role :"q156_owner";
+\set ON_ERROR_STOP off
+:run0156
+\set ON_ERROR_STOP on
+\set QUIET off
+rollback to savepoint refused;
+select pg_temp.expect('A8b analysed: 0156 refuses at its post-check (a row written, and undone, in the transaction)',
   '55000 0156: rows were written in this transaction: lab.work_item_requested_tests',
   :'LAST_ERROR_SQLSTATE' || ' ' || :'LAST_ERROR_MESSAGE');
 
