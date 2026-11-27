@@ -54,7 +54,11 @@
 --      and 5h on 0152's; 5i holds on both, and fails when the clause is
 --      taken out even for a q with the word without; 5k fails on both, and
 --      when the count comes before "starts with q" (which 5g showed before
---      a q shaped like a code counted nothing).
+--      a q shaped like a code counted nothing). Fix 1's whole-word check
+--      still reads a clause's words (5l, which also fails on 0152's); and,
+--      on a release of its own, a clause in our other names does not count
+--      either, for an entry whose title has none, and it ends at the "; "
+--      between two other names (5m, which fails on 0152's and 7ad367c1's).
 -- Synthetic version ids: prefix c150. The codes and titles are ICD-11's
 -- (WHO, CC BY-ND 3.0 IGO), verbatim; the other names are ours.
 set plpgsql.variable_conflict = error;
@@ -506,10 +510,13 @@ update ehr.catalog_versions set active = false where kind = 'diagnosis' and acti
 update ehr.catalog_versions set active = true where id = 'c1500000-0000-4000-8000-000000000006';
 -- The count reads no word of a "without ..." clause, up to the next comma. Before (7ad367c1), with started without
 -- and the clause's tuberculosis, malaria, cholangitis and cholecystitis counted, so the negative entry came first:
--- 1C62.3 named 8 of the 9 words, the others 7; DC11.6 named 7 of 8, DC11.4 6. Now 1C62.3 names 5 and DC11.6 4. In the
--- title typed as written, NC91.0 named all 7 words and came second (on 0152 too, by its shorter title); now it names
--- laceration only, and NB51.0 also lower, after its clause's comma (were the clause taken to the end, NC91.0 would
--- come before NB51.0, by its shorter title).
+-- 1C62.3 named 8 of the 9 words, the others 7; DC11.6 named 7 of 8, DC11.4 6. Now 1C62.3 names 5 and DC11.6 4. The
+-- third q is NC91.1's title typed as written, which stays first. NC91.0's clause runs to the end of its title, so its
+-- site (lower leg) goes with foreign body: it now names laceration only and comes last, where it came second before
+-- (on 0152 too, by its shorter title). That is the rule as Ola's addendum words it, not a clinical choice: it puts
+-- "Laceration without foreign body of <site>" behind other entries when a site is typed, and the contract names it as
+-- a known effect. NB51.0's clause ends at its comma, so lower back or pelvis still count (were the clause taken to the
+-- end, NC91.0 would come before NB51.0, by its shorter title).
 select pg_temp.expect('5h the count reads no word of a "without ..." clause: a positive entry comes first',
   '1C61.3 1C60.3 1C62.3 more=false|DC11.4 DC11.6 more=false|NC91.1 NB51.1 NB51.0 NC91.0 more=false',
   pg_temp.found('hiv disease clinical stage 4 with tuberculosis and malaria', 10) || '|'
@@ -535,6 +542,36 @@ select pg_temp.expect('5j a q shaped like a code keeps its order: "ME24.A" puts 
 -- NC91.0 came second.
 select pg_temp.expect('5k the count orders entries that start with q among themselves, before the others',
   'NC91.1 NB51.1 NC91.0 NB51.0 NB31.01 more=false', pg_temp.found('laceration with', 10));
+-- Fix 1's whole-word check still reads every word of the entry, a clause's too; only the count leaves them out. In
+-- "meconium ileus perforations" the first attempt finds nothing (no word starts with perforations); the second drops
+-- the final s of ileus and perforations, and perforation is a whole word of KB87.2 only inside its clause. So KB87.2
+-- is still found, and the count puts it after KB87.4, which names all three words. Were the check to read the count's
+-- words, KB87.2 would not be found at all, and which entries match would change. 0152 finds nothing (ileu is no word).
+select pg_temp.expect('5l fix 1''s whole-word check still reads a clause''s words; only the count leaves them out',
+  'KB87.4 KB87.2 more=false', pg_temp.found('meconium ileus perforations', 10));
+
+-- A clause in our other names. A release of its own (2026-04), so the rows above keep their answers. WHO's titles
+-- verbatim (neither has the word without); the other names are ours.
+insert into ehr.catalog_versions (id, kind, version, file_sha256, approval_reference, approvals_sha256, approved_at)
+  values ('c1500000-0000-4000-8000-000000000007', 'diagnosis', '2026-04', repeat('8', 64),
+          'synthetic other-names sign-off', repeat('9', 64), now());
+insert into ehr.catalog_diagnoses (version_id, code, title, other_names, chapter, residual) values
+  ('c1500000-0000-4000-8000-000000000007', '8A63.00', 'Simple febrile seizures',
+   'febrile seizure without focal features; simple febrile convulsion', '08', false),
+  ('c1500000-0000-4000-8000-000000000007', '8A63.01', 'Complex febrile seizures',
+   'febrile seizure with focal features; complex febrile convulsion', '08', false);
+update ehr.catalog_versions set active = false where kind = 'diagnosis' and active;
+update ehr.catalog_versions set active = true where id = 'c1500000-0000-4000-8000-000000000007';
+-- "focal febrile seizure": focal is a word of 8A63.00 only inside its other name's clause, so 8A63.01, which names all
+-- three words, comes first. Were other names' clauses counted, or only titles checked for the letters without,
+-- 8A63.00 would name all three too and come first, by its shorter title (as on 0152 and 7ad367c1). "febrile
+-- convulsion": the clause ends at the "; " between two other names, so 8A63.00's "simple febrile convulsion" counts,
+-- both entries name both words, and the shorter title comes first. Were the clause to run on past "; " (to a comma
+-- or the end only), 8A63.00 would name febrile only and come second.
+select pg_temp.expect('5m a clause in our other names does not count either, and ends at the "; " before the next one',
+  '8A63.01(febrile seizure with focal features) 8A63.00(febrile seizure without focal features) more=false|'
+  || '8A63.00(simple febrile convulsion) 8A63.01(complex febrile convulsion) more=false',
+  pg_temp.found('focal febrile seizure', 10) || '|' || pg_temp.found('febrile convulsion', 10));
 
 do $$
 declare
