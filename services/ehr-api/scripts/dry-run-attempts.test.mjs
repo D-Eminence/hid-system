@@ -129,6 +129,46 @@ test('0156\'s two busy refusals, read from the file, name the six tables and are
   assert.doesNotMatch(code, /\b(insert into|update [a-z_]+\.[a-z_]+ set|delete from|truncate)\b/i);
 });
 
+// 0158 (several tests in one lab request): ACCESS SHARE NOWAIT on ehr.order_routes (replacing the validator compiles
+// its ehr.order_routes%rowtype), then ACCESS EXCLUSIVE NOWAIT on ehr.lab_requests and lab.work_items, in one attempt's
+// subtransaction; both refusals name the three tables and are retried. The preconditions (55000) are not.
+test('0158\'s two busy refusals, read from the file, name the three tables and are retried', async () => {
+  const file = '0158_lab_request_groups.sql';
+  const refusals = await busyRefusalsOf(file);
+  const tables = 'ehr.lab_requests, lab.work_items or ehr.order_routes';
+  assert.deepEqual(refusals, [
+    `0158: ${tables} is busy, and this transaction already holds an earlier migration's locks, so it does not wait; `
+      + `nothing applied; ${tail}`,
+    `0158: ${tables} stayed busy for 5 seconds; nothing applied; ${tail}`,
+  ]);
+  for (const message of refusals) {
+    assert.equal(isBusyRefusal(new MigrationFileError(file, databaseError('55P03', message))), true, message);
+    assert.equal(isBusyRefusal(new MigrationFileError(file, databaseError('55000', message))), false, message);
+    assert.equal(isBusyRefusal(new MigrationFileError('0156_name_only_lab_tests_and_diagnoses.sql',
+      databaseError('55P03', message))), false);
+  }
+  for (const refusal of ['0158: already applied', '0158: not in the reviewed state',
+    '0158: 0001-0153 and 0156 must be applied first']) {
+    assert.equal(isBusyRefusal(new MigrationFileError(file, databaseError('55000', refusal))), false, refusal);
+  }
+  const sql = await readFile(path.join(scripts, '../database/migrations', file), 'utf8');
+  // The code without its comments (the header names what the code does).
+  const code = sql.split('\n').filter((line) => !line.trimStart().startsWith('--')).join('\n');
+  const routes = code.indexOf('lock table ehr.order_routes in access share mode nowait;');
+  const strong = code.indexOf('lock table ehr.lab_requests, lab.work_items in access exclusive mode nowait;');
+  const handler = code.indexOf('exception when lock_not_available then', strong);
+  assert.ok(routes > 0 && routes < strong && strong < handler, 'the routes, then the two tables, in one attempt');
+  assert.equal(code.split('lock table ').length - 1, 2, 'no other lock statement');
+  // Nothing is changed, and no body that opens a table is compiled, before the locks.
+  for (const change of ['alter table ', 'create function ', 'create or replace function ', 'create trigger ']) {
+    assert.ok(handler < code.indexOf(change), `${change.trim()} after the locks`);
+  }
+  assert.ok(handler < code.search(/%rowtype/i), 'the validator\'s %rowtype is compiled under the locks');
+  // The file writes no row and runs no probe (no temporary table).
+  assert.doesNotMatch(code, /\b(insert into|update [a-z_]+\.[a-z_]+ set|delete from|truncate)\b/i);
+  assert.doesNotMatch(code, /\bcreate\s+(temporary|temp)\b/i);
+});
+
 test('anything else is not retried', () => {
   const file = '0131_own_facility_patient_access.sql';
   for (const error of [

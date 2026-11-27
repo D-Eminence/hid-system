@@ -426,3 +426,30 @@ by hand:
 ANALYZE takes SHARE UPDATE EXCLUSIVE, which no read or write waits for. But an ANALYZE or autovacuum still running on
 one of the six when 0156 starts makes 0156 stop after 5 seconds with its busy refusal, nothing applied. The dry run
 tries again; the apply does not, so run the release again.
+
+## 0158: several tests in one lab request (release set, switch-off, undo)
+
+0158 (ORD-6) adds `request_group_id` to `ehr.lab_requests` and `lab.work_items` (catalog only), a guard that keeps a
+lab request's group fixed, and a new `lab.validate_work_item()` that copies the group from the EHR row into Lab's own
+work item. Its header gives the details and the measurements.
+
+- **Release set.** 0158 goes after 0156's own release, never in 0155's release, and only with files of 0155-0159
+  (0156 and 0159 each go alone). It never rides with the sprint's 0160-0177 or with 0178-0180. In the runner's dry
+  run 0158's locks (ACCESS EXCLUSIVE on `ehr.lab_requests` and `lab.work_items`) last until the dry run rolls back,
+  through every later file, so the release declaration records the measured dry-run window, from the first strong
+  lock of the release to the rollback, with the real release set at production row counts, well under 15 s.
+- **Busy.** An open read of either table, DDL on `ehr.order_routes`, or an autovacuum or ANALYZE of either table
+  makes 0158 stop after 5 seconds with its busy refusal (55P03), nothing applied. The dry run tries again; the apply
+  does not, so run the release again at a quieter time.
+- **Order.** 0158 first, then lab-api and ehr-api in either order with `LAB_REQUEST_GROUPS_ENABLED` off, then the
+  setting on, then the website. ORD-6's images select the new column, so they need 0158 applied. If the apply stops
+  at 0158 after an earlier file of the same release committed, hold the ORD-6 images until 0158 applies.
+- **Switching off,** before an ehr-api image rollback or the undo: `LAB_REQUEST_GROUPS_ENABLED` off and
+  `ORDER_SETS_ENABLED` off. Written groups stay and are still answered; no new group is written.
+- **Undo** (a migration, only if the owner signs it; one transaction, after the switch-off): ACCESS SHARE on
+  `ehr.order_routes` and ACCESS EXCLUSIVE on `ehr.lab_requests`, NOWAIT, with the 5-second loop, the one-attempt rule
+  and both busy refusals under the undo file's own number; then drop the trigger `lab_requests_group_fixed` and the
+  function `ehr.lab_request_group_fixed()`, restore 0086's `lab.validate_work_item()` (md5
+  `efac15072e0a6e68dff199026ff6f73e`, SECURITY DEFINER and its search_path restated, its ACL kept), post-check both,
+  and remove 0158's lines from `runtime-grants.sql` in the same release. The columns stay. After it, a test accepted
+  by Lab gets no group; earlier work items keep theirs.
