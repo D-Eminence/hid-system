@@ -123,15 +123,20 @@
 -- DIAGNOSIS_NAME_ONLY_ENABLED is true. Both stay off when this file ships.
 -- LAB_REQUEST_NAME_ONLY_ENABLED stays off until 0155's sensitive-test list
 -- build is live (it ships in 0155's images). The release: this file alone,
--- then ehr-api and lab-api with both settings off, then the website, then
--- the settings on.
+-- then ehr-api and lab-api with both settings off, then the health website
+-- and apps/ehr (this repository's staff frontend, the hid-ehr worker) at a
+-- build that reads a null pair, then the settings on.
 --
 -- ONE WAY ONCE USED. The first time either setting goes on in production
 -- is recorded (the time, on hid-system#258 and in the next declaration).
 -- After it, lab-api cannot roll back below this file's image: the old
 -- AcceptEhrOrderDto refuses a null pair (accept-ehr-order.dto.ts:15-16).
--- Old ehr-api and the old website read nulls safely (Rahman's check). The
--- fallback is to turn the settings off; rows saved by name only stay.
+-- Old ehr-api and the old health website read nulls safely (Rahman's
+-- check). apps/ehr before this branch did not: its encounter timeline read
+-- the codes as required, so one name-only diagnosis or lab request failed
+-- the whole page. This branch makes it read a null pair, so apps/ehr is at
+-- this branch's build before either setting goes on and stays there after.
+-- The fallback is to turn the settings off; rows saved by name only stay.
 --
 -- Old services on this schema: they write both codes, as the pair CHECKs
 -- allow, and read the same columns. The recent read keeps its columns.

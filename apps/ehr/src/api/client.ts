@@ -27,6 +27,7 @@ import type {
   OcrValidation,
   TimelinePage,
 } from './contracts';
+import { diagnosisDetail, labRequestDetail } from './clinicalRecordDetail';
 import {
   fetchWithTimeout,
   HidInvalidJsonError,
@@ -588,7 +589,8 @@ const clinicalRecordSummary = (
     return {
       id, kind,
       title: requiredString(value, 'display'),
-      detail: `${requiredString(value, 'codeSystem')} • ${requiredString(value, 'code')}`,
+      // A diagnosis saved by its name only (0156) has no code pair.
+      detail: diagnosisDetail(optionalString(value, 'codeSystem'), optionalString(value, 'code')),
       status: requiredString(value, 'clinicalStatus'),
       occurredAt: requiredString(value, 'createdAt'),
     };
@@ -607,7 +609,8 @@ const clinicalRecordSummary = (
   return {
     id, kind,
     title: requiredString(value, 'testDisplay'),
-    detail: `${requiredString(value, 'testCode')} • ${requiredString(value, 'priority').toUpperCase()}`,
+    // A lab request saved by its test name only (0156) has no code pair.
+    detail: labRequestDetail(optionalString(value, 'testCode'), requiredString(value, 'priority')),
     status: requiredString(value, 'status'),
     occurredAt: requiredString(value, 'createdAt'),
   };

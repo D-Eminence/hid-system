@@ -2570,8 +2570,13 @@ above is the lab request's part.
   production is recorded, with the time, on hid-system#258 and in the next
   declaration. After it, lab-api stays at or above 0156's image: an
   earlier lab-api refuses a null pair (`AcceptEhrOrderDto`). An earlier
-  ehr-api and the earlier website read the nulls safely (Rahman's check).
-  The fallback is to turn the settings off; rows already saved by name only
+  ehr-api and the earlier health website read the nulls safely (Rahman's
+  check). `apps/ehr` (this repository's staff frontend, the hid-ehr worker)
+  did not: its encounter timeline read the codes as required, so one
+  name-only row failed the whole page. From 0156's branch it reads a null
+  pair ("No code" for a diagnosis, the priority alone for a lab request),
+  so it too stays at or above that build once a setting has gone on. The
+  fallback is to turn the settings off; rows already saved by name only
   keep their nulls.
 - **Release (0156 alone):**
   1. ANALYZE of the six tables, by hand, before the deploy is dispatched,
@@ -2588,7 +2593,7 @@ above is the lab request's part.
      refusal, nothing applied (the dry run tries again; the apply does not).
   2. 0156's dry run and apply, alone.
   3. ehr-api and lab-api at 0156's images, both settings off.
-  4. The website.
+  4. The health website, and `apps/ehr` at a build that reads a null pair.
   5. The settings on, with the time recorded (`LAB_REQUEST_NAME_ONLY_ENABLED`
      only once 0155's sensitive-test list build is live).
 - **Undo, only before any null is saved** (owner-signed; 0156's header):
@@ -2621,7 +2626,10 @@ above is the lab request's part.
   `diagnosis-release-switch` (21), on a superuser and a NOSUPERUSER
   NOBYPASSRLS owner; ehr-api's `diagnoses.name-only.spec.ts` (`codeStatus`,
   the lookup's failures, the replay, a name-only diagnosis in the patient's
-  record chat), `name-only-codes.spec.ts` and the consultation's case.
+  record chat), `name-only-codes.spec.ts` and the consultation's case;
+  `apps/ehr`'s `test/clinical-record-detail.test.mjs` (run with `node
+  --test`; `apps/ehr`'s `npm test` names its files in `package.json`,
+  which this branch leaves unchanged, so adding it there is owed).
 
 
 ### Target

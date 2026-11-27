@@ -224,8 +224,9 @@ export interface VitalRecord extends ClinicalRecordBase {
 }
 
 export interface DiagnosisRecord extends ClinicalRecordBase {
-  codeSystem: string;
-  code: string;
+  /** Null for a diagnosis saved by its name only (0156). */
+  codeSystem: string | null;
+  code: string | null;
   display: string;
   clinicalStatus: string;
   verificationStatus: string;
@@ -247,8 +248,9 @@ export interface PrescriptionRecord extends ClinicalRecordBase {
 }
 
 export interface LabRequestRecord extends ClinicalRecordBase {
-  testCodeSystem: string;
-  testCode: string;
+  /** Null for a lab request saved by its test name only (0156). */
+  testCodeSystem: string | null;
+  testCode: string | null;
   testDisplay: string;
   priority: 'routine' | 'urgent' | 'asap' | 'stat';
   status: 'draft' | 'active' | 'on_hold' | 'completed' | 'cancelled' | 'entered_in_error';
