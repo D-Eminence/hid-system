@@ -51,11 +51,13 @@ export const STAFF_LAB_QUERY = `select r.id, r.current_version::text||':'||rel.i
  * then the fragments it reads in test names only. So both services build one
  * pattern string: patient-results.query.spec.ts checks it is ehr-api's
  * string, and it and ehr-api's patient-evidence.query.spec.ts pin the same
- * sha256.
+ * sha256. Like ehr-api's, the fragments use only syntax that means the same
+ * in PostgreSQL and JavaScript, {m,n} and one look-ahead, (?!ydophila),
+ * included.
  */
 export const SENSITIVE_TEST_INITIALISMS=[
-  'hiv','aids','rvs','cd4','vl','hbv','hcv','hsv','hpv','vdrl','rpr','tpha','sti','std','hcg','bhcg','upt',
-  'psa','afp','cea','phq','brca',
+  'hiv','aids','rvs','rvst','cd4','vl','hbv','hcv','hsv','hpv','vdrl','rpr','tpha','sti','std','hcg','bhcg','upt',
+  'psa','afp','cea','phq','brca','pmtct',
 ] as const;
 /** An initialism with any run of marks that are not letters or digits, or none, between its letters: 'rvs' gives 'r[^a-z0-9]*v[^a-z0-9]*s'. */
 export const dottedInitialism=(letters:string):string=>[...letters].join('[^a-z0-9]*');
@@ -64,9 +66,10 @@ export const initialismForm=(letters:string):string=>`${dottedInitialism(letters
 export const SENSITIVE_TEST_SQL_PATTERN = '(^|[^a-z0-9])(?:'+[
   // "Anti" or "rapid" glued to HIV or HCV, and a kit's name glued to HIV, each by name: never '[a-z]*hiv' ("Archive").
   '(?:anti|rapid)?hiv[a-z0-9]*','(?:unigold|statpak|oraquick|determine)hiv[a-z0-9]*','aids','rvs','retro[^a-z0-9]*vir[a-z]*',
-  'cd[^a-z0-9]*4[a-z0-9]*','viral[^a-z0-9]*loads?',
-  'hepatit[a-z]*','hbsag','hbeag','anti[^a-z0-9]*hbc','hbc[^a-z0-9]*ab','hbv[a-z]*','(?:anti|rapid)?hcv[a-z]*',
-  'syph[a-z]*','vdrls?','rprs?','tphas?','treponem[a-z]*','chlam[a-z]*','gonor[a-z]*','gonococc[a-z]*',
+  'cd[^a-z0-9]*4[a-z0-9]*','viral[^a-z0-9]*loa?ds?',
+  'hepatit[a-z]*','hbsag','hbe[^a-z0-9]*ag','anti[^a-z0-9]*hbc','hbc[^a-z0-9]*ab','hbv[a-z]*','(?:anti|rapid)?hcv[a-z]*',
+  // 'chlam' is not read in "Chlamydophila", a cause of pneumonia ('(?!ydophila)' looks ahead, the same in SQL and JS).
+  'syph[a-z]*','vdrls?','rprs?','tphas?','treponem[a-z]*','chlam(?!ydophila)[a-z]*','gonor[a-z]*','gonococc[a-z]*',
   'herpes','hsv[a-z0-9]*','trich?omon[a-z]*','stis?','stds?',
   '(?:beta|b|urine|serum)?hcgs?','upts?',
   '[ft]?psas?','afps?','ceas?','ca[^a-z0-9]*125','ca[^a-z0-9]*19[^a-z0-9]*9','ca[^a-z0-9]*15[^a-z0-9]*3','tumou?r[^a-z0-9]*markers?',
@@ -76,8 +79,9 @@ export const SENSITIVE_TEST_SQL_PATTERN = '(^|[^a-z0-9])(?:'+[
   // GAD only as the anxiety scales GAD-2 and GAD-7 ("G.A.D.-7"); "GAD", "GAD65" and "Anti-GAD65 antibody" stay shown.
   'g[^a-z0-9]*a[^a-z0-9]*d[^a-z0-9]*[27]',
   'vls?','hb[^a-z0-9]*electrophoresis','ha?emoglobin[^a-z0-9]*electrophoresis',
-  'prostate[^a-z0-9]*specific','[a-z]*fetoprotein','carcino[^a-z0-9]*embryonic','cancer[^a-z0-9]*(?:ag|antigen)','chorionic',
-  'choriogonadotrop[a-z]*','human[^a-z0-9]*immuno[^a-z0-9]*deficiency','hep[^a-z0-9]*[bc](?:[^a-z0-9]*[sec])?(?:[^a-z0-9]*a[gb])?',
+  'prostate[^a-z0-9]*specific','[a-z]*fetoprotein','carcino[^a-z0-9]*embryonic','cancer[^a-z0-9]*(?:ag|antigen|screen[a-z]*)',
+  'chorionic','choriogonadotrop[a-z]*','human[^a-z0-9]*immuno[^a-z0-9]*deficiency',
+  'hep[^a-z0-9]*[bcde](?:[^a-z0-9]*[sec])?(?:[^a-z0-9]*a[gb])?',
   'hbs[^a-z0-9]*ag',
   // HIV rapid-test kits named alone (Determine, Uni-Gold and Stat-Pak: Nigeria's serial HIV algorithm; OraQuick:
   // self-testing). A facility's own test (0155) is hidden by its name only. "Determine" may run on into letters or
@@ -86,17 +90,50 @@ export const SENSITIVE_TEST_SQL_PATTERN = '(^|[^a-z0-9])(?:'+[
   // Names that were missed (Ola, #258, 27 Nov 2026): hepatitis B markers; syphilis, CT/NG and HPV; cancer pathology
   // and tumour markers written out; HIV programme tests; panels, drug screens and paternity tests.
   'hbs[^a-z0-9]*ab','anti[^a-z0-9]*hbs','hbe[^a-z0-9]*ab','anti[^a-z0-9]*hbe','hbc[^a-z0-9]*igm','hbc[^a-z0-9]*ag',
-  'tppas?','tp[^a-z0-9]*pa','t[^a-z0-9]*pallidum','fta[^a-z0-9]*abs','ct[^a-z0-9]*ng','hpv[a-z0-9]*',
-  'fnac?s?','ihcs?','er[^a-z0-9]*pr','her[^a-z0-9]*2','frozen[^a-z0-9]*sections?',
-  'alpha[^a-z0-9]*foe?to[^a-z0-9]*proteins?','ca[^a-z0-9]*72[^a-z0-9]*4',
+  // TP-PA takes only a space, dot or hyphen, so "TP & PA" and "TP/PA" (two tests side by side) are shown.
+  'tppas?','tp[ .-]?pa','t[^a-z0-9]*pallidum','fta[^a-z0-9]*abs','ct[^a-z0-9]*(?:ng|gc)','(?:ng|gc)[^a-z0-9]*ct',
+  'hpv[a-z0-9]*',
+  'fnac?s?','ihcs?','er[^a-z0-9]*pr','her[^a-z0-9]*2(?:[^a-z0-9]*neu)?','frozen[^a-z0-9]*sections?',
+  'alpha[^a-z0-9]*fo?e?to[^a-z0-9]*proteins?','ca[^a-z0-9]*72[^a-z0-9]*4',
   'eids?','recency','double[^a-z0-9]*check[^a-z0-9]*gold','insti',
-  'pre[^a-z0-9]*marital','ante[^a-z0-9]*natal[^a-z0-9]*(?:profile|panel|screen[a-z]*)','anc[^a-z0-9]*(?:profile|panel)',
-  'booking[^a-z0-9]*bloods?','drugs?[^a-z0-9]*(?:of[^a-z0-9]*abuse|screen[a-z]*)','urine[^a-z0-9]*drug[a-z]*','paternity',
+  // An antenatal, prenatal, ANC, booking or obstetric panel, with up to three words between its first and last words.
+  'pre[^a-z0-9]*marital',
+  '(?:(?:ante|pre)[^a-z0-9]*natal|anc|booking|obstetric[a-z]*)(?:[^a-z0-9]+(?:[a-z0-9]+[^a-z0-9]+){0,3})?'
+    +'(?:profiles?|panels?|screen[a-z]*|tests?|investigations?|labs?|bloods?|booking)',
+  'drugs?[^a-z0-9]*(?:(?:of[^a-z0-9]*)?abuse(?:[^a-z0-9]*(?:screen[a-z]*|panels?))?|screen[a-z]*)','urine[^a-z0-9]*drug[a-z]*','paternity',
+  // Ola's second list (#258, 27 Nov 2026), as in ehr-api: every name of a national lab test the list already hid by
+  // another name (bone marrow aspirate, cervical smear, "Cyto stain", TORCH, T helper cells, wet mount or prep);
+  // hepatitis misspelt, A, D and E, HBs and HBe antigens set apart, Australia antigen; HIV typos and tests, CrAg and
+  // TB-LAM (advanced HIV disease) and the other names of those two national tests; other STIs; pregnancy screening;
+  // cancer tests.
+  'bone[^a-z0-9]*marrow[^a-z0-9]*aspirat[a-z]*','bmas?','cervi(?:cal|x)[^a-z0-9]*(?:smears?|screen[a-z]*)',
+  'cyto[^a-z0-9]*stain[a-z]*','torch','t[^a-z0-9]*helper','wet[^a-z0-9]*(?:mount|prep)[a-z]*',
+  'hep[a-z]{0,3}t[aiy]t[aiy]s','(?:anti)?h[ade]v(?:ab|ag|igg|igm|rna)?','hb[^a-z0-9]*s[^a-z0-9]*ag',
+  'australia[^a-z0-9]*(?:antigen|ag)',
+  'h[1l]v[a-z0-9]*','retro[^a-z0-9]*(?:screen[a-z]*|tests?)','p[^a-z0-9]*24[^a-z0-9]*(?:antigen|ag)','western[^a-z0-9]*blots?',
+  'lag[^a-z0-9]*avidity','infant[^a-z0-9]*dna[^a-z0-9]*pcr','cr[^a-z0-9]*ags?','(?:tb|lf)[^a-z0-9]*lam',
+  'cryptococ[a-z]*(?:[^a-z0-9]+[a-z]+)?[^a-z0-9]+(?:antigen|ag)','lipoarabinomannan',
+  's[iy][pf]h?[iy]l[a-z]*','vener[a-z]*','v[^a-z0-9]*d[^a-z0-9]*screen[a-z]*','gc[^a-z0-9]*cultures?',
+  '(?:c[^a-z0-9]*)?trachomatis','t[^a-z0-9]*vaginalis','human[^a-z0-9]*papilloma[^a-z0-9]*vir[a-z]*',
+  'nipts?','triple[^a-z0-9]*tests?','quad(?:ruple)?[^a-z0-9]*(?:screen[a-z]*|tests?)','papp[^a-z0-9]*a',
+  'immuno[^a-z0-9]*histochem[a-z]*','fine[^a-z0-9]*needle[^a-z0-9]*aspirat[a-z]*','o?estrogen[^a-z0-9]*receptors?',
+  'progesterone[^a-z0-9]*receptors?','hormone[^a-z0-9]*receptors?[^a-z0-9]*status','er[^a-z0-9]*status','ki[^a-z0-9]*67',
+  'ca[^a-z0-9]*27[^a-z0-9]*29','cytopath[a-z]*','flow[^a-z0-9]*cytometr[a-z]*','bcr[^a-z0-9]*abl[0-9]*',
+  'bence[^a-z0-9]*jones?','cell[^a-z0-9]*blocks?','lbcs?','via[^a-z0-9]*(?:tests?|screen[a-z]*)',
+  'malignan[a-z]*[^a-z0-9]*screen[a-z]*',
   ...SENSITIVE_TEST_INITIALISMS.map(initialismForm),
-  // Test wording only (ehr-api does not read these in a diagnosis's name): a pregnancy test however it is spelt, and
-  // the genotype tests.
-  'preg[a-z]*','sickl[a-z]*[^a-z0-9]*(?:cell[^a-z0-9]*)?(?:test|screen[a-z]*)','hb[^a-z0-9]*s[^a-z0-9]*solubility',
-  'hgb[^a-z0-9]*electrophoresis','hb[^a-z0-9]*typing',
+  // Test wording only (ehr-api does not read these in a diagnosis's name): pregnancy tests ("preg" as a word,
+  // pregnan..., misspellings, and "PT", a name of the national pregnancy tests and of prothrombin time; "Pregnenolone"
+  // is shown); the genotype tests; DBS; mental health and drug tests by their test names.
+  'preg','pregnan[a-z]*','pr[ae]g?n?[ae]n?cy[a-z]*','pt',
+  'sickl(?:ing|edex)(?:[^a-z0-9]*(?:preps?|tests?))?','sickl[a-z]*[^a-z0-9]*(?:cell[^a-z0-9]*)?(?:tests?|screen[a-z]*|status)',
+  '(?:sickl[a-z]*|h(?:a?emoglobin|gb|b)[^a-z0-9]*s)(?:[^a-z0-9]+[a-z]+){0,5}[^a-z0-9]*solubility',
+  'hgb[^a-z0-9]*electrophoresis','hb[^a-z0-9]*typing','h(?:a?emoglobin|gb|b)[^a-z0-9]*(?:variants?|hplc|pattern)',
+  'ha?emoglobinopath[a-z]*[^a-z0-9]*(?:screen[a-z]*|tests?)',
+  'dbs(?:[^a-z0-9]*pcr)?',
+  '(?:depression|anxiety)[^a-z0-9]*screen[a-z]*','epds','hads','mental[^a-z0-9]*status','tox(?:icology)?[^a-z0-9]*screen[a-z]*',
+  'urine[^a-z0-9]*tox(?:icology)?','uds','doas?',
+  '(?:cannabis|thc|opiates?|cocaine|amphetamines?|benzodiazepines?)[^a-z0-9]*(?:screen[a-z]*|tests?)',
 ].join('|')+')($|[^a-z0-9])';
 export const SENSITIVE_LOINC_CODES=[
   '75622-1','56888-1','7917-8','68961-2','20447-9','24467-3','5196-1','5195-3','16128-1','13955-0',
