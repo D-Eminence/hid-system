@@ -2582,12 +2582,15 @@ above is the lab request's part.
   5. The settings on, with the time recorded (`LAB_REQUEST_NAME_ONLY_ENABLED`
      only once 0155's sensitive-test list build is live).
 - **Undo, only before any null is saved** (owner-signed; 0156's header):
-  for each of the ten columns, a `CHECK (col IS NOT NULL) NOT VALID` added
-  and committed under a brief NOWAIT lock, then validated in its own
-  transaction; then the main transaction (the six tables' NOWAIT step and
-  both refusals) sets NOT NULL without a scan, drops those checks and the
-  five pair checks, puts back `order_routes_kind_ck` and 0153's read, and
-  drops `ehr.catalog_diagnosis_listed` with its grants.
+  for each of the ten columns, a `CHECK (col IS NOT NULL) NOT VALID`, and
+  0086's route kind check under a temporary name, each added and committed
+  under a brief NOWAIT lock, then validated in its own transaction with a
+  short `lock_timeout`; then the main transaction (the six tables' NOWAIT
+  step and both refusals) sets NOT NULL without a scan, drops those checks
+  and the five pair checks, drops 0156's `order_routes_kind_ck` and renames
+  0086's back to it (no scan under the six locks), puts back 0153's read
+  and its comment, and drops `ehr.catalog_diagnosis_listed` with its
+  grants.
 - **Where this differs from the plan above:** the plan's two tables
   (`ehr.diagnoses` here, `ehr.lab_requests` and `lab.work_items` in ORD-7)
   are six; the recent read leaves a dropped code out rather than adding an

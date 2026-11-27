@@ -228,7 +228,8 @@ select pg_temp.expect('A2 a second run answers "0156: already applied" (55000); 
 -- statement, before the CHECK it relies on is dropped.
 savepoint undone;
 set local role :"q156_owner";
--- a. A NOT VALID CHECK (col IS NOT NULL) on each of the ten columns, then VALIDATE.
+-- a. A NOT VALID CHECK (col IS NOT NULL) on each of the ten columns, and 0086's route kind check under a temporary
+-- name, then VALIDATE.
 alter table ehr.lab_requests add constraint lab_requests_test_code_system_undo_nn check (test_code_system is not null) not valid,
   add constraint lab_requests_test_code_undo_nn check (test_code is not null) not valid;
 alter table ehr.diagnoses add constraint diagnoses_code_system_undo_nn check (code_system is not null) not valid,
@@ -241,6 +242,21 @@ alter table lab.work_item_requested_tests add constraint work_item_requested_tes
 alter table lab.order_route_result_reports add constraint order_route_result_reports_test_code_system_undo_nn
     check (test_code_system is not null) not valid,
   add constraint order_route_result_reports_test_code_undo_nn check (test_code is not null) not valid;
+-- 0086's kind check as 0086 made it (0086:6377-6390), under a temporary name.
+alter table ehr.order_routes add constraint order_routes_kind_0086_ck check (
+    (kind = 'lab_request' and source_lab_request_id is not null and source_prescription_id is null
+      and test_code_system is not null and test_code is not null and test_display is not null
+      and priority is not null and requested_at is not null
+      and medication_code_system is null and medication_code is null and medication_display is null
+      and dose_quantity is null and dose_unit is null and route_code is null and frequency is null
+      and instructions is null and starts_on is null and ends_on is null and prescribed_at is null
+      and pharmacy_work_item_id is null)
+    or (kind = 'prescription' and source_prescription_id is not null and source_lab_request_id is null
+      and medication_display is not null and frequency is not null and instructions is not null
+      and prescribed_at is not null
+      and test_code_system is null and test_code is null and test_display is null and priority is null
+      and specimen_type_code is null and clinical_information is null and requested_at is null
+      and lab_work_item_id is null)) not valid;
 alter table ehr.lab_requests validate constraint lab_requests_test_code_system_undo_nn;
 alter table ehr.lab_requests validate constraint lab_requests_test_code_undo_nn;
 alter table ehr.diagnoses validate constraint diagnoses_code_system_undo_nn;
@@ -251,9 +267,10 @@ alter table lab.work_item_requested_tests validate constraint work_item_requeste
 alter table lab.work_item_requested_tests validate constraint work_item_requested_tests_code_undo_nn;
 alter table lab.order_route_result_reports validate constraint order_route_result_reports_test_code_system_undo_nn;
 alter table lab.order_route_result_reports validate constraint order_route_result_reports_test_code_undo_nn;
+alter table ehr.order_routes validate constraint order_routes_kind_0086_ck;
 -- b. The main transaction: the six tables at once, NOWAIT; SET NOT NULL (each proven by its CHECK, so no scan); the
--- ten CHECKs and the five pair CHECKs dropped; 0086's kind check, 0153's read (and its comment) back; the new
--- function dropped.
+-- ten CHECKs and the five pair CHECKs dropped; 0156's kind check dropped and 0086's renamed back (no scan); 0153's read
+-- (and its comment) back; the new function dropped.
 lock table ehr.lab_requests, ehr.diagnoses, ehr.order_routes, lab.work_items, lab.work_item_requested_tests,
   lab.order_route_result_reports in access exclusive mode nowait;
 alter table ehr.lab_requests alter column test_code_system set not null, alter column test_code set not null;
@@ -272,22 +289,8 @@ alter table lab.work_item_requested_tests drop constraint work_item_requested_te
 alter table lab.order_route_result_reports drop constraint order_route_result_reports_test_code_system_undo_nn,
   drop constraint order_route_result_reports_test_code_undo_nn,
   drop constraint order_route_result_reports_test_code_pair_ck;
-alter table ehr.order_routes
-  drop constraint order_routes_kind_ck,
-  add constraint order_routes_kind_ck check (
-    (kind = 'lab_request' and source_lab_request_id is not null and source_prescription_id is null
-      and test_code_system is not null and test_code is not null and test_display is not null
-      and priority is not null and requested_at is not null
-      and medication_code_system is null and medication_code is null and medication_display is null
-      and dose_quantity is null and dose_unit is null and route_code is null and frequency is null
-      and instructions is null and starts_on is null and ends_on is null and prescribed_at is null
-      and pharmacy_work_item_id is null)
-    or (kind = 'prescription' and source_prescription_id is not null and source_lab_request_id is null
-      and medication_display is not null and frequency is not null and instructions is not null
-      and prescribed_at is not null
-      and test_code_system is null and test_code is null and test_display is null and priority is null
-      and specimen_type_code is null and clinical_information is null and requested_at is null
-      and lab_work_item_id is null));
+alter table ehr.order_routes drop constraint order_routes_kind_ck;
+alter table ehr.order_routes rename constraint order_routes_kind_0086_ck to order_routes_kind_ck;
 -- 0153's read, as 0153 made it (md5 48c0dbad), with its comment.
 create or replace function ehr.recent_diagnoses(requested_limit integer)
 returns table (code_system text, code text, display text, last_used_at timestamptz, use_count integer)

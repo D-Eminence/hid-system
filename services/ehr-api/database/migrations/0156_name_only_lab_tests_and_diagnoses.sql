@@ -208,18 +208,31 @@
 -- saved):
 -- a. Before the main transaction, for each of the ten columns: add CHECK
 --    (col IS NOT NULL) NOT VALID and commit (ACCESS EXCLUSIVE, briefly:
---    NOWAIT, as section 1); then VALIDATE it in its own transaction (SHARE
---    UPDATE EXCLUSIVE: reads and writes go on). In the same transaction as
+--    NOWAIT, as section 1); and on ehr.order_routes add 0086's kind check
+--    (0086:6377-6390) as it was, under a temporary name
+--    (order_routes_kind_0086_ck), NOT VALID, the same way. Then VALIDATE
+--    each in its own transaction, with lock_timeout 5s (SHARE UPDATE
+--    EXCLUSIVE: reads and writes go on; one queued behind an autovacuum
+--    blocks no read or write while it waits). In the same transaction as
 --    the ADD, the scan would run under the ADD's ACCESS EXCLUSIVE.
 -- b. The main transaction: section 1's NOWAIT step on the six tables, with
 --    both refusals; SET NOT NULL on the ten columns (each skips its scan, as
 --    a validated CHECK proves it) and drop the ten CHECKs of step a; drop
---    the five pair CHECKs; put back order_routes_kind_ck as 0086 made it
---    (0086:6377-6390); put back 0153's ehr.recent_diagnoses (md5
---    48c0dbad4f4d53fa6fbc6a1e5e0a35ac, STABLE, SECURITY DEFINER and its
---    search_path restated); drop ehr.catalog_diagnosis_listed and remove its
---    lines from runtime-grants.sql in the same release.
--- The ledger row stays.
+--    the five pair CHECKs; drop this file's order_routes_kind_ck and RENAME
+--    CONSTRAINT order_routes_kind_0086_ck TO order_routes_kind_ck (catalog
+--    only, so no route is scanned under the six locks); put back 0153's
+--    ehr.recent_diagnoses (md5 48c0dbad4f4d53fa6fbc6a1e5e0a35ac, STABLE,
+--    SECURITY DEFINER and its search_path restated) and 0153's comment on
+--    it; drop ehr.catalog_diagnosis_listed and remove its lines from
+--    runtime-grants.sql in the same release.
+-- The ledger row stays. Measured with the 20,000-row data below, as the
+-- NOSUPERUSER NOBYPASSRLS owner: step a's eleven VALIDATEs each held SHARE
+-- UPDATE EXCLUSIVE only (the kind check's 11.6 ms); in step b, after the
+-- locks, every SET NOT NULL skipped its scan (0.5-0.9 ms each), the kind
+-- check's drop and rename took 0.6 ms (putting it back with ADD CONSTRAINT
+-- scanned the 20,000 routes for 42.7 ms in review), and all of step b's
+-- statements about 7 ms. The six tables, their constraints, both functions,
+-- their grants and comments then matched 0001-0153's exactly.
 --
 -- Measured on throwaway PostgreSQL 16 with 0001-0153 applied and about
 -- 20,000 rows of fictional data in each of the six tables, analysed; ten
