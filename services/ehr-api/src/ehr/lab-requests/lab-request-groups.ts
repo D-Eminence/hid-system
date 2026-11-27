@@ -67,13 +67,16 @@ export const LAB_REQUEST_GROUP_SEND_DEADLINE_MS = 25_000;
  * 503 LAB_REQUEST_GROUPS_UNAVAILABLE: a new group while
  * LAB_REQUEST_GROUPS_ENABLED is off (LabRequestsService.createGroup). It
  * comes after the caller's permission (403), the body (400) and the
- * Idempotency-Key's presence (400 IDEMPOTENCY_KEY_REQUIRED), and before the
- * consent check. A same-key retry of a stored group is not refused. A
- * backstop only: only a direct caller sees this code. Through the public
- * gateway the browser gets nginx's own 503 UPSTREAM_UNAVAILABLE instead
- * (proxy_intercept_errors; gateway/nginx.conf.template, error_page 502 503
- * 504), as for every ehr-api 502, 503 and 504, so the website reads the
- * catalogue status's labRequestGroups instead.
+ * Idempotency-Key (present, 16-128 URL-safe characters: 400
+ * IDEMPOTENCY_KEY_REQUIRED), and before the consent check. No lab request,
+ * group or key row is written, and Lab is not called (the global audit still
+ * writes its http-request failure row, as for any refusal). A same-key retry
+ * of a stored group is not refused. A backstop only: only a direct caller
+ * sees this code. Through the public gateway the browser gets nginx's own
+ * 503 UPSTREAM_UNAVAILABLE instead (proxy_intercept_errors;
+ * gateway/nginx.conf.template, error_page 502 503 504), as for every ehr-api
+ * 502, 503 and 504, so the website reads the catalogue status's
+ * labRequestGroups instead.
  */
 export function labRequestGroupsUnavailable(): DomainProblem {
   return new DomainProblem(503, 'LAB_REQUEST_GROUPS_UNAVAILABLE',

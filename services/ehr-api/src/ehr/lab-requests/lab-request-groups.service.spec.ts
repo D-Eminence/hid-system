@@ -333,10 +333,11 @@ describe('ORD-6: several tests in one lab request (LAB_REQUEST_GROUPS_ENABLED on
         answer.labRequests[2]?.id]);
     });
 
-  it('setting off: a key row gone by the time it is written (a racing first call rolled back) is still refused, '
-    + 'and keeps nothing', async () => {
+  it('setting off, defence in depth: should the key read and the write disagree, the call is still refused and keeps '
+    + 'nothing', async () => {
     const store = memory();
-    // The read finds the row; the write then finds none, so the call would make a group.
+    // The read says the row is there; the write finds none, so the call would make a group. (A committed key row is
+    // never deleted, so this does not happen today: the transaction's own check is the backstop.)
     store.repository.idempotencyKeyStored.mockResolvedValueOnce(true);
     const { labApi } = lab();
     await expect(service(store, labApi, false).createGroup(context(), patientId, encounterId, group(), key, Date.now()))

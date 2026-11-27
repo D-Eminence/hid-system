@@ -246,8 +246,13 @@ export class ClinicalRepository {
    * operation and key, in any state. One read in its own read-only
    * transaction, before any consent check or write. ORD-6's group create
    * asks it only while LAB_REQUEST_GROUPS_ENABLED is off: no row, and the
-   * call would make a new group, so it is refused with nothing read or
-   * written; a row, and the call goes on as a replay (executeCreate).
+   * call would make a new group, so it is refused with nothing written; a
+   * row, and the call goes on as a replay (executeCreate). It sees committed
+   * rows only (READ COMMITTED), and a key row is never deleted
+   * (idempotency_keys_no_delete, 0004), so a row it finds is still there for
+   * executeCreate. A first call with the same key still in flight is not
+   * seen, so a resend that overtakes it is refused rather than waiting on it
+   * as executeCreate's insert would.
    */
   async idempotencyKeyStored(context: DataAccessContext, idempotencyKey: string, operation: string): Promise<boolean> {
     try {

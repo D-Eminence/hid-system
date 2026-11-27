@@ -272,13 +272,14 @@ export class LabRequestsService {
    * off only a new group is refused (the clinical owner's addendum,
    * 7223408785): with no `lab-request-group.create` row for the caller's key
    * it answers 503 LAB_REQUEST_GROUPS_UNAVAILABLE before the consent check,
-   * with nothing written and Lab not called; a same-key retry of a
-   * stored group goes on and is answered as any replay is, so a retry never
-   * leads a clinician to order twice. Each test becomes its own lab request,
-   * linked by one requestGroupId that ehr-api makes, so every rule stays per
-   * test. All are written in one transaction, every one or none, under one
-   * consent check, and each is checked and audited as the single create
-   * checks and audits it, plus one `ehr.lab-request-group.create` row.
+   * with no lab request, group or key row written and Lab not called; a
+   * same-key retry of a stored group goes on and is answered as any replay
+   * is, so a retry never leads a clinician to order twice. Each test becomes
+   * its own lab request, linked by one requestGroupId that ehr-api makes, so
+   * every rule stays per test. All are written in one transaction, every one
+   * or none, under one consent check, and each is checked and audited as the
+   * single create checks and audits it, plus one
+   * `ehr.lab-request-group.create` row.
    * One Idempotency-Key covers the group, as EHR-C5's does: a whole-call row
    * (`lab-request-group.create`), whose result names the group, not a table
    * row, so a replay re-runs the parts, and a part row per test
@@ -306,8 +307,9 @@ export class LabRequestsService {
         client, context, patientId, key, LAB_REQUEST_GROUP_OPERATION, digest, 'lab-request-group',
         async () => {
           const value = await parts();
-          // Off, and the key's row was gone by the time it was written (a first call with the same key rolled
-          // back): createInTransaction wrote a null group, so the whole transaction is refused and keeps nothing.
+          // Defence in depth: while off, the read above found the key's committed row, which is never deleted, so
+          // executeCreate replays and does not come here. Should the read and the write ever disagree,
+          // createInTransaction wrote a null group, and the whole transaction is refused and keeps nothing.
           if (value.requestGroupId === null) throw labRequestGroupsUnavailable();
           return { value, id: value.requestGroupId };
         },
