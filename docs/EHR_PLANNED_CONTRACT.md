@@ -2582,7 +2582,10 @@ above is the lab request's part.
   5. The settings on, with the time recorded (`LAB_REQUEST_NAME_ONLY_ENABLED`
      only once 0155's sensitive-test list build is live).
 - **Undo, only before any null is saved** (owner-signed; 0156's header):
-  for each of the ten columns, a `CHECK (col IS NOT NULL) NOT VALID`, and
+  first both settings off, since the catalogue status reports them from the
+  settings alone and a name-only save on a schema without 0156 fails with a
+  500; then for each of the ten columns, a `CHECK (col IS NOT NULL) NOT
+  VALID`, and
   0086's route kind check under a temporary name, each added and committed
   under a brief NOWAIT lock, then validated in its own transaction with a
   short `lock_timeout`; then the main transaction (the six tables' NOWAIT

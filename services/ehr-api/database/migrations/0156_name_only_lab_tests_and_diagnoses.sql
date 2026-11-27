@@ -206,6 +206,11 @@
 --
 -- Undo (by hand only, owner-signed, and only before any name-only row is
 -- saved):
+-- First both settings go off (LAB_REQUEST_NAME_ONLY_ENABLED and
+-- DIAGNOSIS_NAME_ONLY_ENABLED false, ehr-api restarted). The catalogue
+-- status reports them from the settings alone, so with one still on over a
+-- schema without 0156 the website offers "Use as written" and the save
+-- fails on NOT NULL (23502, which ehr-api answers as a 500).
 -- a. Before the main transaction, for each of the ten columns: add CHECK
 --    (col IS NOT NULL) NOT VALID and commit (ACCESS EXCLUSIVE, briefly:
 --    NOWAIT, as section 1); and on ehr.order_routes add 0086's kind check
