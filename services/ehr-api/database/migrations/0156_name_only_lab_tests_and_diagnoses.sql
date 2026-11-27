@@ -120,9 +120,14 @@
 -- SERVICE SETTINGS. Nothing changes for a service until it sends a null
 -- pair. ehr-api takes a lab request by name only while
 -- LAB_REQUEST_NAME_ONLY_ENABLED is true, and a diagnosis by name only while
--- DIAGNOSIS_NAME_ONLY_ENABLED is true. Both stay off when this file ships.
--- LAB_REQUEST_NAME_ONLY_ENABLED stays off until 0155's sensitive-test list
--- build is live (it ships in 0155's images). The release: this file alone,
+-- DIAGNOSIS_NAME_ONLY_ENABLED is true. Both stay off when this file ships,
+-- and both stay off until 0155's sensitive-test list build is live (it
+-- ships in 0155's images): a test or diagnosis with no code is hidden from
+-- the patient's record chat by its name alone, and today's lists let
+-- dotted initials through (V.D.R.L., R.V.D., H.C.V.). The note gates only
+-- the lab setting; a coded diagnosis is also hidden by its code, but a
+-- name-only one is not, so the diagnosis setting waits too (open for the
+-- clinical owner to confirm). The release: this file alone,
 -- then ehr-api and lab-api with both settings off, then the health website
 -- and apps/ehr (this repository's staff frontend, the hid-ehr worker) at a
 -- build that reads a null pair, then the settings on.

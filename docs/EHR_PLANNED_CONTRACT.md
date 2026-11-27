@@ -2519,8 +2519,14 @@ above is the lab request's part.
   as today.
   - `DIAGNOSIS_NAME_ONLY_ENABLED`: diagnoses by name only and `codeStatus`
     (this section).
-  - `LAB_REQUEST_NAME_ONLY_ENABLED`: lab requests by name only (ORD-7). It
-    stays off until 0155's sensitive-test list build is live.
+  - `LAB_REQUEST_NAME_ONLY_ENABLED`: lab requests by name only (ORD-7).
+  - Both stay off until 0155's sensitive-test list build is live. A test or
+    a diagnosis with no code is hidden from the patient's record chat by its
+    name alone, and today's lists let dotted initials through (V.D.R.L.,
+    R.V.D., H.C.V.); a coded diagnosis is also hidden by its code
+    (`isSensitiveDiagnosisCode`), a name-only one is not. Ola's note gates
+    only the lab setting; the diagnosis setting waits too, for the clinical
+    owner to confirm.
   - The catalogue status's `diagnosisNameOnly` and `labTestNameOnly` are the
     two settings, so the website offers "Use '<typed text>' as written" only
     to a backend that takes it.
@@ -2594,8 +2600,8 @@ above is the lab request's part.
   2. 0156's dry run and apply, alone.
   3. ehr-api and lab-api at 0156's images, both settings off.
   4. The health website, and `apps/ehr` at a build that reads a null pair.
-  5. The settings on, with the time recorded (`LAB_REQUEST_NAME_ONLY_ENABLED`
-     only once 0155's sensitive-test list build is live).
+  5. The settings on, with the time recorded, each only once 0155's
+     sensitive-test list build is live.
 - **Undo, only before any null is saved** (owner-signed; 0156's header):
   first both settings off, since the catalogue status reports them from the
   settings alone and a name-only save on a schema without 0156 fails with a
@@ -2609,7 +2615,9 @@ above is the lab request's part.
   0086's back to it (no scan under the six locks), puts back 0153's read
   and its comment, and drops `ehr.catalog_diagnosis_listed` with its
   grants.
-- **Where this differs from the plan above:** the plan's two tables
+- **Where this differs from the plan above:** `DIAGNOSIS_NAME_ONLY_ENABLED`
+  also waits for 0155's sensitive-test list build (the note gates only the
+  lab setting); the plan's two tables
   (`ehr.diagnoses` here, `ehr.lab_requests` and `lab.work_items` in ORD-7)
   are six; the recent read leaves a dropped code out rather than adding an
   in-list flag; `codeStatus` is `not_checked` also while no release is

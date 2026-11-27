@@ -7863,7 +7863,8 @@ VALIDATION_FAILED` (`services/ehr-api/src/common/validation.ts:3-9`,
   allowed for the name only. Until this changes, the screen should ask for a
   code, or say the diagnosis cannot be saved without one.
 - **Planned (0156, draft, not live):** with 0156 and its ehr-api, while
-  `DIAGNOSIS_NAME_ONLY_ENABLED` is on (off by default), a diagnosis may be
+  `DIAGNOSIS_NAME_ONLY_ENABLED` is on (off by default, and kept off until
+  0155's sensitive-test list build is live), a diagnosis may be
   saved by its name only, with `codeSystem` and `code` both left out, and
   the create answer carries `codeStatus` (`EHR_PLANNED_CONTRACT.md`, ORD-9,
   "Second slice, second part"). Off, everything above holds.

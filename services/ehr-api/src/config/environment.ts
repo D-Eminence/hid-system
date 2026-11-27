@@ -115,6 +115,7 @@ const environmentSchema = z
     // sensitive-test list build is live.
     LAB_REQUEST_NAME_ONLY_ENABLED: booleanString,
     // A diagnosis by its name only, and codeStatus on a diagnosis create (0156): off by default, off is exactly as before.
+    // Stays off until 0155's sensitive-test list build is live, as the lab request setting does.
     DIAGNOSIS_NAME_ONLY_ENABLED: booleanString,
   })
   .superRefine((environment, context) => {

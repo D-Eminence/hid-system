@@ -20,7 +20,11 @@ import {
  *   a test with no code is hidden from the patient's record chat by its name
  *   alone.
  * - DIAGNOSIS_NAME_ONLY_ENABLED: a diagnosis may leave out its code pair, and
- *   a diagnosis create answers `codeStatus`.
+ *   a diagnosis create answers `codeStatus`. It too stays off until that
+ *   build is live: a diagnosis with no code is hidden from the patient's
+ *   record chat by its name alone (isSensitiveDiagnosisCode needs a code),
+ *   and today's condition list lets dotted initials (R.V.D., H.C.V.)
+ *   through. The build adds them (Ola's note, "Privacy gate").
  * Off, the routes are exactly as before: a body is checked against today's
  * class, so a missing code is 400 VALIDATION_FAILED with today's messages,
  * and the answers carry no new key. On, the pair is both or neither (400
