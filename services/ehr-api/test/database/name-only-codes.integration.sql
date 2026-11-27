@@ -20,19 +20,24 @@
 --      column made nullable, a pinned function replaced, 0153's read not at
 --      its before-pin or not STABLE, another ehr.catalog_diagnosis_listed,
 --      0153 missing;
---   5. the size bound: reltuples above 5,000,000 refuses, exactly 5,000,000
---      applies (after ANALYZE of the six, as the release runbook does);
+--   5. the size bound for an analysed table: reltuples above 5,000,000
+--      refuses, exactly 5,000,000 applies. With no ANALYZE: the runbook
+--      recommends it, 0156 does not need it. (The bound for a table never
+--      analysed, 2 GiB on disk, is pinned by dry-run-attempts.test.mjs; a
+--      table past 2 GiB takes too long to make here, so that refusal is
+--      proven outside this suite);
 --   6. 0156 applies again after the undo, exactly as the runner left it,
 --      writing no row;
 --   7. other lanes' additions to the six tables pass (7174680244): a
 --      stand-in for Billing's zz_billing_lab_work_item trigger on
 --      lab.work_items (0167), a column with its own CHECK, an index on the
 --      code pair, a column on ehr.diagnoses; 0156 keeps them;
---   8. a row written in the transaction before 0156, even one undone: with
---      the table never analysed (reltuples -1, a page on disk) the size
---      bound refuses; analysed, 0156 applies (its post-check counts only
---      what is written while it runs); a row written while 0156 runs (by an
---      event trigger on its ALTER TABLE) makes its post-check refuse
+--   8. tables never analysed (reltuples -1) with pages on disk, as a fresh
+--      install on Amazon RDS leaves ehr.diagnoses and ehr.lab_requests
+--      (0102's demo rows): rows written in the transaction before 0156, and
+--      undone; under 2 GiB, 0156 applies (its post-check counts only what is
+--      written while it runs); a row written while 0156 runs (by an event
+--      trigger on its ALTER TABLE) makes its post-check refuse
 --      (pg_stat_xact_user_tables, against section 0's counts);
 --   9. back to the state the runner left.
 -- B. The data path (the P4c fixture of the order route suites):
@@ -379,13 +384,6 @@ select pg_temp.expect('A3c ... 0153''s read (md5 48c0dbad, owner, SECURITY DEFIN
                        'none'));
 select md5(pg_temp.schema_print()) as q156_undone \gset
 
--- The release runbook runs ANALYZE on the six tables before the dry run, so that reltuples is known (0156's size
--- bound refuses -1 for a table with a page on disk). Here as the owner.
-set local role :"q156_owner";
-analyze ehr.lab_requests, ehr.diagnoses, ehr.order_routes, lab.work_items, lab.work_item_requested_tests,
-  lab.order_route_result_reports;
-reset role;
-
 -- A4. On the state before 0156 (the undo), 0156's preconditions refuse what is not as 0001-0153 left it (55000,
 -- nothing applied), each change made first as the owner (or another lane's migrator) would make it.
 savepoint refused;
@@ -482,8 +480,8 @@ select pg_temp.expect('A4h 0153 not applied (its read missing)',
   '55000 0156: 0001-0153 (0152 and 0153) must be applied first',
   :'LAST_ERROR_SQLSTATE' || ' ' || :'LAST_ERROR_MESSAGE');
 
--- A5. The size bound, read under the locks: reltuples above 5,000,000 refuses (55000, nothing applied); exactly
--- 5,000,000 applies. (pg_class is set by hand here, as the suite runner, for this transaction only.)
+-- A5. The size bound for an analysed table, read under the locks: reltuples above 5,000,000 refuses (55000, nothing
+-- applied); exactly 5,000,000 applies. (pg_class is set by hand here, as the suite runner, for this transaction only.)
 update pg_class set reltuples = 5000001 where oid = 'lab.order_route_result_reports'::regclass;
 set local role :"q156_owner";
 \set ON_ERROR_STOP off
@@ -491,8 +489,8 @@ set local role :"q156_owner";
 \set ON_ERROR_STOP on
 \set QUIET off
 rollback to savepoint refused;
-select pg_temp.expect('A5a reltuples above 5,000,000 refuses',
-  '55000 0156: too large to validate here, or never analysed: lab.order_route_result_reports (reltuples 5000001, N bytes); nothing applied | same',
+select pg_temp.expect('A5a analysed, reltuples above 5,000,000 refuses',
+  '55000 0156: too large to validate here: lab.order_route_result_reports (reltuples 5000001, N bytes); nothing applied | same',
   :'LAST_ERROR_SQLSTATE' || ' ' || regexp_replace(:'LAST_ERROR_MESSAGE', '\d+ bytes', 'N bytes') || ' | '
   || case when md5(pg_temp.schema_print()) = :'q156_undone' then 'same' else 'changed' end);
 update pg_class set reltuples = 5000000 where oid = 'lab.order_route_result_reports'::regclass;
@@ -503,7 +501,7 @@ set local role :"q156_owner";
 \set QUIET off
 select md5(pg_temp.schema_print()) as q156_reapplied \gset
 rollback to savepoint refused;
-select pg_temp.expect('A5b exactly 5,000,000 applies', 'applied | as built', :'LAST_ERROR_MESSAGE' || ' | '
+select pg_temp.expect('A5b analysed, exactly 5,000,000 applies', 'applied | as built', :'LAST_ERROR_MESSAGE' || ' | '
   || case when :'q156_reapplied' = :'q156_applied' then 'as built' else 'not as built' end);
 
 -- A6. 0156 again on the undone state: it applies, and leaves exactly what the runner's run left (columns,
@@ -566,27 +564,35 @@ select pg_temp.expect('A7 with other lanes'' additions, 0156 applies and keeps t
   || 'work_items_test_code_pair_ck true,work_items_zz_billing_price_reference_ck true | true | true',
   :'LAST_ERROR_MESSAGE' || ' | ' || :'q156_others');
 
--- A8. A row written to one of the six in this transaction before 0156 runs (an earlier file's, in a dry run of
--- several files), even one undone (its page stays on disk). With that table's reltuples at -1 (never analysed), the
--- size bound refuses, nothing applied; with it analysed, 0156 applies: its post-check counts only what is written
--- while it runs, against the counts section 0 keeps. A row written while 0156 runs (an event trigger on its ALTER
--- TABLE, as the suite runner) makes the post-check refuse, nothing applied. Last of part A: the count stays for the
--- rest of the transaction.
+-- A8. Tables never analysed, with pages on disk, as a fresh install leaves them (on Amazon RDS, 0102's demo rows in
+-- ehr.diagnoses and ehr.lab_requests) and as autovacuum can leave a small table: a row written to each of three of
+-- the six in this transaction before 0156 runs (an earlier file's, in a dry run of several files), then undone (its
+-- page stays on disk), and their reltuples -1. Each is far under 2 GiB, so the size bound lets it through and 0156
+-- applies: its post-check counts only what is written while it runs, against the counts section 0 keeps. A row
+-- written while 0156 runs (an event trigger on its ALTER TABLE, as the suite runner) makes the post-check refuse,
+-- nothing applied. Last of part A: the counts stay for the rest of the transaction.
 savepoint write_one;
 set local session_replication_role = replica;
 insert into lab.work_item_requested_tests (work_item_id, facility_id, patient_id, "ordinal", code_system, code, name)
 values (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 1, 'http://loinc.org', '718-7', 'Haemoglobin');
+insert into ehr.diagnoses (encounter_id, patient_id, facility_id, created_by, created_by_membership_id, code_system,
+  code, display, clinical_status, verification_status)
+values (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'ICD-10',
+  'B50.9', 'Malaria (n156 fictional)', 'active', 'confirmed');
+insert into ehr.lab_requests (encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  test_code_system, test_code, test_display, status)
+values (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(),
+  'http://loinc.org', '718-7', 'Haemoglobin (n156 fictional)', 'active');
 rollback to savepoint write_one;
-update pg_class set reltuples = -1 where oid = 'lab.work_item_requested_tests'::regclass;
-set local role :"q156_owner";
-\set ON_ERROR_STOP off
-:run0156
-\set ON_ERROR_STOP on
-\set QUIET off
-rollback to savepoint refused;
-select pg_temp.expect('A8a never analysed (reltuples -1) with a page on disk: the size bound refuses',
-  '55000 0156: too large to validate here, or never analysed: lab.work_item_requested_tests (reltuples -1, N bytes); nothing applied',
-  :'LAST_ERROR_SQLSTATE' || ' ' || regexp_replace(:'LAST_ERROR_MESSAGE', '\d+ bytes', 'N bytes'));
+update pg_class set reltuples = -1
+ where oid in ('lab.work_item_requested_tests'::regclass, 'ehr.diagnoses'::regclass, 'ehr.lab_requests'::regclass);
+select string_agg(format('%s %s %s', relation.oid::regclass, relation.reltuples::bigint,
+         case when pg_relation_size(relation.oid) between 8192 and 2147483648 then 'pages under 2 GiB'
+              else pg_relation_size(relation.oid) || ' bytes' end), ', ' order by relation.oid::regclass::text)
+         as q156_never_analysed
+  from pg_class relation
+ where relation.oid in ('lab.work_item_requested_tests'::regclass, 'ehr.diagnoses'::regclass,
+                        'ehr.lab_requests'::regclass) \gset
 set local role :"q156_owner";
 \set ON_ERROR_STOP off
 :run0156
@@ -594,8 +600,11 @@ set local role :"q156_owner";
 \set QUIET off
 select md5(pg_temp.schema_print()) as q156_reapplied \gset
 rollback to savepoint refused;
-select pg_temp.expect('A8b analysed: 0156 applies; a row written, and undone, before it ran is not its own',
-  'applied | as built', :'LAST_ERROR_MESSAGE' || ' | '
+select pg_temp.expect('A8a never analysed (reltuples -1), pages on disk under 2 GiB: 0156 applies; rows written, and '
+  || 'undone, before it ran are not its own',
+  'ehr.diagnoses -1 pages under 2 GiB, ehr.lab_requests -1 pages under 2 GiB, '
+  || 'lab.work_item_requested_tests -1 pages under 2 GiB | applied | as built',
+  :'q156_never_analysed' || ' | ' || :'LAST_ERROR_MESSAGE' || ' | '
   || case when :'q156_reapplied' = :'q156_applied' then 'as built' else 'not as built' end);
 -- A row written while 0156 runs: after each of its ALTER TABLE statements, one coded requested test (no foreign key or
 -- trigger runs for it: replica mode, as above).
@@ -614,7 +623,7 @@ set local role :"q156_owner";
 \set ON_ERROR_STOP on
 \set QUIET off
 rollback to savepoint refused;
-select pg_temp.expect('A8c a row written while 0156 runs: its post-check refuses (55000), nothing applied',
+select pg_temp.expect('A8b a row written while 0156 runs: its post-check refuses (55000), nothing applied',
   '55000 0156: rows were written while this file ran: lab.work_item_requested_tests | same | no event trigger',
   :'LAST_ERROR_SQLSTATE' || ' ' || :'LAST_ERROR_MESSAGE' || ' | '
   || case when md5(pg_temp.schema_print()) = :'q156_undone' then 'same' else 'changed' end || ' | '

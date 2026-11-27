@@ -2489,10 +2489,16 @@ above is the lab request's part.
     events, accessions, test executions, pharmacy work items and others;
     0156's header lists them). The hold was
     34-52 ms with 20,000 fictional rows in each table.
-  - The file refuses (55000) while any of the six has `pg_class.reltuples`
-    above 5,000,000, or -1 (never analysed) with a page on disk. Above the
-    bound the checks would go in NOT VALID with a follow-up file. It has no
-    DML and reads no row as the migrator; its post-check reads
+  - The file reads each of the six tables' size under the locks, without
+    reading a row, and refuses (55000) while an analysed one has
+    `pg_class.reltuples` above 5,000,000, or one never analysed (`reltuples`
+    -1) is above 2 GiB on disk (`pg_relation_size`, 2,147,483,648 bytes).
+    2 GiB is 5,000,000 rows of the widest of the six (`ehr.order_routes`,
+    585.3 bytes a row in a 20,000-row fictional copy: 2.73 GiB) less a
+    margin of about 27%; 0156's header gives the derivation. So it needs no
+    ANALYZE, and a fresh install goes on, Amazon RDS's demo rows included.
+    Above the bound the checks would go in NOT VALID with a follow-up file.
+    It has no DML and reads no row as the migrator; its post-check reads
     `pg_stat_xact_user_tables` (no row inserted, updated or deleted while
     it ran, against the counts it keeps at its start, so an earlier file's
     writes in a dry run of several files are not counted).
@@ -2585,18 +2591,21 @@ above is the lab request's part.
   fallback is to turn the settings off; rows already saved by name only
   keep their nulls.
 - **Release (0156 alone):**
-  1. ANALYZE of the six tables, by hand, before the deploy is dispatched,
-     in every environment whose six tables hold rows (production and
-     staging): autovacuum may never have analysed a small table, which
-     leaves `reltuples` at -1, and the file then refuses. The deploy tool
-     runs only the plan, dry run and apply tasks, so the release operator
-     runs it, connected as the role that owns the six tables (the migration
-     role) or as the database owner, and records the time and each table's
+  1. Recommended, not required: ANALYZE of the six tables, by hand,
+     before the deploy is dispatched, in every environment whose six tables
+     hold rows (production and staging). Without it the file bounds a table
+     never analysed by its size on disk; with it the row bound applies
+     (ANALYZE gives the table its row count). The deploy tool runs only the
+     plan, dry run and apply tasks, so the release operator runs it,
+     connected as the role that owns the six tables (the migration role) or
+     as the database owner, and records the time and each table's
      `reltuples`, `relpages` and size in the schema declaration's evidence
      (`docs/MIGRATION_RUNBOOK.md`, "Before 0156"). ANALYZE takes SHARE
      UPDATE EXCLUSIVE, which no read or write waits for; but one still
      running when 0156 starts makes it stop after 5 seconds with the busy
      refusal, nothing applied (the dry run tries again; the apply does not).
+     No file booked before 0156 has to end with ANALYZE of a table it
+     writes (the earlier draft's rule is gone).
   2. 0156's dry run and apply, alone.
   3. ehr-api and lab-api at 0156's images, both settings off.
   4. The health website, and `apps/ehr` at a build that reads a null pair.
@@ -2624,13 +2633,15 @@ above is the lab request's part.
   active (the function answers null then); only `ICD-11` exactly is
   looked up; the lookup's parameters are `requested_code_system` and
   `requested_code`, not the note's `code_system` and `code`; and the size
-  bound refuses `reltuples` -1 only while the table has a page on disk, so
-  a fresh install's empty tables go on (the note refuses every -1). The
-  bound is per table; the hold's 1 s rule is checked by the pre-sign
-  measurement on the rehearsal copy, not by the file.
+  bound does not refuse `reltuples` -1: a table never analysed is bounded
+  by its size on disk, 2 GiB (the clinical owner's decision of 27 November
+  2026), so a fresh install goes on, Amazon RDS's demo rows included, and
+  ANALYZE before the release is recommended, not required (the note
+  refuses every -1). The bound is per table; the hold's 1 s rule is checked
+  by the pre-sign measurement on the rehearsal copy, not by the file.
 - **Not in this slice:** the sensitive-test list (0155's PR and images),
   facility items (0155) and the website's screens.
-- **Checks:** the database suites `name-only-codes` (70 cases) and
+- **Checks:** the database suites `name-only-codes` (69 cases) and
   `diagnosis-release-switch` (21), on a superuser and a NOSUPERUSER
   NOBYPASSRLS owner; ehr-api's `diagnoses.name-only.spec.ts` (`codeStatus`,
   the lookup's failures, the replay, a name-only diagnosis in the patient's

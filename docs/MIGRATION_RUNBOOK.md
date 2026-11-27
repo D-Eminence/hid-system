@@ -384,14 +384,26 @@ codes for one registration, and 30 code confirmations a day per volunteer and em
 variable takes effect on the next identity-api deployment; lowering one never affects Health IDs
 already created.
 
-## Before 0156: ANALYZE the six tables
+## Before 0156: ANALYZE the six tables (recommended)
 
 0156 (lab tests and diagnoses by name only) checks every row of six tables while it holds them, so it first reads
-each table's size from `pg_class.reltuples`. It reads no row. It refuses (55000, nothing applied) when a table is above
-5,000,000 rows, or has never been analysed (`reltuples` -1) and has a page on disk. Autovacuum analyses a table only
-after about 50 changes, so a small table (the routed result reports, say) may never have been analysed.
+each table's size. It reads no row. It refuses (55000, nothing applied) when a table that has been analysed is above
+5,000,000 rows (`pg_class.reltuples`), or when a table that has never been analysed (`reltuples` -1) is above 2 GiB
+on disk (`pg_relation_size`, 2,147,483,648 bytes). 2 GiB is about 3.7 million rows of the widest of the six
+(`ehr.order_routes`), below the 5,000,000 rows, with a margin; 0156's header gives the measurement.
 
-The deploy tool runs only the plan, dry run and apply tasks of the migration runner, so this step is by hand:
+So ANALYZE is not required: without it, 0156 bounds a never-analysed table by its size on disk, and a fresh install
+goes on, including one on Amazon RDS, where 0102 leaves a few demo rows in five of the six tables, most of them never
+analysed. No migration file before 0156 needs to end with ANALYZE either. On a new RDS database, release 0156 on its
+own after 0102, as everywhere: a dry run of 0102 and 0156 in one transaction stops at 0156 (55006, "pending trigger
+events" on `ehr.order_routes` from 0102's demo orders). ANALYZE is still recommended: it gives each table its row
+count, so the row bound applies (autovacuum analyses a table only after about 50 changes, so a small table, the routed
+result reports say, may never have been analysed), and it gives the figures the schema declaration records. If 0156
+refuses a never-analysed table for its size, ANALYZE it and run the release again; if 0156 then refuses it for its
+rows, the pair checks go in NOT VALID with a follow-up file.
+
+The deploy tool runs only the plan, dry run and apply tasks of the migration runner, so this step, when it is run, is
+by hand:
 
 - **Where:** every environment whose six tables hold rows (production and staging).
 - **Who:** the release operator, connected as the role that owns the six tables (the migration role) or as the

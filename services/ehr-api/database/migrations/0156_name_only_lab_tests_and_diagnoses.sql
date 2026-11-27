@@ -180,33 +180,54 @@
 -- is shorter than the hold. In the dry run the locks last until the dry
 -- run ends; this file goes alone, so that hold is its own.
 --
--- THE SIZE BOUND (Rahman's answer 4). Each VALIDATE scans its table under
--- ACCESS EXCLUSIVE (the house pattern of 0122, 0125, 0144 and 0154; Rahman
--- measured 26-35 ms per 200,000 rows). Section 2 refuses (55000, nothing
--- applied) when any of the six has pg_class.reltuples above 5,000,000, or
--- -1 (never analysed) while its heap has a page. A table with no page on
--- disk holds no row, so a fresh install, whose six tables are empty and
--- never analysed, goes on. It is read under the locks, so no ANALYZE,
--- VACUUM or write can change it before the scans, and pg_relation_size
--- waits for nothing. Above the bound, or for a measured hold over 1 s, the
--- change is NOT VALID here and a follow-up file validates it.
--- The bound is per table and counts live rows; VALIDATE's time follows the
--- heap's pages, dead rows included, and the six scans and the route check
--- add up in one hold. So the file lets through six tables just under
--- 5,000,000 rows each, about 4-5 s at Rahman's figure. The file does not
--- check the 1 s rule: the pre-sign measurement on the rehearsal copy does,
--- and the declaration records the hold.
--- The note says -1 refuses; here -1 refuses only while the table has a
--- page on disk, so that a fresh install goes on (the contract lists this
--- among its differences).
--- ANALYZE FIRST. Autovacuum may never have analysed a small table (the
--- routed result reports, say: it analyses after about 50 changes), which
--- leaves reltuples at -1, and section 2 then refuses. ANALYZE samples pages
--- without the policies and takes SHARE UPDATE EXCLUSIVE, which no read or
--- write waits for. The deploy tool runs only the runner's plan, dry run and
--- apply tasks (scripts/production_deployment.py, no shell in the task), so
--- this is a step by hand, in the release runbook (docs/MIGRATION_RUNBOOK.md,
--- "Before 0156"):
+-- THE SIZE BOUND (Rahman's answer 4; the clinical owner's decision of 27
+-- November 2026). Each VALIDATE scans its table under ACCESS EXCLUSIVE (the
+-- house pattern of 0122, 0125, 0144 and 0154; Rahman measured 26-35 ms per
+-- 200,000 rows). Section 2 reads each table's size and reads no row. It
+-- refuses (55000, nothing applied) when any of the six is:
+-- - analysed (pg_class.reltuples 0 or more) with reltuples above
+--   5,000,000; or
+-- - never analysed (reltuples -1) and above 2 GiB on disk
+--   (pg_relation_size of the table: 2,147,483,648 bytes, 262,144 pages).
+-- So it needs no ANALYZE. A fresh install goes on: its six tables are empty,
+-- or on Amazon RDS hold a few demo rows (below), never analysed and far
+-- under 2 GiB.
+-- The byte limit. In the 20,000-row fictional copies measured below
+-- (analysed), the six take from 166.7 bytes a row
+-- (lab.work_item_requested_tests, 407 pages) to 585.3 (ehr.order_routes,
+-- 1,429 pages, the widest); between them lab.work_items 431.3,
+-- lab.order_route_result_reports 241.3, ehr.lab_requests 234.3 and
+-- ehr.diagnoses 221.6. 5,000,000 rows of the widest take 2,926,592,000
+-- bytes (2.73 GiB). With a margin on the safe side the limit is 2 GiB,
+-- about 27% lower: about 3.7 million such routes. A narrower table holds
+-- more rows in 2 GiB (up to about 12.9 million requested tests), but
+-- VALIDATE's time follows the table's pages: on these copies each pair
+-- check took 3.3-5.1 microseconds a page on each of the six (three runs
+-- with each applier), so a scan of 2 GiB of any of them is about as long as
+-- one of 5,000,000 such routes (357,250 pages), or shorter. A wider real
+-- row puts fewer rows in 2 GiB.
+-- Both figures are read under the locks, so no ANALYZE, VACUUM or write can
+-- change them before the scans, and pg_relation_size reads the file's size
+-- and waits for nothing. Above the bound, or for a measured hold over 1 s,
+-- the change is NOT VALID here and a follow-up file validates it.
+-- The bound is per table. The row bound counts live rows; VALIDATE's time
+-- follows the heap's pages, dead rows included, and the six scans and the
+-- route check add up in one hold. So the file lets through six tables just
+-- under 5,000,000 rows each, about 4-5 s at Rahman's figure. The file does
+-- not check the 1 s rule: the pre-sign measurement on the rehearsal copy
+-- does, and the declaration records the hold.
+-- The note says -1 refuses; here a table never analysed is bounded by its
+-- size on disk instead (the contract lists this among its differences).
+-- ANALYZE FIRST: recommended, not required. Autovacuum may never have
+-- analysed a small table (the routed result reports, say: it analyses after
+-- about 50 changes), which leaves reltuples at -1; section 2 then bounds it
+-- by its size on disk. ANALYZE gives it its row count, so the row bound
+-- applies, and gives the figures the declaration records. ANALYZE samples
+-- pages without the policies and takes SHARE UPDATE EXCLUSIVE, which no read
+-- or write waits for. The deploy tool runs only the runner's plan, dry run
+-- and apply tasks (scripts/production_deployment.py, no shell in the task),
+-- so this is a step by hand, in the release runbook
+-- (docs/MIGRATION_RUNBOOK.md, "Before 0156"):
 -- - where: every environment whose six tables hold rows (production and
 --   staging);
 -- - who: the release operator, connected as the role that owns the six
@@ -237,14 +258,23 @@
 -- whole transaction, so section 0 keeps the counts it finds (an earlier
 -- file's writes, in a dry run of several files) in a setting for this
 -- transaction only (hid.m0156_writes), and section 9 compares with them.
--- The size bound has no such baseline: in a fresh install, where each
--- file's tables are new, a table that an earlier file wrote rows to is
--- never analysed and has a page, so section 2 refuses (55000). No file
--- 0001-0153 writes the six at migration time; if a file booked before 0156
--- does, it must end with ANALYZE of the table it wrote (that works inside
--- the dry run's one transaction: measured, -1 became the row count), or
--- 0156 refuses in every fresh install, the CI rehearsal and check:db
--- included.
+-- The size bound needs no such baseline. In a fresh install a table that an
+-- earlier file wrote rows to is never analysed and has pages: on Amazon RDS
+-- (where the role rds_superuser exists) 0102 seeds the sealed demo story,
+-- with 3 diagnoses and 3 lab requests (0102:813-886) and, through the order
+-- commands, 6 routes, 3 work items and 3 requested tests (measured in a
+-- simulated RDS install: 8-24 KiB a table, reltuples -1 but on
+-- ehr.lab_requests, which a later index build counts). Section 2 lets them
+-- through, and 0156 applied there through the runner. So no file booked
+-- before 0156 has to end with ANALYZE of a table it wrote: the earlier
+-- draft's rule that one must is gone. Two things on a new RDS database are
+-- not the size bound's: an install of every file at once stops at 0102
+-- whatever 0156 says (SEALED_DEMO_STORY_LOGINS_NOT_READY, until the owner
+-- resets the demo logins); and after that, a dry run of 0102 and 0156 in
+-- one transaction stops at section 4's ALTER TABLE ehr.order_routes (55006:
+-- 0102's routes leave deferred trigger events pending until commit), while
+-- the apply, a transaction a file, goes on. So there too 0156 goes in a
+-- release of its own, after 0102.
 --
 -- Undo (by hand only, owner-signed, and only before any name-only row is
 -- saved):
@@ -531,8 +561,9 @@ begin
 end
 $locks$;
 
--- 2. The size bound, read under the locks: reltuples above 5,000,000, or -1
--- (never analysed) while the heap has a page, refuses. No row is read.
+-- 2. The size bound, read under the locks, without reading a row: an
+-- analysed table above 5,000,000 rows (reltuples), or a table never analysed
+-- (reltuples -1) above 2 GiB on disk (pg_relation_size), refuses.
 do $$
 declare
   too_large text;
@@ -544,12 +575,14 @@ begin
    where relation.oid in ('ehr.lab_requests'::regclass, 'ehr.diagnoses'::regclass, 'ehr.order_routes'::regclass,
                           'lab.work_items'::regclass, 'lab.work_item_requested_tests'::regclass,
                           'lab.order_route_result_reports'::regclass)
-     and (relation.reltuples > 5000000 or (relation.reltuples < 0 and pg_relation_size(relation.oid) > 0));
+     and (relation.reltuples > 5000000
+          or (relation.reltuples < 0 and pg_relation_size(relation.oid) > 2147483648));
   if too_large is not null then
     raise exception using errcode = '55000',
-      message = '0156: too large to validate here, or never analysed: ' || too_large || '; nothing applied',
-      hint = 'Run ANALYZE on the six tables first (docs/MIGRATION_RUNBOOK.md, "Before 0156"). Above 5,000,000 rows the '
-        || 'pair checks go in NOT VALID with a follow-up file.';
+      message = '0156: too large to validate here: ' || too_large || '; nothing applied',
+      hint = 'The bound is 5,000,000 rows for an analysed table and 2 GiB (2147483648 bytes) on disk for one never '
+        || 'analysed (reltuples -1); ANALYZE gives a never-analysed table its row count (docs/MIGRATION_RUNBOOK.md, '
+        || '"Before 0156"). Above the bound the pair checks go in NOT VALID with a follow-up file.';
   end if;
 end
 $$;
