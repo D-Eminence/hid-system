@@ -2266,11 +2266,12 @@ file's seed in `docs/codes/catalog-approvals.json`.
     complication. When `q` itself has the word without, every word counts,
     so "meconium without ileus" still puts KB87.1 Meconium plug without
     ileus first, and "liver without hepatitis" DB94.3 Alcoholic cirrhosis
-    of liver without hepatitis. A clause also takes a "with ..." that
-    follows it before any `,` or `;` (4 titles of the 2026-01 release:
-    6A02.0, 6A02.2, 6C90.10 and 6C90.11). Which entries match, how many
-    and `more` do not change, and fix 1's whole-word rule still reads every
-    word of the entry.
+    of liver without hepatitis. A clause also takes whatever follows the
+    negated words before any `,` or `;`: a "with ..." (4 titles of the
+    2026-01 release: 6A02.0, 6A02.2, 6C90.10 and 6C90.11), a site, or an
+    included term (0157's known effects, below). Which entries match, how
+    many and `more` do not change, and fix 1's whole-word rule still reads
+    every word of the entry.
   - A one-word `q`, or a `q` shaped like a code, counts nothing, so its
     order is as before (Ola, clinical owner): a clinician who types a code
     fragment such as "1a" or "da" usually means the code, so "1a" still
@@ -2520,6 +2521,50 @@ The number 0157 is a booking, given at integration in release order.
     counted for each of thousands of entries. The 100-character limit and
     the 429 rate limit bound it. The note's timed queries are unchanged
     within noise.
+- **Known effects of the addendum's rules as worded** (found by the
+  build's second clinical and SQL reviews, on the 2026-01 release; not yet
+  ruled on by the clinical owner, and listed in 0157's PR). Which entries
+  match, how many and `more` never change; only the order does:
+  - The clause runs on to the next `,` or `;` or the end, so it also
+    takes a site or a term that follows the negated words:
+    - 22 titles "Laceration without foreign body of <site>" and "Puncture
+      wound without foreign body of <site>" (11 of each; the two for
+      "abdomen, lower back or pelvis" keep the words after the comma).
+      Such an entry now counts laceration (or puncture wound) only, so
+      when a site is typed it comes last: "laceration of forearm" puts
+      NC31.0 11th (3rd before, and on 0152), off the default page of 10,
+      and "laceration of hand" or "... wrist" NC52.10 11th (5th before);
+      "... lower leg", "... thigh", "... finger" and "... shoulder" move
+      NC91.0, NC71.0, NC52.00 and NC11.0 from row 2 or 3 to the last row.
+      Across 21 sites in three word orders, 54 of 63 laceration answers
+      move the entry down, and the 9 for abdomen, lower back and pelvis do
+      not. Puncture wound answers do not change: only the pair matches, and
+      the entry without foreign body was already second.
+    - 11 titles "... without disruption of (posterior arch of) pelvic ring"
+      (NB52.1, NB52.10, NB52.12-NB52.15, NB52.1Y, NB52.1Z, NB53.2-NB53.4):
+      "pelvic fracture" now puts NB52.3 (pelvic ring with complete
+      disruption of posterior arch) first, and the stable single-bone
+      fractures in rows 6-10, where they came first before.
+    - 2 titles "... with or without ..." (NA06.1, KA84.5), whose clause
+      includes rather than negates: "orbit foreign body" puts NA06.2
+      (retained foreign body, a late sequela) before NA06.1 Penetrating
+      wound of orbit with or without foreign body.
+    - QA21.60 Retained intrauterine device without injury or harm in
+      non-pregnant uterus counts retained intrauterine device only.
+  - Only the word without, as typed, keeps a clause's words. "w/o", "w.o"
+    and "w/out" are split into other words, so the clause is taken out
+    and an entry of the opposite meaning can come first: "spontaneous
+    abortion complete w/o complication" puts JA00.08 (with complications)
+    before JA00.09, and "hiv stage 3 w/o tuberculosis or malaria" puts
+    1C60.3Y (stage 4, associated with tuberculosis) first. Each of the 260
+    "without" titles typed as written keeps its place; typed with "w/o",
+    91 of them move their own entry down (2 up), and with "w/out", 40.
+  - The code shape also takes two-word queries of four letters, a space
+    and one or two more, which keep 0152's order: "lung ca" puts CA70.0
+    Farmer lung first and the lung carcinomas (rows 1-5 on 0157's first
+    body) in rows 16-20, as on 0152; "type 3", "type 4", "nose ca" and
+    "cord ca" change the same way. Of 4,102 such pairs (each four-letter
+    title word with 14 short words), 64 have a new first row.
 - **Release:** before the first ICD-11 release is activated. It rides
   alone, or only with files of 0155-0159 (not 0156, which goes alone),
   never with the sprint's files or 0178-0180 (Rahman's rule for lane D's
