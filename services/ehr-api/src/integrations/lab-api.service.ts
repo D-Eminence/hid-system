@@ -10,8 +10,13 @@ export class LabApiService {
   private readonly client:LabApiClient;
   constructor(workloadIdentity:ServiceWorkloadIdentityService){const environment=getEnvironment();this.client=new LabApiClient({baseUrl:environment.LAB_API_URL,timeoutMs:10_000,internalServiceToken:environment.LAB_INTERNAL_SERVICE_TOKEN,
     ...(environment.LAB_SERVICE_IDENTITY_MODE==='jwt'?{serviceAuthorizationProvider:()=>workloadIdentity.authorization('lab')}:{})});}
-  /** A request by name only carries both codes null (0156). */
-  acceptEhrOrder(context:DataAccessContext,input:LabAcceptEhrOrderInput,key:string) {return this.translate(this.client.acceptEhrOrder(input,this.context(context),key));}
+  /**
+   * A request by name only carries both codes null (0156). `signal` (ORD-6's group sends, the time left before their
+   * deadline) cuts the call off: a send cut off is 503 LAB_SERVICE_UNAVAILABLE, as an unreachable Lab is.
+   */
+  acceptEhrOrder(context:DataAccessContext,input:LabAcceptEhrOrderInput,key:string,signal?:AbortSignal) {
+    return this.translate(this.client.acceptEhrOrder(input,this.context(context),key,signal));
+  }
   patientReleasedResults(request:HidRequest,cursor?:string,signal?:AbortSignal) {
     return this.translate(this.client.patientReleasedResults({correlationId:request.correlationId,facilityId:'',purposeOfUse:'patient-self',
       authorization:request.header('authorization'),cookie:request.header('cookie'),origin:request.header('origin')},cursor,signal));

@@ -34,6 +34,8 @@ export interface ActorContext {
 
 export interface HidRequest extends Request {
   correlationId: string;
+  /** When the request reached ehr-api (Date.now(), CorrelationMiddleware); ORD-6's group sends end 25 s after it. */
+  receivedAt?: number;
   actor?: ActorContext;
   facilityId?: string;
   authTransport?: 'bearer' | 'cookie';

@@ -63,6 +63,13 @@ export interface TimelineScope {
   list: string;
   patientId: string;
   encounterId?: string;
+  /**
+   * A filter the page is read with (ORD-6: the lab request list's
+   * requestGroupId). A cursor binds it, so a cursor of one group pages no
+   * other group and no unfiltered list (400 INVALID_CURSOR). Left out, the
+   * binding is exactly as before, so every cursor issued before stays valid.
+   */
+  filter?: string;
 }
 
 export interface TimelinePage<Row> {
@@ -165,7 +172,8 @@ function isCalendarTimestamp(value: string): boolean {
 
 function scopeBinding(scope: TimelineScope): string {
   return createHash('sha256').update(JSON.stringify([scope.list, scope.patientId.toLowerCase(),
-    scope.encounterId?.toLowerCase() ?? null]), 'utf8').digest('base64url').slice(0, 22);
+    scope.encounterId?.toLowerCase() ?? null, ...(scope.filter === undefined ? [] : [scope.filter.toLowerCase()])]), 'utf8')
+    .digest('base64url').slice(0, 22);
 }
 
 function invalidCursor(): DomainProblem {
