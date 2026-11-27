@@ -86,17 +86,25 @@ export function labRequestGroupsUnavailable(): DomainProblem {
  * loinc are one) and code, and every test by its name (trimmed, case and
  * inner spaces ignored, so two tests by name only with one name are one,
  * 0156), each on its specimen type (specimenTypeCode as sent, trimmed; none
- * counts as one value). So the same culture on blood and on urine goes in
- * one Save, while two tests with one code, or one name, on one specimen are
- * refused as a likely double entry: a second blood-culture set from another
- * site goes as its own request.
+ * counts as one value, and a blank one, which the body accepts as '', is
+ * none). So the same culture on blood and on urine goes in one Save, while
+ * two tests with one code, or one name, on one specimen are refused as a
+ * likely double entry: a second blood-culture set from another site goes as
+ * its own request.
  */
 function repeatKeys(test: LabRequestGroupTestInput): string[] {
-  const specimen = test.specimenTypeCode ?? null;
+  const specimen = test.specimenTypeCode?.trim() || null;
   const name = JSON.stringify(['name', test.testDisplay.replace(/\s+/g, ' ').toLocaleLowerCase('en'), specimen]);
   return test.testCodeSystem !== undefined && test.testCode !== undefined
     ? [JSON.stringify(['code', test.testCodeSystem.toLocaleUpperCase('en'), test.testCode, specimen]), name] : [name];
 }
+
+/**
+ * 400 LAB_REQUEST_TEST_REPEATED's words, the answer's and each named test's:
+ * what was refused, and the way on for a second set on the same specimen.
+ */
+export const LAB_REQUEST_TEST_REPEATED_TEXT =
+  'This test is already in the request for this specimen. To order it again, save this request, then add it on its own.';
 
 /** The index of every test that repeats an earlier one on its specimen, in order (empty when none does). */
 export function repeatedTests(tests: readonly LabRequestGroupTestInput[]): number[] {
@@ -160,8 +168,8 @@ export class CreateLabRequestGroupBodyPipe implements PipeTransform<unknown, Pro
     }
     const repeated = repeatedTests(tests);
     if (repeated.length > 0) {
-      throw new DomainProblem(400, 'LAB_REQUEST_TEST_REPEATED', 'This test is already in the request.',
-        repeated.map((index) => ({ field: `tests.${index}`, messages: ['This test is already in the request.'] })));
+      throw new DomainProblem(400, 'LAB_REQUEST_TEST_REPEATED', LAB_REQUEST_TEST_REPEATED_TEXT,
+        repeated.map((index) => ({ field: `tests.${index}`, messages: [LAB_REQUEST_TEST_REPEATED_TEXT] })));
     }
     return input;
   }

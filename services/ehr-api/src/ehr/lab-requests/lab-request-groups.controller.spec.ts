@@ -239,8 +239,10 @@ describe('the lab request group route over HTTP (ORD-6)', () => {
   it('refuses a repeated test: the same code system and code, or the same name, on the same specimen (none is one '
     + 'value) (400 LAB_REQUEST_TEST_REPEATED)', async () => {
     const { post, service } = await start(true, true);
-    const repeated = (index: number) => ({ status: 400, body: { code: 'LAB_REQUEST_TEST_REPEATED',
-      detail: 'This test is already in the request.', errors: [{ field: `tests.${index}` }] } });
+    const words = 'This test is already in the request for this specimen. To order it again, save this request, then '
+      + 'add it on its own.';
+    const repeated = (index: number) => ({ status: 400, body: { code: 'LAB_REQUEST_TEST_REPEATED', detail: words,
+      errors: [{ field: `tests.${index}`, messages: [words] }] } });
     expect(await post(body({ tests: [coded, malaria, { ...coded, testDisplay: 'FBC' }] }))).toMatchObject(repeated(2));
     expect(await post(body({ tests: [coded, { ...malaria, testDisplay: 'Full blood count' }] }))).toMatchObject(repeated(1));
     // Two tests by name only with one name; the name is compared without case or extra spaces.
@@ -286,6 +288,13 @@ describe('the lab request group route over HTTP (ORD-6)', () => {
       .toMatchObject(repeated(1));
     expect(await post(body({ tests: [{ ...culture, specimenTypeCode: 'Urine' }, { ...culture, specimenTypeCode: 'Blood' },
       { ...culture, specimenTypeCode: 'Urine', testDisplay: 'Urine culture' }] }))).toMatchObject(repeated(2));
+    // A blank specimen is none (the body trims '   ' to ''), by code or by name: no way round the rule.
+    for (const blank of ['', '   ']) {
+      expect(await post(body({ tests: [culture, { ...culture, testDisplay: 'Culture, again', specimenTypeCode: blank }] })))
+        .toMatchObject(repeated(1));
+      expect(await post(body({ tests: [{ testDisplay: 'Sickling test', specimenTypeCode: blank },
+        { testDisplay: 'sickling test' }] }))).toMatchObject(repeated(1));
+    }
     expect(service.createGroup).toHaveBeenCalledTimes(4);
   });
 
@@ -303,6 +312,11 @@ describe('the lab request group route over HTTP (ORD-6)', () => {
     expect(repeatedTests([coded('HID-LAB', 'MCS', 'Blood'), coded('HID-LAB', 'mcs', 'Blood')])).toEqual([]);
     // The specimen as sent: a specimen named "null" is not the absent one.
     expect(repeatedTests([coded('LOINC', '600-7'), coded('LOINC', '600-7', 'null')])).toEqual([]);
+    // A blank specimen is none, so it repeats a test with none, and another blank one.
+    expect(repeatedTests([coded('LOINC', '600-7'), coded('LOINC', '600-7', '')])).toEqual([1]);
+    expect(repeatedTests([coded('LOINC', '600-7', '   '), coded('LOINC', '600-7')])).toEqual([1]);
+    expect(repeatedTests([coded('LOINC', '600-7', ''), coded('LOINC', '600-7', ' ')])).toEqual([1]);
+    expect(repeatedTests([coded('LOINC', '600-7', ''), coded('LOINC', '600-7', 'Blood')])).toEqual([]);
     // By name on the same specimen, coded or not.
     expect(repeatedTests([test({ specimenTypeCode: 'Blood' }), test({ testDisplay: 'blood  CULTURE',
       specimenTypeCode: 'Blood' })])).toEqual([1]);

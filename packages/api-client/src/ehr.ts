@@ -122,9 +122,10 @@ export interface EhrLabRequestGroupInput {
   clinicalInformation?: string;
   /**
    * 1 to 20. None repeats another on the same specimen: by code system
-   * (upper-cased) and code, or by name, on the same specimenTypeCode (none
-   * counts as one value). One culture on blood and on urine goes in one
-   * Save; a second set on the same specimen goes as its own request.
+   * (upper-cased) and code, or by name, on the same specimenTypeCode (none,
+   * or a blank one, counts as one value). One culture on blood and on urine
+   * goes in one Save; a second set on the same specimen goes as its own
+   * request.
    */
   tests: EhrLabRequestGroupTestInput[];
 }
