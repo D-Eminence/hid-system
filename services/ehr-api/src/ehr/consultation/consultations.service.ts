@@ -3,13 +3,13 @@ import type { PoolClient } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
 import { ClinicalNotesService, type ClinicalNoteRow } from '../clinical-notes/clinical-notes.service';
-import { DiagnosesService, type DiagnosisRow } from '../diagnoses/diagnoses.service';
+import { DiagnosesService, type DiagnosisCreated } from '../diagnoses/diagnoses.service';
 import { EncountersService, type EncounterCreated, type EncounterCreatePlan } from '../encounters/encounters.service';
 import { requestDigest } from '../shared/clinical-context';
 import type { CreateEncounterDto } from '../shared/clinical.dto';
 import { ClinicalRepository, type AuditedPart, type SemanticEvent } from '../shared/clinical.repository';
 import { VitalsService, type VitalRow } from '../vitals/vitals.service';
-import type { CreateConsultationDto } from './consultation.dto';
+import type { CreateConsultationInput } from './consultation.dto';
 
 /** EHR-C5: the answer of a one-call consultation (and of its replay). */
 export interface ConsultationCreated {
@@ -17,7 +17,8 @@ export interface ConsultationCreated {
   encounter: EncounterCreated;
   note: ClinicalNoteRow | null;
   vitals: VitalRow | null;
-  diagnoses: DiagnosisRow[];
+  /** Each with codeStatus while DIAGNOSIS_NAME_ONLY_ENABLED is on (0156). */
+  diagnoses: DiagnosisCreated[];
 }
 
 /** The Idempotency-Key operation of the whole call. */
@@ -69,7 +70,7 @@ export class ConsultationsService {
   create(
     context: DataAccessContext,
     patientId: string,
-    input: CreateConsultationDto,
+    input: CreateConsultationInput,
     idempotencyKey: string,
   ): Promise<ConsultationCreated> {
     if (input.visit.reuseOpenVisit === false) {
@@ -129,7 +130,7 @@ export class ConsultationsService {
     client: PoolClient,
     context: DataAccessContext,
     patientId: string,
-    input: CreateConsultationDto,
+    input: CreateConsultationInput,
     idempotencyKey: string,
     plan: EncounterCreatePlan,
   ): Promise<{ value: ConsultationCreated; parts: AuditedPart[] }> {
@@ -155,7 +156,7 @@ export class ConsultationsService {
       vitals = created.value;
     }
 
-    const diagnoses: DiagnosisRow[] = [];
+    const diagnoses: DiagnosisCreated[] = [];
     for (const [index, diagnosis] of (input.diagnoses ?? []).entries()) {
       const created = await this.diagnoses.createInTransaction(client, context, patientId, encounterId, diagnosis,
         idempotencyKey, CONSULTATION_PART_OPERATIONS.diagnosis(index));

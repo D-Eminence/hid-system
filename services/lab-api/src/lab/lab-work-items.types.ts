@@ -4,8 +4,9 @@ export interface AcceptEhrLabOrderCommand {
   sourceEncounterId: string;
   patientId: string;
   orderingFacilityId: string;
-  testCodeSystem: string;
-  testCode: string;
+  /** Both null (or left out) for a test ordered by its name only (0156); both or neither. */
+  testCodeSystem?: string | null;
+  testCode?: string | null;
   testName: string;
   priority: 'routine' | 'urgent' | 'asap' | 'stat';
   clinicalIndication?: string;

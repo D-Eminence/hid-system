@@ -3,8 +3,9 @@ import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext } from '../../common/request-context';
 import { decodeTimelineCursor, requestDigest, timelineCursorSql, timelinePage } from '../shared/clinical-context';
+import type { LabAcceptEhrOrderInput } from '@hid/api-client';
 import {
-  CreateLabRequestDto,
+  type CreateLabRequestInput,
   OrderStatus,
   SendLabRequestToLabDto,
   TimelineQueryDto,
@@ -24,8 +25,9 @@ export interface LabRequestRow extends QueryResultRow {
   facilityId: string;
   createdBy: string;
   createdByMembershipId: string;
-  testCodeSystem: string;
-  testCode: string;
+  /** Both null for a test ordered by its name only (0156, LAB_REQUEST_NAME_ONLY_ENABLED). */
+  testCodeSystem: string | null;
+  testCode: string | null;
   testDisplay: string;
   priority: string;
   status: OrderStatus;
@@ -161,7 +163,13 @@ export class LabRequestsService {
     );
   }
 
-  async create(context: DataAccessContext, patientId: string, encounterId: string, input: CreateLabRequestDto, key: string) {
+  /**
+   * A new lab request. While LAB_REQUEST_NAME_ONLY_ENABLED is on (0156) it may
+   * leave out its test code pair (CreateLabRequestBodyPipe), and is saved,
+   * answered and sent to Lab with both codes null.
+   */
+  async create(context: DataAccessContext, patientId: string, encounterId: string, input: CreateLabRequestInput,
+    key: string) {
     const operation = 'lab-request.create';
     const digest = requestDigest(operation, { patientId, encounterId, input });
     const row = await this.repository.run(
@@ -181,7 +189,7 @@ export class LabRequestsService {
              returning ${COLUMNS}, ${EXACT_CREATED_AT}`,
             [
               encounterId, patientId, context.facilityId, context.actor.accountId, context.membershipId,
-              input.testCodeSystem, input.testCode, input.testDisplay, input.priority, input.status,
+              input.testCodeSystem ?? null, input.testCode ?? null, input.testDisplay, input.priority, input.status,
               input.specimenTypeCode ?? null, input.clinicalInformation ?? null,
               input.externalOrderReference ?? null,
             ],
@@ -290,8 +298,12 @@ export class LabRequestsService {
         + 'send it to Lab again');
   }
 
+  /**
+   * A request by name only is sent with both codes null (0156); a Lab image
+   * before 0156 refuses that (400), which is answered as LAB_HANDOFF_REFUSED.
+   */
   private accept(context: DataAccessContext, row: CreatedLabRequestRow) {
-    return this.labApi.acceptEhrOrder(context, {
+    const order: LabAcceptEhrOrderInput = {
       sourceEhrOrderId: row.id,
       sourceEhrOrderVersion: Number(row.rowVersion),
       sourceEncounterId: row.encounterId,
@@ -304,7 +316,8 @@ export class LabRequestsService {
       clinicalIndication: row.clinicalInformation ?? undefined,
       requestedBy: row.createdBy,
       requestedAt: row.createdAtExact,
-    }, `ehr-order:${row.id}:${row.rowVersion}`);
+    };
+    return this.labApi.acceptEhrOrder(context, order, `ehr-order:${row.id}:${row.rowVersion}`);
   }
 
   /**

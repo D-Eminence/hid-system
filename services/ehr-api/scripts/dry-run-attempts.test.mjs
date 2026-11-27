@@ -87,6 +87,48 @@ test('0152\'s two busy refusals, read from the file, name the versions table and
   assert.ok(lists < sql.indexOf('create or replace function ehr.catalog_status()'), 'before the status is replaced');
 });
 
+// 0156 (lab tests and diagnoses by name only): one NOWAIT statement on the six tables, taken before any of them is
+// altered; both refusals are retried. Its size bound (55000) is not a busy refusal, so a dry run stops on it. The
+// bound: 5,000,000 rows (reltuples) for an analysed table, 2 GiB on disk for one never analysed (reltuples -1).
+test('0156\'s two busy refusals, read from the file, name the six tables and are retried', async () => {
+  const file = '0156_name_only_lab_tests_and_diagnoses.sql';
+  const refusals = await busyRefusalsOf(file);
+  const tables = 'ehr.lab_requests, ehr.diagnoses, ehr.order_routes, lab.work_items, lab.work_item_requested_tests or '
+    + 'lab.order_route_result_reports';
+  assert.deepEqual(refusals, [
+    `0156: ${tables} is busy, and this transaction already holds an earlier migration's locks, so it does not wait; `
+      + `nothing applied; ${tail}`,
+    `0156: ${tables} stayed busy for 5 seconds; nothing applied; ${tail}`,
+  ]);
+  for (const message of refusals) {
+    assert.equal(isBusyRefusal(new MigrationFileError(file, databaseError('55P03', message))), true, message);
+    assert.equal(isBusyRefusal(new MigrationFileError(file, databaseError('55000', message))), false, message);
+    assert.equal(isBusyRefusal(new MigrationFileError('0153_clinician_recent_diagnoses.sql',
+      databaseError('55P03', message))), false);
+  }
+  const sizeBound = '0156: too large to validate here: ehr.diagnoses (reltuples -1, 2147491840 bytes); nothing applied';
+  assert.equal(isBusyRefusal(new MigrationFileError(file, databaseError('55000', sizeBound))), false);
+  const sql = await readFile(path.join(scripts, '../database/migrations', file), 'utf8');
+  // The code without its comments (the header names what the code does).
+  const code = sql.split('\n').filter((line) => !line.trimStart().startsWith('--')).join('\n');
+  const attempt = code.indexOf('lock table ehr.lab_requests, ehr.diagnoses, ehr.order_routes, lab.work_items, '
+    + 'lab.work_item_requested_tests,\n        lab.order_route_result_reports in access exclusive mode nowait;');
+  const handler = code.indexOf('exception when lock_not_available then', attempt);
+  assert.ok(attempt > 0 && attempt < handler, 'the six tables are locked in one statement in the attempt');
+  assert.ok(handler < code.indexOf('pg_relation_size'), 'the size bound is read under the locks');
+  assert.ok(handler < code.indexOf('alter table '), 'before any table is altered');
+  // The size bound: rows for an analysed table, bytes on disk (a whole number of 8 KiB pages) for one never analysed.
+  const bound = code.match(
+    /relation\.reltuples > (\d+)\s+or \(relation\.reltuples < 0 and pg_relation_size\(relation\.oid\) > (\d+)\)\)/);
+  assert.ok(bound, 'the size bound reads reltuples, and pg_relation_size only when reltuples is -1');
+  assert.deepEqual([Number(bound[1]), Number(bound[2])], [5_000_000, 2 * 1024 ** 3]);
+  assert.equal(Number(bound[2]) % 8192, 0);
+  assert.ok(code.indexOf('pg_relation_size') < code.indexOf('alter table '), 'the bound is read before any change');
+  // No body opens a table when it is made, and the file writes no row.
+  assert.doesNotMatch(code, /%rowtype|%type/i);
+  assert.doesNotMatch(code, /\b(insert into|update [a-z_]+\.[a-z_]+ set|delete from|truncate)\b/i);
+});
+
 test('anything else is not retried', () => {
   const file = '0131_own_facility_patient_access.sql';
   for (const error of [

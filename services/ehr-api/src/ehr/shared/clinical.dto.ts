@@ -295,17 +295,13 @@ export class CreateVitalCorrectionDto extends VersionedUpdateDto {
   replacementValues!: VitalMeasurementsDto;
 }
 
-export class CreateDiagnosisDto {
-  @Transform(trim)
-  @IsString()
-  @Length(1, 255)
-  codeSystem!: string;
-
-  @Transform(trim)
-  @IsString()
-  @Length(1, 100)
-  code!: string;
-
+/**
+ * A new diagnosis's fields other than its code pair, shared by
+ * CreateDiagnosisDto (the pair required, as before) and
+ * CreateDiagnosisNameOnlyDto (0156). Each subclass declares its pair, so its
+ * checks run first and a refusal lists the fields in the same order as before.
+ */
+export abstract class DiagnosisDetailsDto {
   @Transform(trim)
   @IsString()
   @Length(1, 500)
@@ -331,6 +327,44 @@ export class CreateDiagnosisDto {
   @MaxLength(4000)
   notes?: string;
 }
+
+/** A new diagnosis with its code and code system, both required (the body while DIAGNOSIS_NAME_ONLY_ENABLED is off). */
+export class CreateDiagnosisDto extends DiagnosisDetailsDto {
+  @Transform(trim)
+  @IsString()
+  @Length(1, 255)
+  codeSystem!: string;
+
+  @Transform(trim)
+  @IsString()
+  @Length(1, 100)
+  code!: string;
+}
+
+/**
+ * A new diagnosis whose code pair may be left out (0156, ORD-9): codeSystem
+ * and code are both given or both left out (DIAGNOSIS_CODE_INCOMPLETE,
+ * CreateDiagnosisBodyPipe); display is still required. Used only while
+ * DIAGNOSIS_NAME_ONLY_ENABLED is on. Off, a body is checked against
+ * CreateDiagnosisDto as before, so a diagnosis with no code is refused 400
+ * VALIDATION_FAILED. null is refused as for every optional field.
+ */
+export class CreateDiagnosisNameOnlyDto extends DiagnosisDetailsDto {
+  @IsOptionalButNotNull()
+  @Transform(trim)
+  @IsString()
+  @Length(1, 255)
+  codeSystem?: string;
+
+  @IsOptionalButNotNull()
+  @Transform(trim)
+  @IsString()
+  @Length(1, 100)
+  code?: string;
+}
+
+/** The body a diagnosis create carries: with its code, or (0156, while on) by name only. */
+export type CreateDiagnosisInput = CreateDiagnosisDto | CreateDiagnosisNameOnlyDto;
 
 export class UpdateDiagnosisDto extends VersionedUpdateDto {
   @IsOptionalButNotNull()
@@ -558,17 +592,13 @@ export class SendLabRequestToLabDto {
   expectedRowVersion!: number;
 }
 
-export class CreateLabRequestDto {
-  @Transform(trim)
-  @IsString()
-  @Length(1, 255)
-  testCodeSystem!: string;
-
-  @Transform(trim)
-  @IsString()
-  @Length(1, 100)
-  testCode!: string;
-
+/**
+ * A new lab request's fields other than its test code pair, shared by
+ * CreateLabRequestDto (the pair required, as before) and
+ * CreateLabRequestNameOnlyDto (0156). Each subclass declares its pair, so its
+ * checks run first and a refusal lists the fields in the same order as before.
+ */
+export abstract class LabRequestDetailsDto {
   @Transform(trim)
   @IsString()
   @Length(1, 500)
@@ -599,6 +629,44 @@ export class CreateLabRequestDto {
   @MaxLength(255)
   externalOrderReference?: string;
 }
+
+/** A new lab request with its test code and code system, both required (the body while LAB_REQUEST_NAME_ONLY_ENABLED is off). */
+export class CreateLabRequestDto extends LabRequestDetailsDto {
+  @Transform(trim)
+  @IsString()
+  @Length(1, 255)
+  testCodeSystem!: string;
+
+  @Transform(trim)
+  @IsString()
+  @Length(1, 100)
+  testCode!: string;
+}
+
+/**
+ * A new lab request whose test code pair may be left out (0156, ORD-7 F3):
+ * testCodeSystem and testCode are both given or both left out
+ * (LAB_TEST_CODE_INCOMPLETE, CreateLabRequestBodyPipe); testDisplay is still
+ * required. Used only while LAB_REQUEST_NAME_ONLY_ENABLED is on. Off, a body
+ * is checked against CreateLabRequestDto as before, so a request with no code
+ * is refused 400 VALIDATION_FAILED. null is refused as for every optional field.
+ */
+export class CreateLabRequestNameOnlyDto extends LabRequestDetailsDto {
+  @IsOptionalButNotNull()
+  @Transform(trim)
+  @IsString()
+  @Length(1, 255)
+  testCodeSystem?: string;
+
+  @IsOptionalButNotNull()
+  @Transform(trim)
+  @IsString()
+  @Length(1, 100)
+  testCode?: string;
+}
+
+/** The body a lab request create carries: with its test code, or (0156, while on) by name only. */
+export type CreateLabRequestInput = CreateLabRequestDto | CreateLabRequestNameOnlyDto;
 
 export class UpdateLabRequestDto extends OptionalReasonVersionedUpdateDto {
   @IsOptionalButNotNull()

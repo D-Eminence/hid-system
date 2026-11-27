@@ -11,7 +11,9 @@ import { LabOrderRouteAccess,basisDetails,type LabRouteResource,type RecordActio
 
 interface ExecutionRow extends QueryResultRow {id:string;accession_id:string;specimen_id:string;requested_test_id:string;patient_id:string;
  facility_id:string;status:'in_progress'|'completed';method:string|null;started_at:Date;completed_at:Date|null;row_version:string;
- idempotency_key:string;request_sha256:string;completed_idempotency_key:string|null;completed_request_sha256:string|null;test_name:string;test_code:string;test_code_system:string}
+ idempotency_key:string;request_sha256:string;completed_idempotency_key:string|null;completed_request_sha256:string|null;test_name:string;
+ /** Both null for a test ordered by its name only (0156); the answers carry them as they are. */
+ test_code:string|null;test_code_system:string|null}
 interface RevisionRow extends QueryResultRow {id:string;result_id:string;execution_id:string;patient_id:string;facility_id:string;version:string;
  result_type:'numeric'|'text';numeric_value:string|null;text_value:string|null;unit:string|null;reference_range:string|null;abnormal_flag:string;
  entry_source:'manual';verification_status:'unverified';entered_at:Date;correction_reason:string|null;request_sha256:string}
@@ -19,7 +21,7 @@ const EXEC=`e.id::text,e.accession_id::text,e.specimen_id::text,e.requested_test
  e.status,e.method,e.started_at,e.completed_at,e.row_version::text,e.idempotency_key,e.request_sha256,e.completed_idempotency_key,
  e.completed_request_sha256,t.name as test_name,t.code as test_code,t.code_system as test_code_system`;
 interface WorkItemOrderRow extends QueryResultRow {id:string;patient_id:string;source_ehr_order_id:string;source_ehr_order_version:string;
- test_code_system:string;test_code:string;test_name:string;accepted_at:Date}
+ test_code_system:string|null;test_code:string|null;test_name:string;accepted_at:Date}
 const REV=`rr.id::text,rr.result_id::text,rr.execution_id::text,rr.patient_id::text,rr.facility_id::text,rr.version::text,
  rr.result_type,rr.numeric_value::text,rr.text_value,rr.unit,rr.reference_range,rr.abnormal_flag,rr.entry_source,
  rr.verification_status,rr.entered_at,rr.correction_reason,rr.request_sha256`;

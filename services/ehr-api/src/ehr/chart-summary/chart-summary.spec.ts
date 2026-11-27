@@ -216,6 +216,15 @@ describe('EHR-C4 chart summary: sections by permission', () => {
     expect(audit.record).not.toHaveBeenCalled();
   });
 
+  it('answers a problem and a lab request saved by name only (0156) with both codes null', async () => {
+    const named = { ...problem, codeSystem: null, code: null, display: 'Fictional crisis, as written' };
+    const test = { ...labRequest, testCodeSystem: null, testCode: null, testDisplay: 'Fictional test, as written' };
+    const { service } = setup({ rows: { problems: [named], labRequests: [test] } });
+    const answer = await service.read(contextFor(ROLES.doctor!), patientId);
+    expect(answer.sections.problems).toEqual({ items: [named], more: false });
+    expect(answer.sections.openLabRequests?.items[0]).toEqual({ ...test, ownProgress: expect.objectContaining({ status: 'received' }) });
+  });
+
   it('gives a nurse the same sections as a doctor', async () => {
     const { service } = setup();
     const answer = await service.read(contextFor(ROLES.nurse!), patientId);

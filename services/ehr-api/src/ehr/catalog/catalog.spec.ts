@@ -20,6 +20,7 @@ import {
   STATUS_SQL, diagnosisSearchUnavailable, looksLikePersonIdentifier, medicineDisplay, typedIcd10,
 } from './catalog.service';
 import { RECENT_DIAGNOSES_SQL, RecentDiagnosesService, type RecentDiagnosesCaller } from './recent-diagnoses.service';
+import { NAME_ONLY_CODES_OFF, NAME_ONLY_CODES_PROVIDER, NameOnlyCodes } from '../shared/name-only-codes';
 
 // Fictional identifiers only. Medicine and test names are list facts, not patient data.
 const membershipA = '123e4567-e89b-42d3-a456-426614174004';
@@ -187,6 +188,14 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       });
       expect(calls).toEqual([{ sql: STATUS_SQL, values: [] }]);
       expect(STATUS_SQL).toContain("at time zone 'Africa/Lagos'");
+    });
+
+    it('says which of 0156\'s settings is on, each on its own: labTestNameOnly and diagnosisNameOnly', async () => {
+      for (const [labRequests, diagnoses] of [[true, false], [false, true], [true, true], [false, false]] as const) {
+        const { database } = fakeDatabase([statusRow('lab_test'), statusRow('medicine')]);
+        await expect(new CatalogService(database, new NameOnlyCodes(labRequests, diagnoses)).status()).resolves.toMatchObject({
+          labTestNameOnly: labRequests, diagnosisNameOnly: diagnoses, classDuplicateCheck: false });
+      }
     });
 
     it('a loaded list is available with its version, sign-off day, seed file and its sources\' notices, once each', async () => {
@@ -577,7 +586,7 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
       // The terminology controller also serves recent diagnoses; these HTTP tests never call that route.
       @Module({ controllers: [CatalogController, TerminologyController],
         providers: [CatalogService, { provide: DatabaseService, useValue: database },
-          { provide: RecentDiagnosesService, useValue: {} }] })
+          { provide: RecentDiagnosesService, useValue: {} }, { provide: NameOnlyCodes, useValue: NAME_ONLY_CODES_OFF }] })
       class TestModule {}
       const moduleRef = await Test.createTestingModule({ imports: [TestModule] }).compile();
       app = moduleRef.createNestApplication({ logger: false });
@@ -693,7 +702,8 @@ describe('ORD-9 (0153): recent diagnoses', () => {
     expect(Reflect.getMetadata(REQUIRED_PERMISSIONS, handler)).toEqual(['ehr.diagnosis.write']);
     expect(Reflect.getMetadata(AUDIT_FAILURES_ONLY, handler)).toBe(true);
     expect(Reflect.getMetadata(HEADERS_METADATA, handler)).toBeUndefined();
-    expect(Reflect.getMetadata('providers', CatalogModule)).toEqual([CatalogService, RecentDiagnosesService]);
+    expect(Reflect.getMetadata('providers', CatalogModule)).toEqual([CatalogService, RecentDiagnosesService,
+      NAME_ONLY_CODES_PROVIDER]);
   });
 
   it('the route reads the guards\' actor at this facility, sets no header and needs no X-Purpose-Of-Use', async () => {

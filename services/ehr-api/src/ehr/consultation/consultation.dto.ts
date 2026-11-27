@@ -4,6 +4,7 @@ import { IsOptionalButNotNull } from '../../common/validation';
 import {
   CreateClinicalNoteDto,
   CreateDiagnosisDto,
+  CreateDiagnosisNameOnlyDto,
   CreateEncounterDto,
   CreateVitalDto,
 } from '../shared/clinical.dto';
@@ -46,3 +47,39 @@ export class CreateConsultationDto {
   @Type(() => CreateDiagnosisDto)
   diagnoses?: CreateDiagnosisDto[];
 }
+
+/**
+ * The same body while DIAGNOSIS_NAME_ONLY_ENABLED is on (0156): each diagnosis
+ * may leave out its code pair, both or neither (CreateDiagnosisNameOnlyDto;
+ * DIAGNOSIS_CODE_INCOMPLETE otherwise, CreateConsultationBodyPipe). Off, the
+ * body is checked against CreateConsultationDto as before. The four parts and
+ * their checks are CreateConsultationDto's, in the same order.
+ */
+export class CreateConsultationNameOnlyDto {
+  @IsObject()
+  @ValidateNested()
+  @Type(() => CreateEncounterDto)
+  visit!: CreateEncounterDto;
+
+  @IsOptionalButNotNull()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => CreateClinicalNoteDto)
+  note?: CreateClinicalNoteDto;
+
+  @IsOptionalButNotNull()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => CreateVitalDto)
+  vitals?: CreateVitalDto;
+
+  @IsOptionalButNotNull()
+  @IsArray()
+  @ArrayMaxSize(CONSULTATION_MAX_DIAGNOSES)
+  @ValidateNested({ each: true })
+  @Type(() => CreateDiagnosisNameOnlyDto)
+  diagnoses?: CreateDiagnosisNameOnlyDto[];
+}
+
+/** The body a consultation carries: today's, or (0156, while on) with diagnoses by name only. */
+export type CreateConsultationInput = CreateConsultationDto | CreateConsultationNameOnlyDto;

@@ -3,11 +3,12 @@ import { RequirePermissions } from '../../common/decorators';
 import type { HidRequest } from '../../common/request-context';
 import { clinicalContext, requireIdempotencyKey } from '../shared/clinical-context';
 import {
-  CreateLabRequestDto,
+  type CreateLabRequestInput,
   SendLabRequestToLabDto,
   TimelineQueryDto,
   UpdateLabRequestDto,
 } from '../shared/clinical.dto';
+import { CreateLabRequestBodyPipe } from '../shared/name-only-codes';
 import { LabRequestsService } from './lab-requests.service';
 import { WorkItemProgressService } from '../../integrations/work-item-progress.service';
 
@@ -38,12 +39,17 @@ export class LabRequestsController {
     return this.progress.withLabRequest(context, patientId, labRequest);
   }
 
+  /**
+   * The body is checked by CreateLabRequestBodyPipe: today's
+   * CreateLabRequestDto, or, while LAB_REQUEST_NAME_ONLY_ENABLED is on (0156),
+   * CreateLabRequestNameOnlyDto, whose test code pair may be left out.
+   */
   @Post()
   @HttpCode(201)
   @RequirePermissions('ehr.lab-request.write')
   create(@Req() request: HidRequest, @Param('patientId', new ParseUUIDPipe()) patientId: string,
     @Param('encounterId', new ParseUUIDPipe()) encounterId: string,
-    @Headers('idempotency-key') key: string | undefined, @Body() input: CreateLabRequestDto) {
+    @Headers('idempotency-key') key: string | undefined, @Body(CreateLabRequestBodyPipe) input: CreateLabRequestInput) {
     return this.labRequests.create(clinicalContext(request), patientId, encounterId, input, requireIdempotencyKey(key));
   }
 
