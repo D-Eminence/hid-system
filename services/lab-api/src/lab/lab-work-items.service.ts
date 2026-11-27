@@ -119,6 +119,12 @@ export class LabWorkItemsService {
     private readonly ownPatients: LabOwnWorkPatientCards = OWN_WORK_PATIENT_CARDS_OFF,
     private readonly ownWork: LabOwnWork = OWN_WORK_OFF) {}
 
+  /**
+   * Accepts the exact EHR order version as a work item with its one requested
+   * test. A test ordered by its name only (0156) is accepted with both codes
+   * null, in the work item and in its requested test; the reads answer them
+   * as null.
+   */
   async acceptEhrOrder(context: DataAccessContext, command: AcceptEhrLabOrderCommand): Promise<LabWorkItemResult> {
     if (!context.actor.permissions.includes('lab.work-item.accept')) {
       throw new DomainProblem(403, 'LAB_WORK_ITEM_ACCESS_DENIED', 'Lab order acceptance permission is required');
@@ -180,7 +186,7 @@ export class LabWorkItemsService {
        returning *`,
       [randomUUID(),command.patientId,context.facilityId,command.orderingFacilityId,
         command.sourceEhrOrderId,command.sourceEhrOrderVersion,command.sourceEncounterId,
-        command.priority,command.testCodeSystem,command.testCode,command.testName,
+        command.priority,command.testCodeSystem ?? null,command.testCode ?? null,command.testName,
         command.clinicalIndication ?? null,command.requestedBy,command.requestedAt,
         context.actor.accountId,context.membershipId,key,digest,context.correlationId])
       .catch((error: unknown) => { throw workItemInsertRefusal(error) ?? error; });
@@ -189,7 +195,7 @@ export class LabWorkItemsService {
     await client.query(
       `insert into lab.work_item_requested_tests(work_item_id,facility_id,patient_id,"ordinal",code_system,code,name)
        values ($1,$2,$3,1,$4,$5,$6)`,
-      [row.id,row.facility_id,row.patient_id,command.testCodeSystem,command.testCode,command.testName]);
+      [row.id,row.facility_id,row.patient_id,command.testCodeSystem ?? null,command.testCode ?? null,command.testName]);
     await client.query(
       `insert into lab.work_item_events(work_item_id,facility_id,patient_id,event_version,event_type,
         actor_id,actor_membership_id,reason,correlation_id)

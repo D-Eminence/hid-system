@@ -23,6 +23,30 @@ export interface LabResourceReference {
   id: string;
 }
 
+/**
+ * The EHR lab request ehr-api asks Lab to accept (POST
+ * /api/v1/lab/work-items/accept-ehr-order), at the exact version the EHR
+ * committed. The test's code pair is both or neither: both null for a test
+ * ordered by its name only (0156, ehr-api's LAB_REQUEST_NAME_ONLY_ENABLED).
+ * A Lab image before 0156 refuses a null pair (400 VALIDATION_FAILED), so
+ * once a name-only request has been sent, lab-api stays at or above 0156's.
+ */
+export interface LabAcceptEhrOrderInput {
+  sourceEhrOrderId: string;
+  sourceEhrOrderVersion: number;
+  sourceEncounterId: string;
+  patientId: string;
+  orderingFacilityId: string;
+  testCodeSystem: string | null;
+  testCode: string | null;
+  testName: string;
+  priority: 'routine' | 'urgent' | 'asap' | 'stat';
+  clinicalIndication?: string;
+  requestedBy: string;
+  /** The EHR row's created_at to the microsecond (UTC text). */
+  requestedAt: string;
+}
+
 export interface PatientLabPage {
   records: Array<{id:string;version:string;title:string;recordedAt:string;effectiveAt:string|null;fields:Record<string,unknown>}>;
   nextCursor: string | null;
@@ -80,8 +104,9 @@ export class LabApiClient {
     return page;
   }
 
+  /** `input` is a LabAcceptEhrOrderInput; typed `unknown` so a test may send any body. */
   acceptEhrOrder(
-    input: unknown,
+    input: LabAcceptEhrOrderInput | unknown,
     context: LabRequestContext,
     idempotencyKey: string,
     signal?: AbortSignal,

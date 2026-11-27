@@ -98,6 +98,7 @@ async function readJson(response: Response): Promise<unknown> {
 
 export { LabApiClient, LabApiProblem } from './lab';
 export type {
+  LabAcceptEhrOrderInput,
   LabClientOptions,
   LabInternalCaller,
   LabRequestContext,
