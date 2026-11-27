@@ -3,6 +3,7 @@ import type { QueryResultRow } from 'pg';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
+import { staffPreferencesEnabled } from '../staff-preferences/staff-preferences';
 
 interface StaffProfileRow extends QueryResultRow {
   account_id: string;
@@ -53,8 +54,9 @@ export function licenceNumberHint(value: string | null): string | null {
 /**
  * SX-5 (Akos P1-8, read part): "My profile" for staff. Read only; the
  * changes (password while signed in, preferences, shortcuts) are SX-6 and
- * SX-7. Memberships come from the session already resolved by the guard
- * (every active membership the product gate admits on this site).
+ * SX-7 (canChange.preferences follows STAFF_PREFERENCES_ENABLED).
+ * Memberships come from the session already resolved by the guard (every
+ * active membership the product gate admits on this site).
  */
 @Injectable()
 export class StaffProfileService {
@@ -88,7 +90,9 @@ export class StaffProfileService {
         isCurrent: facility.id === currentFacilityId,
       })),
       products: [...(actor.products ?? [])],
-      canChange: { name: false, password: false, preferences: false },
+      // SX-7 (0206): the language and Home shortcuts can be saved once
+      // STAFF_PREFERENCES_ENABLED is on.
+      canChange: { name: false, password: false, preferences: staffPreferencesEnabled() },
     };
   }
 }

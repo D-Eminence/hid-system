@@ -294,6 +294,14 @@ const environmentSchema = z.object({
   // time, only once 0140 is applied: with it on, Identity refuses to start
   // while the table or one of its grants is missing (OpenPatientStartupCheck).
   STAFF_OPEN_PATIENT_ENABLED: booleanString,
+  // SX-7 (0206): a staff member's language and up to 12 Home shortcuts per
+  // membership. Off (the default): GET and POST /identity/me/preferences and
+  // POST /identity/me/shortcuts answer 404, and SX-5's
+  // canChange.preferences stays false. Turn it on only once 0206 is applied:
+  // with it on, Identity refuses to start while one of 0206's functions or
+  // the runtime's EXECUTE on it is missing (StaffPreferencesStartupCheck).
+  // 'true' or 'false' only; any other value refuses to boot.
+  STAFF_PREFERENCES_ENABLED: booleanString,
 }).superRefine((environment, context) => {
   if (environment.AUTH_MODE === 'local') {
     if (!environment.AUTH_SIGNING_SECRET || environment.AUTH_SIGNING_SECRET.length < 32) {

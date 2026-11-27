@@ -12,6 +12,7 @@ import {
 } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext, FacilityAssignment, HidRequest } from '../common/request-context';
+import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import { STAFF_PROFILE_AUDIT_ACTION, StaffProfileController } from './staff-profile.controller';
 import { licenceNumberHint, STAFF_PROFILE_SQL, StaffProfileService } from './staff-profile.service';
@@ -32,6 +33,24 @@ const actor: ActorContext = {
     facility(SECOND_FACILITY, '40000000-0000-4000-8000-000000000002', ['nurse', 'lab'], false)],
   authenticationMethod: 'local', products: ['ehr', 'migrate'],
 };
+
+// The service reads STAFF_PREFERENCES_ENABLED (SX-7) for canChange.preferences.
+const originalEnvironment = { ...process.env };
+function environment(preferences: string | undefined): void {
+  Object.assign(process.env, { NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid',
+    CORS_ORIGINS: 'http://localhost:5173', AUTH_MODE: 'local',
+    AUTH_SIGNING_SECRET: 'test-signing-secret-with-at-least-32-characters',
+    AUTH_LOGIN_PEPPER: 'test-login-pepper-with-at-least-32-characters' });
+  if (preferences === undefined) delete process.env.STAFF_PREFERENCES_ENABLED;
+  else process.env.STAFF_PREFERENCES_ENABLED = preferences;
+  resetEnvironmentForTests();
+}
+beforeEach(() => environment(undefined));
+afterAll(() => {
+  for (const key of Object.keys(process.env)) if (!(key in originalEnvironment)) delete process.env[key];
+  Object.assign(process.env, originalEnvironment);
+  resetEnvironmentForTests();
+});
 
 function route(controller: { prototype: object }, name: string) {
   const handler = (controller.prototype as Record<string, unknown>)[name] as object;
@@ -85,6 +104,14 @@ describe('GET identity/me/staff-profile (SX-5)', () => {
     });
     expect(JSON.stringify(profile)).not.toContain('12-345');
     expect(JSON.stringify(profile)).not.toMatch(/unverified/i);
+  });
+
+  it('canChange.preferences follows STAFF_PREFERENCES_ENABLED (SX-7, 0206); name and password stay false (SX-6)', async () => {
+    for (const [value, expected] of [[undefined, false], ['false', false], ['true', true]] as const) {
+      environment(value);
+      const profile = await setup(row).service.read(actor, FACILITY);
+      expect(profile.canChange).toEqual({ name: false, password: false, preferences: expected });
+    }
   });
 
   it('falls back to the staff record\'s name, and says when there is no password or licence', async () => {

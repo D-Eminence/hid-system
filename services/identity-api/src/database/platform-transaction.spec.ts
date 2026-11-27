@@ -37,3 +37,38 @@ describe('Explicit platform database transaction', () => {
     expect(connect).not.toHaveBeenCalled();
   });
 });
+
+describe('A staff member\'s own-account transaction (SX-7)', () => {
+  const staff: ActorContext = { kind: 'staff', id: 'staff-subject', subject: 'staff-subject', accountId: 'staff-account',
+    roles: [], permissions: [], facilities: [], facilityIds: [], authenticationMethod: 'local' };
+  function setup() {
+    const query = jest.fn(async (_sql: string, _values?: readonly unknown[]) => ({ rows: [] }));
+    const release = jest.fn();
+    const connect = jest.fn(async () => ({ query, release }));
+    jest.mocked(Pool).mockImplementation(() => ({ connect, on: jest.fn() } as unknown as Pool));
+    return { service: new DatabaseService(), query, release, connect };
+  }
+  const binding = (query: jest.Mock) => query.mock.calls.find(([sql]) => String(sql).includes('app.actor_subject'))?.[1];
+
+  it('binds the actor with no facility, membership or purpose when the request named no facility', async () => {
+    const { service, query } = setup();
+    await expect(service.withStaffAccountTransaction({ actor: staff, correlationId: 'staff-own-context' },
+      async () => 'ok', { readOnly: true })).resolves.toBe('ok');
+    expect(binding(query)).toEqual(['staff-subject', '', 'staff-own-context', '', '']);
+    expect(query.mock.calls.map(([sql]) => String(sql))).toContain('SET TRANSACTION READ ONLY');
+  });
+
+  it('binds the facility and membership the request resolved', async () => {
+    const { service, query } = setup();
+    await service.withStaffAccountTransaction({ actor: staff, correlationId: 'staff-own-context', facilityId: 'facility-1',
+      membershipId: 'membership-1' }, async () => undefined);
+    expect(binding(query)).toEqual(['staff-subject', 'facility-1', 'staff-own-context', 'membership-1', '']);
+  });
+
+  it('refuses a patient before connecting', async () => {
+    const { service, connect } = setup();
+    await expect(service.withStaffAccountTransaction({ actor: { ...staff, kind: 'patient' }, correlationId: 'x-context' },
+      async () => 'unexpected')).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(connect).not.toHaveBeenCalled();
+  });
+});
