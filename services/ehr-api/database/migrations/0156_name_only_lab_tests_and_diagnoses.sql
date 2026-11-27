@@ -38,9 +38,13 @@
 --    The name columns stay NOT NULL (test_display, display, test_name,
 --    name), so a row always says what was ordered or recorded. Every
 --    existing row has both codes, so no CHECK fails.
--- N2 ehr.catalog_diagnosis_listed(code_system text, code text): for ehr-api's
---    codeStatus (Rahman's answer 8; no runtime may read
---    ehr.catalog_diagnoses, 0152:257). It answers only for the code system
+-- N2 ehr.catalog_diagnosis_listed(requested_code_system text,
+--    requested_code text): for ehr-api's codeStatus (Rahman's answer 8; no
+--    runtime may read ehr.catalog_diagnoses, 0152:257). The note writes the
+--    parameters as (code_system, code); they take the requested_ prefix of
+--    0152's and 0153's functions, so neither shares a column's name. ehr-api
+--    calls it by position; a caller using named notation (0180, say) uses
+--    these names. It answers only for the code system
 --    'ICD-11': true when the code is in the active ICD-11 release, false
 --    when it is not. It answers null while no release is active and for any
 --    other code system or a null code (codeStatus not_checked). A

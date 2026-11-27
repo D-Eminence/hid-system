@@ -2491,8 +2491,10 @@ above is the lab request's part.
     bound the checks would go in NOT VALID with a follow-up file. It has no
     DML and reads no row as the migrator; its post-check reads
     `pg_stat_xact_user_tables` (no row inserted, updated or deleted).
-  - New: `ehr.catalog_diagnosis_listed(code_system, code)` for
-    `codeStatus` (no runtime may read `ehr.catalog_diagnoses`). It answers
+  - New: `ehr.catalog_diagnosis_listed(requested_code_system,
+    requested_code)` for `codeStatus` (no runtime may read
+    `ehr.catalog_diagnoses`). The parameters take the `requested_` prefix of
+    0152's and 0153's functions; ehr-api passes them by position. It answers
     only for `ICD-11`: true or false against the active release, on the
     first code of a post-coordinated one; null while no release is active
     and for any other code system. SECURITY DEFINER, STABLE; EXECUTE to the
@@ -2580,8 +2582,9 @@ above is the lab request's part.
   (`ehr.diagnoses` here, `ehr.lab_requests` and `lab.work_items` in ORD-7)
   are six; the recent read leaves a dropped code out rather than adding an
   in-list flag; `codeStatus` is `not_checked` also while no release is
-  active (the function answers null then); and only `ICD-11` exactly is
-  looked up.
+  active (the function answers null then); only `ICD-11` exactly is
+  looked up; and the lookup's parameters are `requested_code_system` and
+  `requested_code`, not the note's `code_system` and `code`.
 - **Not in this slice:** the sensitive-test list (0155's PR and images),
   facility items (0155) and the website's screens.
 - **Checks:** the database suites `name-only-codes` (69 cases) and
