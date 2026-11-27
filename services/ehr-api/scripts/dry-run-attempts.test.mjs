@@ -164,6 +164,17 @@ test('0158\'s two busy refusals, read from the file, name the three tables and a
     assert.ok(handler < code.indexOf(change), `${change.trim()} after the locks`);
   }
   assert.ok(handler < code.search(/%rowtype/i), 'the validator\'s %rowtype is compiled under the locks');
+  // pg_get_constraintdef and pg_get_expr open the table they print for, and pg_get_triggerdef does for a trigger
+  // with a WHEN clause: printed before the locks, they would wait behind DDL on either table for the runner's
+  // lock_timeout and fail with the server's message, which the dry run does not retry (the review of this branch,
+  // 27 November 2026, as #344's test for 0154). So the preconditions print nothing; 0156's CHECKs are printed in
+  // section 2b and the trigger in section 6, both under the locks.
+  for (const printer of ['pg_get_constraintdef(', 'pg_get_triggerdef(', 'pg_get_expr(']) {
+    const first = code.indexOf(printer);
+    assert.ok(first === -1 || handler < first, `${printer.slice(0, -1)} only after the locks`);
+  }
+  assert.ok(handler < code.indexOf('pg_get_constraintdef(')
+    && code.indexOf('pg_get_constraintdef(') < code.indexOf('alter table '), '0156\'s CHECKs printed in section 2b');
   // The file writes no row and runs no probe (no temporary table).
   assert.doesNotMatch(code, /\b(insert into|update [a-z_]+\.[a-z_]+ set|delete from|truncate)\b/i);
   assert.doesNotMatch(code, /\bcreate\s+(temporary|temp)\b/i);

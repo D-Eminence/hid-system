@@ -15,12 +15,17 @@
 --   3. each tamper of the guard is refused, "0158: not in the reviewed state"
 --      (55000, from section 0, so nothing is applied): a WHEN added to the
 --      trigger, the trigger disabled, the function edited, SECURITY DEFINER set
---      on it, PUBLIC granted it; and the validator back at 0086's body under
---      the new columns; 0156's marker missing; a pinned function changed;
+--      on it, PUBLIC granted it, the owner's own EXECUTE revoked (an empty
+--      ACL); and the validator back at 0086's body under the new columns;
+--      0156's marker missing; a pinned function changed; ehr.order_routes
+--      owned by another role (section 0's one-owner rule);
 --   4. the undo of 0158's header (the trigger and the guard dropped, 0086's
 --      validator back, md5 efac1507): the columns stay, so the file refuses
---      (not in the reviewed state); with the columns dropped as well, 0158
---      applies again exactly as the runner left it.
+--      (not in the reviewed state); with the columns dropped as well, and
+--      0156's CHECK on lab.work_items kept by name, validated and on the
+--      pair but printed otherwise, section 2b refuses under the locks
+--      (section 0 prints nothing); then 0158 applies again exactly as the
+--      runner left it.
 -- Part B is the data path, through the exact runtime roles and the services'
 -- statements (cases recorded, all checked at the end):
 --   1. the guard: with an actor (the EHR runtime, a change reason) a change
@@ -283,6 +288,25 @@ rollback to savepoint tampered;
 select pg_temp.expect('A3i a pinned function changed (the child validator) is refused',
   '55000 0158: these functions are not as 0001-0156 left them: lab.validate_work_item_child()',
   :'LAST_ERROR_SQLSTATE' || ' ' || :'LAST_ERROR_MESSAGE');
+set local role :"q158_owner";
+revoke execute on function ehr.lab_request_group_fixed() from :"q158_owner";
+\set ON_ERROR_STOP off
+:run0158
+\set ON_ERROR_STOP on
+\set QUIET off
+rollback to savepoint tampered;
+select pg_temp.expect('A3k the owner''s own EXECUTE revoked from the guard (an empty ACL) is refused, not "already applied"',
+  '55000 0158: not in the reviewed state', :'LAST_ERROR_SQLSTATE' || ' ' || :'LAST_ERROR_MESSAGE');
+alter table ehr.order_routes owner to hid_lab_api_runtime;
+set local role :"q158_owner";
+\set ON_ERROR_STOP off
+:run0158
+\set ON_ERROR_STOP on
+\set QUIET off
+rollback to savepoint tampered;
+select pg_temp.expect('A3l ehr.order_routes owned by another role is refused by section 0 (55000), not in the lock loop',
+  '55000 0158: ' || :'q158_owner' || ', the owner of ehr.lab_requests, must own ehr.order_routes and may create in '
+  || 'schema ehr', :'LAST_ERROR_SQLSTATE' || ' ' || :'LAST_ERROR_MESSAGE');
 select pg_temp.expect('A3j after every tamper, the state is as the runner left it',
   :'q158_applied', md5(pg_temp.schema_print()));
 
@@ -316,16 +340,32 @@ select pg_temp.expect('A4b after the undo the columns stay, so 0158 refuses',
 set local role :"q158_owner";
 alter table ehr.lab_requests drop column request_group_id;
 alter table lab.work_items drop column request_group_id;
+savepoint check_printed_otherwise;
+alter table lab.work_items drop constraint work_items_test_code_pair_ck;
+alter table lab.work_items add constraint work_items_test_code_pair_ck
+  check (test_code_system is not null or test_code is null);
+\set ON_ERROR_STOP off
+:run0158
+\set ON_ERROR_STOP on
+\set QUIET off
+rollback to savepoint check_printed_otherwise;
+select pg_temp.expect('A4c 0156''s CHECK on lab.work_items by name and columns, validated, printed otherwise: '
+  || 'section 2b refuses under the locks, nothing applied',
+  '55000 0158: 0001-0153 and 0156 must be applied first | columns=0',
+  :'LAST_ERROR_SQLSTATE' || ' ' || :'LAST_ERROR_MESSAGE' || ' | columns='
+  || (select count(*) from pg_attribute attribute_row
+       where attribute_row.attrelid in ('ehr.lab_requests'::regclass, 'lab.work_items'::regclass)
+         and attribute_row.attname = 'request_group_id' and not attribute_row.attisdropped));
 \set ON_ERROR_STOP off
 :run0158
 \set ON_ERROR_STOP on
 \set QUIET off
 reset role;
-select pg_temp.expect('A4c with the columns dropped too, 0158 applies again, exactly as the runner left it',
+select pg_temp.expect('A4d with the columns dropped too, 0158 applies again, exactly as the runner left it',
   'applied | as built', :'LAST_ERROR_MESSAGE' || ' | '
   || case when md5(pg_temp.schema_print()) = :'q158_applied' then 'as built' else pg_temp.schema_print() end);
 release savepoint undone;
-select pg_temp.expect('A part done', '20', (select last_value::text from pg_temp.lab_request_groups_passed));
+select pg_temp.expect('A part done', '23', (select last_value::text from pg_temp.lab_request_groups_passed));
 
 -- B. The data path. Clinics F1 (e5800000-...02) and F2 (e5800000-...03) of one organization; member A of F1 orders
 -- and accepts (an active write consent for patient P in F1, direct care), member G of F2 accepts a route. Encounter N

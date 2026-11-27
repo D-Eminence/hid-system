@@ -438,9 +438,14 @@ work item. Its header gives the details and the measurements.
   run 0158's locks (ACCESS EXCLUSIVE on `ehr.lab_requests` and `lab.work_items`) last until the dry run rolls back,
   through every later file, so the release declaration records the measured dry-run window, from the first strong
   lock of the release to the rollback, with the real release set at production row counts, well under 15 s.
-- **Busy.** An open read of either table, DDL on `ehr.order_routes`, or an autovacuum or ANALYZE of either table
-  makes 0158 stop after 5 seconds with its busy refusal (55P03), nothing applied. The dry run tries again; the apply
-  does not, so run the release again at a quieter time.
+- **Busy.** An open read of either table, DDL held or queued on either table or on `ehr.order_routes`, or an
+  autovacuum or ANALYZE of either table makes 0158 stop after 5 seconds with its busy refusal (55P03), nothing
+  applied; at once when the same transaction already holds an earlier file's locks. The dry run tries again; the
+  apply does not, so run the release again at a quieter time. 0158's preconditions read the catalog only and print
+  no CHECK or trigger before its locks, so none of these reaches the runner's lock timeout instead.
+- **Integration with 0159.** 0159's file does not change, but its suite (`database/tests/order-notices`) takes 0159
+  away and runs it again; on a build that also carries 0158, 0159's pin of `lab.validate_work_item()` (efac1507)
+  stops each run. That suite takes 0158 back inside a savepoint first, as `name-only-codes` does for 0156.
 - **Order.** 0158 first, then lab-api and ehr-api in either order with `LAB_REQUEST_GROUPS_ENABLED` off, then the
   setting on, then the website. ORD-6's images select the new column, so they need 0158 applied. If the apply stops
   at 0158 after an earlier file of the same release committed, hold the ORD-6 images until 0158 applies.

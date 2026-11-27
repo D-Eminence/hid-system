@@ -74,20 +74,31 @@
 -- No probe in the file (Rahman's nit; the clinical owner's choice): the
 -- earlier draft's temporary-table probe ran inside the lock window and
 -- needed TEMP on the database, which nothing in the repository grants or
--- checks. The lab-request-groups suite and the rehearsal run it.
+-- checks. The lab-request-groups suite (test/database, case B5) runs it,
+-- and so does database/tests/lab-request-group-probe.integration.sql,
+-- which the staging rehearsal runs with every database/tests suite (on
+-- its fresh build, the non-superuser owner's build and the restore).
 --
 -- PRECONDITIONS (section 0: catalog reads only, no locks; 55000 and
--- nothing applied):
+-- nothing applied). Nothing in section 0 prints a CHECK or a trigger:
+-- pg_get_constraintdef (and pg_get_triggerdef for a trigger with a WHEN
+-- clause) opens the table it prints for, so it would wait behind DDL on
+-- ehr.lab_requests or lab.work_items, with no NOWAIT and no busy refusal.
+-- What is compared by its printed form is compared under section 2's
+-- locks (section 2b, and section 6), as 0148's 1b and 0154's and 0159's
+-- section 3 do.
 -- - 0156's marker, and 0156 alone (7168672285, decision 3): its pair
 --   CHECKs lab_requests_test_code_pair_ck and work_items_test_code_pair_ck
---   (0156:614, :624), each printed CHECK (((test_code_system IS NULL) =
---   (test_code IS NULL))) (0156:797, :803) and validated, else "0158:
---   0001-0153 and 0156 must be applied first". 0156 validates both under
---   its own locks (0156:615, :625) and its post-check refuses otherwise
---   (0156:813). Above 0156's size bound 0156 refuses, nothing applied
---   (0156:600-605); the pair checks would then go in NOT VALID with a
---   follow-up file (0156:217-218), and this marker would require that
---   follow-up instead. 0154, 0155, 0157 and 0159 are not required.
+--   (0156:614, :624), validated, on test_code_system and test_code
+--   (section 0, by name, conkey and convalidated), and each printed CHECK
+--   (((test_code_system IS NULL) = (test_code IS NULL))) (0156:797, :803;
+--   section 2b, under the locks), else "0158: 0001-0153 and 0156 must be
+--   applied first". 0156 validates both under its own locks (0156:615,
+--   :625) and its post-check refuses otherwise (0156:813). Above 0156's
+--   size bound 0156 refuses, nothing applied (0156:600-605); the pair
+--   checks would then go in NOT VALID with a follow-up file
+--   (0156:217-218), and this marker would require that follow-up instead.
+--   0154, 0155, 0157 and 0159 are not required.
 -- - The pins, md5 of prosrc (a function missing at its signature is a
 --   mismatch): lab.validate_work_item_child() at
 --   9bc011f7583332dd3de12ce2a8e45753, as 0156:489 pins it. Why: its body
@@ -98,15 +109,22 @@
 --   current_account_id() b715ffe72856836d13ab16656fa6e94a and
 --   current_membership_id() 641989704fea95f885fbc38c6feb5aa5. The old body
 --   already calls them, so nothing new relies on them.
--- - One owner: the owner of ehr.lab_requests owns lab.work_items and both
---   validators (lab-session-guards' rule), and may create in ehr. The
---   applier is that owner, or inherits it and may SET ROLE to it (0148's
---   and 0154's rule); section 1 then acts as that owner, so the guard
---   function is the table owner's on every database.
+-- - One owner: the owner of ehr.lab_requests owns lab.work_items,
+--   ehr.order_routes (section 2 locks it, and section 5's compile opens it)
+--   and both validators (lab-session-guards' rule), and may create in ehr.
+--   The applier is that owner, or inherits it and may SET ROLE to it
+--   (0148's and 0154's rule); section 1 then acts as that owner, so the
+--   guard function is the table owner's on every database.
 -- - "0158: already applied" (0149:148) only when both columns, the guard
 --   trigger and function and the new validator are exactly as section 6
 --   pins them (Rahman's point 2: a trigger edited to carry WHEN (false)
---   is not "applied").
+--   is not "applied"). The trigger by its catalog fields, as 0152 pins its
+--   own (tgtype 19: BEFORE UPDATE FOR EACH ROW; tgattr request_group_id
+--   alone; no WHEN, tgqual null; no arguments; tgfoid the guard; enabled
+--   'O'; not a constraint trigger, no transition table), which is what its
+--   printed form carries for a BEFORE row trigger; section 6 compares the
+--   printed form under the locks. The guard's ACL exactly the owner's
+--   EXECUTE (an empty ACL is not "applied").
 -- - A first run needs none of this file's objects (no request_group_id
 --   column on either table, no trigger lab_requests_group_fixed, no
 --   function ehr.lab_request_group_fixed), and lab.validate_work_item() at
@@ -164,13 +182,23 @@
 -- - 0156 (built, e59d6e30) keeps the validator at efac1507 (0156:488) and
 --   post-checks it (0156:848); this file replaces it after 0156.
 -- - 0159 ORD-11 (built, #345 at 5857690e) pins lab.validate_work_item()
---   at efac1507 (0159:428), locks neither ehr.lab_requests nor
---   lab.work_items (0159:189-197, :206-209) and reads ehr.lab_requests by
---   id, never request_group_id (0159:136). It ships first, so this file
+--   at efac1507 (0159:428, its section 0f), locks neither ehr.lab_requests
+--   nor lab.work_items (0159:189-197, :206-209) and reads ehr.lab_requests
+--   by id, never request_group_id (0159:136). It ships first, so this file
 --   takes the later number, and a fresh install meets 0159's pin before
---   this file replaces the body: nothing moves. If this file ever ships
+--   this file replaces the body: 0159's file does not move. Its suite
+--   does: database/tests/order-notices.integration.sql takes 0159 away and
+--   runs it again (pg_temp.take_0159_away(), then :run0159, from case
+--   18b), and on a build that carries this file too every such run stops
+--   at 0159's 0f ("a function this migration relies on differs from
+--   0001-0154: lab.validate_work_item() md5 04504d00..."). At integration
+--   that suite gets what this branch gave 0156's suite
+--   (name-only-codes.integration.sql): this file taken back (the undo
+--   below, the two columns dropped too) inside a savepoint before its
+--   take-away cases, and restored after them. If this file ever ships
 --   before 0159, 0159's pin moves to this file's md5 (above) at
---   integration (7192223324); this file's own pin (efac1507) stays.
+--   integration (7192223324), and its suite then needs no such step; this
+--   file's own pin (efac1507) stays.
 -- - 0179 reads both tables and takes ACCESS EXCLUSIVE on lab.work_items for
 --   its whole file; it pins none of this file's objects and re-measures
 --   its pins and locks after 0156 and this file; this file pins no policy
@@ -199,7 +227,9 @@
 -- dry-run-attempts.mjs:9). ehr.lab_requests%rowtype (0086:9355) is covered
 -- by the ACCESS EXCLUSIVE. ACCESS SHARE on the routes blocks only DDL
 -- there. The validator and the guard are replaced and made after the
--- locks; the preconditions read the catalog only and take no table lock.
+-- locks; the preconditions read the catalog only and open no table (no
+-- CHECK or trigger is printed before section 2), so DDL held or queued on
+-- any of the three tables meets section 2's NOWAIT and its busy refusal.
 -- A busy table fails the attempt at once and its subtransaction releases
 -- what it took; the attempt is made again every 100 ms for at most 5
 -- seconds (50 attempts), then 55P03 "0158: ehr.lab_requests, lab.work_items
@@ -285,11 +315,15 @@
 -- Measured on throwaway PostgreSQL 16 on 0001-0153 and 0156 (e59d6e30's
 -- builds) with about 20,000 rows of fictional data in each of
 -- ehr.lab_requests, lab.work_items and ehr.order_routes (and 0156's other
--- three tables), analysed; ten runs with a superuser applier and ten with a
--- NOSUPERUSER NOBYPASSRLS applier that owns the tables:
--- - the hold, from section 2 to the end of COMMIT: 6.6-12.8 ms (median 7.6)
---   and 6.4-10.5 ms (median 7.6), under the 50 ms target (Rahman's run of
---   the DDL: 7.9-9.2 ms); the whole file 16-23 ms and 15-22 ms;
+-- three tables), analysed; ten runs with a superuser applier and twenty
+-- with a NOSUPERUSER NOBYPASSRLS applier that owns the tables, while
+-- another workload shared the machine:
+-- - the hold, from section 2 to the end of COMMIT: 7.7-10.7 ms (median 9.4)
+--   and 7.8-15.1 ms (median 8.8; one run of the twenty took 47.4 ms), under
+--   the 50 ms target (Rahman's run of the DDL: 7.9-9.2 ms). Section 2b adds
+--   about 1.5 ms: in the same runs this file without it held 6.5-8.0 ms
+--   (median 7.3) and 6.6-12.4 ms (median 7.3). The whole file 18-26 ms and
+--   17-58 ms;
 -- - pg_locks before commit, identical with both appliers: ACCESS EXCLUSIVE
 --   on ehr.lab_requests and lab.work_items (and, under it, CREATE
 --   TRIGGER's SHARE ROW EXCLUSIVE and the comments' SHARE UPDATE EXCLUSIVE
@@ -298,18 +332,19 @@
 --   pg_stat_xact_user_tables: no row inserted, updated or deleted and no
 --   scan of the three tables;
 -- - the dry-run window for this file alone, from section 2 to the end of the
---   rollback (the dry run's transaction, by psql): 5.8-22.1 ms (median 8.0)
---   and 5.3-9.6 ms (median 6.6); the runner's whole --dry-run command,
---   node's start and the plan included: 132-211 ms and 145-185 ms;
+--   rollback (the dry run's transaction, by psql): 7.7-12.0 ms (median 8.5)
+--   and 7.9-12.4 ms (median 8.4); the runner's whole --dry-run command,
+--   node's start and the plan included: 157-225 ms and 156-224 ms;
 -- - behind an open read of ehr.lab_requests or lab.work_items, DDL held on
---   ehr.order_routes, or SHARE UPDATE EXCLUSIVE (as an autovacuum or
---   ANALYZE) on ehr.lab_requests or lab.work_items, the file stops after
---   4.99-5.00 s with section 2's 55P03, nothing applied (both appliers);
---   with an earlier migration's lock held in the same transaction it stops
---   at once (21-36 ms) with the one-attempt text; the runner's dry run
---   retries it (attempt 1 busy, attempt 2 succeeded). An open read of
---   ehr.order_routes, or SHARE UPDATE EXCLUSIVE on it, does not stop the
---   file (29-36 ms);
+--   any of ehr.lab_requests, lab.work_items and ehr.order_routes, or SHARE
+--   UPDATE EXCLUSIVE (as an autovacuum or ANALYZE) on ehr.lab_requests or
+--   lab.work_items, the file stops after 4.99-5.00 s with section 2's
+--   55P03, nothing applied (both appliers); with an earlier migration's
+--   lock held in the same transaction it stops at once (22-27 ms) with the
+--   one-attempt text; the runner's dry run retries it (attempt 1 busy,
+--   attempt 2 succeeded), DDL held on either table included. An open read
+--   of ehr.order_routes, or SHARE UPDATE EXCLUSIVE on it, does not stop the
+--   file (31-39 ms);
 -- - a session that compiled plpgsql readers declared as the validators are
 --   (ehr.lab_requests%rowtype and lab.work_items%rowtype, select * into)
 --   before this file committed in another session reads both tables
@@ -319,6 +354,7 @@
 --
 -- 0. Preconditions (catalog reads only; 55000 and nothing applied).
 -- 1. Act as the tables' owner.   2. The locks.
+-- 2b. Under the locks: 0156's two CHECKs by their printed form (55000).
 -- 3. G1, the columns.            4. G2, the guard.
 -- 5. G3, the validator.          6. Post-checks (55000).
 -- 7. Comments.
@@ -334,15 +370,19 @@ declare
   guard_made boolean;
   validator_made boolean;
 begin
-  -- a. 0156's marker (0156 alone): both pair CHECKs, by name and printed definition, validated.
+  -- a. 0156's marker (0156 alone): both pair CHECKs, by name, validated, on test_code_system and test_code (catalog
+  -- only: printing a CHECK opens its table, so their printed definitions are compared under the locks, section 2b).
   if owner_oid is null or to_regclass('lab.work_items') is null
      or (select count(*) from pg_constraint constraint_row
           where constraint_row.contype = 'c' and constraint_row.convalidated
-            and (constraint_row.conrelid, constraint_row.conname, pg_get_constraintdef(constraint_row.oid)) in (
-                  ('ehr.lab_requests'::regclass, 'lab_requests_test_code_pair_ck',
-                   'CHECK (((test_code_system IS NULL) = (test_code IS NULL)))'),
-                  ('lab.work_items'::regclass, 'work_items_test_code_pair_ck',
-                   'CHECK (((test_code_system IS NULL) = (test_code IS NULL)))'))) <> 2 then
+            and (constraint_row.conrelid, constraint_row.conname) in (
+                  ('ehr.lab_requests'::regclass, 'lab_requests_test_code_pair_ck'),
+                  ('lab.work_items'::regclass, 'work_items_test_code_pair_ck'))
+            and (select array_agg(key_column.attnum order by key_column.attnum)
+                   from unnest(constraint_row.conkey) key_column(attnum))
+                = (select array_agg(attribute_row.attnum order by attribute_row.attnum) from pg_attribute attribute_row
+                    where attribute_row.attrelid = constraint_row.conrelid and not attribute_row.attisdropped
+                      and attribute_row.attname in ('test_code_system', 'test_code'))) <> 2 then
     raise exception using errcode = '55000', message = '0158: 0001-0153 and 0156 must be applied first';
   end if;
   -- b. The pins: the child validator (one test per work item) and the three readers the validator calls.
@@ -359,11 +399,14 @@ begin
   if mismatch is not null then
     raise exception using errcode = '55000', message = '0158: these functions are not as 0001-0156 left them: ' || mismatch;
   end if;
-  -- c. One owner: ehr.lab_requests' owns lab.work_items and both validators, and may create in ehr and use lab; the
-  -- applier is that owner, or inherits it and may SET ROLE to it.
+  -- c. One owner: ehr.lab_requests' owns lab.work_items, ehr.order_routes (section 2 locks it, section 5's compile
+  -- opens it) and both validators, and may create in ehr and use lab; the applier is that owner, or inherits it and
+  -- may SET ROLE to it.
   select string_agg(owned.what, ', ') into mismatch
     from (values ('lab.work_items', (select relation.relowner from pg_class relation
                                       where relation.oid = 'lab.work_items'::regclass)),
+                 ('ehr.order_routes', (select relation.relowner from pg_class relation
+                                        where relation.oid = to_regclass('ehr.order_routes'))),
                  ('lab.validate_work_item()', (select proc.proowner from pg_proc proc
                                                 where proc.oid = to_regprocedure('lab.validate_work_item()'))),
                  ('lab.validate_work_item_child()', (select proc.proowner from pg_proc proc
@@ -375,7 +418,7 @@ begin
      or not has_schema_privilege(owner_oid, 'lab', 'USAGE') then
     raise exception using errcode = '55000',
       message = format('0158: %s, the owner of ehr.lab_requests, must own %s and may create in schema ehr',
-        pg_get_userbyid(owner_oid), coalesce(mismatch, 'lab.work_items and both Lab validators'));
+        pg_get_userbyid(owner_oid), coalesce(mismatch, 'lab.work_items, ehr.order_routes and both Lab validators'));
   end if;
   if not (applier = owner_oid
           or (pg_has_role(applier, owner_oid, 'USAGE') and pg_has_role(applier, owner_oid, 'SET'))) then
@@ -383,7 +426,9 @@ begin
       message = format('0158: %s must own, or inherit from and be able to SET ROLE to, %s, the owner of '
         || 'ehr.lab_requests and lab.work_items', current_user, pg_get_userbyid(owner_oid));
   end if;
-  -- d. Already applied: everything exactly as section 6 pins it.
+  -- d. Already applied: everything exactly as section 6 pins it. The trigger by its catalog fields (printing it would
+  -- open ehr.lab_requests when it has a WHEN clause): 19 = 1 for each row + 2 before + 16 update; UPDATE OF
+  -- request_group_id alone; no WHEN, no arguments; the guard; enabled; not a constraint trigger, no transition table.
   columns_made := (select count(*) from pg_attribute attribute_row
                     where attribute_row.attrelid in ('ehr.lab_requests'::regclass, 'lab.work_items'::regclass)
                       and attribute_row.attname = 'request_group_id' and not attribute_row.attisdropped
@@ -395,9 +440,13 @@ begin
                       and trigger_row.tgname = 'lab_requests_group_fixed' and not trigger_row.tgisinternal
                       and trigger_row.tgenabled = 'O'
                       and trigger_row.tgfoid = to_regprocedure('ehr.lab_request_group_fixed()')
-                      and pg_get_triggerdef(trigger_row.oid) = 'CREATE TRIGGER lab_requests_group_fixed BEFORE UPDATE '
-                        || 'OF request_group_id ON ehr.lab_requests FOR EACH ROW EXECUTE FUNCTION '
-                        || 'ehr.lab_request_group_fixed()') = 1;
+                      and trigger_row.tgtype = 19 and trigger_row.tgqual is null and trigger_row.tgnargs = 0
+                      and trigger_row.tgconstraint = 0 and trigger_row.tgoldtable is null
+                      and trigger_row.tgnewtable is null
+                      and trigger_row.tgattr = (select attribute_row.attnum::text::int2vector from pg_attribute attribute_row
+                                                 where attribute_row.attrelid = 'ehr.lab_requests'::regclass
+                                                   and attribute_row.attname = 'request_group_id'
+                                                   and not attribute_row.attisdropped)) = 1;
   guard_made := exists (select 1 from pg_proc proc
                          where proc.oid = to_regprocedure('ehr.lab_request_group_fixed()')
                            and md5(proc.prosrc) = '58e4b93e313cf07a38ee57f5a10fa5bb'
@@ -406,8 +455,10 @@ begin
                            and proc.prorettype = 'trigger'::regtype and proc.provolatile = 'v'
                            and proc.prolang = (select language_row.oid from pg_language language_row
                                                 where language_row.lanname = 'plpgsql')
-                           and proc.proacl is not null
-                           and not exists (select 1 from aclexplode(proc.proacl) acl where acl.grantee <> proc.proowner));
+                           and (select array_agg(format('%s:%s:%s', case acl.grantee when proc.proowner then 'owner'
+                                                                     else acl.grantee::regrole::text end,
+                                                         acl.privilege_type, acl.is_grantable::text))
+                                  from aclexplode(proc.proacl) acl) = array['owner:EXECUTE:false']);
   validator_made := exists (select 1 from pg_proc proc
                              where proc.oid = 'lab.validate_work_item()'::regprocedure
                                and md5(proc.prosrc) = '04504d00ebd8940a8178ce35343f4f8c'
@@ -502,6 +553,27 @@ begin
   end loop;
 end
 $locks$;
+
+-- 2b. Under the locks: 0156's two pair CHECKs by their printed definitions (pg_get_constraintdef opens the table it
+-- prints for; both are held by section 2), else 55000 and nothing applied. The names let the catalog's index find the
+-- two rows, and the CASE prints only these two whatever plan is chosen (section 6 likewise).
+do $$
+begin
+  if (select count(*) from pg_constraint constraint_row
+       where constraint_row.contype = 'c' and constraint_row.convalidated
+         and (constraint_row.conrelid, constraint_row.conname) in (
+               ('ehr.lab_requests'::regclass, 'lab_requests_test_code_pair_ck'),
+               ('lab.work_items'::regclass, 'work_items_test_code_pair_ck'))
+         and case when (constraint_row.conrelid, constraint_row.conname) in (
+                         ('ehr.lab_requests'::regclass, 'lab_requests_test_code_pair_ck'),
+                         ('lab.work_items'::regclass, 'work_items_test_code_pair_ck'))
+                  then pg_get_constraintdef(constraint_row.oid)
+                       = 'CHECK (((test_code_system IS NULL) = (test_code IS NULL)))'
+                  else false end) <> 2 then
+    raise exception using errcode = '55000', message = '0158: 0001-0153 and 0156 must be applied first';
+  end if;
+end
+$$;
 
 -- 3. G1: the group on both tables (catalog only: no default, rewrite or backfill).
 alter table ehr.lab_requests add column request_group_id uuid null;
@@ -627,7 +699,8 @@ begin
            || 'request_group_id ON ehr.lab_requests FOR EACH ROW EXECUTE FUNCTION ehr.lab_request_group_fixed()') <> 1 then
     raise exception using errcode = '55000', message = '0158: the trigger lab_requests_group_fixed is not as made';
   end if;
-  -- The guard function: body, owner, invoker, search_path, and EXECUTE for the owner only (no PUBLIC).
+  -- The guard function: body, owner, invoker, search_path, and an ACL of exactly the owner's EXECUTE (no PUBLIC, and
+  -- not an empty ACL).
   if not exists (select 1 from pg_proc proc
                   where proc.oid = 'ehr.lab_request_group_fixed()'::regprocedure
                     and md5(proc.prosrc) = '58e4b93e313cf07a38ee57f5a10fa5bb'
@@ -636,8 +709,10 @@ begin
                     and proc.prorettype = 'trigger'::regtype and proc.provolatile = 'v'
                     and proc.prolang = (select language_row.oid from pg_language language_row
                                          where language_row.lanname = 'plpgsql')
-                    and proc.proacl is not null
-                    and not exists (select 1 from aclexplode(proc.proacl) acl where acl.grantee <> proc.proowner)) then
+                    and (select array_agg(format('%s:%s:%s', case acl.grantee when proc.proowner then 'owner'
+                                                              else acl.grantee::regrole::text end,
+                                                  acl.privilege_type, acl.is_grantable::text))
+                           from aclexplode(proc.proacl) acl) = array['owner:EXECUTE:false']) then
     raise exception using errcode = '55000', message = '0158: ehr.lab_request_group_fixed() is not as made';
   end if;
   -- The validator: body, owner, definer, search_path, VOLATILE (lab-session-guards.integration.sql:44-57), and its
@@ -673,11 +748,15 @@ begin
   end if;
   if (select count(*) from pg_constraint constraint_row
        where constraint_row.contype = 'c' and constraint_row.convalidated
-         and (constraint_row.conrelid, constraint_row.conname, pg_get_constraintdef(constraint_row.oid)) in (
-               ('ehr.lab_requests'::regclass, 'lab_requests_test_code_pair_ck',
-                'CHECK (((test_code_system IS NULL) = (test_code IS NULL)))'),
-               ('lab.work_items'::regclass, 'work_items_test_code_pair_ck',
-                'CHECK (((test_code_system IS NULL) = (test_code IS NULL)))'))) <> 2 then
+         and (constraint_row.conrelid, constraint_row.conname) in (
+               ('ehr.lab_requests'::regclass, 'lab_requests_test_code_pair_ck'),
+               ('lab.work_items'::regclass, 'work_items_test_code_pair_ck'))
+         and case when (constraint_row.conrelid, constraint_row.conname) in (
+                         ('ehr.lab_requests'::regclass, 'lab_requests_test_code_pair_ck'),
+                         ('lab.work_items'::regclass, 'work_items_test_code_pair_ck'))
+                  then pg_get_constraintdef(constraint_row.oid)
+                       = 'CHECK (((test_code_system IS NULL) = (test_code IS NULL)))'
+                  else false end) <> 2 then
     raise exception using errcode = '55000', message = '0158: 0156''s pair CHECKs changed';
   end if;
 end
