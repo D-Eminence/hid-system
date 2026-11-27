@@ -1919,6 +1919,65 @@ file.
     COMMIT, the loader still ends with exit 1 and "nothing loaded" and
     leaves nothing, and the same load then loads.
 
+### Lab requests by name only (F3; 0156, draft, not live)
+
+Built on 27 Nov 2026 (lane D) as Ola's design note on hid-system#258
+(7192389223, with Rahman's reviews 7167521757 and 7167526411) sets out,
+together with ORD-9's diagnoses by name only. 0156's database part, its
+release, the "one way once used" rule and its undo are in ORD-9's
+"Second slice, second part" below; this part is the lab request's.
+
+- **Setting:** `LAB_REQUEST_NAME_ONLY_ENABLED` in ehr-api, off by default.
+  Off, the lab request routes are exactly as today: a request with no code
+  gets today's `400 VALIDATION_FAILED`, word for word. The catalogue
+  status's `labTestNameOnly` is this setting.
+- **It stays off until 0155's sensitive-test list build is live.** A test
+  with no code is hidden from the patient's record chat by its name alone,
+  and today's list lets dotted initials (R.V.S., V.D.R.L., H.C.V.) and the
+  HIV rapid-test kit names through. That build ships in 0155's PR and
+  images (Ola's note, "Privacy gate for facility lab tests"); 0156 does
+  not change the list.
+- **On:** `POST .../encounters/:encounterId/lab-requests` takes
+  `testCodeSystem` and `testCode` as optional, both or neither.
+  - One without the other is `400 LAB_TEST_CODE_INCOMPLETE` ("Test code and
+    its code system must be supplied together."). `null` or empty text is
+    `400 VALIDATION_FAILED`, as for every optional field. `testDisplay` is
+    still required (1-500).
+  - A request by name only is saved with both codes null, and every lab
+    request answer (list, read, create, update, replay, the chart summary's
+    open requests) gives `"testCodeSystem": null, "testCode": null`.
+  - A coded request is checked, saved and sent as before, and keeps its
+    Idempotency-Key digest, so a retry across the switch replays.
+- **Sending it to this facility's lab** (on create, on activate or resume,
+  and `POST .../:requestId/lab-work-item`) carries both codes as null.
+  lab-api's `AcceptEhrOrderDto` takes the pair both or neither from 0156's
+  image on: both null (or left out) is accepted, and one without the other
+  is `400 VALIDATION_FAILED` on the missing one. The work item and its
+  requested test keep both null, and lab-api's answers (an execution, its
+  replayed start, the released results by order) give `test: { codeSystem:
+  null, code: null, name }`. A lab-api image before 0156 refuses a null pair
+  (`400`); ehr-api answers that as `409 LAB_HANDOFF_REFUSED`, naming the
+  saved request. So lab-api must be at 0156's image before the setting goes
+  on, and stays there after (ORD-9, "One way once used").
+- **Sending it to another facility's lab** (order routes) carries the nulls
+  through every step; 0156's database suite follows a name-only request
+  through each one. The route mapping already typed the codes as nullable.
+- **Billing:** a name-only test gets no automatic bill line and no "Not on
+  the price list" row (Billing's lab work item trigger skips a null pair,
+  `0167:300` at #336 `f804c9e8`); the cashier adds it by hand.
+- **`@hid/api-client`:** `LabAcceptEhrOrderInput` types the order ehr-api
+  sends Lab, with `testCodeSystem` and `testCode` as `string | null`.
+- **Where this differs from the plan above:**
+  - The plan sets the setting "in ehr-api and lab-api together". lab-api has
+    no setting: from 0156's image it takes a pair that is both or neither,
+    whatever ehr-api's setting, so the switch is in one place. The only
+    source of a null pair is ehr-api with its setting on.
+  - Six tables, not two (ORD-9's part below).
+- **Checks:** ehr-api's `name-only-codes.spec.ts` (the settings, the body
+  checks off and on, the three create routes over HTTP),
+  `lab-requests.name-only.spec.ts` and the chart summary's case; lab-api's
+  `name-only-tests.spec.ts`.
+
 ### Target
 
 Release B (number given at merge).
@@ -2027,7 +2086,9 @@ facility, newest first. `limit` is 1-50, default 20.
 - Picks are kept as saved across an ICD-11 release switch: a code the new
   release dropped, or an old title, is still offered, with nothing marking
   it, until the `codeStatus` slice changes the read (the second slice,
-  below, "Across an ICD-11 release switch").
+  below, "Across an ICD-11 release switch"). 0156 changes it: an ICD-11
+  pick then comes back with the active release's title, and a dropped code
+  is left out (the second slice's second part, below).
 - The read is audited as `ehr.terminology.recent-read` with the count only.
 - Favourites are ORD-8 (Release C).
 
@@ -2113,7 +2174,8 @@ facility, newest first. `limit` is 1-50, default 20.
   - Show the recent list when the field is empty, each pick's `display` as
     saved. After a release switch, until the `codeStatus` slice, that can
     be a dropped code or an old title, shown as saved with nothing marking
-    it.
+    it. From 0156 an ICD-11 pick comes with the active release's title and
+    a dropped code is not offered.
   - Show `display` exactly as given (WHO's licence does not allow changing
     the title). Show `matchedName` in grey, as "matched falciparum malaria".
   - When `typedIcd10` is present, offer "Use ICD-10 code B50.9". Then the
@@ -2366,7 +2428,10 @@ live table is altered.
   `codeStatus` is built). Meanwhile the screen shows each pick's
   `display` as saved, the old title included. 0153 is not changed for
   this.
-  - **Booked:** the `codeStatus` slice, which alters `ehr.diagnoses`
+  - **Booked, and built in 0156** (draft, not live; "Across an ICD-11
+    release switch" in the second slice's second part, below: the current
+    title, a dropped code left out, no in-list flag). The booking: the
+    `codeStatus` slice, which alters `ehr.diagnoses`
     anyway, replaces the read, `ehr.recent_diagnoses`, so that it returns
     the active release's current title, with an in-list flag, or leaves
     dropped codes out, and the database suite gains a case for a release
@@ -2395,7 +2460,135 @@ live table is altered.
   0153 changes for another reason (0153 is cleared to sign at sha256
   `45faa6a7…`).
 - **Not in this slice:** diagnoses by name only and `codeStatus` (with
-  the recent read's change for a release switch, above).
+  the recent read's change for a release switch, above): 0156, the next
+  part.
+
+### Second slice, second part: diagnoses and lab tests by name only, and `codeStatus` (0156, draft, not live)
+
+Built on 27 Nov 2026 (lane D) as Ola's design note on hid-system#258
+(7192389223, with Rahman's reviews 7167521757 and 7167526411) sets out.
+The number 0156 is a booking, given in release order at integration. 0156
+needs only 0152's and 0153's objects (not 0155), and goes out alone, never
+with 0154, 0155 or any other file. ORD-7's "Lab requests by name only"
+above is the lab request's part.
+
+- **Database (0156):**
+  - Six live tables carry a test's or a diagnosis's code pair. Each pair may
+    now be empty, both codes or neither; the name stays required:
+    `ehr.lab_requests`, `ehr.diagnoses`, `lab.work_items`,
+    `lab.work_item_requested_tests` and `lab.order_route_result_reports`
+    lose NOT NULL on the pair (ten columns) and gain a both-or-neither CHECK,
+    validated in the file; `ehr.order_routes`' pair was nullable already,
+    and `order_routes_kind_ck` now asks a lab request route for its name
+    and both codes or neither.
+  - The six are locked in one NOWAIT step with both busy refusals, each
+    starting "0156: ", which a dry run tries again. While they are held,
+    every read and write of the six waits, and so does nearly all lab-api
+    work (35 policies on 16 lab tables join `lab.work_items`). The hold was
+    34-52 ms with 20,000 fictional rows in each table.
+  - The file refuses (55000) while any of the six has `pg_class.reltuples`
+    above 5,000,000, or -1 (never analysed) with a page on disk. Above the
+    bound the checks would go in NOT VALID with a follow-up file. It has no
+    DML and reads no row as the migrator; its post-check reads
+    `pg_stat_xact_user_tables` (no row inserted, updated or deleted).
+  - New: `ehr.catalog_diagnosis_listed(code_system, code)` for
+    `codeStatus` (no runtime may read `ehr.catalog_diagnoses`). It answers
+    only for `ICD-11`: true or false against the active release, on the
+    first code of a post-coordinated one; null while no release is active
+    and for any other code system. SECURITY DEFINER, STABLE; EXECUTE to the
+    EHR and schema test runtimes, also in `runtime-grants.sql`.
+  - `ehr.recent_diagnoses` is replaced with the same columns (below).
+  - The 24 functions that copy, compare or read the pairs, or run as
+    triggers on the six, are pinned by md5; each already passes a null pair
+    through.
+- **Settings (ehr-api), both off by default.** Off, the routes are exactly
+  as today.
+  - `DIAGNOSIS_NAME_ONLY_ENABLED`: diagnoses by name only and `codeStatus`
+    (this section).
+  - `LAB_REQUEST_NAME_ONLY_ENABLED`: lab requests by name only (ORD-7). It
+    stays off until 0155's sensitive-test list build is live.
+  - The catalogue status's `diagnosisNameOnly` and `labTestNameOnly` are the
+    two settings, so the website offers "Use '<typed text>' as written" only
+    to a backend that takes it.
+- **Diagnoses, with `DIAGNOSIS_NAME_ONLY_ENABLED` on:**
+  - `POST .../diagnoses` and the EHR-C5 consultation's diagnoses take
+    `codeSystem` and `code` as optional, both or neither. One without the
+    other is `400 DIAGNOSIS_CODE_INCOMPLETE` ("Diagnosis code and its code
+    system must be supplied together."); in a consultation its `errors`
+    name the first such diagnosis (`diagnoses.<index>`, from 0), and
+    nothing is saved. `null` or empty text is `400 VALIDATION_FAILED`.
+    `display` is still required (1-500).
+  - A diagnosis by name only is saved with both codes null, and every
+    diagnosis answer (and EHR-C4's `problems`) gives `"codeSystem": null,
+    "code": null`. It is not a recent pick.
+  - Each create answer carries `codeStatus` (the route's, each diagnosis of
+    a consultation, and a replay's):
+    - `no_code`: saved by name only;
+    - `not_checked`: any code system other than `ICD-11` exactly (ICD-10
+      typed codes included), with no lookup; or an `ICD-11` code while no
+      release is active;
+    - `in_list` or `not_in_list`: an `ICD-11` code found or not found in
+      the active release, by `ehr.catalog_diagnosis_listed` on its first
+      code (the text before the first `&` or `/`, spaces at its ends taken
+      off). The diagnosis is saved either way, with the code as typed.
+  - The lookup runs in a savepoint in the save's transaction. If it fails
+    (a schema without 0156, a timeout, anything else), the diagnosis is
+    saved and the answer says `not_checked`, with a warning naming the
+    SQLSTATE and the correlation id only. A serialization failure in a
+    SERIALIZABLE transaction is passed on, as for the recent record.
+  - Off, a create answer has no `codeStatus`.
+- **Across an ICD-11 release switch (the booking above, built):**
+  `ehr.recent_diagnoses` keeps its columns, so `create or replace` keeps its
+  owner and grants; it restates SECURITY DEFINER, its `search_path` and
+  STABLE, and the file checks `provolatile`.
+  - While no diagnosis release is active (production today), every pick
+    comes back as saved.
+  - While one is active, an `ICD-11` pick is looked up in that release
+    through its key (version, code): it comes back with the release's
+    current title, and a code the release does not hold (dropped, or never
+    in it) is left out. A post-coordinated pick is matched on its first code
+    and keeps its saved display. Every other pick (ICD-10 or any other code
+    system) comes back as saved. The limit counts after picks are left out.
+  - There is no in-list flag: a dropped code is left out instead, so the
+    columns stay the same.
+  - It ships before any second ICD-11 release is loaded.
+- **One way once used.** The first time either setting goes on in
+  production is recorded, with the time, on hid-system#258 and in the next
+  declaration. After it, lab-api stays at or above 0156's image: an
+  earlier lab-api refuses a null pair (`AcceptEhrOrderDto`). An earlier
+  ehr-api and the earlier website read the nulls safely (Rahman's check).
+  The fallback is to turn the settings off; rows already saved by name only
+  keep their nulls.
+- **Release (0156 alone):**
+  1. The release runbook runs ANALYZE on the six tables in production
+     before the dry run: autovacuum may never have analysed a small table,
+     which leaves `reltuples` at -1, and the file then refuses. ANALYZE takes
+     SHARE UPDATE EXCLUSIVE, which no read or write waits for.
+  2. 0156's dry run and apply, alone.
+  3. ehr-api and lab-api at 0156's images, both settings off.
+  4. The website.
+  5. The settings on, with the time recorded (`LAB_REQUEST_NAME_ONLY_ENABLED`
+     only once 0155's sensitive-test list build is live).
+- **Undo, only before any null is saved** (owner-signed; 0156's header):
+  for each of the ten columns, a `CHECK (col IS NOT NULL) NOT VALID` added
+  and committed under a brief NOWAIT lock, then validated in its own
+  transaction; then the main transaction (the six tables' NOWAIT step and
+  both refusals) sets NOT NULL without a scan, drops those checks and the
+  five pair checks, puts back `order_routes_kind_ck` and 0153's read, and
+  drops `ehr.catalog_diagnosis_listed` with its grants.
+- **Where this differs from the plan above:** the plan's two tables
+  (`ehr.diagnoses` here, `ehr.lab_requests` and `lab.work_items` in ORD-7)
+  are six; the recent read leaves a dropped code out rather than adding an
+  in-list flag; `codeStatus` is `not_checked` also while no release is
+  active (the function answers null then); and only `ICD-11` exactly is
+  looked up.
+- **Not in this slice:** the sensitive-test list (0155's PR and images),
+  facility items (0155) and the website's screens.
+- **Checks:** the database suites `name-only-codes` (69 cases) and
+  `diagnosis-release-switch` (21), on a superuser and a NOSUPERUSER
+  NOBYPASSRLS owner; ehr-api's `diagnoses.name-only.spec.ts` (`codeStatus`,
+  the lookup's failures, the replay, a name-only diagnosis in the patient's
+  record chat), `name-only-codes.spec.ts` and the consultation's case.
 
 
 ### Target

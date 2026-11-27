@@ -7848,13 +7848,13 @@ VALIDATION_FAILED` (`services/ehr-api/src/common/validation.ts:3-9`,
 ### R-1. Diagnoses: "ICD-10" and dotted codes
 
 `POST /api/v1/ehr/patients/:patientId/encounters/:encounterId/diagnoses`
-(`diagnoses.controller.ts:8,27`).
+(`diagnoses.controller.ts:9,34`).
 
 | Field | Required today | What is accepted | Source |
 | --- | --- | --- | --- |
-| `codeSystem` | Yes | Any text, 1 to 255 characters. There is no list and nothing checks it. `ICD-10` is stored exactly as sent. | `clinical.dto.ts:299-302`, `0004:180` |
-| `code` | Yes | Any text, 1 to 100 characters. There is no pattern, so dotted codes such as `B50.9`, `O14.9` and plain ones such as `B54` are accepted. | `clinical.dto.ts:304-307`, `0004:181` |
-| `display` | Yes | Any text, 1 to 500 characters. | `clinical.dto.ts:309-312`, `0004:182` |
+| `codeSystem` | Yes | Any text, 1 to 255 characters. There is no list and nothing checks it. `ICD-10` is stored exactly as sent. | `clinical.dto.ts:333-336`, `0004:180` |
+| `code` | Yes | Any text, 1 to 100 characters. There is no pattern, so dotted codes such as `B50.9`, `O14.9` and plain ones such as `B54` are accepted. | `clinical.dto.ts:338-341`, `0004:181` |
+| `display` | Yes | Any text, 1 to 500 characters. | `clinical.dto.ts:305-308`, `0004:182` |
 
 - **Yes:** code system `ICD-10` exactly as written, and WHO codes with a dot,
   are accepted.
@@ -7862,6 +7862,11 @@ VALIDATION_FAILED` (`services/ehr-api/src/common/validation.ts:3-9`,
   VALIDATION_FAILED`, and the column is `NOT NULL` (`0004:181`). Free text is
   allowed for the name only. Until this changes, the screen should ask for a
   code, or say the diagnosis cannot be saved without one.
+- **Planned (0156, draft, not live):** with 0156 and its ehr-api, while
+  `DIAGNOSIS_NAME_ONLY_ENABLED` is on (off by default), a diagnosis may be
+  saved by its name only, with `codeSystem` and `code` both left out, and
+  the create answer carries `codeStatus` (`EHR_PLANNED_CONTRACT.md`, ORD-9,
+  "Second slice, second part"). Off, everything above holds.
 - Send the code system as `ICD-10` (or `ICD-11` with an ICD-11 code). The
   patient's own record chat leaves out sensitive diagnoses by code only when
   the code system contains "ICD"; it also checks the name, whatever the code
@@ -7931,7 +7936,7 @@ VALIDATION_FAILED` (`services/ehr-api/src/common/validation.ts:3-9`,
   ("other specified") category. The name check hides "hypomania" and
   "hypomanic" instead.
 - The code and code system cannot be changed after saving
-  (`UpdateDiagnosisDto`, `clinical.dto.ts:335-353`, has no code fields). A
+  (`UpdateDiagnosisDto`, `clinical.dto.ts:369-387`, has no code fields). A
   wrong code is corrected by marking the diagnosis entered in error and
   saving a new one.
 - **Planned (number given at merge, after Release B):** ICD terminology search, and a diagnosis
@@ -7942,17 +7947,17 @@ VALIDATION_FAILED` (`services/ehr-api/src/common/validation.ts:3-9`,
 ### R-2. Lab tests: "LOINC", and local codes for tests without one
 
 `POST /api/v1/ehr/patients/:patientId/encounters/:encounterId/lab-requests`
-(`lab-requests.controller.ts:14,41`).
+(`lab-requests.controller.ts:15,47`).
 
 | Field | Required today | What is accepted | Source |
 | --- | --- | --- | --- |
-| `testCodeSystem` | Yes | Any text, 1 to 255 characters. No list; nothing checks it. | `clinical.dto.ts:562-565`, `0004:242` |
-| `testCode` | Yes | Any text, 1 to 100 characters. No pattern. | `clinical.dto.ts:567-570`, `0004:243` |
-| `testDisplay` | Yes | Any text, 1 to 500 characters. | `clinical.dto.ts:572-575`, `0004:244` |
-| `specimenTypeCode` | No | Any text up to 100 characters. | `clinical.dto.ts:584-588`, `0004:247` |
+| `testCodeSystem` | Yes | Any text, 1 to 255 characters. No list; nothing checks it. | `clinical.dto.ts:635-638`, `0004:242` |
+| `testCode` | Yes | Any text, 1 to 100 characters. No pattern. | `clinical.dto.ts:640-643`, `0004:243` |
+| `testDisplay` | Yes | Any text, 1 to 500 characters. | `clinical.dto.ts:602-605`, `0004:244` |
+| `specimenTypeCode` | No | Any text up to 100 characters. | `clinical.dto.ts:614-618`, `0004:247` |
 
 When the request is sent to the facility's own lab, Lab takes the same
-lengths (`services/lab-api/src/lab/dto/accept-ehr-order.dto.ts:15-17`,
+lengths (`services/lab-api/src/lab/dto/accept-ehr-order.dto.ts:22-24`,
 `0018:27-29`), so every request EHR saves can be sent.
 
 - **Yes:** `LOINC` is accepted as the test code system (as text, like any
@@ -7961,6 +7966,12 @@ lengths (`services/lab-api/src/lab/dto/accept-ehr-order.dto.ts:15-17`,
   `400 VALIDATION_FAILED`, and the column is `NOT NULL` (`0004:243`). So the
   13 tests the screen fills by name only are refused unless the clinician
   types a code.
+- **Planned (0156, draft, not live):** with 0156 and its ehr-api and
+  lab-api, while `LAB_REQUEST_NAME_ONLY_ENABLED` is on (off by default, and
+  kept off until 0155's sensitive-test list build is live), a request may
+  be saved and sent to Lab by its name only, with `testCodeSystem` and
+  `testCode` both left out (`EHR_PLANNED_CONTRACT.md`, ORD-7, "Lab requests
+  by name only"). Off, everything above holds.
 - **Answer for tests with no LOINC code: use the local code system
   `HID-LAB`.** Send `testCodeSystem: "HID-LAB"`, the code from the table as
   `testCode`, and the name from the table as `testDisplay`. The codes are
@@ -8010,13 +8021,13 @@ note names three of them (malaria smear, Widal, genotype).
 
 | Field | Required today | What is accepted | Source |
 | --- | --- | --- | --- |
-| `medicationDisplay` | Yes | Any text, 1 to 500 characters. | `clinical.dto.ts:368-371`, `0004:211` |
-| `medicationCodeSystem` | No | Any text up to 255 characters. | `clinical.dto.ts:356-360`, `0004:209` |
-| `medicationCode` | No | Any text up to 100 characters. | `clinical.dto.ts:362-366`, `0004:210` |
-| `routeCode` | No | Any text up to 100 characters. There is no code list. | `clinical.dto.ts:384-388`, `0004:214` |
-| `frequency` | Yes | Free text, 1 to 240 characters. | `clinical.dto.ts:390-393`, `0004:215` |
-| `doseUnit` | No | Any text, 1 to 80 characters. | `clinical.dto.ts:378-382` |
-| `instructions` | Yes | Free text, 1 to 4000 characters. | `clinical.dto.ts:395-398` |
+| `medicationDisplay` | Yes | Any text, 1 to 500 characters. | `clinical.dto.ts:402-405`, `0004:211` |
+| `medicationCodeSystem` | No | Any text up to 255 characters. | `clinical.dto.ts:390-394`, `0004:209` |
+| `medicationCode` | No | Any text up to 100 characters. | `clinical.dto.ts:396-400`, `0004:210` |
+| `routeCode` | No | Any text up to 100 characters. There is no code list. | `clinical.dto.ts:418-422`, `0004:214` |
+| `frequency` | Yes | Free text, 1 to 240 characters. | `clinical.dto.ts:424-427`, `0004:215` |
+| `doseUnit` | No | Any text, 1 to 80 characters. | `clinical.dto.ts:412-416` |
+| `instructions` | Yes | Free text, 1 to 4000 characters. | `clinical.dto.ts:429-432` |
 
 - **`routeCode` takes plain words** such as "oral", "intravenous" or
   "intramuscular", up to 100 characters. No HL7 or SNOMED CT route list is
@@ -8034,7 +8045,7 @@ note names three of them (malaria smear, Widal, genotype).
   `0023:63-64,68`). Such a prescription could not be sent.
 - The medicine and route cannot be changed after saving. An update changes
   only status, frequency (1 to 240), instructions and end date
-  (`UpdatePrescriptionDto`, `clinical.dto.ts:499-530`).
+  (`UpdatePrescriptionDto`, `clinical.dto.ts:533-564`).
 - **Planned (ORD-7, Release B):** formulary search from the catalogue.
 
 ### R-4. Rate limits on the pages the drawers re-read
