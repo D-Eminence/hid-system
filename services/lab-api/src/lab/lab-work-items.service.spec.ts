@@ -346,8 +346,8 @@ describe('LabWorkItemsService.list order: open work first', () => {
     expect(workListValues).toEqual([[facilityId, '2026-08-22']]);
     expect(answer.since).toBe('2026-08-22');
     expect(Object.keys(answer.items[0]!)).toEqual(['id', 'patientId', 'facilityId', 'sourceEhrOrderVersion', 'status',
-      'priority', 'acceptedAt', 'version', 'sourceEhrOrderId', 'testName', 'accessionId', 'accessionNumber', 'specimenStatuses',
-      'openWork', 'clinicalIndication']);
+      'priority', 'acceptedAt', 'version', 'sourceEhrOrderId', 'requestGroupId', 'testName', 'accessionId', 'accessionNumber',
+      'specimenStatuses', 'openWork', 'clinicalIndication']);
     expect(Object.keys(answer)).toEqual(['items', 'since', 'crossFacilityOrders', 'crossFacilityWork']);
     // Same-facility rows name no patient on the list, as before: no audit row.
     expect(audit.recordWithClient).not.toHaveBeenCalled();
