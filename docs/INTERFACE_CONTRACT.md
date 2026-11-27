@@ -7190,7 +7190,8 @@ and the audit row; `403 PERMISSION_DENIED` without
 Akos P1-8, read part. The account menu's "My profile" for staff. Changing a
 password while signed in (SX-6), preferences and home shortcuts (SX-7) come
 later; until then `canChange` answers `false` for each, and the screen shows
-no edit control.
+no edit control. `canChange.preferences` is `true` exactly while SX-7's
+`STAFF_PREFERENCES_ENABLED` is on (0206; see "SX-7" below).
 
 | Route (under `/api/v1`) | Who | Answer |
 | --- | --- | --- |
@@ -12423,3 +12424,222 @@ when `dateOfBirthEstimated`, and "NIN Not Verified". On `sent_for_review`
 show the message and nobody else's details. After `identified`, offer
 "Verify NIN" (ID-6). Never show `firstName`/`lastName` of a record whose
 `recordKind` is `unknown`.
+
+## SX-7. Staff language and Home shortcuts (migration 0206, provisional; not live until signed)
+
+Akos P1-8 (language) and the Home shortcuts raised after the review. The
+planned contract's "SX-7" is the spec; this section is what is built, with the
+corrections of the design note on hid-system#258 (comment 7192268473):
+
+- the audit actions are `auth.staff-preferences.read` and
+  `auth.staff-preferences.update` (not `identity.*`): a staff audit row with no
+  facility must be an `auth.` action on `session` (the audit CHECKs
+  `audit_actor_facility_ck` and `events_check4`), and these routes answer a
+  platform administrator with no facility;
+- shortcut keys are SX-1's module keys (section "SX-1: modules map per
+  facility"), for example `patients` and `lab`, never `find-patient` or
+  `lab-queue`; the set grows with each department and is accepted with no
+  change here;
+- `VERSION_CONFLICT` is `412` (Identity's convention), not `409`;
+- the routes answer `404` while the setting is off;
+- the notice choices are not stored yet: `notices.served` is `false`, and a
+  save that sends `notices` is refused (they come with ORD-11);
+- a saved shortcut the member's roles no longer show is kept and may be sent
+  again; only a key not saved before must be allowed now.
+
+The language is English only (the owner's default "Staff language is English
+only for now"); P2-2 adds others.
+
+### Setting
+
+`STAFF_PREFERENCES_ENABLED` (Identity; `true` or `false`, default `false`; any
+other value, an empty one included, refuses to boot). While it is `false` the
+three routes below answer a plain `404` before any guard (as an Identity
+without them), and SX-5's `canChange.preferences` is `false`. While it is
+`true`, `canChange.preferences` is `true`, and Identity starts only on a
+definite answer that its runtime may execute each of 0206's three functions
+(`identity.read_my_staff_preferences()`,
+`identity.save_my_staff_preferences(text,bigint,text,text)`,
+`identity.save_my_staff_shortcuts(text[],bigint,text,text)`), so a deploy made
+before 0206 or its grants rolls back. A start-up read that fails is tried 5
+times, 2 seconds apart; with still no answer Identity refuses to start.
+
+### Routes
+
+All under `/api/v1`, for any staff session, by bearer or cookie (a cookie POST
+needs the Origin and CSRF checks). No permission: these are the caller's own
+settings. A patient session: `403 PATIENT_SCOPE_DENIED`. An outreach
+account-only session: `403 NO_ACTIVE_FACILITY_MEMBERSHIP`. No sign-in: `401
+AUTHENTICATION_REQUIRED`.
+
+| Method and path | Who | Facility |
+|---|---|---|
+| `GET /identity/me/preferences` | Any staff session, a platform administrator with no membership included. | `X-Facility-ID` optional. When sent it must be one of the caller's facilities (`403 FACILITY_ACCESS_DENIED`), and the answer adds that membership's shortcuts. |
+| `POST /identity/me/preferences` | The same. Saves the language for the person (every facility). | The same. |
+| `POST /identity/me/shortcuts` | A staff session at the `X-Facility-ID` facility. Saves that membership's shortcuts. | Required: `400 FACILITY_REQUIRED` without it, `403 FACILITY_ACCESS_DENIED` for a facility the caller is not active at. |
+
+When a person holds two memberships at one facility, the one the session
+resolves first for that facility is the one whose shortcuts are read and saved
+(as for every other facility route).
+
+### Read answer
+
+```json
+{ "version": 2, "language": "en", "languagesAvailable": ["en"],
+  "notices": { "served": false, "labResultReady": true, "prescriptionDispensed": true,
+               "criticalResult": true, "criticalResultCanChange": false },
+  "shortcuts": { "facilityId": "uuid", "version": 5, "max": 12,
+                 "items": [ { "module": "patients", "available": true },
+                            { "module": "lab", "available": false } ] } }
+```
+
+- `version` is the person's preferences version: `0` until the first save.
+  `language` is `en` until saved.
+- `shortcuts` is `null` without `X-Facility-ID`. With it: that membership's
+  keys in the saved order, `version` `0` and no items until the first save
+  there, `max` `12`.
+- `available` is computed on every read from the session's current
+  permissions at that facility (SX-1's rule: every `show` code held), so a role
+  removed by SX-4, or a later role table change, changes it with no write. A
+  stored key Identity no longer knows (an older image) is answered
+  `available: false`, never an error. The Home screen hides `available: false`
+  items.
+- `notices` is the fixed answer above until ORD-11 is built and reads these
+  choices: nothing is stored, `served` is `false`, and a critical result always
+  notifies.
+- `languagesAvailable` stays `["en"]` until P2-2.
+
+### `POST /api/v1/identity/me/preferences`
+
+Headers: `Idempotency-Key` (16-128 URL-safe characters). Body, exactly:
+
+```json
+{ "language": "en", "expectedVersion": 0 }
+```
+
+- `expectedVersion` is the `version` read: `0` for the first save.
+- `language` must be `en` (`400 LANGUAGE_NOT_AVAILABLE` otherwise).
+- `notices`, `criticalResult` or any other field: `400 VALIDATION_FAILED`.
+
+`200` with the read answer (shortcuts too when `X-Facility-ID` was sent) plus
+`"replayed": false`. The same `Idempotency-Key` and body as the last save
+answers `200` with the read answer as it is now and `"replayed": true`. Only
+the last save's key is kept: an older key sent again is a new save, and its
+stale `expectedVersion` answers `412`.
+
+### `POST /api/v1/identity/me/shortcuts`
+
+Headers: `Idempotency-Key`. Body, exactly:
+
+```json
+{ "items": [ { "module": "patients" }, { "module": "triage" } ], "expectedVersion": 5 }
+```
+
+- 0 to 12 items, kept in the order sent, no repeats.
+- `module` must be one of SX-1's module keys (today `patients`,
+  `registration`, `accessRequests`, `emergencyAccess`, `triage`,
+  `consultation`, `orders`, `lab`, `labResults`, `pharmacy`, `prescriptions`,
+  `migrate`, `outreach`, `admin`, `audit`; more as departments are added).
+  Only a page, never a patient: an item may carry `module` alone (any other
+  field is `VALIDATION_FAILED`), and the database stores only letters, so no
+  patient id, Health ID or `matchRef` can be stored.
+- A key not saved before for this membership must be shown by the member's
+  roles here now (`SHORTCUT_NOT_ALLOWED` otherwise). A key already saved may be
+  sent again and is kept, even when the roles no longer show it, and even when
+  the running Identity does not know it (a key of a newer or an older image,
+  of the stored shape): it is then answered `available: false`, never an
+  error. A key not sent is dropped.
+- `expectedVersion` is the `shortcuts.version` read at this facility: `0` for
+  the first save there.
+
+`200` with the read answer at this facility plus `replayed`, under the same
+replay rules as the preferences save. The request's digest includes the
+facility, so the same key at another facility is that membership's own save.
+
+### Errors
+
+| HTTP | Code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | A field missing, of the wrong type, or not allowed (`notices`, `criticalResult`, an item field other than `module`). |
+| 400 | `LANGUAGE_NOT_AVAILABLE` | A language other than `en`. "Only English is available for now." |
+| 400 | `SHORTCUTS_TOO_MANY` | More than 12 items. "You can keep up to 12 shortcuts." |
+| 400 | `SHORTCUT_UNKNOWN` | A key that is not an SX-1 module key and is not already saved for this membership. "One of these shortcuts is not a page Health ID knows. Reload and try again." |
+| 400 | `SHORTCUT_DUPLICATE` | A key twice. "Each shortcut can appear only once." |
+| 400 | `SHORTCUT_NOT_ALLOWED` | A key not saved before that the roles here do not show. "Your role here cannot open one of these pages." |
+| 400 | `FACILITY_REQUIRED` | Shortcuts without `X-Facility-ID`. |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED` | A save without a valid `Idempotency-Key`. |
+| 401 | `AUTHENTICATION_REQUIRED` | No sign-in, or the account is no longer active. |
+| 403 | `PATIENT_SCOPE_DENIED` | A patient session. |
+| 403 | `NO_ACTIVE_FACILITY_MEMBERSHIP` | An outreach account-only session. |
+| 403 | `FACILITY_ACCESS_DENIED` | An `X-Facility-ID` that is not one of the caller's active, unheld memberships. |
+| 403 | (CSRF and Origin refusals) | A cookie POST without them, as every cookie POST. |
+| 404 | (none) | `STAFF_PREFERENCES_ENABLED` is off. |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | The last save's key with another body. |
+| 412 | `VERSION_CONFLICT` | `expectedVersion` is not the current version (also the second of two first saves made at once). |
+| 503 | `PREFERENCES_UNAVAILABLE` (or `DEPENDENCY_UNAVAILABLE` when the audit row cannot be written either, for example with the database unreachable) | Anything else (for example 0206 missing). The detail is the generic service text; clients act on the status `503` (the website's own message is in the screen notes). |
+
+### Audit
+
+- Each read writes one row `auth.staff-preferences.read` (success, `denied`
+  for 401 and 403, or `failure`), resource `session` (the session id), at the
+  `X-Facility-ID` facility when one was resolved and with no facility
+  otherwise, as SX-5 does.
+- A preferences save writes, in its own transaction (0206), one
+  `auth.staff-preferences.update` row: staff actor, no facility, membership or
+  organization, resource `session` with the account id, details `language` and
+  `version` (and `replayed: true` on a replay). A refused or failed save writes
+  one `auth.staff-preferences.update` row with outcome `denied` or `failure`
+  and the problem code, from Identity (a body the validation pipe refuses, and
+  a refusal by the guard, are answered before the route and not recorded).
+- A shortcuts save writes, in its transaction, one
+  `identity.staff-shortcuts.update` row with the account, membership,
+  organization and facility, resource `staff-membership` with the membership
+  id, details `modules` and `version` (and `replayed`). A refused or failed
+  save writes the audit interceptor's `api.identity.staff-shortcuts.update`
+  failure row at that facility.
+- No row holds a patient. Identity's and 0206's rows hold no purpose of use;
+  the interceptor's failure row for shortcuts carries one only if the request
+  sent `X-Purpose-Of-Use`.
+
+### Database (0206)
+
+- `identity.staff_preferences`: one row per account (language, version, the
+  last save's key and request SHA-256). `identity.staff_shortcuts`: one row per
+  membership, referenced by `(id, facility_id, account_id)` with `ON DELETE
+  RESTRICT` (0 to 12 keys, no NULL, no repeats, each `^[a-z][A-Za-z]{1,39}$`;
+  version; the last key and SHA-256). Neither holds patient data. Row-level
+  security on with no policy and no grant: only 0206's three SECURITY DEFINER
+  functions, `EXECUTE` for the Identity runtime only, read or write them. Each
+  save takes an advisory lock on its row's key first, so two saves of one row
+  run one after the other.
+- An ended or held membership's row is neither read nor written. A member
+  re-invited to the same membership (0086 reactivates the same id) reads the
+  old shortcuts again. Nothing deletes these rows yet (retention is an open
+  question for the DPO).
+
+### Screen notes (website, after this is live)
+
+- Settings: show the language read-only as English while `languagesAvailable`
+  has one entry; send `"language": "en"`. Show no notice switches while
+  `notices.served` is `false`.
+- Home: the saved order; hide `available: false` items; "Edit shortcuts"
+  offers only pages the session's `modules` shows at this facility, and stops
+  at 12. To keep a hidden (unavailable) shortcut, send it back with the
+  others, whether or not its key is in the session's `modules` map; leaving it
+  out drops it. Save on "Done". On `503`, keep the tab's shortcuts and show
+  "Your shortcuts could not be saved." On a `503` from a read, show "Your
+  settings could not be loaded. Please try again."
+- While `canChange.preferences` is `false`: today's tab-only shortcuts, no
+  language or notice settings.
+
+Tests: `services/ehr-api/test/database/staff-preferences.integration.sql`
+(0206 on a migrated database: the busy refusals and their timing, the lock
+set, already applied, half states and each precondition, the concurrent first
+save of the preferences and of the shortcuts, structure, privileges, every
+refusal above at the database and each table CHECK, the audit rows against the
+audit CHECKs; reads and saves go through Identity's own three statements, word
+for word), and in identity-api `src/staff-preferences/staff-preferences.spec.ts`
+(which also pins those statements to the suite's copies),
+`staff-preferences.http.spec.ts` (supertest through the real
+`StaffPreferencesModule`, guard, audit interceptor, pipe and filter) and
+`staff-preferences-startup.spec.ts`.

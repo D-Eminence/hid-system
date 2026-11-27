@@ -115,6 +115,42 @@ export interface PlatformAdminContext extends Omit<DataAccessContext, 'facilityI
   membershipId?: string;
 }
 
+/**
+ * A staff member acting on their own account (SX-7's preferences and
+ * shortcuts; SX-6's own profile later): no purpose of use, and a facility
+ * only when the request resolved one (X-Facility-ID on a facility-optional
+ * route, or the facility a facility-required route needs). Unlike
+ * DataAccessContext it may carry no facility, so a platform administrator
+ * with no membership can act on their own account.
+ */
+export interface StaffAccountContext {
+  correlationId: string;
+  actor: ActorContext;
+  facilityId?: string;
+  membershipId?: string;
+}
+
+/**
+ * The context of a staff member's own-account route. Staff sessions only (a
+ * patient is refused by the guard before; refused here again); the facility
+ * and membership are the ones the guard resolved, or none.
+ */
+export function requireStaffAccountContext(request: HidRequest): StaffAccountContext {
+  if (!request.actor || !request.correlationId) {
+    throw new Error('Request context was not established by security guards');
+  }
+  if (request.actor.kind === 'patient') {
+    throw new DomainProblem(403, 'PATIENT_SCOPE_DENIED', 'This operation requires workforce authorization');
+  }
+  const membershipId = request.facilityId && request.actor.facility?.id === request.facilityId
+    ? request.actor.facility.membershipId : undefined;
+  return {
+    correlationId: request.correlationId,
+    actor: request.actor,
+    ...(request.facilityId && membershipId ? { facilityId: request.facilityId, membershipId } : {}),
+  };
+}
+
 export function requireRequestContext(request: HidRequest, suppliedPurpose?: string): DataAccessContext {
   if (!request.actor || !request.facilityId || !request.correlationId) {
     throw new Error('Request context was not established by security guards');

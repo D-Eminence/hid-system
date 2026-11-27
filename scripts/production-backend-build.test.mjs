@@ -122,6 +122,7 @@ test('files that service tests read from outside the service select the reading 
     ['services/ehr-api/database/tests/schema.integration.sql',['ehr-api','ocr-worker','outreach-api','database-migration']],
     ['services/ehr-api/test/fixtures/order-route-cannot-complete-reasons.sql',['ehr-api','lab-api','pharmacy-api']],
     ['services/ehr-api/test/database/registration-case-list.integration.sql',['identity-api','ehr-api']],
+    ['services/ehr-api/test/database/staff-preferences.integration.sql',['identity-api','ehr-api']],
     ['services/ocr-worker/src/reading/contract.ts',['ocr-api','ocr-worker']],
     ['services/ocr-worker/package.json',['ocr-worker']],
     ['services/identity-api/src/identity/dto/authorize-outreach.dto.ts',['identity-api','outreach-api']],

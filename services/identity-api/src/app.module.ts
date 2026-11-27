@@ -21,12 +21,14 @@ import { StaffProfileModule } from './staff-profile/staff-profile.module';
 // 0132 (lane B): staff patient search and emergency search.
 import { PatientSearchModule } from './patient-search/patient-search.module';
 import { OpenPatientModule } from './open-patient/open-patient.module';
+// SX-7 (0206): the staff member's language and Home shortcuts.
+import { StaffPreferencesModule } from './staff-preferences/staff-preferences.module';
 
 @Module({
   imports: [DatabaseModule, AuditModule, IntegrationModule, AuthModule, ConsentModule, IdentityModule, AdminModule, CommercialModule,
     PatientSafetyModule, PatientProfileModule, WebPushModule, OutreachOrganisersModule,
     StaffProfileModule,
-    PatientSearchModule, OpenPatientModule],
+    PatientSearchModule, OpenPatientModule, StaffPreferencesModule],
   controllers: [HealthController],
   providers: [
     { provide: APP_GUARD, useExisting: SecurityGuard },

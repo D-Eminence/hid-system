@@ -2065,3 +2065,20 @@ grant execute on function ehr.record_recent_diagnosis(text, text, text), ehr.rec
   to hid_ehr_runtime, hid_schema_test_runtime;
 revoke all on function ehr.record_recent_diagnosis(text, text, text), ehr.recent_diagnoses(integer) from public;
 revoke all on ehr.clinician_recent_diagnoses from public;
+
+-- Staff preferences and Home shortcuts (0206, SX-7; design note on
+-- hid-system#258, 26 November 2026), exactly as 0206 grants them: the read
+-- and the two saves to the Identity runtime alone (as 0139 and 0140 grant
+-- Identity's functions); no privilege for any runtime on the two tables
+-- (row-level security on, no policy: only those three functions, as the
+-- tables' owner, use them) or on the two CHECK helpers, which the CHECKs and
+-- the shortcuts save run as the owner.
+grant execute on function identity.read_my_staff_preferences(),
+  identity.save_my_staff_preferences(text, bigint, text, text),
+  identity.save_my_staff_shortcuts(text[], bigint, text, text) to hid_identity_runtime;
+revoke all on function identity.read_my_staff_preferences(),
+  identity.save_my_staff_preferences(text, bigint, text, text),
+  identity.save_my_staff_shortcuts(text[], bigint, text, text),
+  identity.staff_shortcut_keys_valid(text[]),
+  identity.staff_shortcut_keys_distinct(text[]) from public;
+revoke all on identity.staff_preferences, identity.staff_shortcuts from public;

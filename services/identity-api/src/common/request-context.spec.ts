@@ -3,7 +3,7 @@ import { Logger } from '@nestjs/common';
 import { NinRegistrationController } from '../identity/nin-registration.controller';
 import type { NinRegistrationService } from '../identity/nin-registration.service';
 import { DomainProblem, ProblemDetailsFilter } from './problem';
-import { requireRequestContext, type HidRequest } from './request-context';
+import { requireRequestContext, requireStaffAccountContext, type HidRequest } from './request-context';
 
 // The registration-case read takes the purpose from X-Purpose-Of-Use, which the
 // security guard does not check (consent and audit routes check it first
@@ -98,5 +98,24 @@ describe('Identity registration-case read refuses a missing purpose before readi
     const problem = purposeRefusal(() => routes.getCase('70000000-0000-4000-8000-000000000001', guardedRequest({})));
     expect([problem.getStatus(), problem.code]).toEqual([400, 'PURPOSE_OF_USE_REQUIRED']);
     expect(registrations.getCase).not.toHaveBeenCalled();
+  });
+});
+
+describe('A staff member\'s own-account context (SX-7)', () => {
+  it('needs no purpose and carries the guard\'s facility and membership when one was resolved', () => {
+    expect(requireStaffAccountContext(guardedRequest({}))).toEqual({ correlationId: 'correlation-identity-purpose-0001',
+      actor, facilityId, membershipId: '40000000-0000-4000-8000-000000000001' });
+  });
+
+  it('carries no facility or membership when the request resolved none', () => {
+    const request = { ...guardedRequest({}), facilityId: undefined, actor: { ...actor, facility: undefined } } as unknown as HidRequest;
+    expect(requireStaffAccountContext(request)).toEqual({ correlationId: 'correlation-identity-purpose-0001',
+      actor: { ...actor, facility: undefined } });
+  });
+
+  it('refuses a patient, and keeps a request the guard did not establish an internal error', () => {
+    const patient = { ...guardedRequest({}), actor: { ...actor, kind: 'patient' } } as unknown as HidRequest;
+    expect(thrown(() => requireStaffAccountContext(patient))).toMatchObject({ code: 'PATIENT_SCOPE_DENIED' });
+    expect(thrown(() => requireStaffAccountContext(guardedRequest({}, false)))).not.toBeInstanceOf(DomainProblem);
   });
 });

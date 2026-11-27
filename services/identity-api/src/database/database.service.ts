@@ -2,7 +2,7 @@ import { Injectable, OnApplicationShutdown } from '@nestjs/common';
 import { Pool, type PoolClient, type PoolConfig, type QueryResult, type QueryResultRow } from 'pg';
 import { getEnvironment } from '../config/environment';
 import { UnauthorizedException } from '@nestjs/common';
-import type { DataAccessContext, PlatformAdminContext } from '../common/request-context';
+import type { DataAccessContext, PlatformAdminContext, StaffAccountContext } from '../common/request-context';
 
 export interface TransactionOptions {
   readOnly?: boolean;
@@ -54,8 +54,26 @@ export class DatabaseService implements OnApplicationShutdown {
     return this.runTransaction(context, operation, options);
   }
 
+  /**
+   * A staff member's own-account transaction (requireStaffAccountContext):
+   * the same settings as withTransaction, with the facility and membership
+   * only when the request resolved one ('' otherwise) and no purpose of use
+   * (''). For SECURITY DEFINER functions that read the caller from
+   * app.actor_subject and decide on their own what a missing facility means.
+   */
+  async withStaffAccountTransaction<Result>(
+    context: StaffAccountContext,
+    operation: (client: PoolClient) => Promise<Result>,
+    options: TransactionOptions = {},
+  ): Promise<Result> {
+    if (context.actor.kind === 'patient') {
+      throw new UnauthorizedException('A staff session is required');
+    }
+    return this.runTransaction(context, operation, options);
+  }
+
   private async runTransaction<Result>(
-    context: DataAccessContext | PlatformAdminContext,
+    context: DataAccessContext | PlatformAdminContext | StaffAccountContext,
     operation: (client: PoolClient) => Promise<Result>,
     options: TransactionOptions,
   ): Promise<Result> {
@@ -77,7 +95,7 @@ export class DatabaseService implements OnApplicationShutdown {
           context.facilityId ?? '',
           context.correlationId,
           context.membershipId ?? '',
-          context.purposeOfUse,
+          'purposeOfUse' in context ? context.purposeOfUse : '',
         ],
       );
       const result = await operation(client);

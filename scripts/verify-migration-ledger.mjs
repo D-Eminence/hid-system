@@ -166,6 +166,8 @@ const acceptedMigrations = new Map([
   ['0151_sealed_qa_front_desk_and_nurse_logins.sql', 'abab517679255cec2d67aadae9d44f1b629e8e3e9ee30d77cfee33817b2c75f2'],
   ['0152_catalog_diagnoses.sql', 'abfecc3571808e4ad29fdf8c1e202f65b3cdf890e9f3106b74bd6ef1bd19f9c9'],
   ['0153_clinician_recent_diagnoses.sql', '45faa6a739056cc07426fdb5363b58c7dda1dbcbc096fb6d1769ae746798500b'],
+  // SX-7 (staff preferences and Home shortcuts), number provisional (given at integration, in release order: #258), unsigned.
+  ['0206_staff_preferences_and_shortcuts.sql', '65dd0436aafdd9d7e2f6c9d7e509b6dc3ec1ef69ca283cb7f55c3280840fa6f0'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))
