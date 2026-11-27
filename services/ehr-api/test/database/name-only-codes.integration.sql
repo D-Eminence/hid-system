@@ -61,8 +61,10 @@
 --   7. each pair CHECK on its own (half a pair refused in the six tables; a
 --      lab route without its name refused); the coded order's codes at every
 --      step;
---   8. the undo refuses once a name-only row is saved (step a's VALIDATE
---      fails on each of the five tables).
+--   8. the undo's check first (0156's header), as the suite runner, whom
+--      row security does not limit: a name-only row in each of the six
+--      tables, so the undo must not run as written; and with one saved,
+--      step a's VALIDATE fails on each of the five tables.
 -- Synthetic values only; uuid prefix e56, n156 names, .invalid addresses.
 set plpgsql.variable_conflict = error;
 
@@ -1452,8 +1454,20 @@ select pg_temp.expect('B7h the coded order''s rows keep their codes at every ste
      join lab.work_item_requested_tests test on test.work_item_id = item.id
     where route.id = current_setting('hid.test.route_coded')::uuid));
 
--- B8. The undo is for before any name-only row: with one saved, step a's VALIDATE of the NOT NULL CHECK fails on each
--- of the five tables (23514), and nothing changes (as the tables' owner).
+-- B8. The undo is for before any name-only row. 0156's header: check first, as a role that row security does not
+-- limit (the suite runner here), for a row whose code pair is null in each of the six tables; one found, the undo
+-- must not run as written. With one saved, step a's VALIDATE of the NOT NULL CHECK fails on each of the five tables
+-- (23514), and nothing changes (as the tables' owner).
+select pg_temp.expect('B8a check first: a row with a null code pair in each of the six tables',
+  'ehr.diagnoses true, ehr.lab_requests true, ehr.order_routes true, lab.order_route_result_reports true, '
+  || 'lab.work_item_requested_tests true, lab.work_items true',
+  'ehr.diagnoses ' || exists (select 1 from ehr.diagnoses where code is null)
+  || ', ehr.lab_requests ' || exists (select 1 from ehr.lab_requests where test_code is null)
+  || ', ehr.order_routes ' || exists (select 1 from ehr.order_routes where kind = 'lab_request' and test_code is null)
+  || ', lab.order_route_result_reports '
+  || exists (select 1 from lab.order_route_result_reports where test_code is null)
+  || ', lab.work_item_requested_tests ' || exists (select 1 from lab.work_item_requested_tests where code is null)
+  || ', lab.work_items ' || exists (select 1 from lab.work_items where test_code is null));
 savepoint undo_after_use;
 set local role :"q156_owner";
 alter table ehr.lab_requests add constraint lab_requests_test_code_undo_nn check (test_code is not null) not valid;
@@ -1463,7 +1477,7 @@ alter table lab.work_item_requested_tests add constraint work_item_requested_tes
   check (code is not null) not valid;
 alter table lab.order_route_result_reports add constraint order_route_result_reports_test_code_undo_nn
   check (test_code is not null) not valid;
-select pg_temp.expect('B8 the undo refuses once a name-only row is saved',
+select pg_temp.expect('B8b the undo refuses once a name-only row is saved',
   '23514 check constraint "lab_requests_test_code_undo_nn" of relation "lab_requests" is violated by some row|'
   || '23514 check constraint "diagnoses_code_undo_nn" of relation "diagnoses" is violated by some row|'
   || '23514 check constraint "work_items_test_code_undo_nn" of relation "work_items" is violated by some row|'

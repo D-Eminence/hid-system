@@ -2531,8 +2531,9 @@ above is the lab request's part.
     name alone, and today's lists let dotted initials through (V.D.R.L.,
     R.V.D., H.C.V.); a coded diagnosis is also hidden by its code
     (`isSensitiveDiagnosisCode`), a name-only one is not. Ola's note gates
-    only the lab setting; the diagnosis setting waits too, for the clinical
-    owner to confirm.
+    only the lab setting; she confirmed on 27 November 2026 that
+    `DIAGNOSIS_NAME_ONLY_ENABLED` waits for 0155's list build too, as
+    `LAB_REQUEST_NAME_ONLY_ENABLED` does.
   - The catalogue status's `diagnosisNameOnly` and `labTestNameOnly` are the
     two settings, so the website offers "Use '<typed text>' as written" only
     to a backend that takes it.
@@ -2577,6 +2578,11 @@ above is the lab request's part.
     system) comes back as saved. The limit counts after picks are left out.
   - There is no in-list flag: a dropped code is left out instead, so the
     columns stay the same.
+  - Confirmed by the clinical owner on 27 November 2026: while a release is
+    active, an `ICD-11` pick the release does not hold is left out of the
+    list, so a clinician is never offered an invalid code again. The
+    diagnosis saved with it stays recorded on the chart (`ehr.diagnoses` is
+    not touched), and so does the pick's row.
   - It ships before any second ICD-11 release is loaded.
 - **One way once used.** The first time either setting goes on in
   production is recorded, with the time, on hid-system#258 and in the next
@@ -2614,34 +2620,45 @@ above is the lab request's part.
 - **Undo, only before any null is saved** (owner-signed; 0156's header):
   first both settings off, since the catalogue status reports them from the
   settings alone and a name-only save on a schema without 0156 fails with a
-  500; then for each of the ten columns, a `CHECK (col IS NOT NULL) NOT
-  VALID`, and
-  0086's route kind check under a temporary name, each added and committed
-  under a brief NOWAIT lock, then validated in its own transaction with a
-  short `lock_timeout`; then the main transaction (the six tables' NOWAIT
-  step and both refusals) sets NOT NULL without a scan, drops those checks
-  and the five pair checks, drops 0156's `order_routes_kind_ck` and renames
-  0086's back to it (no scan under the six locks), puts back 0153's read
-  and its comment, and drops `ehr.catalog_diagnosis_listed` with its
-  grants.
+  500.
+  - **Check first:** before the undo, look in each of the six tables for a
+    row whose code pair is null (on `ehr.order_routes`, a lab request
+    route), as a role that row security does not limit (a superuser or a
+    BYPASSRLS role; as the tables' NOSUPERUSER NOBYPASSRLS owner the
+    policies hide the rows of four of the six). If any exists, the undo must
+    not run as written: a name-only row makes its VALIDATE fail (23514).
+  - If a VALIDATE in the undo still fails, stop, and drop the CHECKs its
+    first step added (the ten NOT NULL checks and 0086's kind check under
+    its temporary name) before trying again: each was committed NOT VALID,
+    and until it is dropped it refuses every new name-only save.
+  - Then for each of the ten columns, a `CHECK (col IS NOT NULL) NOT VALID`,
+    and 0086's route kind check under a temporary name, each added and
+    committed under a brief NOWAIT lock, then validated in its own
+    transaction with a short `lock_timeout`; then the main transaction (the
+    six tables' NOWAIT step and both refusals) sets NOT NULL without a scan,
+    drops those checks and the five pair checks, drops 0156's
+    `order_routes_kind_ck` and renames 0086's back to it (no scan under the
+    six locks), puts back 0153's read and its comment, and drops
+    `ehr.catalog_diagnosis_listed` with its grants.
 - **Where this differs from the plan above:** `DIAGNOSIS_NAME_ONLY_ENABLED`
   also waits for 0155's sensitive-test list build (the note gates only the
-  lab setting); the plan's two tables
-  (`ehr.diagnoses` here, `ehr.lab_requests` and `lab.work_items` in ORD-7)
-  are six; the recent read leaves a dropped code out rather than adding an
-  in-list flag; `codeStatus` is `not_checked` also while no release is
-  active (the function answers null then); only `ICD-11` exactly is
-  looked up; the lookup's parameters are `requested_code_system` and
-  `requested_code`, not the note's `code_system` and `code`; and the size
-  bound does not refuse `reltuples` -1: a table never analysed is bounded
-  by its size on disk, 2 GiB (the clinical owner's decision of 27 November
-  2026), so a fresh install goes on, Amazon RDS's demo rows included, and
-  ANALYZE before the release is recommended, not required (the note
-  refuses every -1). The bound is per table; the hold's 1 s rule is checked
-  by the pre-sign measurement on the rehearsal copy, not by the file.
+  lab setting; confirmed by the clinical owner on 27 November 2026); the
+  plan's two tables (`ehr.diagnoses` here, `ehr.lab_requests` and
+  `lab.work_items` in ORD-7) are six; the recent read leaves a dropped code
+  out rather than adding an in-list flag; `codeStatus` is `not_checked` also
+  while no release is active (the function answers null then); only `ICD-11`
+  exactly is looked up; the lookup's parameters are `requested_code_system`
+  and `requested_code`, not the note's `code_system` and `code`; and the
+  size bound does not refuse `reltuples` -1: a table never analysed is
+  bounded by its size on disk, 2 GiB (the clinical owner's decision of 27
+  November 2026), so a fresh install goes on, Amazon RDS's demo rows
+  included, and ANALYZE before the release is recommended, not required (the
+  note refuses every -1). The bound is per table; the hold's 1 s rule is
+  checked by the pre-sign measurement on the rehearsal copy, not by the
+  file.
 - **Not in this slice:** the sensitive-test list (0155's PR and images),
   facility items (0155) and the website's screens.
-- **Checks:** the database suites `name-only-codes` (69 cases) and
+- **Checks:** the database suites `name-only-codes` (70 cases) and
   `diagnosis-release-switch` (21), on a superuser and a NOSUPERUSER
   NOBYPASSRLS owner; ehr-api's `diagnoses.name-only.spec.ts` (`codeStatus`,
   the lookup's failures, the replay, a name-only diagnosis in the patient's

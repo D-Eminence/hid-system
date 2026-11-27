@@ -71,6 +71,11 @@
 --      first code;
 --    - every other pick (ICD-10 or any other system) comes back as stored;
 --    - the limit applies after picks are left out.
+--    The clinical owner confirmed this on 27 November 2026: while a release
+--    is active, an ICD-11 pick the release does not hold is left out of the
+--    list, so a clinician is never offered an invalid code again. The
+--    diagnosis saved with that code stays recorded on the chart
+--    (ehr.diagnoses is not touched), and so does the pick's row.
 --    It restates SECURITY DEFINER, search_path and STABLE (without STABLE,
 --    CREATE OR REPLACE makes it volatile), and the post-check reads
 --    provolatile, as 0152 does. It ships before any second ICD-11 release
@@ -124,13 +129,14 @@
 -- and both stay off until 0155's sensitive-test list build is live (it
 -- ships in 0155's images): a test or diagnosis with no code is hidden from
 -- the patient's record chat by its name alone, and today's lists let
--- dotted initials through (V.D.R.L., R.V.D., H.C.V.). The note gates only
--- the lab setting; a coded diagnosis is also hidden by its code, but a
--- name-only one is not, so the diagnosis setting waits too (open for the
--- clinical owner to confirm). The release: this file alone,
--- then ehr-api and lab-api with both settings off, then the health website
--- and apps/ehr (this repository's staff frontend, the hid-ehr worker) at a
--- build that reads a null pair, then the settings on.
+-- dotted initials through (V.D.R.L., R.V.D., H.C.V.). A coded diagnosis is
+-- also hidden by its code, but a name-only one is not, so the diagnosis
+-- setting waits too. The note gates only the lab setting; the clinical owner
+-- confirmed on 27 November 2026 that DIAGNOSIS_NAME_ONLY_ENABLED waits for
+-- 0155's list build, as LAB_REQUEST_NAME_ONLY_ENABLED does. The release:
+-- this file alone, then ehr-api and lab-api with both settings off, then
+-- the health website and apps/ehr (this repository's staff frontend, the
+-- hid-ehr worker) at a build that reads a null pair, then the settings on.
 --
 -- ONE WAY ONCE USED. The first time either setting goes on in production
 -- is recorded (the time, on hid-system#258 and in the next declaration).
@@ -283,6 +289,20 @@
 -- status reports them from the settings alone, so with one still on over a
 -- schema without 0156 the website offers "Use as written" and the save
 -- fails on NOT NULL (23502, which ehr-api answers as a 500).
+-- Check first. Before step a, look in each of the six tables for a row
+-- whose code pair is null: test_code is null in ehr.lab_requests,
+-- lab.work_items and lab.order_route_result_reports; code is null in
+-- ehr.diagnoses and lab.work_item_requested_tests; kind = 'lab_request'
+-- and test_code is null in ehr.order_routes. Look as a role that row
+-- security does not limit (a superuser, or a role with BYPASSRLS): as the
+-- tables' NOSUPERUSER NOBYPASSRLS owner the policies hide the rows of four
+-- of the six (measured below), so a look there can find none. If any such
+-- row exists, the undo must not run as written: a name-only row makes step
+-- a's VALIDATE fail (23514).
+-- If a VALIDATE in step a still fails, stop, and drop every CHECK that step
+-- a added (the ten NOT NULL CHECKs and order_routes_kind_0086_ck) before
+-- trying again: each was committed NOT VALID, and until it is dropped it
+-- refuses every new name-only save.
 -- a. Before the main transaction, for each of the ten columns: add CHECK
 --    (col IS NOT NULL) NOT VALID and commit (ACCESS EXCLUSIVE, briefly:
 --    NOWAIT, as section 1); and on ehr.order_routes add 0086's kind check
