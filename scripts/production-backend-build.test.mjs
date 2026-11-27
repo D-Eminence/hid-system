@@ -121,6 +121,8 @@ test('files that service tests read from outside the service select the reading 
     ['services/ehr-api/database/runtime-grants.sql',['ehr-api','ocr-worker','outreach-api','database-migration']],
     ['services/ehr-api/database/tests/schema.integration.sql',['ehr-api','ocr-worker','outreach-api','database-migration']],
     ['services/ehr-api/test/fixtures/order-route-cannot-complete-reasons.sql',['ehr-api','lab-api','pharmacy-api']],
+    ['services/ehr-api/src/ehr/patient-records/patient-evidence.policy.ts',['ehr-api','lab-api','database-migration']],
+    ['services/ehr-api/test/fixtures/national-sensitive-lab-tests.json',['ehr-api','lab-api']],
     ['services/ehr-api/test/database/registration-case-list.integration.sql',['identity-api','ehr-api']],
     ['services/ocr-worker/src/reading/contract.ts',['ocr-api','ocr-worker']],
     ['services/ocr-worker/package.json',['ocr-worker']],
@@ -613,7 +615,9 @@ test('every file a service test reads from outside the service selects that serv
     'services/ocr-worker/src/database-privileges.spec.ts -> services/ehr-api/database/runtime-grants.sql',
     'services/outreach-api/src/outreach/health-id-unclaimed.spec.ts -> gateway/nginx.conf.template',
     'services/workload-token-agent/test/issuer.test.mjs -> infra/aws/runtime/workload-issuer/issuer.mjs',
-    'services/lab-api/src/lab/lab-order-route-cannot-complete.spec.ts -> services/ehr-api/test/fixtures/order-route-cannot-complete-reasons.sql'])
+    'services/lab-api/src/lab/lab-order-route-cannot-complete.spec.ts -> services/ehr-api/test/fixtures/order-route-cannot-complete-reasons.sql',
+    'services/lab-api/src/lab/patient-results.query.spec.ts -> services/ehr-api/src/ehr/patient-records/patient-evidence.policy.ts',
+    'services/lab-api/src/lab/patient-results.query.spec.ts -> services/ehr-api/test/fixtures/national-sensitive-lab-tests.json'])
     assert.ok(reads.has(known),`test read scanner missed ${known}`);
   for(const [key,{reader,target}] of reads){
     assert.ok(existsSync(join(repoRoot,target)),`${key}: not in the repository`);
