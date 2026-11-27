@@ -130,6 +130,45 @@ export interface EhrLabRequestGroupCreated {
   labRequests: EhrLabRequestCreated[];
 }
 
+/** One national list in the catalogue status (ORD-7, 0149): available once its signed version offers a row. */
+export interface EhrCatalogListStatus {
+  available: boolean;
+  version: string | null;
+  /** The clinical lead's sign-off day (Lagos), YYYY-MM-DD. */
+  approvedAt: string | null;
+  fileSha256: string | null;
+}
+
+/**
+ * What the screens may use: ehr-api's `GET /api/v1/ehr/catalog/status`
+ * (any staff member of the facility; no X-Purpose-Of-Use). A screen reads
+ * it once per page load.
+ */
+export interface EhrCatalogStatus {
+  medicines: EhrCatalogListStatus;
+  labTests: EhrCatalogListStatus;
+  /** ORD-9 (0152): the ICD-11 release the diagnosis search uses, when one is loaded. */
+  diagnoses: { available: boolean; release: string | null; fileSha256: string | null };
+  /** 0156: a lab request may be saved by its test name only (LAB_REQUEST_NAME_ONLY_ENABLED). */
+  labTestNameOnly: boolean;
+  /**
+   * ORD-6 (0158): several tests may be saved in one lab request
+   * (LAB_REQUEST_GROUPS_ENABLED). The website offers the multi-test form
+   * only when it is true, and otherwise saves one test per request. It
+   * cannot learn this from the group route: through the public gateway its
+   * 503 LAB_REQUEST_GROUPS_UNAVAILABLE is the gateway's 503
+   * UPSTREAM_UNAVAILABLE. An ehr-api before ORD-6 sends no such field: read
+   * it as false.
+   */
+  labRequestGroups: boolean;
+  /** 0156: a diagnosis may be saved by its name only (DIAGNOSIS_NAME_ONLY_ENABLED). */
+  diagnosisNameOnly: boolean;
+  /** ORD-10 phase 2. */
+  classDuplicateCheck: false;
+  /** The notices the active lists' sources require, for the About page. */
+  attribution: string[];
+}
+
 /** ORD-6: at most this many tests in one group (ehr-api's LAB_REQUEST_GROUP_MAX_TESTS). */
 export const EHR_LAB_REQUEST_GROUP_MAX_TESTS = 20;
 

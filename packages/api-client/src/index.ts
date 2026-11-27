@@ -132,6 +132,7 @@ export type {
 } from './pharmacy';
 export { EHR_LAB_REQUEST_GROUP_MAX_TESTS, EHR_LAB_REQUEST_GROUP_TIMEOUT_MS, EhrApiClient, EhrApiProblem } from './ehr';
 export type {
+  EhrCatalogListStatus, EhrCatalogStatus,
   EhrClientOptions, EhrInternalCaller, EhrLabHandoff, EhrLabPriority, EhrLabRequest, EhrLabRequestCreated,
   EhrLabRequestGroupCreated, EhrLabRequestGroupInput, EhrLabRequestGroupTestInput, EhrOcrClinicalNoteImport,
   EhrOcrDocumentSource, EhrOrderStatus, EhrRequestContext, EhrResourceReference,

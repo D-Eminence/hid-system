@@ -1,3 +1,4 @@
+import type { EhrCatalogStatus } from '@hid/api-client';
 import { type INestApplication, Logger, Module, RequestMethod } from '@nestjs/common';
 import type { ArgumentMetadata } from '@nestjs/common';
 import { HEADERS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
@@ -17,7 +18,7 @@ import {
 import { CatalogModule } from './catalog.module';
 import {
   CATALOG_SEARCHES_PER_WINDOW, CATALOG_SEARCH_WINDOW_MS, CatalogService, DIAGNOSES_SQL, LAB_TESTS_SQL, MEDICINES_SQL,
-  STATUS_SQL, diagnosisSearchUnavailable, looksLikePersonIdentifier, medicineDisplay, typedIcd10,
+  STATUS_SQL, diagnosisSearchUnavailable, looksLikePersonIdentifier, medicineDisplay, typedIcd10, type CatalogStatus,
 } from './catalog.service';
 import { RECENT_DIAGNOSES_SQL, RecentDiagnosesService, type RecentDiagnosesCaller } from './recent-diagnoses.service';
 import { NAME_ONLY_CODES_OFF, NAME_ONLY_CODES_PROVIDER, NameOnlyCodes } from '../shared/name-only-codes';
@@ -216,6 +217,16 @@ describe('ORD-7 catalogue (0149, first slice)', () => {
           .resolves.toMatchObject({ labRequestGroups: true, labTestNameOnly: false, diagnosisNameOnly: false });
         expect((Reflect.getMetadata('design:paramtypes', CatalogService) as unknown[])[2]).toBe(LabRequestGroups);
       });
+
+    it('@hid/api-client types the status as ehr-api answers it (EhrCatalogStatus), labRequestGroups included', async () => {
+      // Each type is assignable to the other, so tsc and ts-jest refuse a field one side lacks or types otherwise.
+      type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+      const same: Same<CatalogStatus, EhrCatalogStatus> = true;
+      const { database } = fakeDatabase([statusRow('lab_test'), statusRow('medicine')]);
+      const typed: EhrCatalogStatus = await new CatalogService(database, NAME_ONLY_CODES_OFF, new LabRequestGroups(true))
+        .status();
+      expect([same, typed.labRequestGroups, typed.labTestNameOnly]).toEqual([true, true, false]);
+    });
 
     it('a loaded list is available with its version, sign-off day, seed file and its sources\' notices, once each', async () => {
       const loinc = 'This material contains content from LOINC (http://loinc.org).';
