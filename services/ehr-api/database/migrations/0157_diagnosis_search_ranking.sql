@@ -127,13 +127,17 @@
 -- "mumps complications" found nothing on 0152 and offers only 1D80.0 Mumps
 -- without complication here (fix 1), the negation blindness 0152 already
 -- has for "varicella complications"; the fix is an other name in the seed
--- follow-up (#342). A junk q of 50 one-letter words takes about 2.3 times
--- as long as on 0152 (about 405 ms against 177 ms), bounded by the
--- 100-character limit and the 429 rate limit. Two problems 0152 already
--- has, outside 0157 (Ola tracks them separately): "1C62.3 hiv", a code and
--- a word, is not a code, so 1C62.2 comes first; and "gestational
--- hypertension with proteinuria" matches only "... without hypertension"
--- entries.
+-- follow-up (#342). A junk q of many one-letter words costs more than on
+-- 0152, as each word is counted for each candidate: 50 that start words
+-- of most entries take about 2.3 times as long (about 420 ms against 180
+-- ms), and the worst found, 6 such words (which decide the matches) then
+-- 44 that start no word (each reads every word of every row), about 3.7
+-- times (about 680 ms against 185 ms; the third review's figure, listed in
+-- the PR for Ola). Both are bounded by the 100-character limit and the 429
+-- rate limit. Two problems 0152 already has, outside 0157 (Ola tracks them
+-- separately): "1C62.3 hiv", a code and a word, is not a code, so 1C62.2
+-- comes first; and "gestational hypertension with proteinuria" matches
+-- only "... without hypertension" entries.
 --
 -- Locks: none on tables. The search stays PL/pgSQL, as 0152 made it. The
 -- runner leaves check_function_bodies on, and for PL/pgSQL that check is

@@ -2537,21 +2537,38 @@ The number 0157 is a booking, given at integration in release order.
     1D80.0 Mumps without complication. It is the negation blindness 0152
     already has for "varicella complications", which again puts 1E90.0
     Varicella without complication first, as on 0152 (it has no word with;
-    the first addendum's body put 1E90.Y first). The fix is an other name
-    in the seed follow-up (#342): "mumps with complication" on
+    the first addendum's body put 1E90.Y first). Likewise "hiv stage 4
+    tuberculosis" puts 1C62.3 (... without mention of tuberculosis or
+    malaria) third, as on 0152 (fourth on the first addendum's body), and
+    "hiv stage 4 tuberculosis malaria" puts the 1C62.3 family first on
+    every body, the only one that names both words. The fix is an other
+    name in the seed follow-up (#342): "mumps with complication" on
     1D80.1-1D80.Y.
-  - The cost of queries of many short words: a junk `q` of 50 one-letter
-    words takes about 405 ms, against about 177 ms on 0152 (about 2.3
-    times), as each word is counted for each of thousands of entries. The
-    100-character limit and the 429 rate limit bound it. The note's timed
-    queries are unchanged within noise.
+  - The cost of queries of many short words, as each word is counted for
+    each of thousands of entries: a junk `q` of 50 one-letter words that
+    start words of most entries takes about 420 ms, against about 180 ms
+    on 0152 (about 2.3 times; the figure Ola's addenda accepted). The worst
+    found is higher (the third review, listed in 0157's PR for Ola): 6 such
+    words, which decide the matches, then 44 one-letter words that start
+    no word, each of which reads every word of every row, take about
+    680 ms against about 185 ms on 0152 (about 3.7 times; the same on the
+    first addendum's body). The 100-character limit and the 429 rate limit
+    bound both. The note's timed queries are unchanged within noise.
   - Two problems 0152 already has, outside 0157 (Ola tracks them
     separately): "1C62.3 hiv", a code and a word, is not a code, so 1C62.2
     comes first (the same answer on 0152 and 0157); and "gestational
     hypertension with proteinuria" matches only "... without hypertension"
     entries (JA22.0, JA22, JA22.2, KA00.1). It has the word with, so 0157
     puts JA22.2 Gestational oedema with proteinuria without hypertension
-    first, where 0152 put JA22.0; neither is pre-eclampsia.
+    first, where 0152 put JA22.0; neither is pre-eclampsia. The third
+    review found two more in which entries match, the same on 0152 and
+    0157 (listed in 0157's PR for Ola): "w/o" is the words w and o, and o
+    must start a word, so "migraine w/o aura" offers only 8A80.1Y Other
+    specified migraine with aura, and "malaria w/o complication", "measles
+    w/o complication" and "varicella w/o complication" only entries with
+    complications; and ca starts calculus, so "bladder ca" and "ca kidney"
+    put GB71.0 Calculus in bladder and GB70.0 Calculus of kidney first, and
+    "ca of prostate" offers only GA91.3 Calculus of prostate.
 - **The first addendum's known effects, as the second addendum resolves
   them** (found by the build's second clinical and SQL reviews, on the
   2026-01 release). Which entries match, how many and `more` never change;
@@ -2590,7 +2607,20 @@ The number 0157 is a booking, given at integration in release order.
     and 4 titles typed as written, each still first. A site after a clause
     still goes with it: "Laceration with foreign body of lower leg" puts
     NC91.0 Laceration without foreign body of lower leg last, after NB51.1
-    and NB51.0 (second on 0152).
+    and NB51.0 (second on 0152). Of 72 "with foreign body" queries (24
+    laceration and puncture wound sites, in three word orders), the entry
+    typed is first in all 72, as on 0152, and the same site's "without
+    foreign body" entry comes lower in 14, past the page of 10 in 4:
+    "puncture wound with foreign body of head" puts NA01.4 14th (7th on
+    0152), "... of neck" NA21.2 15th (8th), "... of thorax" NA81.2 16th
+    (10th) and "... of toe" ND12.62 13th (5th). The same on the first
+    addendum's body.
+  - A title that says "with or without X" loses X from the count when `q`
+    has the word with, though the entry covers "with X": 2 titles of the
+    2026-01 release, NA06.1 Penetrating wound of orbit with or without
+    foreign body and KA84.5 (... with or without concomitant diffuse
+    intravascular coagulation). No answer tried moves: each stays first
+    for its queries.
   - A `q` with the word with and "w/o", "w.o" or "w/out" (not the word
     without) has the clause typed after "w/o" taken out too, as in 9 of
     the 93 "w/o" titles and 5 of the 40 "w/out" ones: "drug-induced or
@@ -2598,7 +2628,19 @@ The number 0157 is a booking, given at integration in release order.
     (with cirrhosis) first and DB95.11, the entry typed, 4th (19th on 0152,
     2nd on the design note's body); "syndromes with multiple structural
     anomalies, w/o predominant body system involvement" puts LD2F 5th (4th
-    on 0152).
+    on 0152). The o of "w/o" also counts, towards "Other", "of" and "or":
+    "hiv disease clinical stage 4 with tb w/o malaria" puts 1C61.3Y Other
+    specified HIV disease clinical stage 4 associated with malaria first,
+    and 1C60.3 (with tuberculosis) 5th (2nd on 0152, 8th on the design
+    note's body). The same on the first addendum's body.
+  - "w/" is the word w, not the word with, so a `q` typed with it keeps
+    0152's order, with the opposite meaning first where 0152 has it:
+    "varicella w/ complication" puts 1E90.0 Varicella without complication
+    first, "malaria w/ complication" 1F41.Z and 1F42.Z (both without
+    complication), "needle stick w/ injury" QA8F Needle stick without
+    injury or harm, and "migraine w/ aura" 8A80.0 Migraine without aura
+    second; the first addendum's body put the entries with first. Typed
+    with the word with, each puts an entry with first.
 - **Release:** before the first ICD-11 release is activated. It rides
   alone, or only with files of 0155-0159 (not 0156, which goes alone),
   never with the sprint's files or 0178-0180 (Rahman's rule for lane D's
