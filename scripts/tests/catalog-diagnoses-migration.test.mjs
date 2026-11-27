@@ -128,13 +128,25 @@ test('0157 restates the search\'s signature, columns, language, STABLE, SECURITY
   }
 })
 
-test('0157\'s body is 0152\'s but for the two fixes, the new key and their comments', () => {
+test('0157\'s body is 0152\'s but for the two fixes, the new key, Ola\'s addendum and their comments', () => {
   // Fix 1 (Rahman's form): the shortened word or the word as typed is one of the entry's own words, listed once per row.
   assert.match(searchAfter, /where not \(array\[word\.shortened_word, word\.shortened_word \|\| 's'\] && found\.entry_words\)/)
   assert.match(searchAfter, /string_to_array\(btrim\(candidate\.title_words \|\| ' '\s+\|\| regexp_replace\(lower\(candidate\.other_names\), '\[\^\[:alnum:\]\]\+', ' ', 'g'\)\), ' '\) as entry_words/)
-  // Fix 2: every word of q, cut to 40 characters, not stopped at 6; 0 for a one-word q; the fourth key.
+  // Fix 2: every word of q, cut to 40 characters, not stopped at 6; 0 for a one-word q, and for a q shaped like a code
+  // (Ola's addendum); the fourth key.
   assert.match(searchAfter, /typed_words := array\(select left\(split\.word, 40\)\s+from regexp_split_to_table\(lower\(searched\), '\[\^\[:alnum:\]\]\+'\) as split\(word\)\s+where split\.word <> ''\);/)
-  assert.match(searchAfter, /case when cardinality\(typed_words\) < 2 then 0/)
+  assert.match(searchAfter, /case when cardinality\(typed_words\) < 2 or typed_code is not null then 0/)
+  // Ola's addendum: the count reads the entry's words with each "without ..." clause (the word without, as q is split,
+  // to the next , or ; or the end) taken out of the title and of our other names, listed once per row beside
+  // entry_words; null, so the entry's own words, when q has the word without or the entry has no such letters. The
+  // clause's pattern has no backslash, so standard_conforming_strings cannot change it. Fix 1's whole-word check still
+  // reads every word (entry_words, above).
+  const clause = "'(?<![[:alnum:]])without(?![[:alnum:]])[^,;]*'"
+  assert.equal(searchAfter.split(clause).length - 1, 2)
+  assert.doesNotMatch(code(searchAfter), /\\[mM]/)
+  assert.match(searchAfter, /case when 'without' <> all\(typed_words\)\s+and \(strpos\(candidate\.title_words, 'without'\) > 0\s+or strpos\(lower\(candidate\.other_names\), 'without'\) > 0\)\s+then string_to_array\(btrim\(regexp_replace\(regexp_replace\(lower\(candidate\.title\),/)
+  assert.match(searchAfter, /unnest\(coalesce\(found\.counted_words, found\.entry_words\)\) as entry\(word\)\s+where starts_with\(entry\.word, typed\.word\)/)
+  assert.equal(searchAfter.split('found.counted_words').length - 1, 1)
   assert.match(searchAfter, /order by shown\.code_hit desc, shown\.name_is_q desc, shown\.starts_with_q desc,\s+shown\.words_named desc, length\(shown\.title\), lower\(shown\.title\) collate "C", shown\.code collate "C"\)/)
   // Line by line, with comments set aside and indentation kept, 0157's body is 0152's with these edits, in this order
   // and nowhere else: so a line moved (typed_words set before the loop, say, where the second attempt would count the
@@ -156,15 +168,24 @@ test('0157\'s body is 0152\'s but for the two fixes, the new key and their comme
         '               compared.title as compared_title,',
         "               string_to_array(btrim(candidate.title_words || ' '",
         "                 || regexp_replace(lower(candidate.other_names), '[^[:alnum:]]+', ' ', 'g')), ' ') as entry_words,",
+        "               case when 'without' <> all(typed_words)",
+        "                         and (strpos(candidate.title_words, 'without') > 0",
+        "                              or strpos(lower(candidate.other_names), 'without') > 0)",
+        '                    then string_to_array(btrim(regexp_replace(regexp_replace(lower(candidate.title),',
+        "                           '(?<![[:alnum:]])without(?![[:alnum:]])[^,;]*', ' ', 'g'), '[^[:alnum:]]+', ' ', 'g') || ' '",
+        '                         || regexp_replace(regexp_replace(lower(candidate.other_names),',
+        "                           '(?<![[:alnum:]])without(?![[:alnum:]])[^,;]*', ' ', 'g'), '[^[:alnum:]]+', ' ', 'g')), ' ')",
+        '               end as counted_words,',
       ],
     },
     {
       find: ['                 as compared_other'],
       put: [
         '                 as compared_other,',
-        '               case when cardinality(typed_words) < 2 then 0',
+        '               case when cardinality(typed_words) < 2 or typed_code is not null then 0',
         '                    else (select count(*)::integer from unnest(typed_words) as typed(word)',
-        '                           where exists (select 1 from unnest(found.entry_words) as entry(word)',
+        '                           where exists (select 1',
+        '                                           from unnest(coalesce(found.counted_words, found.entry_words)) as entry(word)',
         '                                          where starts_with(entry.word, typed.word))) end as words_named',
       ],
     },

@@ -4,7 +4,9 @@
 -- name only", first slice. Rahman's last look at #320 (hid-system#320, 24
 -- November 2026) cleared 0152 to sign and left two ranking minors, to fix
 -- before any ICD-11 release is activated; the design note on hid-system#258
--- (Ola, 26 November 2026, 13:20 UTC) is the plan. Written on 0152 (#320).
+-- (Ola, 26 November 2026, 13:20 UTC) is the plan, and Ola's addendum there
+-- (27 November 2026, 10:10 UTC, from the build's clinical review) changes
+-- fix 2's count twice (below). Written on 0152 (#320).
 -- The number is a booking, given at integration in release order; neither
 -- function body names 0152 or 0157 (both name only 0149, the helper's file,
 -- in comments), so renumbering leaves both md5s. This file requires 0149
@@ -50,11 +52,29 @@
 --    pieces dropped, each cut to 40 characters as 0149's helper cuts them,
 --    but not stopped at 6; on the second attempt, the words as shortened, as
 --    the match uses them) is counted for each entry when it starts one of
---    the entry's own words, never a code part. For a q of one word every
---    entry counts 0, so a one-word q keeps 0152's order (Ola, clinical
---    owner: a clinician who types a code fragment such as "1a" usually means
---    the code, so 1A00 Cholera stays before GC51.00 Female Genital
---    Mutilation Type 1a).
+--    the words the count reads, never a code part. Those are the entry's own
+--    words, but with each "without ..." clause of its title and of our other
+--    names taken out first (the word without, split as q is, up to the next
+--    , or ; or the end); all of them when q has the word without (Ola's
+--    addendum: with starts without, so "hiv disease clinical stage 4 with
+--    tuberculosis and malaria" put 1C62.3, "... without mention of
+--    tuberculosis or malaria", first, and "calculus of bile duct with
+--    cholangitis and cholecystitis" put DC11.6, "... without cholangitis or
+--    cholecystitis", first; "meconium without ileus" still puts KB87.1
+--    Meconium plug without ileus first). That list is made once per row,
+--    beside the entry's own words, only when the count runs, and only for an
+--    entry with the letters without in its title or other names (the
+--    2026-01 release has 260 such titles and no such other name); every
+--    other entry's count reads its own words. Fix 1's whole-word check still
+--    reads all of the entry's own words. For a q of one word, or of a code's
+--    shape (as the first key reads it: "ME24.A", "KA21.2", "5C50 5", and so
+--    also any four letters or digits, a space and one or two more, such as
+--    "type 1" or "loss of"), every entry counts 0, so such a q keeps 0152's
+--    order (Ola, clinical owner: a clinician who types a code fragment such
+--    as "1a" usually means the code, so 1A00 Cholera stays before GC51.00
+--    Female Genital Mutilation Type 1a; and the addendum: "ME24.A", counted
+--    as two words, put its own subcodes in rows 2-5 behind other ME24
+--    entries).
 -- 3. The order:
 --    a. the entry whose code q is;
 --    b. entries whose title or one of our other names is q;
@@ -62,16 +82,19 @@
 --    d. (new) entries naming more of q's words (2);
 --    e. shorter titles, then the title in the "C" collation, then the code.
 --    The first three keys never move, so a code typed in any form, and a
---    title typed as written, still come first; an entry that is q, or
---    starts with q, names every word of q. The new key never changes which
---    entries match, how many, or more. It orders only entries that name
---    different numbers of q's words, which happens only when q has 7 or
---    more words, or when q has 2 or more words and one of them starts a code
---    part of an entry and no word of its title or other names. So "HIV
---    disease stage 1 associated with tuberculosis" puts 1C60.0 first and
---    1C61.0 second, "grade 2 follicular lymphoma" 2A80.1 first, "hiv stage
---    2" the stage 2 entries before the stage 3 ones, and "stage 3" 1C60.2
---    and 1C62.2 before 1C61.3, which is stage 4.
+--    title typed as written, still come first. The new key never changes
+--    which entries match, how many, or more. It orders only entries that
+--    name different numbers of q's words, which happens only when q has 2
+--    or more words and no code's shape, and either has 7 or more words, or
+--    one of its words starts a code part of an entry, or a word of one of
+--    its "without ..." clauses, and no word the count reads. So "HIV disease
+--    stage 1 associated with tuberculosis" puts 1C60.0 first and 1C61.0
+--    second, "grade 2 follicular lymphoma" 2A80.1 first, "hiv stage 2" the
+--    stage 2 entries before the stage 3 ones, "stage 3" 1C60.2 and 1C62.2
+--    before 1C61.3, which is stage 4, "hiv disease clinical stage 4 with
+--    tuberculosis and malaria" 1C61.3 and 1C60.3 before 1C62.3, and
+--    "calculus of bile duct with cholangitis and cholecystitis" DC11.4
+--    before DC11.6.
 -- 4. The body's comment on the release, as Rahman worded it: the active
 --    release's id is read first, and the code through the key (version_id,
 --    code), but the words' index finds every kept release's matches, and
@@ -85,6 +108,14 @@
 -- words after the 6th still do not narrow; they only rank), 0153's and
 -- 0156's functions (which never call the search), the seed, ehr-api
 -- (DIAGNOSES_SQL) and runtime-grants.sql are unchanged.
+--
+-- Known limits (Ola's addendum: accepted, and named in the contract):
+-- "mumps complications" found nothing on 0152 and offers only 1D80.0 Mumps
+-- without complication here (fix 1), the negation blindness 0152 already
+-- has for "varicella complications"; the fix is an other name in the seed
+-- follow-up (#342). A junk q of 50 one-letter words takes about 335 ms
+-- (0152: about 150 ms), bounded by the 100-character limit and the 429
+-- rate limit.
 --
 -- Locks: none on tables. The search stays PL/pgSQL, as 0152 made it. The
 -- runner leaves check_function_bodies on, and for PL/pgSQL that check is
@@ -132,7 +163,7 @@ begin
   end if;
   if (select md5(proc.prosrc) from pg_proc proc
        where proc.oid = 'ehr.search_catalog_diagnoses(text,integer)'::regprocedure)
-     = 'd1a07a483ee87a50eef2a1f7d8dbabca' then
+     = 'b5b5ee7ac39080784fb3052bbc6e79be' then
     raise exception using errcode = '55000', message = '0157: already applied';
   end if;
   -- The search as 0152 made it: its body, language, SECURITY DEFINER, STABLE, search_path, owner and columns.
@@ -244,6 +275,18 @@ begin
                -- The entry's own words: its title's and our other names', each split as q is; never the code's.
                string_to_array(btrim(candidate.title_words || ' '
                  || regexp_replace(lower(candidate.other_names), '[^[:alnum:]]+', ' ', 'g')), ' ') as entry_words,
+               -- The words the count reads, when they are not the entry's own: its title's and our other names', each
+               -- "without ..." clause taken out first (the word without, as q is split, to the next , or ; or the
+               -- end), then split as q is. Null when q has the word without, or neither has the letters without: the
+               -- count then reads the entry's own words. Made once per row, and only when the count is.
+               case when 'without' <> all(typed_words)
+                         and (strpos(candidate.title_words, 'without') > 0
+                              or strpos(lower(candidate.other_names), 'without') > 0)
+                    then string_to_array(btrim(regexp_replace(regexp_replace(lower(candidate.title),
+                           '(?<![[:alnum:]])without(?![[:alnum:]])[^,;]*', ' ', 'g'), '[^[:alnum:]]+', ' ', 'g') || ' '
+                         || regexp_replace(regexp_replace(lower(candidate.other_names),
+                           '(?<![[:alnum:]])without(?![[:alnum:]])[^,;]*', ' ', 'g'), '[^[:alnum:]]+', ' ', 'g')), ' ')
+               end as counted_words,
                coalesce(candidate.code = typed_code, false) as code_hit,
                -- The code and the title, split as q is (a code is A-Z, 0-9 and dots only).
                to_tsvector('simple'::regconfig, replace(lower(candidate.code), '.', ' ') || ' ' || candidate.title_words)
@@ -277,11 +320,12 @@ begin
         select found.*,
                lower(regexp_replace(found.other_hit, '([[:alnum:]])[''’][sS](?![[:alnum:]])', '\1', 'g'))
                  as compared_other,
-               -- How many words of q start a word of the entry's own words: every word, not only the first 6, and
-               -- never a code part. 0 for every row when q is one word, so a one-word q keeps its order.
-               case when cardinality(typed_words) < 2 then 0
+               -- How many words of q start a word the count reads: every word, not only the first 6, and never a code
+               -- part. 0 for every row when q is one word, or has a code's shape, so such a q keeps its order.
+               case when cardinality(typed_words) < 2 or typed_code is not null then 0
                     else (select count(*)::integer from unnest(typed_words) as typed(word)
-                           where exists (select 1 from unnest(found.entry_words) as entry(word)
+                           where exists (select 1
+                                           from unnest(coalesce(found.counted_words, found.entry_words)) as entry(word)
                                           where starts_with(entry.word, typed.word))) end as words_named
           from found
          where (found.code_hit or found.title_hit or found.other_hit is not null)
@@ -330,7 +374,7 @@ $$;
 
 -- 2. Its comment.
 comment on function ehr.search_catalog_diagnoses(text, integer) is
-  '0152 (ORD-9), 0157 (ORD-9, Rahman''s two ranking fixes): the active ICD-11 release''s entries whose code and title or one other name has a word starting with each word of q (a word-final ''s dropped from q; when nothing matched, once more with a final s dropped from words of 4 or more letters, each word so shortened, or the word as typed, then a whole word of the title or of one other name); the entry whose code q is (with or without its dot, or with spaces at its dot, and with any run of characters that are neither letters nor digits taken off both ends; its own dot stays) first, then a title or other name that is q, then names starting with q, then, for q of 2 or more words, entries naming more of q''s words (every word of q, not only the first 6, that starts a word of the title or of one other name, never a code part), then shorter titles, then A to Z; at most limit (1-25) and whether more matched. 22023 CATALOG_SEARCH_INVALID for q outside 2-100 characters or a limit outside 1-25.';
+  '0152 (ORD-9), 0157 (ORD-9, Rahman''s two ranking fixes, with Ola''s addendum): the active ICD-11 release''s entries whose code and title or one other name has a word starting with each word of q (a word-final ''s dropped from q; when nothing matched, once more with a final s dropped from words of 4 or more letters, each word so shortened, or the word as typed, then a whole word of the title or of one other name); the entry whose code q is (with or without its dot, or with spaces at its dot, and with any run of characters that are neither letters nor digits taken off both ends; its own dot stays) first, then a title or other name that is q, then names starting with q, then, for q of 2 or more words not shaped like a code, entries naming more of q''s words (every word of q, not only the first 6, that starts a word of the title or of one other name, never a code part, nor a word of a "without ..." clause unless q has the word without), then shorter titles, then A to Z; at most limit (1-25) and whether more matched. 22023 CATALOG_SEARCH_INVALID for q outside 2-100 characters or a limit outside 1-25.';
 
 -- 3. Post-checks.
 do $$
@@ -339,7 +383,7 @@ declare
 begin
   if not exists (select 1 from pg_proc proc
                   where proc.oid = 'ehr.search_catalog_diagnoses(text,integer)'::regprocedure
-                    and md5(proc.prosrc) = 'd1a07a483ee87a50eef2a1f7d8dbabca'
+                    and md5(proc.prosrc) = 'b5b5ee7ac39080784fb3052bbc6e79be'
                     and proc.prosecdef and proc.provolatile = 's' and proc.proowner = owner_oid
                     and proc.proconfig = array['search_path=pg_catalog, pg_temp']) then
     raise exception using errcode = '55000', message = '0157: the diagnosis search is not as made';
