@@ -9045,20 +9045,35 @@ and lab-api images. The route, its body, its answer and its errors are in
 backend does with the key, the audit and Lab's answers, beside EHR-C5's.
 
 - **The setting.** ehr-api's `LAB_REQUEST_GROUPS_ENABLED`, off by default,
-  stops new groups only. While it is off, `POST
-  /ehr/patients/:patientId/encounters/:encounterId/lab-request-groups`
-  answers `503 LAB_REQUEST_GROUPS_UNAVAILABLE` after the permission check
-  and before the body is validated or the Idempotency-Key is read (so a
-  same-key retry of a group saved while it was on is refused too; its tests
-  stay saved), and the service's `createInTransaction` (ORD-8's way in)
-  writes a null group (option (b)). Only a direct caller sees that code:
-  the gateway replaces it with its own `503 UPSTREAM_UNAVAILABLE`, as it
-  does every ehr-api 502, 503 and 504, so the browser cannot tell groups
-  off from an outage by this answer. Groups already written
-  are always answered: `requestGroupId` on every lab request answer, and
-  the list's `?requestGroupId=<uuid>`, which a cursor binds (a cursor of one
-  group pages no other list: `400 INVALID_CURSOR`). Switch it off, and
-  `ORDER_SETS_ENABLED` off, before an ehr-api image rollback or 0158's undo.
+  stops new groups only (the clinical owner's addendum, 7223408785):
+  - **The website reads it from the catalogue status:** `GET
+    /api/v1/ehr/catalog/status` answers `labRequestGroups` (boolean) beside
+    `labTestNameOnly`, and the website offers the multi-test form only when
+    it is true (`@hid/api-client`'s `EhrCatalogStatus`). A backend before
+    ORD-6 sends no such field: read it as false.
+  - **A new group while off:** `POST
+    /ehr/patients/:patientId/encounters/:encounterId/lab-request-groups`
+    checks the body and the key's presence as when on, then the service
+    reads the caller's own `lab-request-group.create` row for the key (one
+    read, in its own read-only transaction). With none it answers `503
+    LAB_REQUEST_GROUPS_UNAVAILABLE` before the consent check: nothing is
+    written and Lab is not called. Only a direct caller sees that code: the
+    gateway replaces it with its own `503 UPSTREAM_UNAVAILABLE`, as it does
+    every ehr-api 502, 503 and 504, so it is a backstop, not the way the
+    website learns that groups are off.
+  - **A same-key retry while off** (the row exists) is answered as any
+    replay: it writes no new group, answers the stored one, and sends its
+    active tests with the routed check below. Another body under the key is
+    `409 IDEMPOTENCY_KEY_REUSED`, as when on. So a retry never leads a
+    clinician to order twice.
+  - **ORD-8:** the service's `createInTransaction` (ORD-8's way in) writes a
+    null group while off (option (b)).
+  - **Groups already written are always answered:** `requestGroupId` on
+    every lab request answer, and the list's `?requestGroupId=<uuid>`, which
+    a cursor binds (a cursor of one group pages no other list: `400
+    INVALID_CURSOR`).
+  - **Switch it off,** and `ORDER_SETS_ENABLED` off, before an ehr-api image
+    rollback or 0158's undo.
 - **Idempotency-Key**, as EHR-C5's: one key covers the group. It is stored
   once for the whole call (operation `lab-request-group.create`, whose
   result names the group, not a table row, so a replay re-runs the parts)
@@ -9098,6 +9113,14 @@ backend does with the key, the audit and Lab's answers, beside EHR-C5's.
   `tests.<n>.<field>` (from 0), and a test that is not an object as
   `tests.<n>`; `LAB_TEST_CODE_INCOMPLETE` and `LAB_REQUEST_TEST_REPEATED`
   name every such test.
+- **The repeat rule includes the specimen** (the clinical owner's call,
+  addendum 7223408785). `LAB_REQUEST_TEST_REPEATED` refuses a test as a
+  likely double entry only when an earlier test has the same code system
+  (upper-cased) and code, or the same name (case and extra spaces
+  ignored), on the same `specimenTypeCode` (as sent; none counts as one
+  value). One culture on blood and on urine goes in one Save. A second
+  blood-culture set from another site has the same specimen, so it goes as
+  its own request.
 
 ## SX-1: modules map per facility
 
