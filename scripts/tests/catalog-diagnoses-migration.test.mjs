@@ -227,3 +227,34 @@ test('0157\'s body is 0152\'s but for the two fixes, the new key, Ola\'s two add
   }
   assert.deepEqual(code(searchAfter).split('\n'), expected)
 })
+
+test('0157\'s comment on the search names both fixes, both addenda and the order as built', () => {
+  // The third review: no other check read the comment, so a stale description of the order (a clause that no longer
+  // ends at the word with, say) passed every test. Its text is pinned whole here, its quotes undoubled.
+  const comments = [...ranking.matchAll(/^comment on function ([^\n]+) is\n {2}'((?:[^']|'')*)';$/gm)]
+  assert.equal(comments.length, 1)
+  const [statement, target, quoted] = comments[0]
+  assert.equal(target, 'ehr.search_catalog_diagnoses(text, integer)')
+  // Set after the search is made, and before the post-checks.
+  assert.ok(ranking.indexOf(statement) > ranking.indexOf(`create or replace function ${searchHead}`))
+  assert.ok(ranking.indexOf(statement) < ranking.indexOf('\n-- 3. Post-checks.\n'))
+  // The whole comment, in its parts: what matches (fix 1), the code first, then the order with the count (fix 2) and
+  // the addenda's two rules, the limit and the refusal.
+  const parts = [
+    "0152 (ORD-9), 0157 (ORD-9, Rahman's two ranking fixes, with Ola's two addenda): ",
+    "the active ICD-11 release's entries whose code and title or one other name has a word starting with "
+      + 'each word of q ',
+    "(a word-final 's dropped from q; when nothing matched, once more with a final s dropped from words of 4 or more "
+      + 'letters, each word so shortened, or the word as typed, then a whole word of the title or of one other name); ',
+    'the entry whose code q is (with or without its dot, or with spaces at its dot, and with any run of characters '
+      + 'that are neither letters nor digits taken off both ends; its own dot stays) first, ',
+    'then a title or other name that is q, then names starting with q, ',
+    "then, for q of 2 or more words not shaped like an ICD-11 code, entries naming more of q's words (every word of q, "
+      + 'not only the first 6, that starts a word of the title or of one other name, never a code part, ',
+    'nor, when q has the word with and not the word without, a word of a "without ..." clause, which ends at the next '
+      + 'comma, semicolon or word with), ',
+    'then shorter titles, then A to Z; at most limit (1-25) and whether more matched. ',
+    '22023 CATALOG_SEARCH_INVALID for q outside 2-100 characters or a limit outside 1-25.',
+  ]
+  assert.equal(quoted.replaceAll("''", "'"), parts.join(''))
+})
