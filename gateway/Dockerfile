@@ -10,7 +10,10 @@ FROM nginxinc/nginx-unprivileged@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451
 # musl 1.2.6-r3 fixes CVE-2026-107891 (High; musl and musl-utils 1.2.6-r2 in the base).
 # libxslt 1.1.43-r4 fixes CVE-2026-125350, CVE-2026-87636 and CVE-2026-9947
 # (High; 1.1.43-r3 in the base, a dependency of the nginx xslt module).
-# libxml2 2.13.9-r3 fixes CVE-2026-86144 (High; 2.13.9-r2 in the base, XInclude parse flags).
+# libxml2 2.13.9-r5 keeps -r3's fix for CVE-2026-86144 (High; 2.13.9-r2 in the base, XInclude
+# parse flags) and adds Alpine's -r4/-r5 fixes for CVE-2026-0989, CVE-2026-0990, CVE-2026-0992,
+# CVE-2026-1757, CVE-2026-11979 and CVE-2026-86137 to CVE-2026-86143 (aports ec25eb188b4f);
+# Alpine 3.24 replaced -r3 with -r5 on 2026-11-26.
 # libssl3 and libcrypto3 3.5.9-r1 fix CVE-2026-88823, CVE-2026-95691, CVE-2026-95692 and
 # CVE-2026-107496 (High) and CVE-2026-88822 in the base's 3.5.9-r0 (aports 0f4c7e8d0f5f);
 # the five OpenSSL CVEs they do not fix stay in the gateway OpenVEX.
@@ -26,7 +29,7 @@ USER 0
 # curl fix is available in this Alpine branch. Keep nginx modules installed.
 RUN apk del --no-cache curl \
     && apk add --no-cache 'pcre2=10.49-r0' 'libexpat=2.11.0-r0' 'zlib=1.4-r0' 'libx11=1.8.14-r0' 'brotli-libs=1.2.1-r0' \
-       'musl=1.2.6-r3' 'musl-utils=1.2.6-r3' 'libxslt=1.1.43-r4' 'libxml2=2.13.9-r3' \
+       'musl=1.2.6-r3' 'musl-utils=1.2.6-r3' 'libxslt=1.1.43-r4' 'libxml2=2.13.9-r5' \
        'libssl3=3.5.9-r1' 'libcrypto3=3.5.9-r1' \
     && apk add --no-cache -X https://nginx.org/packages/alpine/v3.24/main \
        'nginx=1.30.7-r1' 'nginx-module-njs=1.30.7.1.0.2-r1' 'nginx-module-xslt=1.30.7-r1' \
