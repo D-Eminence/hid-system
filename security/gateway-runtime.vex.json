@@ -2,12 +2,12 @@
   "@context": "https://openvex.dev/ns/v0.2.0",
   "@id": "https://healthidentitydirectory.com/security/assessments/gateway-alpine-3.24.2-openssl-3.5.9-r1",
   "author": "HID production runtime applicability assessment",
-  "timestamp": "2026-11-25T00:00:00Z",
-  "version": 2,
+  "timestamp": "2026-11-28T00:00:00Z",
+  "version": 3,
   "hid_expires_at": "2026-12-01T00:00:00Z",
   "hid_scope": "gateway image only; exact libssl3 and libcrypto3 3.5.9-r1 aarch64 Alpine 3.24.2 purls; original findings retained in grype.raw.json; no risk-acceptance waiver",
   "hid_bound_files": {
-    "gateway/Dockerfile": "cdd5d45ffa924a0bf7d2d03a2636805884568e66e993d93d8d97d15bf1f4828a",
+    "gateway/Dockerfile": "765ff82035a025c9ad6977f0ae92ae7720d6b819d2ff50a155dfe4bc0f22e2c0",
     "gateway/nginx.conf.template": "058bffd804832b70daff36d57d6ad71528d2943d8a29e1c24e6a9c6c684691fb",
     "gateway/proxy-headers.conf": "17f90e70dedbc21f01e24a40f721541e234e91b0dd1907b3e0c9428957ed273e"
   },
@@ -93,5 +93,5 @@
       "impact_statement": "The affected code is CMS and PKCS#7 SignedData verification with CRL checking (upstream openssl/openssl pull 33546). No gateway ELF imports CMS_* or PKCS7_verify, and nothing in the image verifies SignedData. The gateway image (nginxinc/nginx-unprivileged@sha256:782bb897..., Alpine 3.24.2, arm64) serves through nginx 1.30.7-r1 with gateway/nginx.conf.template: one plain-HTTP listen 3000 with no ssl or quic parameter, and every proxy_pass target is an http:// *_UPSTREAM value, so nginx never creates a TLS or QUIC session. No load_module directive exists, so the njs, xslt, geoip and image-filter modules are never loaded. The only other OpenSSL user that runs is the entrypoint's apk manifest (libapk imports only digest, PEM key and TLS-client symbols, and makes no network connection there); the wget health check is plain http://127.0.0.1:3000. As rechecked on 2026-11-19, no nginx, module or njs ELF imports OSSL_QUIC_*, CMS_*, PEM_X509_INFO_* or SSL_new_listener. Assessed 2026-11-22; approved by the owner, Q136 A, 2026-11-22. Rechecked 2026-11-25 for libssl3 and libcrypto3 3.5.9-r1 (Alpine v3.24/main, built 2026-11-18, aports 0f4c7e8d0f5f), pinned in gateway/Dockerfile: its only patches fix CVE-2026-88822, CVE-2026-88823, CVE-2026-95691, CVE-2026-95692 and CVE-2026-107496 (bss_dgram, AES-GCM-SIV, QUIC CRYPTO frame reassembly, EC key generation) and leave this code unchanged, and the nginx, module, njs, libapk and ssl_client imports are unchanged; moved to 3.5.9-r1 as approved by the owner, Q292 A, 2026-11-25."
     }
   ],
-  "hid_owner_approval": "D-Eminence, verbatim in chat on 2026-11-18 at about 12:57 UTC: \"Q99 A\"; D-Eminence, verbatim in chat on 2026-11-22 at about 20:58 UTC: \"Q136 A: approve the gateway OpenVEX for CVE-2026-84786, CVE-2026-107493, CVE-2026-124709, CVE-2026-107494 and CVE-2026-121482 (Alpine libssl3/libcrypto3 3.5.9-r0) in #313, expiring 2026-12-01\"; D-Eminence, verbatim in chat on 2026-11-25 at about 14:15 UTC: \"Q291 A, Q292 A\" (Owner Queue Q291: re-bind the gateway OpenVEX to #339's Dockerfile, and to #336's nginx routes after the coordinator's re-review; Q292: pin libssl3/libcrypto3 3.5.9-r1, retire the statements it fixes and move the rest to 3.5.9-r1, expiring 2026-12-01)"
+  "hid_owner_approval": "D-Eminence, verbatim in chat on 2026-11-18 at about 12:57 UTC: \"Q99 A\"; D-Eminence, verbatim in chat on 2026-11-22 at about 20:58 UTC: \"Q136 A: approve the gateway OpenVEX for CVE-2026-84786, CVE-2026-107493, CVE-2026-124709, CVE-2026-107494 and CVE-2026-121482 (Alpine libssl3/libcrypto3 3.5.9-r0) in #313, expiring 2026-12-01\"; D-Eminence, verbatim in chat on 2026-11-25 at about 14:15 UTC: \"Q291 A, Q292 A\" (Owner Queue Q291: re-bind the gateway OpenVEX to #339's Dockerfile, and to #336's nginx routes after the coordinator's re-review; Q292: pin libssl3/libcrypto3 3.5.9-r1, retire the statements it fixes and move the rest to 3.5.9-r1, expiring 2026-12-01); Q294 A (owner D-Eminence, verbatim in the coordinator's chat, 28 Nov): pin libxml2 2.13.9-r5 and re-bind the gateway OpenVEX"
 }

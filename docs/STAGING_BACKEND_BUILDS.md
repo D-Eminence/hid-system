@@ -211,6 +211,19 @@ and njs at 1.30.7-r1 have the same OpenSSL imports as 1.30.6-r1, so only its
 `gateway/Dockerfile` hash and the nginx version in its statements changed; its
 CVEs, purls and 2026-12-01 expiry are unchanged.
 
+At 14:14 UTC on 2026-11-26 Alpine v3.24/main replaced libxml2 2.13.9-r3 with
+2.13.9-r5 (aports ec25eb188b4f) for both aarch64 and x86_64, so the exact
+`libxml2=2.13.9-r3` pin made every gateway build fail with `unable to select
+packages`. `gateway/Dockerfile` now pins 2.13.9-r5 (Q294 A). It keeps -r3's fix
+for CVE-2026-86144 and adds the -r4 fixes for CVE-2026-0990, CVE-2026-0992 and
+CVE-2026-86137 to CVE-2026-86143 and the -r5 fixes for CVE-2026-0989,
+CVE-2026-1757 and CVE-2026-11979. Every other pin is still served by the Alpine
+3.24 and nginx.org repositories. libxml2 links only musl, zlib and liblzma, not
+OpenSSL, so `security/gateway-runtime.vex.json` was re-reviewed with no change to
+its statements: only its `gateway/Dockerfile` hash, version and timestamp changed,
+and its CVEs, libssl3/libcrypto3 3.5.9-r1 purls and 2026-12-01 expiry are
+unchanged.
+
 Every staging image with High scan findings except the gateway (see above) is admitted against the same exact-image not-affected assessment as
 production, `security/production-runtime-assessment.json`, which covers all
 twelve assessed components. Editing it rebuilds every staging image.
